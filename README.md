@@ -73,4 +73,4 @@ Native shaders and configuration templates are staged from:
 - CMake 3.22.1+
 
 ---
-*OpenMW-Android Alpha3 is a community-driven effort to bring the best possible Morrowind experience to mobile devices. Sisah is largely responsible for many of the improvements.*
+*Alpha3 is a community-driven effort to bring the best possible native code gaming experience to mobile devices. Sisah is largely responsible for many of the improvements with OpenMW.*
