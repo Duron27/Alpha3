@@ -1,5 +1,9 @@
 # Alpha3
 
+I'm not motivated by money and wasn't going to add this but I've been asked so many times I decided to add it.
+[buy me a coffee](https://ko-fi.com/jareddavenport)
+
+
 A high-performance, feature-rich android launcher supporting multiple game engines including OpenMW, MegaMOD (UQM) and Dethrace, focused on native integration and modern haptic feedback. This project extends the core engines with specialized Android-first features and critical stability fixes for mobile GPUs.
 
 ## 🚀 Key Project Improvements
