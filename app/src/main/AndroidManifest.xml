@@ -92,6 +92,16 @@
                 android:value="true" />
         </service>
 
+        <service
+            android:name=".utils.IniImporterService"
+            android:process=":importer"
+            android:exported="false" />
+
+        <service
+            android:name=".utils.NavMeshService"
+            android:process=":navmesh"
+            android:exported="false" />
+
         <activity
             android:name="org.openmw.EngineActivity"
             android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|uiMode|smallestScreenSize|density"

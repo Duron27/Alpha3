@@ -129,7 +129,6 @@ class UserManageAssets(val context: Context) {
         }
         copyIfNotExists("libopenmw/openmw/settings.fallback.cfg", Constants.SETTINGS_FILE)
         UserManageAssets(context).installUQMResourceFiles()
-        org.openmw.fragments.onFirstLaunch(context)
     }
 
     fun resourcePrepare() {
@@ -137,12 +136,19 @@ class UserManageAssets(val context: Context) {
         val currentStamp = if (stampFile.exists()) stampFile.readText().trim() else ""
         val targetStamp = BuildConfig.RANDOMIZER.toString()
 
-        if (currentStamp == targetStamp) {
-            Log.d("ManageAssets", "Version match (stamp: $currentStamp), skipping resource update.")
+        val resourcesDir = File(Constants.USER_RESOURCES)
+        val defaultsBin = File(Constants.DEFAULTS_BIN)
+
+        if (currentStamp == targetStamp && resourcesDir.exists() && defaultsBin.exists()) {
+            Log.d("ManageAssets", "Version match and resources exist, skipping resource update.")
             return
         }
 
-        Log.d("ManageAssets", "Version mismatch: current='$currentStamp', target='$targetStamp'. Updating resources...")
+        if (currentStamp != targetStamp) {
+            Log.d("ManageAssets", "Version mismatch: current='$currentStamp', target='$targetStamp'. Updating resources...")
+        } else {
+            Log.d("ManageAssets", "Resources missing, re-copying...")
+        }
 
         // Copy the resources with overwrite enabled
         Log.d("ManageAssets", "Smart copying resources from libopenmw/resources to ${Constants.USER_RESOURCES}")
@@ -152,7 +158,6 @@ class UserManageAssets(val context: Context) {
         // Write the new stamp after successful copy
         try {
             stampFile.writeText(targetStamp)
-            patchShaders()
             Log.d("ManageAssets", "Successfully updated resources and stamp: $targetStamp")
         } catch (e: Exception) {
             Log.e("ManageAssets", "Failed to write version stamp", e)

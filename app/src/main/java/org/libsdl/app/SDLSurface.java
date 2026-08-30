@@ -123,7 +123,7 @@ public class SDLSurface extends SurfaceView implements SurfaceHolder.Callback,
         SDLActivity.onNativeSurfaceCreated();
 
         // Conditionally call omwSurfaceDestroyed() if Game is "OpenMW"
-        if ("OpenMW".equals(UIStateManager.INSTANCE.getTempCodeGroup())) {
+        if (UIStateManager.INSTANCE.getTempCodeGroup().equals("OpenMW")) {
             SDLActivity.omwSurfaceRecreated();
         }
     }
@@ -140,9 +140,8 @@ public class SDLSurface extends SurfaceView implements SurfaceHolder.Callback,
         mIsSurfaceReady = false;
         SDLActivity.onNativeSurfaceDestroyed();
 
-
         // Conditionally call omwSurfaceDestroyed() if Game is "OpenMW"
-        if ("OpenMW".equals(UIStateManager.INSTANCE.getTempCodeGroup())) {
+        if (UIStateManager.INSTANCE.getTempCodeGroup().equals("OpenMW")) {
             SDLActivity.omwSurfaceDestroyed();
         }
     }

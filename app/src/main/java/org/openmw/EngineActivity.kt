@@ -56,6 +56,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.libsdl.app.SDLActivity
+import org.openmw.Constants.USER_OPENMW_CFG
 import org.openmw.ui.controls.HapticEffect
 import org.openmw.ui.controls.MouseIcon
 import org.openmw.ui.controls.ResizableDraggableButton
@@ -85,7 +86,6 @@ import org.openmw.ui.overlay.GridOverlay
 import org.openmw.ui.overlay.HiddenMenu
 import org.openmw.ui.overlay.OverlayUI
 import org.openmw.ui.view.BackgroundAnimation
-import org.openmw.ui.view.NavmeshScreen
 import org.openmw.ui.view.addCustomLog
 import org.openmw.ui.view.enableLogcat
 import org.openmw.ui.view.vibrateHelper
@@ -95,6 +95,9 @@ import org.openmw.utils.GameFilesPreferences.getENVLine
 import org.openmw.utils.GameFilesPreferences.loadAutoMouseMode
 import org.openmw.utils.GameFilesPreferences.readAngle
 import org.openmw.utils.GameFilesPreferences.readSPIRV
+import org.openmw.utils.LibraryLoader
+import org.openmw.utils.patchShadersLinking
+import org.openmw.utils.patchShadersToGLES
 import kotlin.math.roundToInt
 
 @Suppress("DEPRECATION")
@@ -102,9 +105,9 @@ import kotlin.math.roundToInt
 @AndroidEntryPoint
 class EngineActivity : SDLActivity() {
     private lateinit var sdlView: View
-    private external fun getPathToJni(path_global: String, path_user: String)
     external fun getLastResourceName(): String
     external fun initAlpha3()
+    external fun setNativeEnv(key: String, value: String)
 
     init {
         System.loadLibrary("Alpha3")
@@ -113,28 +116,11 @@ class EngineActivity : SDLActivity() {
 
     @SuppressLint("UnsafeDynamicallyLoadedCode")
     override fun getLibraries(): Array<String> {
-        val jniLibsArray = when (UIStateManager.tempCodeGroup) {
-            "OpenMW" -> arrayOf("SDL2", "ng_gl4es", "c++_shared", "openal", "openmw")
-            "UQM" -> arrayOf("SDL2", "ng_gl4es", "c++_shared", "openal", "uqm")
-            "Dethrace" -> arrayOf("SDL2", "ng_gl4es", "c++_shared", "openal", "dethrace")
-            else -> emptyArray()
-        }
-
-        jniLibsArray.forEach { libName ->
-            System.loadLibrary(libName)
-        }
-        return jniLibsArray
+        return LibraryLoader.loadLibraries()
     }
 
     override fun getMainSharedObject(): String {
-        val sharedObjectName = when (UIStateManager.tempCodeGroup) {
-            "OpenMW" -> OPENMW_MAIN_LIB
-            "UQM" -> UQM_MAIN_LIB
-            "Dethrace" -> DETHRACE_MAIN_LIB
-            else -> ""
-        }
-
-        return sharedObjectName
+        return LibraryLoader.getMainSharedObject()
     }
 
     override fun onResume() {
@@ -144,19 +130,21 @@ class EngineActivity : SDLActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        finishAffinity() // kill all activity
-        Process.killProcess(Process.myPid())
-//        exitProcess(0)
+            finishAffinity() // kill all activity
+            Process.killProcess(Process.myPid())
+
     }
 
     @SuppressLint("ClickableViewAccessibility")
     override fun onCreate(savedInstanceState: Bundle?) {
+
         enableEdgeToEdge()
         runCatching {
             initAlpha3()
         }.onFailure {
             Log.e(TAG, "initAlpha3: ", it)
         }
+
         super.onCreate(savedInstanceState)
 
         launchedActivity = true
@@ -207,10 +195,11 @@ class EngineActivity : SDLActivity() {
 
                 // Load button states into UIStateManager with container dimensions
                 UIStateManager.loadButtonState(containerWidth, containerHeight)
-
-                if (!UIStateManager.useNavmesh) {
                     // Adds Overlay menu for buttons and edit mode
                     composeViewUI.setContent {
+                        patchShadersLinking()
+                        patchShadersToGLES()
+
                         val isUIHidden by GameFilesPreferences.loadUIState(this@EngineActivity).collectAsState(initial = false)
                         val autoMouseMode by loadAutoMouseMode(this@EngineActivity).collectAsState(initial = "Hybrid")
                         val virtualKeyboard by GameFilesPreferences.useVirtualKeyboard(this@EngineActivity).collectAsState(initial = true)
@@ -355,7 +344,6 @@ class EngineActivity : SDLActivity() {
                         }
                     }
 
-                    //if (UIStateManager.tempCodeGroup == "OpenMW") {
                     val composeViewLeftThumb = findViewById<ComposeView>(R.id.compose_leftThumb)
                     (composeViewLeftThumb.parent as? ViewGroup)?.removeView(composeViewLeftThumb)
 
@@ -371,13 +359,7 @@ class EngineActivity : SDLActivity() {
 
                     sdlContainer.addView(composeViewLeftThumb)
                     updateComposeViewPosition(composeViewLeftThumb)
-                    //}
-                } else if (UIStateManager.useNavmesh) {
-                    composeViewUI.setContent {
-                        BackgroundAnimation()
-                        NavmeshScreen(onComplete = { navigateToMain() })
-                    }
-                }
+
                 // Remove the Global Layout Listener to prevent multiple calls
                 sdlContainer.viewTreeObserver.removeOnGlobalLayoutListener(this)
             }
@@ -421,11 +403,20 @@ class EngineActivity : SDLActivity() {
     }
 
     private fun setEnvironmentVariables(context: Context) {
-        try {
-            Os.setenv("OPENMW_GLES_VERSION", "32", true)
-            Os.setenv("LIBGL_ES", "3", true)
+        fun setEnv(key: String, value: String) {
+            try {
+                Os.setenv(key, value, true)
+                setNativeEnv(key, value)
+            } catch (e: Exception) {
+                Log.e("Alpha3", "Failed setting env: $key=$value ($e)")
+            }
+        }
 
-            Os.setenv("UQM_CONFIG_DIR", "${Constants.USER_FILE_STORAGE}/uqm", true)
+        try {
+            val glesVersion = if (isEmulator()) "31" else "32"
+            setEnv("OPENMW_GLES_VERSION", glesVersion)
+
+            setEnv("UQM_CONFIG_DIR", "${Constants.USER_FILE_STORAGE}/uqm")
 
             if ((UIStateManager.tempCodeGroup) != "UQM") {
                 val enableANGLE = runBlocking {
@@ -435,42 +426,38 @@ class EngineActivity : SDLActivity() {
                     readSPIRV(context).first()
                 }
                 if (enableSPIRV) {
-                    Os.setenv("LIBGL_SIMPLE_SHADERCONV", "1", true)
+                    setEnv("OPENMW_SPIRV_SHADERCONV", "1")
                 }
                 if (enableANGLE) {
-                    Os.setenv("LIBGL_SIMPLE_SHADERCONV", "0", true)
-                    Os.setenv("LIBGL_GLES", "libGLESv2_angle.so", true)
-                    Os.setenv("LIBGL_EGL", "libEGL_angle.so", true)
-                    Os.setenv("SDL_VIDEO_GL_DRIVER", "libGLESv2_angle.so", true)
-                    Os.setenv("SDL_VIDEO_EGL_DRIVER", "libEGL_angle.so", true)
+                    setEnv("OSG_USE_ANGLE", "1")
+                    setEnv("SDL_VIDEO_GL_DRIVER", "libGLESv2_angle.so")
+                    setEnv("SDL_VIDEO_EGL_DRIVER", "libEGL_angle.so")
                 }
             }
 
-            Os.setenv("OSG_TEXT_SHADER_TECHNIQUE", "ALL", true)
-            Os.setenv("OSG_VERTEX_BUFFER_HINT", "VBO", true)
-            Os.setenv("OSG_GL_TEXTURE_STORAGE", "OFF", true)
-            Os.setenv("LIBGL_INSTANCING", "1", true)
+            setEnv("OSG_TEXT_SHADER_TECHNIQUE", "ALL")
+            setEnv("OSG_VERTEX_BUFFER_HINT", "VBO")
 
-            Os.setenv("DETHRACE_ROOT_DIR", "${Constants.USER_FILE_STORAGE}/dethrace/", true)
+            setEnv("DETHRACE_ROOT_DIR", "${Constants.USER_FILE_STORAGE}/dethrace/")
 
-            Os.setenv("HARNESS_OPENGL", "1", true)
+            setEnv("HARNESS_OPENGL", "1")
 
             CoroutineScope(Dispatchers.IO).launch {
                 GameFilesPreferences.readAvoid16Bits(context).collect { avoid16bits ->
                     if (avoid16bits) {
-                        Os.setenv("LIBGL_AVOID16BITS", "1", true)
+                        setEnv("LIBGL_AVOID16BITS", "1")
                     } else {
-                        Os.setenv("LIBGL_AVOID16BITS", "0", true)
+                        setEnv("LIBGL_AVOID16BITS", "0")
                     }
                 }
                 // Set LIBGL_SHRINK based on preference
                 GameFilesPreferences.readTextureShrinkingOption(context)
                     .collect { textureShrinkingOption ->
                         when (textureShrinkingOption) {
-                            "low" -> Os.setenv("LIBGL_SHRINK", "2", true)
-                            "medium" -> Os.setenv("LIBGL_SHRINK", "7", true)
-                            "high" -> Os.setenv("LIBGL_SHRINK", "6", true)
-                            else -> Os.setenv("LIBGL_SHRINK", "0", true)
+                            "low" -> setEnv("LIBGL_SHRINK", "2")
+                            "medium" -> setEnv("LIBGL_SHRINK", "7")
+                            "high" -> setEnv("LIBGL_SHRINK", "6")
+                            else -> setEnv("LIBGL_SHRINK", "0")
                         }
                     }
             }
@@ -486,7 +473,7 @@ class EngineActivity : SDLActivity() {
                             val key = keyValue[0].trim()
                             val value = keyValue[1].trim()
                             if (key.isNotEmpty() && value.isNotEmpty()) {
-                                Os.setenv(key, value, true)
+                                setEnv(key, value)
                             }
                         }
                     }
@@ -513,6 +500,10 @@ class EngineActivity : SDLActivity() {
 
         var resolutionX = 0
         var resolutionY = 0
+
+        @JvmStatic
+        @Suppress("KotlinJniMissingFunction", "LocalVariableName")
+        external fun getPathToJni(path_global: String, path_user: String)
     }
 
     fun findHapticForSound(name: String): HapticEffect? {
@@ -520,6 +511,25 @@ class EngineActivity : SDLActivity() {
         return soundHaptics.entries.firstOrNull { (pattern, _) ->
             lower.contains(pattern)
         }?.value
+    }
+
+    private fun isEmulator(): Boolean {
+        return (Build.BRAND.startsWith("generic") && Build.DEVICE.startsWith("generic"))
+                || Build.FINGERPRINT.startsWith("generic")
+                || Build.FINGERPRINT.startsWith("unknown")
+                || Build.HARDWARE.contains("goldfish")
+                || Build.HARDWARE.contains("ranchu")
+                || Build.MODEL.contains("google_sdk")
+                || Build.MODEL.contains("Emulator")
+                || Build.MODEL.contains("Android SDK built for x86")
+                || Build.MANUFACTURER.contains("Genymotion")
+                || Build.PRODUCT.contains("sdk_google")
+                || Build.PRODUCT.contains("google_sdk")
+                || Build.PRODUCT.contains("sdk")
+                || Build.PRODUCT.contains("sdk_x86")
+                || Build.PRODUCT.contains("vbox86p")
+                || Build.PRODUCT.contains("emulator")
+                || Build.PRODUCT.contains("simulator")
     }
 
     @Composable
@@ -544,15 +554,13 @@ class EngineActivity : SDLActivity() {
             GameFilesPreferences.getARGLine(this@EngineActivity).first() ?: ""
         }
 
-        // Check if command-line arguments are valid
-        if (commandLineArgs.isEmpty() || !commandLineArgs.contains("-")) {
-            return super.getArguments()
-        }
-
         return try {
-            // Construct resource path
             val resourcesPath = "--resources " + Constants.USER_RESOURCES
-            val combinedArgs = "$resourcesPath $commandLineArgs"
+            val combinedArgs = if (commandLineArgs.isNotEmpty()) {
+                "$resourcesPath $commandLineArgs"
+            } else {
+                resourcesPath
+            }
 
             // Parse the combined arguments
             val args = arrayListOf<String>()
@@ -635,6 +643,33 @@ fun hideSystemBars(activity: Activity) {
                         or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
                         or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
                         or View.SYSTEM_UI_FLAG_LAYOUT_STABLE)
+    }
+}
+
+@OptIn(InternalCoroutinesApi::class)
+fun runIniImporter(context: Context, gameFilesPath: String) {
+    try {
+        val intent = Intent(context, org.openmw.utils.IniImporterService::class.java).apply {
+            putExtra("gameFilesPath", gameFilesPath)
+            putExtra("configPath", USER_OPENMW_CFG)
+        }
+        context.startService(intent)
+        Log.d("EngineActivity", "IniImporter Service started in separate process with path: $gameFilesPath")
+    } catch (e: Exception) {
+        Log.e("EngineActivity", "Failed to start IniImporter Service", e)
+    }
+}
+
+@OptIn(InternalCoroutinesApi::class)
+fun runNavMesh(context: Context) {
+    try {
+        val intent = Intent(context, org.openmw.utils.NavMeshService::class.java).apply {
+            putExtra("configPath", Constants.USER_CONFIG)
+        }
+        context.startService(intent)
+        Log.d("EngineActivity", "NavMesh Service started")
+    } catch (e: Exception) {
+        Log.e("EngineActivity", "Failed to start NavMesh Service", e)
     }
 }
 

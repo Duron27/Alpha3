@@ -1,0 +1,132 @@
+diff --git a/apps/bsatool/CMakeLists.txt b/apps/bsatool/CMakeLists.txt
+index 8d2e8b2d1b..8745c0d910 100644
+--- a/apps/bsatool/CMakeLists.txt
++++ b/apps/bsatool/CMakeLists.txt
+@@ -4,15 +4,23 @@ set(BSATOOL
+ source_group(apps\\bsatool FILES ${BSATOOL})
+ 
+ # Main executable
+-openmw_add_executable(bsatool
+-    ${BSATOOL}
+-)
++if (ANDROID)
++    add_library(bsatool SHARED ${BSATOOL})
++else()
++    openmw_add_executable(bsatool
++            ${BSATOOL}
++    )
++endif()
+ 
+ target_link_libraries(bsatool
+     Boost::program_options
+     components
+ )
+ 
++if(ANDROID)
++    target_link_libraries(bsatool log)
++endif()
++
+ if (WIN32)
+     target_sources(bsatool PRIVATE ${CMAKE_SOURCE_DIR}/files/windows/other-apps.manifest)
+ endif()
+diff --git a/apps/bsatool/bsatool.cpp b/apps/bsatool/bsatool.cpp
+index 90685dfe1d..037fe44c8e 100644
+--- a/apps/bsatool/bsatool.cpp
++++ b/apps/bsatool/bsatool.cpp
+@@ -311,7 +311,11 @@ int call(Arguments& info)
+     }
+ }
+ 
++#ifdef ANDROID
++extern "C" int SDL_main(int argc, char* argv[])
++#else
+ int main(int argc, char** argv)
++#endif
+ {
+     try
+     {
+diff --git a/apps/mwiniimporter/CMakeLists.txt b/apps/mwiniimporter/CMakeLists.txt
+index d53020f447..b8f7bf5930 100644
+--- a/apps/mwiniimporter/CMakeLists.txt
++++ b/apps/mwiniimporter/CMakeLists.txt
+@@ -9,15 +9,21 @@ set(MWINIIMPORT_HEADER
+ 
+ source_group(launcher FILES ${MWINIIMPORT} ${MWINIIMPORT_HEADER})
+ 
+-openmw_add_executable(openmw-iniimporter
+-    ${MWINIIMPORT}
+-)
++if (ANDROID)
++    add_library(openmw-iniimporter SHARED ${MWINIIMPORT})
++else()
++    openmw_add_executable(openmw-iniimporter ${MWINIIMPORT})
++endif()
+ 
+ target_link_libraries(openmw-iniimporter
+     Boost::program_options
+     components
+ )
+ 
++if(ANDROID)
++    target_link_libraries(openmw-iniimporter log)
++endif()
++
+ if (WIN32)
+     target_sources(openmw-iniimporter PRIVATE ${CMAKE_SOURCE_DIR}/files/windows/other-apps.manifest)
+ endif()
+diff --git a/apps/mwiniimporter/main.cpp b/apps/mwiniimporter/main.cpp
+index cb1fb95628..ee65baf3b8 100644
+--- a/apps/mwiniimporter/main.cpp
++++ b/apps/mwiniimporter/main.cpp
+@@ -12,7 +12,11 @@
+ namespace bpo = boost::program_options;
+ 
+ #ifndef _WIN32
++#ifdef ANDROID
++extern "C" int SDL_main(int argc, char* argv[])
++#else
+ int main(int argc, char* argv[])
++#endif
+ {
+ #else
+ 
+@@ -48,7 +52,7 @@ private:
+     std::vector<std::string> args;
+ };
+ 
+-/*  The only way to pass Unicode on Winodws with CLI is to use wide
++/*  The only way to pass Unicode on Windows with CLI is to use wide
+     characters interface which presents UTF-16 encoding. The rest of
+     OpenMW application stack assumes UTF-8 encoding, therefore this
+     conversion.
+diff --git a/apps/navmeshtool/CMakeLists.txt b/apps/navmeshtool/CMakeLists.txt
+index b39c1d1d1c..4c7e486fff 100644
+--- a/apps/navmeshtool/CMakeLists.txt
++++ b/apps/navmeshtool/CMakeLists.txt
+@@ -20,6 +20,10 @@ target_link_libraries(openmw-navmeshtool-lib
+     components
+ )
+ 
++if(ANDROID)
++    target_link_libraries(openmw-navmeshtool-lib log z glslang::glslang glslang::SPIRV spirv-cross-c)
++endif()
++
+ if (WIN32)
+     target_sources(openmw-navmeshtool PRIVATE ${CMAKE_SOURCE_DIR}/files/windows/other-apps.manifest)
+ endif()
+diff --git a/apps/navmeshtool/navmesh.cpp b/apps/navmeshtool/navmesh.cpp
+index 1323aa77b8..16e9d44256 100644
+--- a/apps/navmeshtool/navmesh.cpp
++++ b/apps/navmeshtool/navmesh.cpp
+@@ -53,6 +53,11 @@ namespace NavMeshTool
+             Log(Debug::Info) << provided << "/" << expected << " ("
+                              << (static_cast<double>(provided) / static_cast<double>(expected) * 100)
+                              << "%) navmesh tiles are generated";
++
++#ifdef ANDROID
++            std::string message = std::to_string((static_cast<double>(provided) / static_cast<double>(expected) * 100));
++            setenv("NAVMESHTOOL_MESSAGE", message.c_str(), true);
++#endif
+         }
+ 
+         template <class T>

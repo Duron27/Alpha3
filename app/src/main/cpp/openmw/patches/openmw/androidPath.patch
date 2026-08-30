@@ -1,26 +1,79 @@
-From cf7c849ceba5cdd45195b61b758a1dc7eaa0dae9 Mon Sep 17 00:00:00 2001
-From: Jared Davenport <duron27@gmail.com>
-Date: Fri, 27 Sep 2024 13:48:29 +0000
-Subject: [PATCH] Update androidpath.cpp
-
----
- components/files/androidpath.cpp | 2 +-
- 1 file changed, 1 insertion(+), 1 deletion(-)
-
 diff --git a/components/files/androidpath.cpp b/components/files/androidpath.cpp
-index 0a6cc161f31..dbd363658f9 100644
+index 18d6863662..bf6714742a 100644
 --- a/components/files/androidpath.cpp
 +++ b/components/files/androidpath.cpp
-@@ -15,7 +15,7 @@ static const char* g_path_user; //< Path to user root, e.g. /sdcard/Android/data
+@@ -9,14 +9,28 @@
+ #include <pwd.h>
+ #include <unistd.h>
+ 
+-static const char* g_path_global; //< Path to global directory root, e.g. /data/data/com.libopenmw.openmw
+-static const char* g_path_user; //< Path to user root, e.g. /sdcard/Android/data/com.libopenmw.openmw
++static const char* g_path_global = nullptr;
++static const char* g_path_user = nullptr;
++
++static std::filesystem::path getGlobalPath()
++{
++    if (g_path_global) return std::filesystem::path(g_path_global);
++    if (const char* env = getenv("OPENMW_ANDROID_GLOBAL_PATH")) return std::filesystem::path(env);
++    return std::filesystem::path("");
++}
++
++static std::filesystem::path getUserPath()
++{
++    if (g_path_user) return std::filesystem::path(g_path_user);
++    if (const char* env = getenv("OPENMW_ANDROID_USER_PATH")) return std::filesystem::path(env);
++    return std::filesystem::path("");
++}
+ 
  /**
   * \brief Called by java code to set up directory paths
   */
 -extern "C" JNIEXPORT void JNICALL Java_ui_activity_GameActivity_getPathToJni(
+-    JNIEnv* env, jobject obj, jstring global, jstring user)
 +extern "C" JNIEXPORT void JNICALL Java_org_openmw_EngineActivity_getPathToJni(
-     JNIEnv* env, jobject obj, jstring global, jstring user)
++        JNIEnv* env, jobject obj, jstring global, jstring user)
  {
-     g_path_global = env->GetStringUTFChars(global, nullptr);     
-
--- 
-GitLab
-
+     g_path_global = env->GetStringUTFChars(global, nullptr);
+     g_path_user = env->GetStringUTFChars(user, nullptr);
+@@ -30,28 +44,28 @@ namespace Files
+     // /sdcard/Android/data/com.libopenmw.openmw/config
+     std::filesystem::path AndroidPath::getUserConfigPath() const
+     {
+-        return std::filesystem::path(g_path_user) / "config";
++        return getUserPath() / "config";
+     }
+ 
+     // /sdcard/Android/data/com.libopenmw.openmw/
+     // (so that saves are placed at /sdcard/Android/data/com.libopenmw.openmw/saves)
+     std::filesystem::path AndroidPath::getUserDataPath() const
+     {
+-        return std::filesystem::path(g_path_user);
++        return getUserPath();
+     }
+ 
+     // /data/data/com.libopenmw.openmw/cache
+     // (supposed to be "official" android cache location)
+     std::filesystem::path AndroidPath::getCachePath() const
+     {
+-        return std::filesystem::path(g_path_global) / "cache";
++        return getGlobalPath() / "cache";
+     }
+ 
+     // /data/data/com.libopenmw.openmw/files/config
+     // (note the addition of "files")
+     std::filesystem::path AndroidPath::getGlobalConfigPath() const
+     {
+-        return std::filesystem::path(g_path_global) / "files" / "config";
++        return getGlobalPath() / "files" / "config";
+     }
+ 
+     std::filesystem::path AndroidPath::getLocalPath() const
+@@ -63,7 +77,7 @@ namespace Files
+     // (so that the data is at /sdcard/Android/data/com.libopenmw.openmw/data)
+     std::filesystem::path AndroidPath::getGlobalDataPath() const
+     {
+-        return std::filesystem::path(g_path_user);
++        return getUserPath();
+     }
+ 
+     std::vector<std::filesystem::path> AndroidPath::getInstallPaths() const

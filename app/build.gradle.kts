@@ -47,7 +47,7 @@ android {
 
         //noinspection OldTargetApi
         targetSdk = 36
-        versionCode = 2
+        versionCode = 3
         versionName = providers.exec {
             commandLine("git", "rev-parse", "--short", "HEAD")
         }.standardOutput.asText.get().trim()

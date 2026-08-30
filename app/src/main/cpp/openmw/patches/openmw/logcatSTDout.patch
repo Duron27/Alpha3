@@ -1,0 +1,48 @@
+diff --git a/components/debug/debugging.cpp b/components/debug/debugging.cpp
+index ff0404f0d54600f2b39dcc6b00f82d72487ccddc..74d839c28ff2a2178621e6d5dbc142a6fbb70914 100644
+--- a/components/debug/debugging.cpp
++++ b/components/debug/debugging.cpp
+@@ -42,6 +42,10 @@
+ 
+ #include <SDL_messagebox.h>
+ 
++#ifdef __ANDROID__
++#include <android/log.h>
++#endif
++
+ namespace Debug
+ {
+ #ifdef _WIN32
+@@ -154,6 +158,32 @@ namespace Debug
+                         lineSize++;
+                     writeImpl(prefix, prefixSize, level);
+                     writeImpl(msg.data(), lineSize, level);
++#ifdef __ANDROID__
++                    int androidLevel = ANDROID_LOG_INFO;
++                    switch (level)
++                    {
++                        case Error:
++                            androidLevel = ANDROID_LOG_ERROR;
++                            break;
++                        case Warning:
++                            androidLevel = ANDROID_LOG_WARN;
++                            break;
++                        case Info:
++                            androidLevel = ANDROID_LOG_INFO;
++                            break;
++                        case Verbose:
++                            androidLevel = ANDROID_LOG_VERBOSE;
++                            break;
++                        case Debug:
++                            androidLevel = ANDROID_LOG_DEBUG;
++                            break;
++                        case All:
++                            androidLevel = ANDROID_LOG_DEBUG;
++                            break;
++                    }
++                    __android_log_print(
++                        androidLevel, "OpenMW", "%.*s%.*s", (int)prefixSize, prefix, (int)lineSize, msg.data());
++#endif
+                     if (logListener)
+                         logListener(
+                             level, std::string_view(prefix, prefixSize), std::string_view(msg.data(), lineSize));

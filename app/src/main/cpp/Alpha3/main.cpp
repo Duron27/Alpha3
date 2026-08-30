@@ -3,6 +3,10 @@
 #include "BackTrace.h"
 #include "deps/Obfuscator/obfuscator.h"
 #include "spdlog/sinks/basic_file_sink.h"
+#include <stdlib.h>
+#include <dlfcn.h>
+#include <vector>
+#include <string>
 
 
 JavaVM* g_java_vm = nullptr;
@@ -84,4 +88,68 @@ void JNI_OnUnload([[maybe_unused]] JavaVM* vm, [[maybe_unused]] void* reserved)
 extern "C" JNIEXPORT void JNICALL Java_org_openmw_EngineActivity_initAlpha3(JNIEnv* env, jobject obj)
 {
     g_java->setupContext(obj, env);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_org_openmw_EngineActivity_setNativeEnv(JNIEnv* env, jobject /* thiz */, jstring key, jstring value)
+{
+    const char* nativeKey = env->GetStringUTFChars(key, nullptr);
+    const char* nativeValue = env->GetStringUTFChars(value, nullptr);
+
+    if (nativeKey != nullptr && nativeValue != nullptr) {
+        setenv(nativeKey, nativeValue, 1);
+        spdlog::info("Set native env: {}={}", nativeKey, nativeValue);
+    }
+
+    if (nativeKey != nullptr) env->ReleaseStringUTFChars(key, nativeKey);
+    if (nativeValue != nullptr) env->ReleaseStringUTFChars(value, nativeValue);
+}
+
+extern "C" JNIEXPORT jint JNICALL Java_org_openmw_utils_NativeAppLauncher_launchIntMain(JNIEnv* env, jobject /* thiz */, jstring libName, jobjectArray args)
+{
+  const char* nativeLibName = env->GetStringUTFChars(libName, nullptr);
+  spdlog::info("launchIntMain: Loading {}", nativeLibName);
+
+  void* handle = dlopen(nativeLibName, RTLD_LAZY);
+  if (!handle) {
+    spdlog::error("Failed to load library {}: {}", nativeLibName, dlerror());
+    env->ReleaseStringUTFChars(libName, nativeLibName);
+    return -1;
+  }
+
+  typedef int (*MainFunc)(int, char**);
+  MainFunc int_main = (MainFunc)dlsym(handle, "SDL_main"); // Try SDL_main first
+  if (!int_main) {
+    int_main = (MainFunc)dlsym(handle, "int_main");
+  }
+
+  if (!int_main) {
+    spdlog::error("Failed to find int_main or SDL_main in {}", nativeLibName);
+    dlclose(handle);
+    env->ReleaseStringUTFChars(libName, nativeLibName);
+    return -2;
+  }
+
+  int argc = env->GetArrayLength(args);
+  std::vector<std::string> argv_str;
+  std::vector<char*> argv;
+
+  for (int i = 0; i < argc; ++i) {
+    jstring arg = (jstring)env->GetObjectArrayElement(args, i);
+    const char* nativeArg = env->GetStringUTFChars(arg, nullptr);
+    argv_str.push_back(nativeArg);
+    env->ReleaseStringUTFChars(arg, nativeArg);
+  }
+
+  for (int i = 0; i < argc; ++i) {
+    argv.push_back(const_cast<char*>(argv_str[i].c_str()));
+  }
+  argv.push_back(nullptr);
+
+  spdlog::info("Calling main in {}", nativeLibName);
+  int result = int_main(argc, argv.data());
+  spdlog::info("main returned {}", result);
+
+  dlclose(handle);
+  env->ReleaseStringUTFChars(libName, nativeLibName);
+  return result;
 }

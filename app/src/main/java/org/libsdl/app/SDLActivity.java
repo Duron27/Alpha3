@@ -1908,8 +1908,8 @@ class SDLMain implements Runnable {
     @Override
     public void run() {
         // Runs SDL_main()
-        if ("OpenMW".equals(UIStateManager.INSTANCE.getTempCodeGroup())) {
-            SDLActivity.nativeInit();
+        if (UIStateManager.INSTANCE.getTempCodeGroup().equals("OpenMW")) {
+                SDLActivity.nativeInit();
         }
 
         String library = SDLActivity.mSingleton.getMainSharedObject();

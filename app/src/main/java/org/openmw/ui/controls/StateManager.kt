@@ -134,6 +134,7 @@ val DeletedButtonState = ButtonState(
 
 object UIStateManager {
     var useNavmesh by mutableStateOf(false)
+    var useBsaTool by mutableStateOf(false)
     var buttonsGroup by mutableIntStateOf(1)
     var globalColorChange by mutableStateOf(false)
     var globalColor by mutableStateOf("#FFFFFF") // Default color

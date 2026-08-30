@@ -6,6 +6,8 @@ import dagger.hilt.android.HiltAndroidApp
 import java.io.File
 
 const val OPENMW_MAIN_LIB = "libopenmw.so"
+const val OPENMW_NAVMESH = "libopenmw-navmeshtool.so"
+const val OPENMW_BSATOOL = "libbsatool.so"
 const val UQM_MAIN_LIB = "libuqm.so"
 const val DETHRACE_MAIN_LIB = "libdethrace.so"
 
@@ -34,7 +36,6 @@ object Constants {
 
 @HiltAndroidApp
 class MyApp : Application() {
-
     override fun onCreate() {
         super.onCreate()
         app = this
