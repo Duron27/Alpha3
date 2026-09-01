@@ -1,18 +1,18 @@
 package org.openmw.ui.page.main
 
 import android.content.Context
+import android.util.Log
 import androidx.compose.runtime.mutableStateOf
-import androidx.documentfile.provider.DocumentFile
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.openmw.Constants
 import org.openmw.R
-import org.openmw.fragments.processSelectedFolder
+import org.openmw.runIniImporter
+import org.openmw.ui.controls.UIStateManager
 import org.openmw.ui.view.ProgressDialog
 import org.openmw.ui.view.dismiss
 import org.openmw.ui.view.moeDialog
@@ -29,185 +29,127 @@ class MainPageViewModel @Inject constructor() : ViewModel() {
     val persistedPath = mutableStateOf<String?>(null)
 
     fun onGameFolderSelected(folder: File, context: Context) {
-        val selectedDirectory = DocumentFile.fromFile(folder)
-        val iniFile = selectedDirectory.findFile("Morrowind.ini")
-        val dataFilesFolder = selectedDirectory.findFile("Data Files")
-
-        if (iniFile != null && dataFilesFolder != null && dataFilesFolder.isDirectory) {
-            viewModelScope.launch(Dispatchers.IO) {
-                storeGameFilesPath(context, folder.absolutePath)
-            }
+        if (File(folder, "Morrowind.ini").exists() && File(folder, "Data Files").isDirectory) {
             MToast("${stringRes(R.string.selected_folder)}${folder.name}")
-            // Re-trigger processing
-            processSelectedFolder(
-                context,
-                folder,
-                onUriPersisted = { persistedPath.value = it })
-
+            applyGameFolder(context, folder)
             showFileBrowser.value = false
         } else {
-            CoroutineScope(Dispatchers.IO).launch {
-                storeGameFilesPath(context, "")
-            }
+            viewModelScope.launch(Dispatchers.IO) { storeGameFilesPath(context, "") }
             MToast(stringRes(R.string.please_select_a_folder_with_morrowind_ini_and_data_files))
         }
     }
 
-    fun selectMorrowWindFolder(context: Context) {
-        // Show loading dialog
-        val progressDialog = "".moeDialog(
-            fullCustom = true,
-            content = {
-                ProgressDialog(
-                    text = stringRes(R.string.searching_for_morrowind_esm)
-                )
-            }
-        )
-
+    private fun applyGameFolder(context: Context, folder: File) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val configFile = File(Constants.USER_OPENMW_CFG)
+                val path = folder.absolutePath
+                storeGameFilesPath(context, path)
+                persistedPath.value = path
+                Log.d("Add_Morrowind", "Add_Morrowind: $path")
+                UIStateManager.useNavmesh = false
 
-                if (!configFile.exists()) {
-                    progressDialog.dismiss()
-                    stringRes(R.string.openmw_config_file_not_found_msg)
-                        .moeDialog(
-                            title = stringRes(R.string.config_file_missing),
-                            confirmLabel = stringRes(R.string.ok),
-                            onConfirm = {
-                                showFileBrowser.value = true
-                            }
-                        )
-                    return@launch
-                }
-
-                val lines = configFile.readLines()
-                val dataPaths = mutableListOf<String>()
-                var containsMorrowindEsm = false
-
-                // Parse config file
-                lines.forEach { line ->
-                    when {
-                        line.trim().startsWith("content=Morrowind.esm") -> containsMorrowindEsm = true
-                        line.trim().startsWith("data=") -> {
-                            val path = line.removePrefix("data=\"").removeSuffix("\"").trim()
-                            if (path.isNotEmpty()) dataPaths.add(path)
-                        }
-                    }
-                }
-
-                progressDialog.dismiss()
-
-                if (!containsMorrowindEsm) {
-                    stringRes(R.string.morrowind_esm_not_in_cfg_msg).moeDialog(
-                        title = stringRes(R.string.morrowind_esm_not_found),
-                        confirmLabel = stringRes(R.string.yes),
-                        onConfirm = {
-                            showFileBrowser.value = true
-                        },
-                        dismissLabel = stringRes(R.string.cancel)
-                    )
-                    return@launch
-                }
-
-                // Show searching dialog again for the second part
-                val searchDialog = "".moeDialog(
-                    fullCustom = true,
-                    content = {
-                        ProgressDialog(
-                            text = stringRes(R.string.checking_data_paths)
-                        )
-                    }
-                )
-
-                val foundDir = findMorrowindEsm(dataPaths)
-                searchDialog.dismiss()
-                foundDir?.let { folder ->
-                    String.format(stringRes(R.string.found_morrowind_esm_msg), folder)
-                        .moeDialog(
-                            title = stringRes(R.string.game_files_found),
-                            confirmLabel = stringRes(R.string.yes),
-                            onConfirm = {
-                                viewModelScope.launch(Dispatchers.IO) {
-                                    // Attempt to locate Morrowind.ini in the current or parent directory
-                                    val iniFile = listOf(
-                                        File(folder, "Morrowind.ini"),
-                                        folder.parentFile?.let { File(it, "Morrowind.ini") }
-                                    ).firstOrNull { it?.exists() == true }
-
-                                    // Use the directory that contains Morrowind.ini if found, otherwise default
-                                    val iniDirectory = iniFile?.parentFile ?: folder
-
-                                    // Store the chosen path
-                                    storeGameFilesPath(context, iniDirectory.absolutePath)
-
-                                    // Use the ini directory for folder processing
-                                    processSelectedFolder(
-                                        context,
-                                        iniDirectory,
-                                        onUriPersisted = { persistedPath.value = it }
-                                    )
-                                    MToast(stringRes(R.string.game_files_location_set))
-                                }
-                            },
-                            dismissLabel = stringRes(R.string.no),
-                            onDismiss = {
-                                showFileBrowser.value = true
-                            }
-                        )
-                } ?: run {
-                    stringRes(R.string.morrowind_esm_not_found_msg)
-                        .moeDialog(
-                            title = stringRes(R.string.not_found),
-                            confirmLabel = stringRes(R.string.ok),
-                            onConfirm = {
-                                showFileBrowser.value = true
-                            }
-                        )
-                }
+                updateConfigs(path)
+                runIniImporter(context, path)
             } catch (e: Exception) {
-                progressDialog.dismiss()
-                (stringRes(R.string.failed_to_process_config_file) + e.localizedMessage)
-                    .moeDialog(
-                        title = stringRes(R.string.error),
-                        confirmLabel = stringRes(R.string.ok),
-                        onConfirm = {
-                            showFileBrowser.value = true
-                        }
-                    )
+                e.printStackTrace()
+                persistedPath.value = null
+                MToast(stringRes(R.string.an_error_occurred_while_selecting_the_folder))
             }
         }
     }
 
+    private fun updateConfigs(path: String) {
+        val dataLine = """data="$path/Data Files""""
+        val vfsLine = "data=${Constants.USER_RESOURCES}/vfs-mw"
+        val overrideLine = "data-local=${Constants.USER_FILE_STORAGE}/OpenMW/Override"
+        val dataRegex = Regex("""^data\s*=\s*".*?"""")
 
-    suspend fun findMorrowindEsm(dataPaths: List<String>): File? {
-        return withContext(Dispatchers.IO) {
-            dataPaths.firstNotNullOfOrNull { dataPath ->
-                try {
-                    val dataDir = File(dataPath)
-                    if (!dataDir.exists() || !dataDir.isDirectory) return@firstNotNullOfOrNull null
-
-                    // Check root directory first
-                    val rootFile = dataDir.walk()
-                        .firstOrNull {
-                            it.isFile && it.name.equals("Morrowind.esm", ignoreCase = true)
-                        }
-                    if (rootFile != null) return@firstNotNullOfOrNull rootFile.parentFile
-
-                    // Then check Data Files subfolder
-                    val dataFilesDir = File(dataPath, "Data Files")
-                    if (dataFilesDir.exists() && dataFilesDir.isDirectory) {
-                        dataFilesDir.walk()
-                            .firstOrNull {
-                                it.isFile && it.name.equals("Morrowind.esm", ignoreCase = true)
-                            }?.parentFile
-                    } else {
-                        null
-                    }
-                } catch (e: Exception) {
-                    null
+        File(Constants.OPENMW_CFG).takeIf { it.exists() }?.let { file ->
+            val lines = file.readLines().map { line ->
+                when {
+                    line.contains(dataRegex) -> dataLine
+                    line.trim() == "resources=./resources" -> "resources=${Constants.USER_RESOURCES}"
+                    line.trim().startsWith("data=") && line.contains("vfs-mw") -> vfsLine
+                    line.trim().startsWith("data-local=") -> overrideLine
+                    else -> line
                 }
+            }.toMutableList()
+            if (lines.none { it.contains("vfs-mw") }) lines.add(vfsLine)
+            if (lines.none { it.startsWith("data-local=") }) lines.add(overrideLine)
+            file.writeText(lines.joinToString("\n"))
+        }
+
+        File(Constants.USER_OPENMW_CFG).takeIf { it.exists() }?.let { file ->
+            val lines = file.readLines().toMutableList()
+            if (lines.none { it.trim() == dataLine }) {
+                val idx = lines.indexOfFirst { it.trim().startsWith("data=") }.let { if (it == -1) 0 else it }
+                lines.add(idx, dataLine)
+                file.writeText(lines.joinToString("\n"))
             }
+        }
+    }
+
+    fun selectMorrowWindFolder(context: Context) {
+        val progress = "".moeDialog(fullCustom = true) { ProgressDialog(text = stringRes(R.string.searching_for_morrowind_esm)) }
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val userCfg = File(Constants.USER_OPENMW_CFG)
+                if (!userCfg.exists()) {
+                    progress.dismiss()
+                    showErrorAndBrowse(R.string.config_file_missing, R.string.openmw_config_file_not_found_msg)
+                    return@launch
+                }
+
+                val lines = userCfg.readLines()
+                val hasEsm = lines.any { it.trim().startsWith("content=Morrowind.esm") }
+                val paths = lines.filter { it.trim().startsWith("data=") }
+                    .map { it.removePrefix("data=\"").removeSuffix("\"").trim() }
+
+                progress.dismiss()
+                if (!hasEsm) {
+                    showErrorAndBrowse(R.string.morrowind_esm_not_found, R.string.morrowind_esm_not_in_cfg_msg, true)
+                    return@launch
+                }
+
+                val searchProgress = "".moeDialog(fullCustom = true) { ProgressDialog(text = stringRes(R.string.checking_data_paths)) }
+                val esmDir = findMorrowindEsm(paths)
+                searchProgress.dismiss()
+
+                esmDir?.let { dir ->
+                    String.format(stringRes(R.string.found_morrowind_esm_msg), dir).moeDialog(
+                        title = stringRes(R.string.game_files_found),
+                        confirmLabel = stringRes(R.string.yes),
+                        onConfirm = {
+                            val iniFile = listOf(File(dir, "Morrowind.ini"), dir.parentFile?.let { File(it, "Morrowind.ini") })
+                                .firstOrNull { it?.exists() == true }
+                            applyGameFolder(context, iniFile?.parentFile ?: dir)
+                            MToast(stringRes(R.string.game_files_location_set))
+                        },
+                        dismissLabel = stringRes(R.string.no),
+                        onDismiss = { showFileBrowser.value = true }
+                    )
+                } ?: showErrorAndBrowse(R.string.not_found, R.string.morrowind_esm_not_found_msg)
+            } catch (e: Exception) {
+                progress.dismiss()
+                (stringRes(R.string.error) + ": " + e.localizedMessage).moeDialog(confirmLabel = stringRes(R.string.ok))
+            }
+        }
+    }
+
+    private fun showErrorAndBrowse(titleRes: Int, msgRes: Int, cancellable: Boolean = false) {
+        stringRes(msgRes).moeDialog(
+            title = stringRes(titleRes),
+            confirmLabel = stringRes(R.string.ok),
+            onConfirm = { showFileBrowser.value = true },
+            dismissLabel = if (cancellable) stringRes(R.string.cancel) else null
+        )
+    }
+
+    private suspend fun findMorrowindEsm(paths: List<String>) = withContext(Dispatchers.IO) {
+        paths.firstNotNullOfOrNull { path ->
+            File(path).takeIf { it.isDirectory }?.walk()?.maxDepth(3)?.firstOrNull {
+                it.isFile && it.name.equals("Morrowind.esm", true)
+            }?.parentFile
         }
     }
 }

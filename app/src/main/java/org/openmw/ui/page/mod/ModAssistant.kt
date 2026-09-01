@@ -85,6 +85,7 @@ import com.composables.core.VerticalScrollbar
 import com.composables.core.rememberScrollAreaState
 import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.InternalCoroutinesApi
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.openmw.Constants
 import org.openmw.Constants.SETTINGS_FILE
@@ -311,6 +312,7 @@ fun ModValuesList(
     }
 
     LaunchedEffect(savedPath) {
+        delay(1600)
         savedPath?.let { path ->
             categorizedModValues = ModValue.updateUIFromModValues(categories.map { it.key })
         }

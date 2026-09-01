@@ -1,6 +1,8 @@
 package org.openmw.ui.page.main
 
 import android.annotation.SuppressLint
+import android.content.Context
+import android.content.Intent
 import android.util.Log
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
@@ -71,11 +73,13 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.DelicateCoroutinesApi
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.launch
+import org.openmw.EngineActivity
 import org.openmw.R
-import org.openmw.fragments.processSelectedFolder
 import org.openmw.ui.controls.UIStateManager
 import org.openmw.ui.controls.UIStateManager.customCFG
 import org.openmw.ui.controls.UIStateManager.gold
@@ -323,10 +327,7 @@ fun OpenMW(
     viewModel: MainPageViewModel = hiltViewModel()
 ) {
     var showFileBrowser by viewModel.showFileBrowser
-    var selectedFolderPath by remember { mutableStateOf<String?>(null) }
-    var persistedPath by viewModel.persistedPath
     val infiniteTransition = rememberInfiniteTransition(label = "")
-    var lastProcessedFolder by remember { mutableStateOf<String?>(null) }
     val context = LocalContext.current
     val savedPath by GameFilesPreferences.getGameFilesUriState(context).collectAsState(initial = null)
 
@@ -373,18 +374,6 @@ fun OpenMW(
                 },
                 color = Color.White
             )
-        }
-
-        LaunchedEffect(selectedFolderPath) {
-            selectedFolderPath?.let { path ->
-                if (path != lastProcessedFolder) {
-                    lastProcessedFolder = path
-                    processSelectedFolder(context, File(path), onUriPersisted = { newPath ->
-                        persistedPath = newPath
-                        Log.d("Add_Morrowind", "Add_Morrowind: $persistedPath = $newPath")
-                    })
-                }
-            }
         }
 
         BackHandler(showFileBrowser) {

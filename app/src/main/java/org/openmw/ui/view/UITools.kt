@@ -64,6 +64,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.painter.Painter
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
@@ -304,17 +305,23 @@ fun getDirectorySize(directory: File): Long {
     return totalSize
 }
 
-fun getCpuProcessUsage(): Int {
+fun getCpuProcessUsage(pid: Int = Process.myPid()): Int {
     try {
-        val pid = Process.myPid().toString()
-        val cores = Runtime.getRuntime().availableProcessors()
+        val pidStr = pid.toString()
+        val cores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
+        // Use -o PID,%CPU for consistent column ordering
         val process = Runtime.getRuntime().exec("top -n 1 -o PID,%CPU")
         val bufferedReader = BufferedReader(InputStreamReader(process.inputStream))
         var line = bufferedReader.readLine()
         while (line != null) {
-            if (line.contains(pid)) {
-                val rawCpu = line.split(" ").last().toInt()
-                return rawCpu / cores
+            val trimmed = line.trim()
+            if (trimmed.startsWith(pidStr)) {
+                val parts = trimmed.split("\\s+".toRegex())
+                if (parts.size >= 2 && parts[0] == pidStr) {
+                    // Handle decimal strings like "5.0" by taking the part before the dot
+                    val rawCpu = parts[1].substringBefore('.').toIntOrNull() ?: 0
+                    return rawCpu / cores
+                }
             }
             line = bufferedReader.readLine()
         }
@@ -626,15 +633,9 @@ fun ProgressWithNavmesh(onComplete: () -> Unit) {
     LaunchedEffect(Unit) {
         //Log.d("ProgressWithNavmesh", "LaunchedEffect triggered")
         launch(Dispatchers.IO) {
+            val am = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
 
             while (navmeshStatus.value != "Done") {
-                val statusMessage = Os.getenv("NAVMESHTOOL_MESSAGE")
-                if (statusMessage != null) {
-                    navmeshStatus.value = statusMessage
-                    progressFlow.value = statusMessage.toFloat() / 100.0f
-                }
-
-                // Update file size
                 val file = File("${Constants.USER_FILE_STORAGE}/navmesh.db")
                 if (file.exists()) {
                     fileSizeFlow.value = file.length()
@@ -643,21 +644,38 @@ fun ProgressWithNavmesh(onComplete: () -> Unit) {
                 // Update memory info
                 memoryInfoFlow.value = getMemoryInfo(context)
 
-                // Read navmeshtool.log
+                // Read navmeshtool.log and parse progress (since Env is process-local)
                 val logFile = File("${Constants.USER_CONFIG}/navmeshtool.log")
                 if (logFile.exists()) {
-                    val lines = logFile.readLines()
-                    //Log.d("LogLines", "Read ${lines.size} lines from navmeshtool.log")
+                    val lines = try { logFile.readLines() } catch (_: Exception) { emptyList() }
                     logLinesFlow.value = lines
+
+                    // 1. Check for success message to end loop
+                    if (lines.any { it.contains("runNavMeshTool sucess") }) {
+                        navmeshStatus.value = "Done"
+                    } else {
+                        // 2. Parse percentage from the latest generation log line
+                        lines.findLast { it.contains("navmesh tiles are generated") }?.let { line ->
+                            val regex = """\(([\d.]+)%\)""".toRegex()
+                            regex.find(line)?.groupValues?.get(1)?.let { percent ->
+                                navmeshStatus.value = percent
+                                progressFlow.value = percent.toFloat() / 100.0f
+                            }
+                        }
+                    }
                 }
 
-                // Update CPU usage
-                val usage = getCpuProcessUsage()
+                val navmeshPid = am.runningAppProcesses?.find {
+                    it.processName.endsWith(":navmesh")
+                }?.pid ?: Process.myPid()
+
+                // Update CPU usage using the correct PID
+                val usage = getCpuProcessUsage(navmeshPid)
                 withContext(Dispatchers.Main) {
                     cpuUsage = usage
                 }
 
-                delay(50)
+                delay(1000)
             }
             progressFlow.value = 1f
 
@@ -670,11 +688,25 @@ fun ProgressWithNavmesh(onComplete: () -> Unit) {
 fun BackgroundAnimation() {
     val context = LocalContext.current
     val backgroundAnimation by getBackgroundAnimationFlow(context).collectAsState(initial = "BouncingBackground")
-    when (backgroundAnimation) {
-        "BouncingBackground" -> BouncingBackground()
-        "RotatingImageBackground" -> RotatingImageBackground()
-        "CircularBackground" -> CircularBackground()
-        else -> NoneBackground()
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .pointerInput(Unit) {
+                // Consumes all touch events, effectively disabling them
+                awaitPointerEventScope {
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        event.changes.forEach { it.consume() }
+                    }
+                }
+            }
+    ) {
+        when (backgroundAnimation) {
+            "BouncingBackground" -> BouncingBackground()
+            "RotatingImageBackground" -> RotatingImageBackground()
+            "CircularBackground" -> CircularBackground()
+            else -> NoneBackground()
+        }
     }
 }
 

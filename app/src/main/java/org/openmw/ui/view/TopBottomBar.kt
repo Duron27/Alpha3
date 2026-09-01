@@ -68,6 +68,7 @@ import org.openmw.utils.GameFilesPreferences
 import org.openmw.utils.GameFilesPreferences.readCodeGroup
 import org.openmw.utils.MToast
 import org.openmw.utils.UserManageAssets
+import org.openmw.runNavMesh
 import org.openmw.utils.startGame
 import org.openmw.utils.stringRes
 import java.io.File
@@ -89,15 +90,14 @@ fun MyTopBar(context: Context) {
                 color = Color.White,
                 overflow = TextOverflow.Ellipsis
             )
-            //CodeGroupOptionSelector()
         },
         actions = {
             if (controllerConnected) {
                 Image(
-                    painter = painterResource(id = R.drawable.stadia_controller_24dp_e8eaed_fill0_wght400_grad0_opsz24), // Replace with your icon resource ID
+                    painter = painterResource(id = R.drawable.stadia_controller_24dp_e8eaed_fill0_wght400_grad0_opsz24),
                     contentDescription = "Icon",
                     modifier = Modifier.size(24.dp),
-                    colorFilter = ColorFilter.tint(Color.Green) // Tint the icon green
+                    colorFilter = ColorFilter.tint(Color.Green)
                 )
             }
             BarOptions(context)
@@ -200,6 +200,7 @@ fun BarOptions (context: Context) {
     var showDialog by remember { mutableStateOf(false) }
     val settingsFile = File(SETTINGS_FILE)
     val codeGroupOption by readCodeGroup(context).collectAsState(initial = "OpenMW")
+    val scope = rememberCoroutineScope()
 
     IconButton(onClick = { isTabExpanded = !isTabExpanded }) {
         Icon(
@@ -252,19 +253,18 @@ fun BarOptions (context: Context) {
                     }
                 },
                 onClick = {
+                    scope.launch {
+                    UIStateManager.useNavmesh = true
                     // Delete the navmesh file if it exists
                     val navmeshFile = File("${Constants.USER_FILE_STORAGE}/navmesh.db")
                     if (navmeshFile.exists()) {
                         navmeshFile.delete()
                     }
-
-                    // Set environment variable to start navmesh generation
-                    Os.setenv("OPENMW_GENERATE_NAVMESH_CACHE", "1", true)
-
-                    UIStateManager.useNavmesh = true
-
-                    // Start the navmesh activity
-                    context.startGame()
+                    withContext(Dispatchers.Default) {
+                        UserManageAssets(context).resourcePrepare()
+                    }
+                    runNavMesh(context)
+                    }
                 }
             )
             DropdownMenuItem(
