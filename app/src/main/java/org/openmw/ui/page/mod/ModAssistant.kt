@@ -89,6 +89,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.openmw.Constants
 import org.openmw.Constants.SETTINGS_FILE
+import org.openmw.utils.ModMappingJson
 import org.openmw.R
 import org.openmw.modDownloader.KramConversion
 import org.openmw.modDownloader.SSOHome
@@ -582,10 +583,33 @@ fun ModValuesList(
                                             // Directly modify just this line in the file
                                             val file = File(Constants.USER_OPENMW_CFG)
                                             if (file.exists()) {
+                                                val mappings = ModMappingJson.loadMappings()
+                                                val associatedPlugins = mutableSetOf<String>()
+                                                if (modValue.category == "data") {
+                                                    val mapping = mappings.find { it.dataPath == modValue.value }
+                                                    if (mapping != null) {
+                                                        associatedPlugins.addAll(mapping.contentFiles)
+                                                        associatedPlugins.addAll(mapping.groundcoverFiles)
+                                                    }
+                                                }
+
                                                 val lines = file.readLines()
                                                 val newLines = lines.map { line ->
                                                     val trimmed = line.trim()
+                                                    val cleanLine = trimmed.removePrefix(";")
                                                     when {
+                                                        (trimmed == "data=${modValue.value}" || trimmed == ";data=${modValue.value}") && modValue.category == "data" -> {
+                                                            if (!checked) ";data=${modValue.value}" else "data=${modValue.value}"
+                                                        }
+                                                        modValue.category == "data" && associatedPlugins.any { plugin ->
+                                                            cleanLine == "content=$plugin" || cleanLine == "groundcover=$plugin"
+                                                        } -> {
+                                                            if (!checked) {
+                                                                if (!trimmed.startsWith(";")) ";$cleanLine" else line
+                                                            } else {
+                                                                cleanLine
+                                                            }
+                                                        }
                                                         trimmed == "${modValue.category}=${modValue.value}" && !checked ->
                                                             ";${modValue.category}=${modValue.value}"
                                                         trimmed == ";${modValue.category}=${modValue.value}" && checked ->
@@ -594,6 +618,7 @@ fun ModValuesList(
                                                     }
                                                 }
                                                 file.writeText(newLines.joinToString("\n"))
+                                                categorizedModValues = ModValue.updateUIFromModValues(categories.map { it.key })
                                             }
                                         },
                                         colors = CheckboxDefaults.colors(
@@ -708,63 +733,96 @@ fun ModValuesList(
                                                     style = MaterialTheme.typography.bodyMedium.copy(color = Color.White)
                                                 )
                                                 Spacer(modifier = Modifier.height(8.dp))
+                                                if (modValue.category != "data") {
+                                                    Button(
+                                                        onClick = {
+                                                            // Handle the switch category action
+                                                            val updatedList =
+                                                                categorizedModValues[selectedTabIndex].toMutableList()
+                                                            val index =
+                                                                updatedList.indexOfFirst { it.id == modValue.id }
+                                                            if (index != -1) {
+                                                                val newCategory =
+                                                                    if (modValue.category == "content") "groundcover" else "content"
+                                                                updatedList[index] =
+                                                                    updatedList[index].copy(category = newCategory)
+                                                                categorizedModValues =
+                                                                    categorizedModValues.toMutableList()
+                                                                        .apply {
+                                                                            this[selectedTabIndex] =
+                                                                                updatedList
+                                                                        }
 
-                                                Button(
-                                                    onClick = {
-                                                        // Handle the switch category action
-                                                        val updatedList = categorizedModValues[selectedTabIndex].toMutableList()
-                                                        val index = updatedList.indexOfFirst { it.id == modValue.id }
-                                                        if (index != -1) {
-                                                            val newCategory = if (modValue.category == "Content") "Groundcover" else "Content"
-                                                            updatedList[index] = updatedList[index].copy(category = newCategory)
-                                                            categorizedModValues = categorizedModValues.toMutableList().apply {
-                                                                this[selectedTabIndex] = updatedList
-                                                            }
-
-                                                            // Update the file by removing the matching line and appending to the correct category
-                                                            val file = File(Constants.USER_OPENMW_CFG)
-                                                            val updatedLines = mutableListOf<String>()
-                                                            if (file.exists()) {
-                                                                file.forEachLine { line ->
-                                                                    // Skip the line that matches the modValue to remove it
-                                                                    if (line.trim() != ";${modValue.category}=${modValue.value}" && line.trim() != "${modValue.category}=${modValue.value}") {
-                                                                        updatedLines.add(line)
+                                                                // Update the file by removing the matching line and appending to the correct category
+                                                                val file =
+                                                                    File(Constants.USER_OPENMW_CFG)
+                                                                val updatedLines =
+                                                                    mutableListOf<String>()
+                                                                if (file.exists()) {
+                                                                    file.forEachLine { line ->
+                                                                        // Skip the line that matches the modValue to remove it
+                                                                        if (line.trim() != ";${modValue.category}=${modValue.value}" && line.trim() != "${modValue.category}=${modValue.value}") {
+                                                                            updatedLines.add(line)
+                                                                        }
                                                                     }
                                                                 }
+
+                                                                // Find the last line with the new category to append after it
+                                                                val newLine =
+                                                                    "${newCategory}=${modValue.value}"
+                                                                val lastCategoryIndex =
+                                                                    updatedLines.indexOfLast {
+                                                                        it.trim()
+                                                                            .startsWith("$newCategory=")
+                                                                    }
+                                                                val appendIndex =
+                                                                    if (lastCategoryIndex != -1) {
+                                                                        // Append after the last line of the new category
+                                                                        lastCategoryIndex + 1
+                                                                    } else {
+                                                                        // If no lines exist for the new category, append at the end
+                                                                        updatedLines.size
+                                                                    }
+
+                                                                // Insert the new line at the determined index
+                                                                updatedLines.add(
+                                                                    appendIndex,
+                                                                    newLine
+                                                                )
+
+                                                                // Write the updated content back to the file
+                                                                file.writeText(
+                                                                    updatedLines.joinToString(
+                                                                        "\n"
+                                                                    ) + if (updatedLines.lastOrNull()
+                                                                            ?.isNotEmpty() == true
+                                                                    ) "\n" else ""
+                                                                )
+
+                                                                // Reload the mod values and update the UI
+                                                                categorizedModValues =
+                                                                    ModValue.updateUIFromModValues(
+                                                                        categories.map { it.key })
                                                             }
+                                                            showPopup = false
+                                                        },
+                                                        colors = ButtonDefaults.buttonColors(
+                                                            containerColor = Color.DarkGray
+                                                        )
+                                                    ) {
+                                                        Text(
 
-                                                            // Find the last line with the new category to append after it
-                                                            val newLine = "${newCategory}=${modValue.value}"
-                                                            val lastCategoryIndex = updatedLines.indexOfLast { it.trim().startsWith("$newCategory=") }
-                                                            val appendIndex = if (lastCategoryIndex != -1) {
-                                                                // Append after the last line of the new category
-                                                                lastCategoryIndex + 1
-                                                            } else {
-                                                                // If no lines exist for the new category, append at the end
-                                                                updatedLines.size
-                                                            }
-
-                                                            // Insert the new line at the determined index
-                                                            updatedLines.add(appendIndex, newLine)
-
-                                                            // Write the updated content back to the file
-                                                            file.writeText(updatedLines.joinToString("\n") + if (updatedLines.lastOrNull()?.isNotEmpty() == true) "\n" else "")
-
-                                                            // Reload the mod values and update the UI
-                                                            categorizedModValues = ModValue.updateUIFromModValues(categories.map { it.key })
-                                                        }
-                                                        showPopup = false
+                                                            text = "${stringResource(R.string.switch_to)} ${
+                                                                if (modValue.category == "content")
+                                                                    stringResource(R.string.groundcover)
+                                                                else
+                                                                    stringResource(R.string.content)
+                                                            }",
+                                                            style = MaterialTheme.typography.bodyMedium.copy(
+                                                                color = Color.White
+                                                            )
+                                                        )
                                                     }
-                                                ) {
-                                                    Text(
-
-                                                        text = "${stringResource(R.string.switch_to)} ${if (modValue.category == "Content") 
-                                                            stringResource(R.string.groundcover) 
-                                                        else 
-                                                            stringResource(R.string.content)
-                                                        }",
-                                                        style = MaterialTheme.typography.bodyMedium.copy(color = Color.White)
-                                                    )
                                                 }
                                                 Spacer(modifier = Modifier.height(8.dp))
 
@@ -772,7 +830,8 @@ fun ModValuesList(
                                                     onClick = {
                                                         // Show the delete confirmation dialog
                                                         showDeleteConfirmation = true
-                                                    }
+                                                    },
+                                                    colors = ButtonDefaults.buttonColors(containerColor = Color.DarkGray)
                                                 ) {
                                                     Text(
                                                         text = stringResource(R.string.delete),
@@ -786,7 +845,8 @@ fun ModValuesList(
                                                     onClick = {
                                                         // Show the move dialog
                                                         showMoveDialog = true
-                                                    }
+                                                    },
+                                                    colors = ButtonDefaults.buttonColors(containerColor = Color.DarkGray)
                                                 ) {
                                                     Text(
                                                         text = stringResource(R.string.move),
@@ -796,7 +856,10 @@ fun ModValuesList(
 
                                                 Spacer(modifier = Modifier.height(8.dp))
 
-                                                Button(onClick = { showPopup = false }) {
+                                                Button(
+                                                    onClick = { showPopup = false },
+                                                    colors = ButtonDefaults.buttonColors(containerColor = Color.DarkGray)
+                                                ) {
                                                     Text(
                                                         text = stringRes(R.string.btn_cancel),
                                                         style = MaterialTheme.typography.bodyMedium.copy(color = Color.White)
@@ -1026,7 +1089,7 @@ fun ModValuesList(
                                     )
                                 }
 
-                                if (showDialog2) {
+                                if (showDialog2 && modValue.category != "data") {
                                     AlertDialog(
                                         onDismissRequest = { showDialog2 = false },
                                         confirmButton = {
@@ -1036,7 +1099,7 @@ fun ModValuesList(
                                                     val updatedList = categorizedModValues[selectedTabIndex].toMutableList()
                                                     val index = updatedList.indexOfFirst { it.id == modValue.id }
                                                     if (index != -1) {
-                                                        val newCategory = if (modValue.category == "Content") "Groundcover" else "Content"
+                                                        val newCategory = if (modValue.category == "content") "groundcover" else "content"
                                                         updatedList[index] = updatedList[index].copy(category = newCategory)
                                                         categorizedModValues = categorizedModValues.toMutableList().apply {
                                                             this[selectedTabIndex] = updatedList
@@ -1086,7 +1149,7 @@ fun ModValuesList(
                                             }
                                         },
                                         title = { Text(stringResource(R.string.confirm_action)) },
-                                        text = { Text(String.format(stringResource(R.string.switch_the_category_to_tip), if (modValue.category == "Content") stringRes(
+                                        text = { Text(String.format(stringResource(R.string.switch_the_category_to_tip), if (modValue.category == "content") stringRes(
                                             R.string.groundcover
                                         ) else stringRes(R.string.content)
                                         )) }
