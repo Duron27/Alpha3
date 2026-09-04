@@ -8,8 +8,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.launch
-import org.openmw.EngineActivity
-
 @OptIn(InternalCoroutinesApi::class)
 class IniImporterService : Service() {
     private val serviceScope = CoroutineScope(Dispatchers.IO)

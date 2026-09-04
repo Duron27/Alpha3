@@ -59,10 +59,39 @@ class MainPageViewModel @Inject constructor() : ViewModel() {
     }
 
     private fun updateConfigs(path: String) {
+        val extensions = arrayOf("bsa", "esm", "esp", "esl", "omwaddon", "omwgame", "omwscripts")
         val dataLine = """data="$path/Data Files""""
         val vfsLine = "data=${Constants.USER_RESOURCES}/vfs-mw"
         val overrideLine = "data-local=${Constants.USER_FILE_STORAGE}/OpenMW/Override"
         val dataRegex = Regex("""^data\s*=\s*".*?"""")
+
+        val dataFilesDir = File("$path/Data Files")
+        val targetDir = if (dataFilesDir.exists() && dataFilesDir.isDirectory) dataFilesDir else File(path)
+
+        val foundFiles = mutableListOf<File>()
+        fun walkDir(dir: File) {
+            dir.listFiles()?.forEach { f ->
+                if (f.isDirectory) {
+                    walkDir(f)
+                } else if (f.isFile) {
+                    if (f.extension.lowercase() in extensions) {
+                        foundFiles.add(f)
+                    }
+                }
+            }
+        }
+        if (targetDir.exists() && targetDir.isDirectory) {
+            walkDir(targetDir)
+        }
+
+        val pluginLinesToAdd = foundFiles.map { file ->
+            val fileName = file.name
+            if (file.extension.lowercase() == "bsa") {
+                "fallback-archive=$fileName"
+            } else {
+                "content=$fileName"
+            }
+        }
 
         File(Constants.OPENMW_CFG).takeIf { it.exists() }?.let { file ->
             val lines = file.readLines().map { line ->
@@ -76,6 +105,13 @@ class MainPageViewModel @Inject constructor() : ViewModel() {
             }.toMutableList()
             if (lines.none { it.contains("vfs-mw") }) lines.add(vfsLine)
             if (lines.none { it.startsWith("data-local=") }) lines.add(overrideLine)
+
+            pluginLinesToAdd.forEach { pluginLine ->
+                if (lines.none { it.trim().removePrefix(";") == pluginLine }) {
+                    lines.add(pluginLine)
+                }
+            }
+
             file.writeText(lines.joinToString("\n"))
         }
 
@@ -84,8 +120,15 @@ class MainPageViewModel @Inject constructor() : ViewModel() {
             if (lines.none { it.trim() == dataLine }) {
                 val idx = lines.indexOfFirst { it.trim().startsWith("data=") }.let { if (it == -1) 0 else it }
                 lines.add(idx, dataLine)
-                file.writeText(lines.joinToString("\n"))
             }
+
+            pluginLinesToAdd.forEach { pluginLine ->
+                if (lines.none { it.trim().removePrefix(";") == pluginLine }) {
+                    lines.add(pluginLine)
+                }
+            }
+
+            file.writeText(lines.joinToString("\n"))
         }
     }
 
