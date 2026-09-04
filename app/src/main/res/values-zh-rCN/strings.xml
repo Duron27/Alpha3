@@ -292,4 +292,7 @@
     <string name="enable_launcher_logcat">启用/禁用启动器日志，用于排查启动器崩溃问题</string>
     <string name="interact">交互</string>
     <string name="vibration">振动</string>
+    <string name="reset_resources">重置用户资源</string>
+    <string name="reset_the_resources_tip">确定要重置用户资源吗？</string>
+    <string name="resources_reset">用户资源已重置</string>
 </resources>

@@ -292,5 +292,8 @@
     <string name="enable_launcher_logcat">Включает/выключает логкат лаунчера, используйте это при вылетах лаунчера</string>
     <string name="interact">Взаимодействие</string>
     <string name="vibration">Вибрация</string>
+    <string name="reset_resources">Сбросить пользовательские ресурсы</string>
+    <string name="reset_the_resources_tip">Вы уверены, что хотите сбросить пользовательские ресурсы?</string>
+    <string name="resources_reset">Пользовательские ресурсы сброшены</string>
 
 </resources>

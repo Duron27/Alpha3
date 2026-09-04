@@ -114,6 +114,7 @@ import org.openmw.utils.stringRes
 import sh.calvin.reorderable.ReorderableItem
 import sh.calvin.reorderable.rememberReorderableLazyListState
 import java.io.File
+import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 
 @OptIn(ExperimentalMaterial3Api::class, InternalCoroutinesApi::class)
@@ -312,7 +313,7 @@ fun ModValuesList(
     }
 
     LaunchedEffect(savedPath) {
-        delay(1600)
+        delay(1600.milliseconds)
         savedPath?.let { path ->
             categorizedModValues = ModValue.updateUIFromModValues(categories.map { it.key })
         }

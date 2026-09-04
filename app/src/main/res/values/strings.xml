@@ -291,5 +291,8 @@
     <string name="graphics_and_performance">Graphics &amp; Performance</string>
     <string name="interface_and_overlay">Interface &amp; Overlay</string>
     <string name="system_and_debug">System &amp; Debug</string>
+    <string name="reset_resources">Reset user resources</string>
+    <string name="reset_the_resources_tip">Are you sure you want to reset user resources?</string>
+    <string name="resources_reset">User resources reset</string>
 
 </resources>

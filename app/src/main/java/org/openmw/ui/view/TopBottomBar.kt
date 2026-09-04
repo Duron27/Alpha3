@@ -198,6 +198,7 @@ fun MyFloatingActionButton() {
 fun BarOptions (context: Context) {
     var expanded by remember { mutableStateOf(false) }
     var showDialog by remember { mutableStateOf(false) }
+    var showResetResourcesDialog by remember { mutableStateOf(false) }
     val settingsFile = File(SETTINGS_FILE)
     val codeGroupOption by readCodeGroup(context).collectAsState(initial = "OpenMW")
     val scope = rememberCoroutineScope()
@@ -268,6 +269,12 @@ fun BarOptions (context: Context) {
                 }
             )
             DropdownMenuItem(
+                text = { Text(stringResource(R.string.reset_resources), color = Color.White) },
+                onClick = {
+                    showResetResourcesDialog = true
+                }
+            )
+            DropdownMenuItem(
                 text = { Text(stringResource(R.string.reset_settings), color = Color.White) },
                 onClick = {
                     showDialog = true
@@ -275,6 +282,38 @@ fun BarOptions (context: Context) {
             )
         }
         CodeGroupOptionSelector()
+        if (showResetResourcesDialog) {
+            AlertDialog(
+                onDismissRequest = { showResetResourcesDialog = false },
+                title = { Text(stringRes(R.string.confirm_reset)) },
+                text = { Text(stringRes(R.string.reset_the_resources_tip)) },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            showResetResourcesDialog = false
+                            val progress = "".moeDialog(fullCustom = true) { ProgressDialog(text = stringRes(R.string.reset_resources)) }
+                            scope.launch {
+                                withContext(Dispatchers.Default) {
+                                    UserManageAssets(context).resetUserResources()
+                                }
+                                progress.dismiss()
+                                MToast(stringRes(R.string.resources_reset))
+                            }
+                            expanded = false
+                        }
+                    ) {
+                        Text(stringRes(R.string.btn_confirm))
+                    }
+                },
+                dismissButton = {
+                    Button(
+                        onClick = { showResetResourcesDialog = false }
+                    ) {
+                        Text(stringRes(R.string.btn_cancel))
+                    }
+                }
+            )
+        }
         if (showDialog) {
             AlertDialog(
                 onDismissRequest = { showDialog = false },

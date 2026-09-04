@@ -106,6 +106,15 @@ class UserManageAssets(val context: Context) {
         }
     }
 
+    fun resetUserResources() {
+        val resourcesDir = File(Constants.USER_RESOURCES)
+        if (resourcesDir.exists()) {
+            Log.d("ManageAssets", "Deleting existing user resources: ${Constants.USER_RESOURCES}")
+            resourcesDir.deleteRecursively()
+        }
+        assetCopier.copy("libopenmw/resources", Constants.USER_RESOURCES, overwrite = true)
+    }
+
     fun onFirstLaunch() {
 
         assetCopier.copy("libopenmw/openmw", Constants.GLOBAL_CONFIG)
