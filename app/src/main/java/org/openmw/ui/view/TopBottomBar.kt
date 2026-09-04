@@ -1,18 +1,14 @@
 package org.openmw.ui.view
 
 import android.content.Context
-import android.system.Os
 import android.util.Log
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
@@ -28,7 +24,6 @@ import androidx.compose.material3.FloatingActionButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
@@ -57,6 +52,7 @@ import org.openmw.Constants
 import org.openmw.Constants.SETTINGS_FILE
 import org.openmw.R
 import org.openmw.isControllerConnected
+import org.openmw.runNavMesh
 import org.openmw.ui.controls.UIStateManager
 import org.openmw.ui.controls.UIStateManager.editMode
 import org.openmw.ui.controls.UIStateManager.isAppLoggingEnabled
@@ -67,8 +63,8 @@ import org.openmw.ui.page.setting.CodeGroupOptionSelector
 import org.openmw.utils.GameFilesPreferences
 import org.openmw.utils.GameFilesPreferences.readCodeGroup
 import org.openmw.utils.MToast
+import org.openmw.utils.ModMappingJson
 import org.openmw.utils.UserManageAssets
-import org.openmw.runNavMesh
 import org.openmw.utils.startGame
 import org.openmw.utils.stringRes
 import java.io.File
@@ -265,6 +261,27 @@ fun BarOptions (context: Context) {
                         UserManageAssets(context).resourcePrepare()
                     }
                     runNavMesh(context)
+                    }
+                }
+            )
+            DropdownMenuItem(
+                text = { Text(stringResource(R.string.reindex_mods), color = Color.White) },
+                onClick = {
+                    expanded = false
+                    var currentProgressText by mutableStateOf(stringRes(R.string.indexing_mods))
+                    val progress = "".moeDialog(fullCustom = true) { 
+                        ProgressDialog(text = currentProgressText) 
+                    }
+                    scope.launch {
+                        withContext(Dispatchers.Default) {
+                            ModMappingJson.syncAndSaveFromOpenMWConfig { msg ->
+                                scope.launch(Dispatchers.Main) {
+                                    currentProgressText = msg
+                                }
+                            }
+                        }
+                        progress.dismiss()
+                        MToast(stringRes(R.string.mods_indexed))
                     }
                 }
             )

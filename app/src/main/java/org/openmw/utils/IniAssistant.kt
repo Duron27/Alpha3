@@ -1,6 +1,5 @@
 package org.openmw.utils
 
-import android.annotation.SuppressLint
 import android.os.Build
 import android.view.HapticFeedbackConstants
 import androidx.compose.foundation.clickable
@@ -48,68 +47,58 @@ import org.openmw.Constants
 import org.openmw.ui.controls.UIStateManager.darkGray
 import java.io.File
 
-class IniConverter(private val data: String) {
-    fun convert(): String {
-        return data
-            .lines()
-            .map { it.trim() }
-            .filter { it.isNotEmpty() && !it.startsWith(";") }
-            .fold(Pair("", "")) { acc, line ->
-                if (line.startsWith("[") && line.endsWith("]")) {
-                    acc.copy(first = line.substring(1, line.length - 1).replace(" ", "_"))
-                } else if (line.contains("=")) {
-                    val converted = convertLine(line)
-                    if (converted.isNotEmpty()) {
-                        acc.copy(second = acc.second + "fallback=${acc.first}_$converted\n")
-                    } else acc
-                } else acc
-            }.second
-    }
-
-    private fun convertLine(line: String): String {
-        val (key, value) = line.split("=", limit = 2)
-        if (key.isBlank() || value.isBlank()) return ""
-        return "${key.replace(" ", "_")},$value"
-    }
-}
-
 private fun readIniValues(): Map<String, List<Triple<String, Any, String?>>> {
     val settings = mutableMapOf<String, MutableList<Triple<String, Any, String?>>>()
     val comments = mutableMapOf<String, String?>()
     val sections = mutableMapOf<String, MutableMap<String, String>>()
     var currentSection: String? = null
-    var pendingComment: String? = null
 
     // Define your blacklist here
     val blacklist = setOf("key1", "key2", "key3")
+    val file = File(Constants.SETTINGS_FILE)
+    if (!file.exists()) return emptyMap()
 
-    File(Constants.SETTINGS_FILE).forEachLine { line ->
-        val trimmedLine = line.trim()
+    val lines = file.readLines()
+
+    for (i in lines.indices) {
+        val line = lines[i].trim()
         when {
-            trimmedLine.startsWith("[") && trimmedLine.endsWith("]") -> {
-                currentSection = trimmedLine.substring(1, trimmedLine.length - 1).trim()
+            line.startsWith("[") && line.endsWith("]") -> {
+                currentSection = line.substring(1, line.length - 1).trim()
                 sections[currentSection!!] = mutableMapOf()
-                pendingComment = null
             }
-            trimmedLine.startsWith("#") -> {
-                val commentText = trimmedLine.substring(1).trim()
-                pendingComment = if (pendingComment == null) commentText else "$pendingComment\n$commentText"
-            }
-            "=" in trimmedLine -> {
-                val (key, value) = trimmedLine.split("=", limit = 2).map { it.trim() }
-                if (currentSection != null && key !in blacklist) {
-                    sections[currentSection]!![key] = value
-                    if (pendingComment != null) {
-                        comments[key] = pendingComment
-                        pendingComment = null
+            "=" in line -> {
+                val parts = line.split("=", limit = 2).map { it.trim() }
+                if (parts.size == 2) {
+                    val key = parts[0]
+                    val value = parts[1]
+                    if (currentSection != null && key !in blacklist) {
+                        sections[currentSection]!![key] = value
+
+                        // Expect comment on TOP (above the key)
+                        var j = i - 1
+                        val commentLines = mutableListOf<String>()
+                        while (j >= 0) {
+                            val prevLine = lines[j].trim()
+                            if (prevLine.startsWith("#")) {
+                                commentLines.add(0, prevLine.substring(1).trim())
+                                j--
+                            } else if (prevLine.isEmpty()) {
+                                // Allow empty lines between comment and key
+                                j--
+                            } else {
+                                break
+                            }
+                        }
+                        if (commentLines.isNotEmpty()) {
+                            comments[key] = commentLines.joinToString("\n")
+                        }
                     }
                 }
             }
-            trimmedLine.isEmpty() -> {
-                pendingComment = null // Blank line breaks the association between comment and next key
-            }
         }
     }
+
     sections.forEach { (section, properties) ->
         val sectionSettings = properties.mapNotNull { (key, value) ->
             if (key in blacklist) return@mapNotNull null

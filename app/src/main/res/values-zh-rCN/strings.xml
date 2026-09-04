@@ -295,4 +295,7 @@
     <string name="reset_resources">重置用户资源</string>
     <string name="reset_the_resources_tip">确定要重置用户资源吗？</string>
     <string name="resources_reset">用户资源已重置</string>
+    <string name="reindex_mods">重新索引模组</string>
+    <string name="indexing_mods">正在索引模组...</string>
+    <string name="mods_indexed">模组重新索引成功</string>
 </resources>

@@ -295,5 +295,8 @@
     <string name="reset_resources">Сбросить пользовательские ресурсы</string>
     <string name="reset_the_resources_tip">Вы уверены, что хотите сбросить пользовательские ресурсы?</string>
     <string name="resources_reset">Пользовательские ресурсы сброшены</string>
+    <string name="reindex_mods">Переиндексировать моды</string>
+    <string name="indexing_mods">Индексация модов...</string>
+    <string name="mods_indexed">Моды успешно переиндексированы</string>
 
 </resources>

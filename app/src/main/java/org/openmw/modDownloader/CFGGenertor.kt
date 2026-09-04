@@ -8,11 +8,9 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
 import org.openmw.Constants
-import org.openmw.modDownloader.ModListManager.modList
 import org.openmw.utils.GameFilesPreferences.getGameFilesUri
 import java.io.File
 import java.io.FileOutputStream
-import java.io.IOException
 import java.net.URL
 
 private val pluginsToCommentOut: MutableSet<String> = mutableSetOf()
@@ -22,8 +20,7 @@ suspend fun loadPluginsToCommentOut() {
 
     withContext(Dispatchers.IO) {
         try {
-            val url = URL("https://gitlab.com/cavebros/openmw-android-docker/-/raw/main/patches/linesToCommentOut.txt")
-            //val url = URL("https://gitlab.com/duron27/alpha3/-/raw/main/app/linesToCommentOut.txt")
+            val url = URL("https://gitlab.com/duron27/alpha3/-/raw/main/app/linesToCommentOut.txt")
             val text = url.readText()
 
             val lines = text.lines()
