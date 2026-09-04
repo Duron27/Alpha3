@@ -19,12 +19,6 @@ if (keystorePropertiesFile.exists()) {
 }
 
 val generatedAssetsDir = layout.buildDirectory.dir("generated_assets")
-val generateOpenMWAssets = tasks.register("generateOpenMWAssets") {
-    outputs.dir(generatedAssetsDir)
-    doLast {
-        generatedAssetsDir.get().asFile.mkdirs()
-    }
-}
 
 android {
     namespace = "org.openmw"
@@ -47,7 +41,7 @@ android {
 
         //noinspection OldTargetApi
         targetSdk = 36
-        versionCode = 3
+        versionCode = 2
         versionName = providers.exec {
             commandLine("git", "rev-parse", "--short", "HEAD")
         }.standardOutput.asText.get().trim()
@@ -83,8 +77,8 @@ android {
         val cap = variant.name.replaceFirstChar { it.uppercase() }
         tasks.withType<MergeSourceSetFolders>().configureEach {
             if (name == "merge${cap}Assets") {
-                dependsOn(generateOpenMWAssets)
                 dependsOn("externalNativeBuild$cap")
+                inputs.dir(generatedAssetsDir)
             }
         }
     }
