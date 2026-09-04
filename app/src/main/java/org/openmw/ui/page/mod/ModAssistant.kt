@@ -1,5 +1,8 @@
 package org.openmw.ui.page.mod
 
+import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.os.Build
 import android.util.Log
 import android.view.HapticFeedbackConstants
@@ -184,9 +187,13 @@ private fun ModTabRow(
             Tab(
                 selected = selectedTabIndex == 3,
                 onClick = {
-                    resetStates()
-                    downloader = true
-                    selectedTabIndex = 3
+                    if (isNetworkAvailable(context)) {
+                        resetStates()
+                        downloader = true
+                        selectedTabIndex = 3
+                    } else {
+                        MToast("No internet connection available")
+                    }
                 },
                 text = { Text(stringResource(R.string.mod_downloader)) }
             )
@@ -488,7 +495,7 @@ fun ModValuesList(
             Terminal()
         }
         AnimatedVisibility(
-            visible = downloader,
+            visible = downloader && isNetworkAvailable(context),
             enter = fadeIn() + expandIn(),
             exit = fadeOut() + shrinkOut()
         ) {
@@ -1177,6 +1184,13 @@ fun ModValuesList(
             }
         }
     }
+}
+
+private fun isNetworkAvailable(context: Context): Boolean {
+    val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return false
+    val network = cm.activeNetwork ?: return false
+    val caps = cm.getNetworkCapabilities(network) ?: return false
+    return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
 }
 
 @Composable
