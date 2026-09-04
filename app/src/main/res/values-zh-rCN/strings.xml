@@ -298,4 +298,5 @@
     <string name="reindex_mods">重新索引模组</string>
     <string name="indexing_mods">正在索引模组...</string>
     <string name="mods_indexed">模组重新索引成功</string>
+    <string name="resources">资源</string>
 </resources>

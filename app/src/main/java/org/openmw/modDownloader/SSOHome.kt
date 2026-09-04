@@ -117,6 +117,7 @@ import org.openmw.utils.GameFilesPreferences.loadIsPremiumTier
 import org.openmw.utils.dataStore
 import org.openmw.utils.stringRes
 import java.io.File
+import kotlin.time.Duration.Companion.milliseconds
 
 object StatusInfo {
     var processing by mutableStateOf(false)
@@ -278,7 +279,7 @@ fun SSOHome() {
         while (showModsLog) {
             logMessages.clear()
             logMessages.addAll(getMessages())
-            delay(1000) // Refresh every second
+            delay(1000.milliseconds) // Refresh every second
         }
     }
 

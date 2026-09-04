@@ -24,6 +24,7 @@ import org.openmw.utils.findFilesWithExtensions
 import java.io.File
 import java.util.regex.Pattern
 import javax.inject.Inject
+import kotlin.time.Duration.Companion.milliseconds
 import kotlin.uuid.ExperimentalUuidApi
 import kotlin.uuid.Uuid
 
@@ -199,13 +200,19 @@ class ModAssistantViewModel @Inject constructor(
                 val newModValues = files.mapIndexed { index, file ->
                     val fileName = file.name ?: ""
                     val nameWithoutExtension = fileName.substringBeforeLast(".")
-                    val extension = fileName.substringAfterLast(".")
-                    ModValue(index + 1, "content", "$nameWithoutExtension.$extension", isChecked = true)
+                    val extension = fileName.substringAfterLast(".").lowercase()
+                    val category = if (extension == "bsa") "fallback-archive" else "content"
+                    ModValue(index + 1, category, "$nameWithoutExtension.$extension", isChecked = true)
                 }.toMutableList().filter { it.value !in ignoreList }.toMutableList()
 
                 newModValues.add(ModValue(newModValues.size + 1, "data", modPath, isChecked = true))
 
                 // Convert new mod values to file lines
+                val newResourceLines = newModValues
+                    .filter { it.category == "fallback-archive" }
+                    .map { "fallback-archive=${it.value}" }
+                    .toSet()
+
                 val newContentLines = newModValues
                     .filter { it.category == "content" }
                     .map { "content=${it.value}" }
@@ -217,11 +224,28 @@ class ModAssistantViewModel @Inject constructor(
                     .toSet()
 
                 // Find insertion points for each category
+                val lastResourceIndex = existingLines.indexOfLast { it.startsWith("fallback-archive=") }
                 val lastContentIndex = existingLines.indexOfLast { it.startsWith("content=") }
                 val lastDataIndex = existingLines.indexOfLast { it.startsWith("data=") }
 
                 // Create a new list with inserted lines
                 val updatedLines = existingLines.toMutableList()
+
+                // Insert new resource lines (fallback-archive)
+                newResourceLines.forEach { line ->
+                    if (!existingLines.contains(line)) {
+                        if (lastResourceIndex != -1) {
+                            updatedLines.add(lastResourceIndex + 1, line)
+                        } else {
+                            val bsasSectionIndex = existingLines.indexOfFirst { it.contains("## BSAS", ignoreCase = true) || it.contains("## BSAs", ignoreCase = true) || it.contains("## Resources", ignoreCase = true) }
+                            if (bsasSectionIndex != -1) {
+                                updatedLines.add(bsasSectionIndex + 1, line)
+                            } else {
+                                updatedLines.add(0, line)
+                            }
+                        }
+                    }
+                }
 
                 // Insert new content lines after the last existing content line
                 newContentLines.forEach { line ->
@@ -363,7 +387,7 @@ class ModAssistantViewModel @Inject constructor(
 
         // Reset after 3 seconds
         coroutineScope.launch {
-            delay(3000)
+            delay(3000.milliseconds)
             setHighlightedCardId(null)
         }
 
@@ -393,7 +417,7 @@ class ModAssistantViewModel @Inject constructor(
 
 fun readModValues(
     configPath: String = Constants.USER_OPENMW_CFG,
-    validCategories: Set<String> = setOf("data", "content", "groundcover")
+    validCategories: Set<String> = setOf("data", "content", "groundcover", "fallback-archive")
 ): List<ModValue> {
     val values = mutableListOf<ModValue>()
     val configFile = File(configPath)
@@ -411,7 +435,7 @@ fun readModValues(
                 }
             } catch (e: Exception) {
                 // Log or handle malformed lines if needed
-                println("Skipping malformed line: $trimmedLine")
+                println("Skipping malformed line: $trimmedLine\n$e")
             }
         }
     }

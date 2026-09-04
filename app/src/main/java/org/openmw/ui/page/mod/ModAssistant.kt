@@ -597,6 +597,7 @@ fun ModValuesList(
                                                     if (mapping != null) {
                                                         associatedPlugins.addAll(mapping.contentFiles)
                                                         associatedPlugins.addAll(mapping.groundcoverFiles)
+                                                        associatedPlugins.addAll(mapping.resourceFiles)
                                                     }
                                                 }
 
@@ -609,7 +610,7 @@ fun ModValuesList(
                                                             if (!checked) ";data=${modValue.value}" else "data=${modValue.value}"
                                                         }
                                                         modValue.category == "data" && associatedPlugins.any { plugin ->
-                                                            cleanLine == "content=$plugin" || cleanLine == "groundcover=$plugin"
+                                                            cleanLine == "content=$plugin" || cleanLine == "groundcover=$plugin" || cleanLine == "fallback-archive=$plugin"
                                                         } -> {
                                                             if (!checked) {
                                                                 if (!trimmed.startsWith(";")) ";$cleanLine" else line
@@ -740,7 +741,7 @@ fun ModValuesList(
                                                     style = MaterialTheme.typography.bodyMedium.copy(color = Color.White)
                                                 )
                                                 Spacer(modifier = Modifier.height(8.dp))
-                                                if (modValue.category != "data") {
+                                                if (modValue.category != "data" && modValue.category != "fallback-archive") {
                                                     Button(
                                                         onClick = {
                                                             // Handle the switch category action
@@ -1096,7 +1097,7 @@ fun ModValuesList(
                                     )
                                 }
 
-                                if (showDialog2 && modValue.category != "data") {
+                                if (showDialog2 && modValue.category != "data" && modValue.category != "fallback-archive") {
                                     AlertDialog(
                                         onDismissRequest = { showDialog2 = false },
                                         confirmButton = {

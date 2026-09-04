@@ -75,9 +75,12 @@ import java.io.File
 fun MyTopBar(context: Context) {
     val controllerConnected = isControllerConnected(context)
     TopAppBar(
-        colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
+        colors = TopAppBarDefaults.topAppBarColors(
             containerColor = transparentBlack,
+            scrolledContainerColor = Color.Unspecified,
+            navigationIconContentColor = Color.Unspecified,
             titleContentColor = MaterialTheme.colorScheme.primary,
+            actionIconContentColor = Color.Unspecified
         ),
         title = {
             Text(

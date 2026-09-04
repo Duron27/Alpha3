@@ -21,7 +21,7 @@ object OpenMWConfigUtils {
         else this
 
     fun String.getKey(): String? = if (this.contains("=")) this.substringBefore("=").trim() else null
-     fun String.getValue(): String? = if (this.contains("=")) this.substringAfter("=").trim() else null
+    fun String.getValue(): String? = if (this.contains("=")) this.substringAfter("=").trim() else null
 
 
     enum class ConfigKeyType(
@@ -31,7 +31,8 @@ object OpenMWConfigUtils {
         Others("", ""),
         Data("data", stringRes(R.string.cfg_key_data)),
         Content("content", stringRes(R.string.content)),
-        GroundCover("groundcover", stringRes(R.string.groundcover));
+        GroundCover("groundcover", stringRes(R.string.groundcover)),
+        Resources("fallback-archive", stringRes(R.string.resources));
 
         companion object {
             val list get() = entries.filter { it != Others }.map { it.key }.toList()
@@ -58,6 +59,7 @@ object OpenMWConfigUtils {
         val dataLines = mutableListOf<String>()
         val contentLines = mutableListOf<String>()
         val groundcoverLines = mutableListOf<String>()
+        val resourcesLines = mutableListOf<String>()
 
         for (line in targetLines) {
             val key = line.removeComment().getKey()
@@ -65,6 +67,7 @@ object OpenMWConfigUtils {
                 ConfigKeyType.Data.key -> dataLines += line
                 ConfigKeyType.Content.key -> contentLines += line
                 ConfigKeyType.GroundCover.key -> groundcoverLines += line
+                ConfigKeyType.Resources.key -> resourcesLines += line
             }
         }
 
@@ -73,6 +76,7 @@ object OpenMWConfigUtils {
             ConfigKeyType.Data to dataLines,
             ConfigKeyType.Content to contentLines,
             ConfigKeyType.GroundCover to groundcoverLines,
+            ConfigKeyType.Resources to resourcesLines,
         )
     }
 
@@ -84,14 +88,9 @@ object OpenMWConfigUtils {
 
         val outputLines = mutableListOf<String>()
 
-        // write others, data、content、groundcover
         ConfigKeyType.entries.forEachIndexed { index, keyType ->
             val lines = config[keyType].orEmpty()
             outputLines.addAll(lines)
-
-            /*if (index < ConfigKeyType.list.lastIndex && lines.isNotEmpty()) {
-                outputLines.add("")
-            }*/
         }
 
         file.writeText(outputLines.joinToString("\n"))

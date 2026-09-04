@@ -10,7 +10,8 @@ import java.io.File
 data class ModPluginMapping(
     val dataPath: String,
     val contentFiles: List<String> = emptyList(),
-    val groundcoverFiles: List<String> = emptyList()
+    val groundcoverFiles: List<String> = emptyList(),
+    val resourceFiles: List<String> = emptyList()
 )
 
 @Serializable
@@ -54,7 +55,7 @@ object ModMappingJson {
     }
 
     /**
-     * Automatically links data paths with content/groundcover plugins based on openmw.cfg and directory contents.
+     * Automatically links data paths with content/groundcover/resource plugins based on openmw.cfg and directory contents.
      */
     fun syncAndSaveFromOpenMWConfig(
         filePath: String = Constants.USER_OPENMW_CFG,
@@ -66,9 +67,10 @@ object ModMappingJson {
         val dataLines = configMap[OpenMWConfigUtils.ConfigKeyType.Data].orEmpty()
         val contentLines = configMap[OpenMWConfigUtils.ConfigKeyType.Content].orEmpty()
         val groundcoverLines = configMap[OpenMWConfigUtils.ConfigKeyType.GroundCover].orEmpty()
+        val resourcesLines = configMap[OpenMWConfigUtils.ConfigKeyType.Resources].orEmpty()
 
         onProgress("Found ${dataLines.size} data paths, ${contentLines.size} plugins")
-        Log.d("ModMappingJson", "Found ${dataLines.size} data paths, ${contentLines.size} content plugins, ${groundcoverLines.size} groundcover plugins.")
+        Log.d("ModMappingJson", "Found ${dataLines.size} data paths, ${contentLines.size} content plugins, ${groundcoverLines.size} groundcover plugins, ${resourcesLines.size} resource files.")
 
         val mappings = mutableListOf<ModPluginMapping>()
 
@@ -76,6 +78,7 @@ object ModMappingJson {
             // Extract plugin names (values after '=')
             val allContents = contentLines.mapNotNull { it.removeComment().getValue()?.removeSurrounding("\"") }
             val allGroundcovers = groundcoverLines.mapNotNull { it.removeComment().getValue()?.removeSurrounding("\"") }
+            val allResources = resourcesLines.mapNotNull { it.removeComment().getValue()?.removeSurrounding("\"") }
 
             for ((index, dataLine) in dataLines.withIndex()) {
                 val rawPath = dataLine.removeComment().getValue()?.removeSurrounding("\"") ?: continue
@@ -92,14 +95,16 @@ object ModMappingJson {
 
                 val matchedContents = allContents.filter { it in dirFiles }
                 val matchedGroundcovers = allGroundcovers.filter { it in dirFiles }
+                val matchedResources = allResources.filter { it in dirFiles }
 
-                Log.d("ModMappingJson", "Mapped dataPath: $rawPath -> content: $matchedContents, groundcover: $matchedGroundcovers")
+                Log.d("ModMappingJson", "Mapped dataPath: $rawPath -> content: $matchedContents, groundcover: $matchedGroundcovers, resources: $matchedResources")
 
                 mappings.add(
                     ModPluginMapping(
                         dataPath = rawPath,
                         contentFiles = matchedContents,
-                        groundcoverFiles = matchedGroundcovers
+                        groundcoverFiles = matchedGroundcovers,
+                        resourceFiles = matchedResources
                     )
                 )
             }

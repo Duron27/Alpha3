@@ -298,5 +298,6 @@
     <string name="reindex_mods">Переиндексировать моды</string>
     <string name="indexing_mods">Индексация модов...</string>
     <string name="mods_indexed">Моды успешно переиндексированы</string>
+    <string name="resources">Ресурсы</string>
 
 </resources>

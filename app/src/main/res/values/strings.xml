@@ -297,5 +297,6 @@
     <string name="reindex_mods">Reindex Mods</string>
     <string name="indexing_mods">Indexing mods...</string>
     <string name="mods_indexed">Mods reindexed successfully</string>
+    <string name="resources">Resources</string>
 
 </resources>
