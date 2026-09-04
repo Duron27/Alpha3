@@ -18,6 +18,7 @@ import kotlinx.coroutines.withContext
 import org.openmw.Constants
 import org.openmw.ui.view.addCustomLog
 import org.openmw.utils.GameFilesPreferences
+import org.openmw.utils.ModMappingJson
 import org.openmw.utils.OpenMWConfigUtils
 import org.openmw.utils.findFilesWithExtensions
 import java.io.File
@@ -267,6 +268,8 @@ class ModAssistantViewModel @Inject constructor(
                         writer.newLine()
                     }
                 }
+
+                ModMappingJson.syncAndSaveFromOpenMWConfig()
 
                 if (files.isNotEmpty()) {
                     onPathPersisted(modPath)
