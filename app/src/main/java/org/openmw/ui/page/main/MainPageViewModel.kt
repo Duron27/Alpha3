@@ -106,12 +106,6 @@ class MainPageViewModel @Inject constructor() : ViewModel() {
             if (lines.none { it.contains("vfs-mw") }) lines.add(vfsLine)
             if (lines.none { it.startsWith("data-local=") }) lines.add(overrideLine)
 
-            pluginLinesToAdd.forEach { pluginLine ->
-                if (lines.none { it.trim().removePrefix(";") == pluginLine }) {
-                    lines.add(pluginLine)
-                }
-            }
-
             file.writeText(lines.joinToString("\n"))
         }
 

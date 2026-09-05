@@ -92,7 +92,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.openmw.Constants
 import org.openmw.Constants.SETTINGS_FILE
-import org.openmw.utils.ModMappingJson
 import org.openmw.R
 import org.openmw.modDownloader.KramConversion
 import org.openmw.modDownloader.SSOHome
@@ -590,32 +589,57 @@ fun ModValuesList(
                                             // Directly modify just this line in the file
                                             val file = File(Constants.USER_OPENMW_CFG)
                                             if (file.exists()) {
-                                                val mappings = ModMappingJson.loadMappings()
                                                 val associatedPlugins = mutableSetOf<String>()
                                                 if (modValue.category == "data") {
-                                                    val mapping = mappings.find { it.dataPath == modValue.value }
-                                                    if (mapping != null) {
-                                                        associatedPlugins.addAll(mapping.contentFiles)
-                                                        associatedPlugins.addAll(mapping.groundcoverFiles)
-                                                        associatedPlugins.addAll(mapping.resourceFiles)
+                                                    val dataDir = File(modValue.value)
+                                                    val extensions = arrayOf("bsa", "esm", "esp", "esl", "omwaddon", "omwgame", "omwscripts")
+                                                    fun getMatchingFiles(dir: File, set: MutableSet<String>) {
+                                                        dir.listFiles()?.forEach { f ->
+                                                            if (f.isFile) {
+                                                                if (f.extension.lowercase() in extensions) {
+                                                                    set.add(f.name)
+                                                                }
+                                                            } else if (f.isDirectory) {
+                                                                getMatchingFiles(f, set)
+                                                            }
+                                                        }
+                                                    }
+                                                    if (dataDir.exists() && dataDir.isDirectory) {
+                                                        getMatchingFiles(dataDir, associatedPlugins)
                                                     }
                                                 }
+
+                                                val targetDataPath = modValue.value.trim().removeSurrounding("\"")
 
                                                 val lines = file.readLines()
                                                 val newLines = lines.map { line ->
                                                     val trimmed = line.trim()
                                                     val cleanLine = trimmed.removePrefix(";")
+                                                    val cleanLineLower = cleanLine.lowercase()
+
+                                                    val isThisDataLine = modValue.category == "data" && cleanLineLower.startsWith("data=") &&
+                                                        cleanLine.substringAfter("=").trim().removeSurrounding("\"").trim() == targetDataPath
+
                                                     when {
-                                                        (trimmed == "data=${modValue.value}" || trimmed == ";data=${modValue.value}") && modValue.category == "data" -> {
-                                                            if (!checked) ";data=${modValue.value}" else "data=${modValue.value}"
-                                                        }
-                                                        modValue.category == "data" && associatedPlugins.any { plugin ->
-                                                            cleanLine == "content=$plugin" || cleanLine == "groundcover=$plugin" || cleanLine == "fallback-archive=$plugin"
-                                                        } -> {
+                                                        isThisDataLine -> {
                                                             if (!checked) {
                                                                 if (!trimmed.startsWith(";")) ";$cleanLine" else line
                                                             } else {
-                                                                cleanLine
+                                                                if (cleanLine.startsWith("data=")) cleanLine else "data=\"$targetDataPath\""
+                                                            }
+                                                        }
+                                                        modValue.category == "data" && associatedPlugins.isNotEmpty() && cleanLine.contains("=") -> {
+                                                            val keyPart = cleanLine.substringBefore("=").trim().lowercase()
+                                                            val valPart = cleanLine.substringAfter("=").trim().removeSurrounding("\"").trim()
+                                                            if (keyPart in setOf("content", "groundcover", "fallback-archive") &&
+                                                                associatedPlugins.any { it.equals(valPart, ignoreCase = true) }) {
+                                                                if (!checked) {
+                                                                    if (!trimmed.startsWith(";")) ";$cleanLine" else line
+                                                                } else {
+                                                                    cleanLine
+                                                                }
+                                                            } else {
+                                                                line
                                                             }
                                                         }
                                                         trimmed == "${modValue.category}=${modValue.value}" && !checked ->

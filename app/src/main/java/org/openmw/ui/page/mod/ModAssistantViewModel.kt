@@ -18,7 +18,6 @@ import kotlinx.coroutines.withContext
 import org.openmw.Constants
 import org.openmw.ui.view.addCustomLog
 import org.openmw.utils.GameFilesPreferences
-import org.openmw.utils.ModMappingJson
 import org.openmw.utils.OpenMWConfigUtils
 import org.openmw.utils.findFilesWithExtensions
 import java.io.File
@@ -293,8 +292,6 @@ class ModAssistantViewModel @Inject constructor(
                     }
                 }
 
-                ModMappingJson.syncAndSaveFromOpenMWConfig()
-
                 if (files.isNotEmpty()) {
                     onPathPersisted(modPath)
                 } else {
@@ -429,7 +426,8 @@ fun readModValues(
         if ("=" in trimmedLine) {
             try {
                 val isChecked = !trimmedLine.startsWith(";")
-                val (category, value) = trimmedLine.removePrefix(";").split("=", limit = 2).map { it.trim() }
+                val (category, rawValue) = trimmedLine.removePrefix(";").split("=", limit = 2).map { it.trim() }
+                val value = rawValue.removeSurrounding("\"")
                 if (category in validCategories) {
                     values.add(ModValue(values.size + 1, category, value, isChecked))
                 }

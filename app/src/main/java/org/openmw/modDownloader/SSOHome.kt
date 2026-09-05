@@ -48,7 +48,6 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import org.openmw.utils.ModMappingJson
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -395,7 +394,6 @@ fun SSOHome() {
                                 try {
                                     if (srcFile.exists()) {
                                         srcFile.copyTo(destFile, overwrite = true)
-                                        ModMappingJson.syncAndSaveFromOpenMWConfig()
                                         Log.d("ConfigApply", "Applied $pending to ${Constants.USER_OPENMW_CFG}")
                                         addCustomLog("Applied new config for $modList", textSize = 10, textColor = Color.Green)
                                     }
@@ -666,7 +664,6 @@ fun SSOHome() {
                                             "$modList.cfg",
                                             formattedConfig
                                         )
-                                        ModMappingJson.syncAndSaveFromOpenMWConfig(savedFile.absolutePath)
                                         StatusInfo.pendingConfigPath = savedFile.absolutePath
                                         Log.d("ConfigSave", "Saved to ${savedFile.absolutePath}")
                                     } catch (e: Exception) {

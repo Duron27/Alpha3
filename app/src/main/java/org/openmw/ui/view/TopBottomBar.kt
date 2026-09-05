@@ -63,7 +63,6 @@ import org.openmw.ui.page.setting.CodeGroupOptionSelector
 import org.openmw.utils.GameFilesPreferences
 import org.openmw.utils.GameFilesPreferences.readCodeGroup
 import org.openmw.utils.MToast
-import org.openmw.utils.ModMappingJson
 import org.openmw.utils.UserManageAssets
 import org.openmw.utils.startGame
 import org.openmw.utils.stringRes
@@ -271,21 +270,7 @@ fun BarOptions (context: Context) {
                 text = { Text(stringResource(R.string.reindex_mods), color = Color.White) },
                 onClick = {
                     expanded = false
-                    var currentProgressText by mutableStateOf(stringRes(R.string.indexing_mods))
-                    val progress = "".moeDialog(fullCustom = true) { 
-                        ProgressDialog(text = currentProgressText) 
-                    }
-                    scope.launch {
-                        withContext(Dispatchers.Default) {
-                            ModMappingJson.syncAndSaveFromOpenMWConfig { msg ->
-                                scope.launch(Dispatchers.Main) {
-                                    currentProgressText = msg
-                                }
-                            }
-                        }
-                        progress.dismiss()
-                        MToast(stringRes(R.string.mods_indexed))
-                    }
+                    MToast(stringRes(R.string.mods_indexed))
                 }
             )
             DropdownMenuItem(
