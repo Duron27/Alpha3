@@ -16,7 +16,7 @@ import org.openmw.ui.controls.UIStateManager
 import org.openmw.ui.view.ProgressDialog
 import org.openmw.ui.view.dismiss
 import org.openmw.ui.view.moeDialog
-import org.openmw.utils.GameFilesPreferences.storeGameFilesPath
+import org.openmw.utils.GameFilesPreferences
 import org.openmw.utils.MToast
 import org.openmw.utils.stringRes
 import java.io.File
@@ -34,7 +34,7 @@ class MainPageViewModel @Inject constructor() : ViewModel() {
             applyGameFolder(context, folder)
             showFileBrowser.value = false
         } else {
-            viewModelScope.launch(Dispatchers.IO) { storeGameFilesPath(context, "") }
+            viewModelScope.launch(Dispatchers.IO) { GameFilesPreferences.setPreference(context, GameFilesPreferences.GAME_FILES_URI_KEY, "") }
             MToast(stringRes(R.string.please_select_a_folder_with_morrowind_ini_and_data_files))
         }
     }
@@ -43,7 +43,7 @@ class MainPageViewModel @Inject constructor() : ViewModel() {
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val path = folder.absolutePath
-                storeGameFilesPath(context, path)
+                GameFilesPreferences.setPreference(context, GameFilesPreferences.GAME_FILES_URI_KEY, path)
                 persistedPath.value = path
                 Log.d("Add_Morrowind", "Add_Morrowind: $path")
                 UIStateManager.useNavmesh = false

@@ -48,9 +48,7 @@ import org.openmw.ui.view.updateResolutionInConfig
 import org.openmw.utils.CaptureCrash
 import org.openmw.utils.ConfigFileObserver
 import org.openmw.utils.GameFilesPreferences
-import org.openmw.utils.GameFilesPreferences.getScreenStayOn
-import org.openmw.utils.GameFilesPreferences.getSystemBars
-import org.openmw.utils.GameFilesPreferences.readCodeGroup
+import kotlinx.coroutines.flow.map
 import org.openmw.utils.MyAlertDialog
 import org.openmw.utils.UserManageAssets
 
@@ -113,8 +111,6 @@ class MainActivity : ComponentActivity() {
 
     private fun proceedWithNextSteps() {
         lifecycleScope.launch(Dispatchers.Main) {
-            GameFilesPreferences.initialize(this@MainActivity)
-
             withContext(Dispatchers.Default) {
                 UserManageAssets(applicationContext).onFirstLaunch()
             }
@@ -125,8 +121,10 @@ class MainActivity : ComponentActivity() {
             setContent {
                 OpenMWTheme(darkTheme = true) {
                     Surface(modifier = Modifier.fillMaxSize()) {
-                        val hideSystemBars by getSystemBars(this@MainActivity).collectAsState(initial = false)
-                        val screenStayOn by getScreenStayOn(this@MainActivity).collectAsState(initial = false)
+                        val hideSystemBarsFlow = remember { GameFilesPreferences.getPreference(this@MainActivity, GameFilesPreferences.HIDE_SYSTEM_BARS, false).map { !it } }
+                        val hideSystemBars by hideSystemBarsFlow.collectAsState(initial = false)
+                        val screenStayOnFlow = remember { GameFilesPreferences.getPreference(this@MainActivity, GameFilesPreferences.SCREEN_STAY_ON, false).map { !it } }
+                        val screenStayOn by screenStayOnFlow.collectAsState(initial = false)
 
                         SideEffect {
                             if (hideSystemBars) hideSystemBars(this@MainActivity) else showSystemBars(this@MainActivity)
@@ -141,8 +139,8 @@ class MainActivity : ComponentActivity() {
                         }
 
                         val showDialog = remember { mutableStateOf(true) }
-                        val avoidInsertion by GameFilesPreferences.readResolutionInsertion(this@MainActivity).collectAsState(initial = false)
-                        val whatsNew by GameFilesPreferences.getWhatsNew(this@MainActivity).collectAsState(initial = false)
+                        val avoidInsertion by GameFilesPreferences.getPreference(this@MainActivity, GameFilesPreferences.AVOID_RESOLUTION_INSERTION, false).collectAsState(initial = false)
+                        val whatsNew by GameFilesPreferences.getPreference(this@MainActivity, GameFilesPreferences.WHATS_NEW_KEY, true).collectAsState(initial = false)
 
                         if (!avoidInsertion) {
                             updateResolutionInConfig(width, height)
@@ -175,7 +173,7 @@ fun isControllerConnected(context: Context): Boolean {
 
 fun startObservingCodeGroup(context: Context, scope: CoroutineScope) {
     scope.launch {
-        readCodeGroup(context).collect { codeGroup ->
+        GameFilesPreferences.getPreference(context, GameFilesPreferences.CODE_GROUP_KEY, "OpenMW").collect { codeGroup ->
             UIStateManager.tempCodeGroup = codeGroup
         }
     }

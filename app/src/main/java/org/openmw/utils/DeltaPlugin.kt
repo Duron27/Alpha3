@@ -42,7 +42,9 @@ import kotlinx.coroutines.withContext
 import org.openmw.Constants
 import org.openmw.R
 import org.openmw.ui.controls.UIStateManager.customColor
-import org.openmw.utils.GameFilesPreferences.getGameFilesUri
+import org.openmw.utils.GameFilesPreferences
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
 import java.io.File
 import java.io.PrintWriter
 import java.io.StringWriter
@@ -51,7 +53,7 @@ fun baseRules(context: Context) {
     val openmwCfgFile = File("${Constants.USER_CONFIG}/openmw.cfg")
     if (openmwCfgFile.exists()) {
         val lines = openmwCfgFile.readLines().toMutableList()
-        val gameFilesUri = getGameFilesUri(context)
+        val gameFilesUri = runBlocking { GameFilesPreferences.getNullablePreference(context, GameFilesPreferences.GAME_FILES_URI_KEY).first() }
         val lineToAdd = "data = ${gameFilesUri}/Data Files/"
         if (gameFilesUri != null && !lines.contains(lineToAdd)) {
             lines.add(0, lineToAdd)
@@ -192,7 +194,7 @@ fun executeQueryCommand(context: Context, commandInput: String, onOutputUpdate: 
 }
 
 fun delta(context: Context, commandInput: String, onOutputUpdate: suspend (AnnotatedString) -> Unit) {
-    val gameFilesUri = getGameFilesUri(context)
+    val gameFilesUri = runBlocking { GameFilesPreferences.getNullablePreference(context, GameFilesPreferences.GAME_FILES_URI_KEY).first() }
     val gamePath = "$gameFilesUri"
 
     baseRules(context)
@@ -222,7 +224,7 @@ fun delta(context: Context, commandInput: String, onOutputUpdate: suspend (Annot
 }
 
 fun groundcoverify(context: Context, pretend: Boolean = false, onOutputUpdate: suspend (AnnotatedString) -> Unit) {
-    val gameFilesUri = getGameFilesUri(context)
+    val gameFilesUri = runBlocking { GameFilesPreferences.getNullablePreference(context, GameFilesPreferences.GAME_FILES_URI_KEY).first() }
     val gamePath = "$gameFilesUri"
     CoroutineScope(Dispatchers.IO).launch {
         try {
@@ -365,7 +367,7 @@ suspend fun shellExec(context: Context, cmd: String, onOutputUpdate: suspend (An
 }
 
 fun revertChanges(context: Context, onOutputUpdate: suspend (String) -> Unit) {
-    val gameFilesUri = getGameFilesUri(context)
+    val gameFilesUri = runBlocking { GameFilesPreferences.getNullablePreference(context, GameFilesPreferences.GAME_FILES_URI_KEY).first() }
     val gamePath = "$gameFilesUri"
     CoroutineScope(Dispatchers.IO).launch {
         try {
@@ -422,7 +424,7 @@ fun appendFallbackArchives(context: Context) {
     val configFile = File("${Constants.USER_CONFIG}/openmw.cfg")
 
     // Get game files URI
-    val gameFilesUri = getGameFilesUri(context)
+    val gameFilesUri = runBlocking { GameFilesPreferences.getNullablePreference(context, GameFilesPreferences.GAME_FILES_URI_KEY).first() }
     val gamePath = "$gameFilesUri/Data Files"
 
     // List of BSA files to check

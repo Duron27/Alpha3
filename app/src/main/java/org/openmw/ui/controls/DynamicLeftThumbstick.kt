@@ -113,11 +113,7 @@ import org.openmw.ui.overlay.getAnimations
 import org.openmw.utils.ColorPickerWheel
 import org.openmw.utils.CustomIconPickerButton
 import org.openmw.utils.GameFilesPreferences
-import org.openmw.utils.GameFilesPreferences.getAutoRun
-import org.openmw.utils.GameFilesPreferences.getSelectedAnimation
-import org.openmw.utils.GameFilesPreferences.getSelectedKeycodes
-import org.openmw.utils.GameFilesPreferences.loadAutoMouseMode
-import org.openmw.utils.GameFilesPreferences.writeVirtualLeftThumbstick
+import kotlinx.coroutines.flow.map
 import org.openmw.utils.fromHex
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
@@ -159,9 +155,9 @@ fun ResizableDraggableThumbstick(
         val scrollState = rememberScrollState()
         val stateSB = rememberScrollAreaState(scrollState)
         val buttonUri = remember { mutableStateOf(state.uri) }
-        val selectedAnimation by getSelectedAnimation(context).collectAsState(initial = "None")
-        val autoMouseMode by loadAutoMouseMode(context).collectAsState(initial = "Hybrid")
-        val autoRUN by getAutoRun(context).collectAsState(initial = true)
+        val selectedAnimation by GameFilesPreferences.getPreference(context, GameFilesPreferences.SELECTED_ANIMATION_KEY, "None").collectAsState(initial = "None")
+        val autoMouseMode by GameFilesPreferences.getPreference(context, GameFilesPreferences.AUTO_MOUSE_MODE_KEY, "Hybrid").collectAsState(initial = "Hybrid")
+        val autoRUN by GameFilesPreferences.getPreference(context, GameFilesPreferences.AUTO_RUN, true).collectAsState(initial = true)
         var offset by remember { mutableStateOf(IntOffset.Zero) }
         val density = LocalDensity.current
         val radiusPx = with(density) { (buttonSize / 2).toPx() }
@@ -177,9 +173,10 @@ fun ResizableDraggableThumbstick(
         var isShiftPressed by remember { mutableStateOf(false) }
 
         var showControlsPopup by remember { mutableStateOf(false) }
-        val isUIHidden by GameFilesPreferences.loadUIState(context).collectAsState(initial = false)
-        val isVirtualLeft by GameFilesPreferences.getVirtualLeftThumbstick(context).collectAsState(initial = true)
-        val buttonGroupSwitch by GameFilesPreferences.getButtonGroupSwitch(context).collectAsState(initial = false)
+        val isUIHiddenFlow = remember { GameFilesPreferences.getPreference(context, GameFilesPreferences.UI_HIDDEN_STATE_KEY, "false").map { it.toBoolean() } }
+        val isUIHidden by isUIHiddenFlow.collectAsState(initial = false)
+        val isVirtualLeft by GameFilesPreferences.getPreference(context, GameFilesPreferences.VIRTUAL_LEFT_THUMBSTICK, true).collectAsState(initial = true)
+        val buttonGroupSwitch by GameFilesPreferences.getPreference(context, GameFilesPreferences.BUTTON_GROUP_SWITCH_KEY, false).collectAsState(initial = false)
         val controllerConnected = isControllerConnected(context)
         val painter: Painter? = state.uri?.let { uri ->
             if (uri.toString().endsWith(".gif", ignoreCase = true)) {
@@ -247,11 +244,13 @@ fun ResizableDraggableThumbstick(
         val animations = getAnimations().toMutableMap().apply { put("None", EnterTransition.None to ExitTransition.None) }
         val (currentEnterAnimation, currentExitAnimation) = animations[selectedAnimation] ?: (animations["Slide Vertically"] ?: error("Default animation not found"))
 
-        val selectedKeycodesFlow = getSelectedKeycodes(context).map { keycodeString ->
-            keycodeString.split(",").map { it.toInt() }
+        val selectedKeycodesFlow = remember(context) {
+            GameFilesPreferences.getPreference(context, GameFilesPreferences.SELECTED_MOUSE_KEYS, "54,111").map { keycodeString ->
+                keycodeString.split(",").map { it.toInt() }
+            }
         }
         val selectedKeycodes by selectedKeycodesFlow.collectAsState(initial = emptyList())
-        val isOnMouseScreen by derivedStateOf { 99 in selectedKeycodes }
+        val isOnMouseScreen by remember { derivedStateOf { 99 in selectedKeycodes } }
         val visibility = when {
             isCursorVisible == 0 && autoMouseMode == "None" -> !isUIHidden
             isCursorVisible == 0 && autoMouseMode == "Hybrid" || 99 in selectedKeycodes -> !isUIHidden
@@ -691,7 +690,7 @@ fun ResizableDraggableThumbstick(
                                                                         selectedKeycodes - 99
                                                                     }.joinToString(",")
                                                                     CoroutineScope(Dispatchers.Main).launch {
-                                                                        GameFilesPreferences.setSelectedKeycodes(context, updatedKeycodes)
+                                                                        GameFilesPreferences.setPreference(context, GameFilesPreferences.SELECTED_MOUSE_KEYS, updatedKeycodes)
                                                                     }
                                                                 },
                                                                 colors = SwitchDefaults.colors(
@@ -722,7 +721,7 @@ fun ResizableDraggableThumbstick(
                                                                 checked = autoRUN,
                                                                 onCheckedChange = { isChecked ->
                                                                     CoroutineScope(Dispatchers.Main).launch {
-                                                                        GameFilesPreferences.setAutoRun(context, isChecked)
+                                                                        GameFilesPreferences.setPreference(context, GameFilesPreferences.AUTO_RUN, isChecked)
                                                                     }
                                                                 },
                                                                 colors = SwitchDefaults.colors(
@@ -764,7 +763,7 @@ fun ResizableDraggableThumbstick(
                                                                     checked = !isVirtualLeft,
                                                                     onCheckedChange = { isChecked ->
                                                                         CoroutineScope(Dispatchers.IO).launch {
-                                                                            writeVirtualLeftThumbstick(context, !isChecked)
+                                                                            GameFilesPreferences.setPreference(context, GameFilesPreferences.VIRTUAL_LEFT_THUMBSTICK, !isChecked)
                                                                         }
                                                                     },
                                                                     colors = SwitchDefaults.colors(

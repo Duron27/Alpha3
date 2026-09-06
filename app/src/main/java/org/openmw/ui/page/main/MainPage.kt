@@ -94,7 +94,6 @@ import org.openmw.ui.view.MyTopBar
 import org.openmw.utils.FileBrowserMode
 import org.openmw.utils.FileBrowserPopup
 import org.openmw.utils.GameFilesPreferences
-import org.openmw.utils.GameFilesPreferences.readCodeGroup
 import org.openmw.utils.MToast
 import org.openmw.utils.UqmDownloads
 import org.openmw.utils.getLayoutType
@@ -133,8 +132,8 @@ fun MainPage(
         }
     }
 
-    val savedPath by GameFilesPreferences.getGameFilesUriState(context).collectAsState(initial = null)
-    val codeGroupOption by readCodeGroup(context).collectAsState(initial = "OpenMW")
+    val savedPath by GameFilesPreferences.getNullablePreference(context, GameFilesPreferences.GAME_FILES_URI_KEY).collectAsState(initial = null)
+    val codeGroupOption by GameFilesPreferences.getPreference(context, GameFilesPreferences.CODE_GROUP_KEY, "OpenMW").collectAsState(initial = "OpenMW")
     val layoutType = getLayoutType()
 
     updateConsoleOutput = { _ ->
@@ -329,7 +328,7 @@ fun OpenMW(
     var showFileBrowser by viewModel.showFileBrowser
     val infiniteTransition = rememberInfiniteTransition(label = "")
     val context = LocalContext.current
-    val savedPath by GameFilesPreferences.getGameFilesUriState(context).collectAsState(initial = null)
+    val savedPath by GameFilesPreferences.getNullablePreference(context, GameFilesPreferences.GAME_FILES_URI_KEY).collectAsState(initial = null)
 
     val pulse by infiniteTransition.animateFloat(
         initialValue = 1f,

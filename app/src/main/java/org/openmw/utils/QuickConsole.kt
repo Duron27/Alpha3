@@ -43,6 +43,7 @@ import androidx.compose.ui.window.PopupProperties
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import org.libsdl.app.SDLActivity.nativeCommitText
 import org.openmw.ui.controls.UIStateManager.menuAlpha
@@ -63,8 +64,8 @@ fun TravelMenuPopup(
     var dropdownExpanded by remember { mutableStateOf(false) }
     val context = LocalContext.current
     var selectedText by remember { mutableStateOf("Travel to destination ") }
-    val matchIconColorChecked by GameFilesPreferences.loadMatchIconColorState(context).collectAsState(initial = false)
-    val iconGlowChecked by GameFilesPreferences.loadIconGlow(context).collectAsState(initial = true)
+    val matchIconColorChecked by remember { GameFilesPreferences.getPreference(context, GameFilesPreferences.MATCH_ICON_COLOR_KEY, "false").map { it.toBoolean() } }.collectAsState(initial = false)
+    val iconGlowChecked by GameFilesPreferences.getPreference(context, GameFilesPreferences.ICON_GLOW_KEY, true).collectAsState(initial = true)
     val options = listOf(
         "Balmora", "Suran", "Vivec", "Ald'ruhn", "Caldera", "Ebonheart", "Ghostgate", "Gnisis",
         "Maar Gan", "Molag Mar", "Pelagiad", "Tel Aruhn", "Tel Branora", "Tel Mora",

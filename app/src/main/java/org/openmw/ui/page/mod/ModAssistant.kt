@@ -294,7 +294,7 @@ fun ModValuesList(
     var showDialog by remember { mutableStateOf(false) }
     val settingsFile = File(SETTINGS_FILE)
 
-    val savedPath by GameFilesPreferences.getGameFilesUriState(context).collectAsState(initial = null)
+    val savedPath by GameFilesPreferences.getNullablePreference(context, GameFilesPreferences.GAME_FILES_URI_KEY).collectAsState(initial = null)
 
     // Manage what's in the tabs here
     var showMods by viewModel.showMods
@@ -311,7 +311,7 @@ fun ModValuesList(
 
     val coroutineScope = rememberCoroutineScope()
     var highlightedCardId by remember { mutableStateOf<Int?>(null) }
-    val translationChecked by GameFilesPreferences.loadTranslationState(context).collectAsState(initial = false)
+    val translationChecked by GameFilesPreferences.getPreference(context, GameFilesPreferences.TRANSLATION_ENABLED_KEY, false).collectAsState(initial = false)
     val newFeatureEnabledChecked by viewModel.newFeatureEnabledChecked.collectAsState(initial = false)
 
     val reorderableLazyListState = rememberReorderableLazyListState(lazyListState) { from, to ->

@@ -112,7 +112,7 @@ import org.openmw.modDownloader.NexusInfo.downloadProgressMap
 import org.openmw.modDownloader.StatusInfo.activeMods
 import org.openmw.modDownloader.ZipUtils.nativeGetArchiveFileList
 import org.openmw.ui.controls.UIStateManager.customColor
-import org.openmw.utils.GameFilesPreferences.loadIsPremiumTier
+import org.openmw.utils.GameFilesPreferences
 import java.io.File
 import java.time.Instant
 import androidx.core.net.toUri
@@ -652,7 +652,7 @@ fun ModItem(mod: ModDesc, onDelete: () -> Unit, modDao: ModDao) {
     var isLoading by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     val plainText = stripHtml(mod.usageNotes ?: "")
-    val isPremium by loadIsPremiumTier(context).collectAsState(initial = null)
+    val isPremium by GameFilesPreferences.getNullablePreference(context, GameFilesPreferences.IS_NEXUS_PREMIUM).collectAsState(initial = null)
     val currentListDownloads = mod.downloadInfo
         .filter { it.sourceLists.contains(modList) && !it.fileName.isNullOrBlank() }
         .distinctBy { "${it.fileName}|${it.nexusFileId}|${it.directDownload}" }

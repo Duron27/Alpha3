@@ -54,8 +54,7 @@ import kotlinx.coroutines.runBlocking
 import org.openmw.Constants
 import org.openmw.R
 import org.openmw.utils.GameFilesPreferences
-import org.openmw.utils.GameFilesPreferences.saveARGLine
-import org.openmw.utils.GameFilesPreferences.saveENVLine
+import kotlinx.coroutines.flow.first
 import java.io.File
 
 @Composable
@@ -76,6 +75,14 @@ fun CommandLineInputScreen(context: Context) {
     var showDialogENV by remember { mutableStateOf(false) }
     val saveGameOptions by remember { mutableStateOf(emptyList<String>()) }
     val allOptionsCombined = allOptions + saveGameOptions
+
+    LaunchedEffect(Unit) {
+        envLine = GameFilesPreferences.getOrCreateDefaultENVLine(context)
+        val initialArg = GameFilesPreferences.getPreference(context, GameFilesPreferences.ARG_LINE_KEY, "").first()
+        if (initialArg != null) {
+            argLine = initialArg
+        }
+    }
 
     Row(modifier = Modifier, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         // Button styled as text field
@@ -177,7 +184,9 @@ fun CommandLineInputScreen(context: Context) {
                                         if (option !in optionDescriptions.keys) {
                                             IconButton(onClick = {
                                                 runBlocking {
-                                                    GameFilesPreferences.deleteUserOption(context, option)
+                                                    val existing = GameFilesPreferences.getPreference(context, GameFilesPreferences.USER_OPTIONS_KEY, "").first().split(",").toSet()
+                                                    val updated = existing - option
+                                                    GameFilesPreferences.setPreference(context, GameFilesPreferences.USER_OPTIONS_KEY, updated.joinToString(","))
                                                     allOptions = allOptions - option
                                                 }
                                                 // Also remove the option from the commandLine and selectedOptions
@@ -207,12 +216,14 @@ fun CommandLineInputScreen(context: Context) {
                             val finalCommandLine = argLine
                             runBlocking {
                                 // Save command line
-                                saveARGLine(context, finalCommandLine)
+                                GameFilesPreferences.setNullablePreference(context, GameFilesPreferences.ARG_LINE_KEY, finalCommandLine)
 
                                 // Extract new options without leading/trailing spaces and avoid empty entries
                                 val newOptions = argLine.split(" ").map { it.trim() }.filter { it.isNotEmpty() && it !in allOptions }.toSet()
                                 if (newOptions.isNotEmpty()) {
-                                    GameFilesPreferences.saveUserOptions(context, newOptions)
+                                    val existing = GameFilesPreferences.getPreference(context, GameFilesPreferences.USER_OPTIONS_KEY, "").first().split(",").filter { it.isNotEmpty() }.toSet()
+                                    val allOptSet = existing + newOptions
+                                    GameFilesPreferences.setPreference(context, GameFilesPreferences.USER_OPTIONS_KEY, allOptSet.joinToString(","))
                                     allOptions = (allOptions + newOptions).distinct()
                                 }
                             }
@@ -252,7 +263,7 @@ fun CommandLineInputScreen(context: Context) {
                     Button(
                         onClick = {
                             CoroutineScope(Dispatchers.IO).launch {
-                                saveENVLine(context, envLine) // Save the envLine string
+                                GameFilesPreferences.setPreference(context, GameFilesPreferences.ENV_LINE_KEY, envLine) // Save the envLine string
                             }
                             showDialogENV = false
                         }

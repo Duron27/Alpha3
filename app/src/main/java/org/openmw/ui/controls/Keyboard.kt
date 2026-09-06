@@ -61,14 +61,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import org.openmw.ui.view.vibrateHelper
-import org.openmw.utils.GameFilesPreferences.getKeyboardBacklight
-import org.openmw.utils.GameFilesPreferences.getKeyboardHeight
-import org.openmw.utils.GameFilesPreferences.getKeyboardTheme
-import org.openmw.utils.GameFilesPreferences.getKeyboardWidth
-import org.openmw.utils.GameFilesPreferences.setKeyboardBacklight
-import org.openmw.utils.GameFilesPreferences.setKeyboardHeight
-import org.openmw.utils.GameFilesPreferences.setKeyboardTheme
-import org.openmw.utils.GameFilesPreferences.setKeyboardWidth
+import kotlinx.coroutines.flow.map
 import kotlin.math.roundToInt
 import kotlin.random.Random
 
@@ -87,7 +80,7 @@ fun cycleBackLight(context: Context, scope: CoroutineScope, currentBacklight: Fl
         else -> 1f // fallback for unexpected values
     }
     scope.launch {
-        setKeyboardBacklight(context, nextBacklight)
+        GameFilesPreferences.setPreference(context, GameFilesPreferences.KEYBOARD_BACKLIGHT, nextBacklight)
     }
 }
 
@@ -100,7 +93,7 @@ fun cycleColorTheme(context: Context, scope: CoroutineScope, currentTheme: Strin
         else -> "darkMode" // fallback
     }
     scope.launch {
-        setKeyboardTheme(context, nextTheme)
+        GameFilesPreferences.setPreference(context, GameFilesPreferences.KEYBOARD_THEME, nextTheme)
     }
 }
 
@@ -109,8 +102,8 @@ fun VirtualKeyboard() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     
-    val themeMode by getKeyboardTheme(context).collectAsState(initial = "lightMode")
-    val backLight by getKeyboardBacklight(context).collectAsState(initial = 1f)
+    val themeMode by GameFilesPreferences.getPreference(context, GameFilesPreferences.KEYBOARD_THEME, "lightMode").collectAsState(initial = "lightMode")
+    val backLight by GameFilesPreferences.getPreference(context, GameFilesPreferences.KEYBOARD_BACKLIGHT, 1f).collectAsState(initial = 1f)
     
     var functionKEYS by remember { mutableStateOf(false) }
     var numROWS by remember { mutableIntStateOf(if (functionKEYS) 6 else 5) }
@@ -118,8 +111,8 @@ fun VirtualKeyboard() {
     var offsetY by remember { mutableFloatStateOf(0f) }
     var showSettingsDialog by remember { mutableStateOf(false) }
     
-    val storedWidth by getKeyboardWidth(context).collectAsState(initial = null)
-    val storedHeight by getKeyboardHeight(context).collectAsState(initial = null)
+    val storedWidth by GameFilesPreferences.getNullablePreference(context, GameFilesPreferences.KEYBOARD_WIDTH).collectAsState(initial = null)
+    val storedHeight by GameFilesPreferences.getNullablePreference(context, GameFilesPreferences.KEYBOARD_HEIGHT).collectAsState(initial = null)
     
     var boxHeight by remember(storedHeight, numROWS) { 
         mutableFloatStateOf(storedHeight ?: (numROWS * 40f)) 
@@ -174,9 +167,10 @@ fun VirtualKeyboard() {
             modifier: Modifier = Modifier
         ) {
             val context = LocalContext.current
-            val translationChecked by GameFilesPreferences.loadTranslationState(context).collectAsState(initial = false)
+            val translationChecked by GameFilesPreferences.getPreference(context, GameFilesPreferences.TRANSLATION_ENABLED_KEY, false).collectAsState(initial = false)
             val mKeyCharacterMap = KeyCharacterMap.load(KeyCharacterMap.VIRTUAL_KEYBOARD)
-            val isVibrationOn by GameFilesPreferences.loadVibrationState(context).collectAsState(initial = true)
+            val isVibrationOnFlow = remember { GameFilesPreferences.getPreference(context, GameFilesPreferences.VIBRATION_STATE_KEY, "true").map { it.toBoolean() } }
+            val isVibrationOn by isVibrationOnFlow.collectAsState(initial = true)
 
             Box(
                 modifier = modifier
@@ -284,8 +278,8 @@ fun VirtualKeyboard() {
                                                 },
                                                 onDragEnd = { 
                                                     scope.launch {
-                                                        setKeyboardWidth(context, boxWidth)
-                                                        setKeyboardHeight(context, boxHeight)
+                                                        GameFilesPreferences.setPreference(context, GameFilesPreferences.KEYBOARD_WIDTH, boxWidth)
+                                                        GameFilesPreferences.setPreference(context, GameFilesPreferences.KEYBOARD_HEIGHT, boxHeight)
                                                     }
                                                 }
                                             )
@@ -553,25 +547,25 @@ fun VirtualKeyboard() {
                                 DropdownMenuItem(
                                     text = { Text(stringResource(R.string.lightmode), color = Color.White) },
                                     onClick = {
-                                        scope.launch { setKeyboardTheme(context, "lightMode") }
+                                        scope.launch { GameFilesPreferences.setPreference(context, GameFilesPreferences.KEYBOARD_THEME, "lightMode") }
                                         expanded = false
                                     })
                                 DropdownMenuItem(
                                     text = { Text(stringResource(R.string.darkmode), color = Color.White) },
                                     onClick = {
-                                        scope.launch { setKeyboardTheme(context, "darkMode") }
+                                        scope.launch { GameFilesPreferences.setPreference(context, GameFilesPreferences.KEYBOARD_THEME, "darkMode") }
                                         expanded = false
                                     })
                                 DropdownMenuItem(
                                     text = { Text("RGB", color = Color.White) },
                                     onClick = {
-                                        scope.launch { setKeyboardTheme(context, "RGB") }
+                                        scope.launch { GameFilesPreferences.setPreference(context, GameFilesPreferences.KEYBOARD_THEME, "RGB") }
                                         expanded = false
                                     })
                                 DropdownMenuItem(
                                     text = { Text(stringResource(R.string.gold), color = Color.White) },
                                     onClick = {
-                                        scope.launch { setKeyboardTheme(context, "gold") }
+                                        scope.launch { GameFilesPreferences.setPreference(context, GameFilesPreferences.KEYBOARD_THEME, "gold") }
                                         expanded = false
                                     })
                             }

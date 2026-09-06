@@ -91,10 +91,9 @@ import org.openmw.ui.view.enableLogcat
 import org.openmw.ui.view.vibrateHelper
 import org.openmw.utils.DebugOverlayBox
 import org.openmw.utils.GameFilesPreferences
-import org.openmw.utils.GameFilesPreferences.getENVLine
-import org.openmw.utils.GameFilesPreferences.loadAutoMouseMode
-import org.openmw.utils.GameFilesPreferences.readAngle
-import org.openmw.utils.GameFilesPreferences.readSPIRV
+import org.openmw.utils.dataStore
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import org.openmw.utils.LibraryLoader
 import org.openmw.utils.patchShadersLinking
 import org.openmw.utils.patchShadersToGLES
@@ -200,10 +199,12 @@ class EngineActivity : SDLActivity() {
                         patchShadersLinking()
                         patchShadersToGLES()
 
-                        val isUIHidden by GameFilesPreferences.loadUIState(this@EngineActivity).collectAsState(initial = false)
-                        val autoMouseMode by loadAutoMouseMode(this@EngineActivity).collectAsState(initial = "Hybrid")
-                        val virtualKeyboard by GameFilesPreferences.useVirtualKeyboard(this@EngineActivity).collectAsState(initial = true)
-                        val isVibrationOn by GameFilesPreferences.loadVibrationState(this@EngineActivity).collectAsState(initial = true)
+                        val isUIHiddenFlow = remember { GameFilesPreferences.getPreference(this@EngineActivity, GameFilesPreferences.UI_HIDDEN_STATE_KEY, "false").map { it.toBoolean() } }
+                        val isUIHidden by isUIHiddenFlow.collectAsState(initial = false)
+                        val autoMouseMode by GameFilesPreferences.getPreference(this@EngineActivity, GameFilesPreferences.AUTO_MOUSE_MODE_KEY, "Hybrid").collectAsState(initial = "Hybrid")
+                        val virtualKeyboard by GameFilesPreferences.getPreference(this@EngineActivity, GameFilesPreferences.USE_VIRTUAL_KB, true).collectAsState(initial = true)
+                        val isVibrationOnFlow = remember { GameFilesPreferences.getPreference(this@EngineActivity, GameFilesPreferences.VIBRATION_STATE_KEY, "true").map { it.toBoolean() } }
+                        val isVibrationOn by isVibrationOnFlow.collectAsState(initial = true)
 
                         BackHandler {
                             // disable back exit
@@ -406,68 +407,57 @@ class EngineActivity : SDLActivity() {
         }
 
         try {
-            val glesVersion = if (isEmulator()) "31" else "32"
-            setEnv("OPENMW_GLES_VERSION", glesVersion)
+            val envLine = runBlocking {
+                val prefs = context.dataStore.data.first()
+                val existing = prefs[GameFilesPreferences.ENV_LINE_KEY]
+                if (!existing.isNullOrBlank()) {
+                    existing
+                } else {
+                    val glesVersion = if (isEmulator()) "31" else "32"
+                    val defaults = mutableListOf<String>()
+                    defaults.add("OPENMW_GLES_VERSION=$glesVersion")
+                    defaults.add("UQM_CONFIG_DIR=${Constants.USER_FILE_STORAGE}/uqm")
+                    defaults.add("OSG_TEXT_SHADER_TECHNIQUE=ALL")
+                    defaults.add("OSG_VERTEX_BUFFER_HINT=VBO")
+                    defaults.add("DETHRACE_ROOT_DIR=${Constants.USER_FILE_STORAGE}/dethrace/")
+                    defaults.add("HARNESS_OPENGL=1")
 
-            setEnv("UQM_CONFIG_DIR", "${Constants.USER_FILE_STORAGE}/uqm")
+                    val enableANGLE = prefs[GameFilesPreferences.USE_ANGLE] == true
+                    val enableSPIRV = prefs[GameFilesPreferences.USE_SPIRV] == true
+                    if (enableSPIRV) {
+                        defaults.add("OPENMW_SPIRV_SHADERCONV=1")
+                    }
+                    if (enableANGLE) {
+                        defaults.add("OSG_USE_ANGLE=1")
+                        defaults.add("SDL_VIDEO_GL_DRIVER=libGLESv2_angle.so")
+                        defaults.add("SDL_VIDEO_EGL_DRIVER=libEGL_angle.so")
+                    }
 
-            if ((UIStateManager.tempCodeGroup) != "UQM") {
-                val enableANGLE = runBlocking {
-                    readAngle(context).first()
-                }
-                val enableSPIRV = runBlocking {
-                    readSPIRV(context).first()
-                }
-                if (enableSPIRV) {
-                    setEnv("OPENMW_SPIRV_SHADERCONV", "1")
-                }
-                if (enableANGLE) {
-                    setEnv("OSG_USE_ANGLE", "1")
-                    setEnv("SDL_VIDEO_GL_DRIVER", "libGLESv2_angle.so")
-                    setEnv("SDL_VIDEO_EGL_DRIVER", "libEGL_angle.so")
+                    val avoid16 = prefs[GameFilesPreferences.AVOID_16_BITS_KEY] == true
+                    defaults.add(if (avoid16) "LIBGL_AVOID16BITS=1" else "LIBGL_AVOID16BITS=0")
+
+                    val shrink = prefs[GameFilesPreferences.TEXTURE_SHRINKING_KEY] ?: "0"
+                    val shrinkVal = when (shrink) {
+                        "low" -> "2"
+                        "medium" -> "7"
+                        "high" -> "6"
+                        else -> "0"
+                    }
+                    defaults.add("LIBGL_SHRINK=$shrinkVal")
+
+                    val defaultStr = defaults.joinToString(" ")
+                    GameFilesPreferences.setPreference(context, GameFilesPreferences.ENV_LINE_KEY, defaultStr)
+                    defaultStr
                 }
             }
-
-            setEnv("OSG_TEXT_SHADER_TECHNIQUE", "ALL")
-            setEnv("OSG_VERTEX_BUFFER_HINT", "VBO")
-
-            setEnv("DETHRACE_ROOT_DIR", "${Constants.USER_FILE_STORAGE}/dethrace/")
-
-            setEnv("HARNESS_OPENGL", "1")
-
-            CoroutineScope(Dispatchers.IO).launch {
-                GameFilesPreferences.readAvoid16Bits(context).collect { avoid16bits ->
-                    if (avoid16bits) {
-                        setEnv("LIBGL_AVOID16BITS", "1")
-                    } else {
-                        setEnv("LIBGL_AVOID16BITS", "0")
-                    }
-                }
-                // Set LIBGL_SHRINK based on preference
-                GameFilesPreferences.readTextureShrinkingOption(context)
-                    .collect { textureShrinkingOption ->
-                        when (textureShrinkingOption) {
-                            "low" -> setEnv("LIBGL_SHRINK", "2")
-                            "medium" -> setEnv("LIBGL_SHRINK", "7")
-                            "high" -> setEnv("LIBGL_SHRINK", "6")
-                            else -> setEnv("LIBGL_SHRINK", "0")
-                        }
-                    }
-            }
-
-            val envLine = getENVLine(context)
-            envLine?.let {
-                if (it.isNotEmpty()) {
-                    // Split the command line string by commas to get individual key-value pairs
-                    envLine.split(" ").forEach { pair ->
-                        // Split each pair by '=' to separate key and value
-                        val keyValue = pair.trim().split("=")
-                        if (keyValue.size == 2) {
-                            val key = keyValue[0].trim()
-                            val value = keyValue[1].trim()
-                            if (key.isNotEmpty() && value.isNotEmpty()) {
-                                setEnv(key, value)
-                            }
+            if (envLine.isNotEmpty()) {
+                envLine.split("\\s+".toRegex()).forEach { pair ->
+                    val keyValue = pair.trim().split("=", limit = 2)
+                    if (keyValue.size == 2) {
+                        val key = keyValue[0].trim()
+                        val value = keyValue[1].trim()
+                        if (key.isNotEmpty() && value.isNotEmpty()) {
+                            setEnv(key, value)
                         }
                     }
                 }
@@ -477,7 +467,26 @@ class EngineActivity : SDLActivity() {
             e.printStackTrace()
         }
 
-        Log.d("EngineActivity", "Environment variables set")
+        Log.d("EngineActivity", "Environment variables set dynamically from DataStore")
+    }
+
+    private fun isEmulator(): Boolean {
+        return (Build.BRAND.startsWith("generic") && Build.DEVICE.startsWith("generic"))
+                || Build.FINGERPRINT.startsWith("generic")
+                || Build.FINGERPRINT.startsWith("unknown")
+                || Build.HARDWARE.contains("goldfish")
+                || Build.HARDWARE.contains("ranchu")
+                || Build.MODEL.contains("google_sdk")
+                || Build.MODEL.contains("Emulator")
+                || Build.MODEL.contains("Android SDK built for x86")
+                || Build.MANUFACTURER.contains("Genymotion")
+                || Build.PRODUCT.contains("sdk_google")
+                || Build.PRODUCT.contains("google_sdk")
+                || Build.PRODUCT.contains("sdk")
+                || Build.PRODUCT.contains("sdk_x86")
+                || Build.PRODUCT.contains("vbox86p")
+                || Build.PRODUCT.contains("emulator")
+                || Build.PRODUCT.contains("simulator")
     }
 
     private fun handleKeyEvent(keyCode: Int) {
@@ -506,25 +515,6 @@ class EngineActivity : SDLActivity() {
         }?.value
     }
 
-    private fun isEmulator(): Boolean {
-        return (Build.BRAND.startsWith("generic") && Build.DEVICE.startsWith("generic"))
-                || Build.FINGERPRINT.startsWith("generic")
-                || Build.FINGERPRINT.startsWith("unknown")
-                || Build.HARDWARE.contains("goldfish")
-                || Build.HARDWARE.contains("ranchu")
-                || Build.MODEL.contains("google_sdk")
-                || Build.MODEL.contains("Emulator")
-                || Build.MODEL.contains("Android SDK built for x86")
-                || Build.MANUFACTURER.contains("Genymotion")
-                || Build.PRODUCT.contains("sdk_google")
-                || Build.PRODUCT.contains("google_sdk")
-                || Build.PRODUCT.contains("sdk")
-                || Build.PRODUCT.contains("sdk_x86")
-                || Build.PRODUCT.contains("vbox86p")
-                || Build.PRODUCT.contains("emulator")
-                || Build.PRODUCT.contains("simulator")
-    }
-
     @Composable
     fun SoundWatcher(onSound: (String) -> Unit) {
         var last by remember { mutableStateOf("") }
@@ -544,7 +534,7 @@ class EngineActivity : SDLActivity() {
 
     override fun getArguments(): Array<String> {
         val commandLineArgs = runBlocking {
-            GameFilesPreferences.getARGLine(this@EngineActivity).first() ?: ""
+            GameFilesPreferences.getNullablePreference(this@EngineActivity, GameFilesPreferences.ARG_LINE_KEY).first() ?: ""
         }
 
         return try {

@@ -119,14 +119,7 @@ import org.openmw.ui.overlay.getAnimations
 import org.openmw.utils.ColorPickerWheel
 import org.openmw.utils.CustomIconPickerButton
 import org.openmw.utils.GameFilesPreferences
-import org.openmw.utils.GameFilesPreferences.getSelectedAnimation
-import org.openmw.utils.GameFilesPreferences.getSelectedKeycodes
-import org.openmw.utils.GameFilesPreferences.getSensitivityMouse
-import org.openmw.utils.GameFilesPreferences.getSensitivityRT
-import org.openmw.utils.GameFilesPreferences.loadAutoMouseMode
-import org.openmw.utils.GameFilesPreferences.loadButtonShape
-import org.openmw.utils.GameFilesPreferences.setTutorial
-import org.openmw.utils.GameFilesPreferences.setWhatsNew
+import kotlinx.coroutines.flow.map
 import org.openmw.ui.view.currentDeviceRealSize
 import org.openmw.utils.fromHex
 import org.openmw.ui.view.vibrate
@@ -178,7 +171,7 @@ fun ResizableDraggableButton(
         var offset by remember { mutableStateOf(IntOffset.Zero) }
         var isPressed by remember { mutableStateOf(false) }
         var showControlsPopup by remember { mutableStateOf(false) }
-        val isUIHidden by GameFilesPreferences.loadUIState(context).collectAsState(initial = false)
+        val isUIHidden by remember { GameFilesPreferences.getPreference(context, GameFilesPreferences.UI_HIDDEN_STATE_KEY, "false").map { it.toBoolean() } }.collectAsState(initial = false)
         val isDragging = remember { mutableStateOf(false) }
         val isLocked = remember { mutableStateOf(state.isLocked) }
         val blockMouse = remember { mutableStateOf(state.blockMouse) }
@@ -226,16 +219,17 @@ fun ResizableDraggableButton(
         var buttonAlpha by remember { mutableFloatStateOf(state.alpha) }
         val scrollState = rememberScrollState()
         val stateSB = rememberScrollAreaState(scrollState)
-        val autoMouseMode by loadAutoMouseMode(context).collectAsState(initial = "Hybrid")
-        val buttonShape by loadButtonShape(context).collectAsState(initial = "CircleShape")
-        val selectedAnimation by getSelectedAnimation(context).collectAsState(initial = "None")
-        val sensitivityMouseFlow = getSensitivityMouse(context).collectAsState(initial = 5000f)
+        val autoMouseMode by GameFilesPreferences.getPreference(context, GameFilesPreferences.AUTO_MOUSE_MODE_KEY, "Hybrid").collectAsState(initial = "Hybrid")
+        val buttonShape by GameFilesPreferences.getPreference(context, GameFilesPreferences.BUTTON_SHAPE, "CircleShape").collectAsState(initial = "CircleShape")
+        val selectedAnimation by GameFilesPreferences.getPreference(context, GameFilesPreferences.SELECTED_ANIMATION_KEY, "None").collectAsState(initial = "None")
+        val sensitivityMouseFlow = GameFilesPreferences.getNullablePreference(context, GameFilesPreferences.SENSITIVITY_MOUSE).collectAsState(initial = 5000f)
         var sensitivityMouse by remember { mutableFloatStateOf(sensitivityMouseFlow.value ?: 5000f) }
-        val sensitivityRTFlow = getSensitivityRT(context).collectAsState(initial = 5000f)
+        val sensitivityRTFlow = GameFilesPreferences.getNullablePreference(context, GameFilesPreferences.SENSITIVITY_RT).collectAsState(initial = 5000f)
         var sensitivityRT by remember { mutableFloatStateOf(sensitivityRTFlow.value ?: 5000f) }
-        val tutorial by GameFilesPreferences.getTutorial(context).collectAsState(initial = false)
-        val isVibrationOn by GameFilesPreferences.loadVibrationState(context).collectAsState(initial = true)
-        val buttonGroupSwitch by GameFilesPreferences.getButtonGroupSwitch(context).collectAsState(initial = true)
+        val tutorial by GameFilesPreferences.getPreference(context, GameFilesPreferences.TUTORIAL_KEY, true).collectAsState(initial = true)
+        val isVibrationOnFlow = remember { GameFilesPreferences.getPreference(context, GameFilesPreferences.VIBRATION_STATE_KEY, "true").map { it.toBoolean() } }
+        val isVibrationOn by isVibrationOnFlow.collectAsState(initial = true)
+        val buttonGroupSwitch by GameFilesPreferences.getPreference(context, GameFilesPreferences.BUTTON_GROUP_SWITCH_KEY, false).collectAsState(initial = false)
         val animations = getAnimations().toMutableMap().apply { put("None", EnterTransition.None to ExitTransition.None) }
         val (currentEnterAnimation, currentExitAnimation) = animations[selectedAnimation] ?: (animations["None"] ?: error("Default animation not found"))
         val controllerConnected = isControllerConnected(context)
@@ -245,13 +239,15 @@ fun ResizableDraggableButton(
         val animatedOffsetY = remember { Animatable(offsetY.floatValue) }
 
         // Get the selected key codes from the data store as a flow of lists of integers
-        val selectedKeycodesFlow = getSelectedKeycodes(context).map { keycodeString ->
-            keycodeString.split(",").map { it.toInt() }
+        val selectedKeycodesFlow = remember(context) {
+            GameFilesPreferences.getPreference(context, GameFilesPreferences.SELECTED_MOUSE_KEYS, "54,111").map { keycodeString ->
+                keycodeString.split(",").map { it.toInt() }
+            }
         }
 
         val selectedKeycodes by selectedKeycodesFlow.collectAsState(initial = emptyList())
 
-        val isOnMouseScreen by derivedStateOf { keyCode in selectedKeycodes }
+        val isOnMouseScreen by remember { derivedStateOf { keyCode in selectedKeycodes } }
 
         // Update hexCode, buttonColor, and buttonAlpha to use the global color and alpha if globalColorChange is enabled
         LaunchedEffect(globalColorChange) {
@@ -797,8 +793,8 @@ fun ResizableDraggableButton(
                                                                 highlightStep++
                                                                 onDelete(id)
                                                                 scope.launch {
-                                                                    setWhatsNew(context, false)
-                                                                    setTutorial(context, false)
+                                                                    GameFilesPreferences.setPreference(context, GameFilesPreferences.WHATS_NEW_KEY, false)
+                                                                    GameFilesPreferences.setPreference(context, GameFilesPreferences.TUTORIAL_KEY, false)
                                                                 }
                                                             }
                                                         }
@@ -857,7 +853,7 @@ fun ResizableDraggableButton(
                                                                             }.joinToString(",")
 
                                                                             CoroutineScope(Dispatchers.Main).launch {
-                                                                                GameFilesPreferences.setSelectedKeycodes(context, updatedKeycodes)
+                                                                                GameFilesPreferences.setPreference(context, GameFilesPreferences.SELECTED_MOUSE_KEYS, updatedKeycodes)
                                                                             }
                                                                         }
                                                                         ,

@@ -93,8 +93,7 @@ import org.openmw.ui.controls.UIStateManager.logMessagesFlow
 import org.openmw.ui.controls.UIStateManager.memoryInfoFlow
 import org.openmw.ui.controls.UIStateManager.userUI
 import org.openmw.ui.overlay.MemoryInfo
-import org.openmw.utils.GameFilesPreferences.getBackgroundAnimationFlow
-import org.openmw.utils.GameFilesPreferences.readCodeGroup
+import org.openmw.utils.GameFilesPreferences
 import org.openmw.utils.stringRes
 import java.io.BufferedReader
 import java.io.File
@@ -687,7 +686,7 @@ fun ProgressWithNavmesh(onComplete: () -> Unit) {
 @Composable
 fun BackgroundAnimation() {
     val context = LocalContext.current
-    val backgroundAnimation by getBackgroundAnimationFlow(context).collectAsState(initial = "BouncingBackground")
+    val backgroundAnimation by GameFilesPreferences.getPreference(context, GameFilesPreferences.BACKGROUND_ANIMATION_KEY, "BouncingBackground").collectAsState(initial = "BouncingBackground")
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -714,7 +713,7 @@ fun BackgroundAnimation() {
 @Composable
 fun NoneBackground() {
     val context = LocalContext.current
-    val codeGroupOption by readCodeGroup(context).collectAsState(initial = "OpenMW")
+    val codeGroupOption by GameFilesPreferences.getPreference(context, GameFilesPreferences.CODE_GROUP_KEY, "OpenMW").collectAsState(initial = "OpenMW")
     val image: Painter = when (codeGroupOption) {
         "OpenMW" -> rememberImagePainter(data = "file:${userUI}/backgroundbouncebw.jpg")
         "UQM" -> rememberImagePainter(data = "file:${userUI}/starmap.jpg")
@@ -736,7 +735,7 @@ fun NoneBackground() {
 @Composable
 fun RotatingImageBackground() {
     val context = LocalContext.current
-    val codeGroupOption by readCodeGroup(context).collectAsState(initial = "OpenMW")
+    val codeGroupOption by GameFilesPreferences.getPreference(context, GameFilesPreferences.CODE_GROUP_KEY, "OpenMW").collectAsState(initial = "OpenMW")
     val image: Painter = when (codeGroupOption) {
         "OpenMW" -> rememberImagePainter(data = "file:${userUI}/backgroundbouncebw.jpg")
         "UQM" -> rememberImagePainter(data = "file:${userUI}/starmap.jpg")
@@ -777,7 +776,7 @@ fun RotatingImageBackground() {
 @Composable
 fun BouncingBackground() {
     val context = LocalContext.current
-    val codeGroupOption by readCodeGroup(context).collectAsState(initial = "OpenMW")
+    val codeGroupOption by GameFilesPreferences.getPreference(context, GameFilesPreferences.CODE_GROUP_KEY, "OpenMW").collectAsState(initial = "OpenMW")
     val image: Painter = when (codeGroupOption) {
         "OpenMW" -> rememberImagePainter(data = "file:${userUI}/backgroundbouncebw.jpg")
         "UQM" -> rememberImagePainter(data = "file:${userUI}/starmap.jpg")
@@ -825,7 +824,7 @@ fun BouncingBackground() {
 @Composable
 fun CircularBackground() {
     val context = LocalContext.current
-    val codeGroupOption by readCodeGroup(context).collectAsState(initial = "OpenMW")
+    val codeGroupOption by GameFilesPreferences.getPreference(context, GameFilesPreferences.CODE_GROUP_KEY, "OpenMW").collectAsState(initial = "OpenMW")
     val image: Painter = when (codeGroupOption) {
         "OpenMW" -> rememberImagePainter(data = "file:${userUI}/backgroundbouncebw.jpg")
         "UQM" -> rememberImagePainter(data = "file:${userUI}/starmap.jpg")

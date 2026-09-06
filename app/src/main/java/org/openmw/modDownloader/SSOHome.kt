@@ -111,8 +111,7 @@ import org.openmw.ui.view.getAvailableStorageSpace
 import org.openmw.ui.view.getMessages
 import org.openmw.utils.GameFilesPreferences.IS_NEXUS_PREMIUM
 import org.openmw.utils.GameFilesPreferences.NEXUS_API_KEY
-import org.openmw.utils.GameFilesPreferences.getNexusAPIFlow
-import org.openmw.utils.GameFilesPreferences.loadIsPremiumTier
+import org.openmw.utils.GameFilesPreferences
 import org.openmw.utils.dataStore
 import org.openmw.utils.stringRes
 import java.io.File
@@ -211,10 +210,10 @@ fun SSOHome() {
     var currentTabIndex by rememberSaveable { mutableIntStateOf(0) }
     var showInitiatingDialog by rememberSaveable { mutableStateOf(false) }
     val webViewTabs by NexusInfo.webViewTabsFlow.collectAsState(initial = emptyList())
-    val fetchNexusAPI by getNexusAPIFlow(context).collectAsState(initial = "")
+    val fetchNexusAPI by GameFilesPreferences.getNullablePreference(context, NEXUS_API_KEY).collectAsState(initial = "")
     var showModsLog by remember { mutableStateOf(false) }
     val logMessages = remember { mutableStateListOf<String>() }
-    val isPremium by loadIsPremiumTier(context).collectAsState(initial = null)
+    val isPremium by GameFilesPreferences.getNullablePreference(context, IS_NEXUS_PREMIUM).collectAsState(initial = null)
     var showLogs by remember { mutableStateOf(false) }
     val isValidated by remember {
         derivedStateOf { isPremium != null }
@@ -837,7 +836,7 @@ fun RateLimitDisplay() {
     val availableSpace = getAvailableStorageSpace()
     val modDao = remember { ModDatabase.getDatabase(context).modDao() }
     var totalMods by remember { mutableIntStateOf(0) }
-    val isPremium by loadIsPremiumTier(context).collectAsState(initial = null)
+    val isPremium by GameFilesPreferences.getNullablePreference(context, IS_NEXUS_PREMIUM).collectAsState(initial = null)
 
     LaunchedEffect(Unit) {
         totalMods = modDao.getModCount()
