@@ -267,13 +267,6 @@ fun BarOptions (context: Context) {
                 }
             )
             DropdownMenuItem(
-                text = { Text(stringResource(R.string.reindex_mods), color = Color.White) },
-                onClick = {
-                    expanded = false
-                    MToast(stringRes(R.string.mods_indexed))
-                }
-            )
-            DropdownMenuItem(
                 text = { Text(stringResource(R.string.reset_resources), color = Color.White) },
                 onClick = {
                     showResetResourcesDialog = true

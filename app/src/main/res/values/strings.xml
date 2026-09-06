@@ -294,9 +294,6 @@
     <string name="reset_resources">Reset user resources</string>
     <string name="reset_the_resources_tip">Are you sure you want to reset user resources?</string>
     <string name="resources_reset">User resources reset</string>
-    <string name="reindex_mods">Reindex Mods</string>
-    <string name="indexing_mods">Indexing mods...</string>
-    <string name="mods_indexed">Mods reindexed successfully</string>
     <string name="resources">Resources</string>
 
 </resources>
