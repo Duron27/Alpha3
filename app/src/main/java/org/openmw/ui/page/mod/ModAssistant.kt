@@ -187,12 +187,12 @@ private fun ModTabRow(
                 )
             }
             Tab(
-                selected = selectedTabIndex == 3,
+                selected = selectedTabIndex == 4,
                 onClick = {
                     if (isNetworkAvailable(context)) {
                         resetStates()
                         downloader = true
-                        selectedTabIndex = 3
+                        selectedTabIndex = 4
                     } else {
                         MToast("No internet connection available")
                     }
@@ -200,49 +200,49 @@ private fun ModTabRow(
                 text = { Text(stringResource(R.string.mod_downloader)) }
             )
             Tab(
-                selected = selectedTabIndex == 4,
-                onClick = {
-                    resetStates()
-                    s3LightsDialog = true
-                    selectedTabIndex = 4
-                },
-                text = { Text(stringResource(R.string.s3lightfixes)) }
-            )
-            Tab(
                 selected = selectedTabIndex == 5,
                 onClick = {
                     resetStates()
-                    showDelta = true
+                    s3LightsDialog = true
                     selectedTabIndex = 5
                 },
-
-                text = { Text(stringResource(R.string.delta_plugin)) }
+                text = { Text(stringResource(R.string.s3lightfixes)) }
             )
             Tab(
                 selected = selectedTabIndex == 6,
                 onClick = {
                     resetStates()
-                    showSearchDialog = true
+                    showDelta = true
                     selectedTabIndex = 6
+                },
+
+                text = { Text(stringResource(R.string.delta_plugin)) }
+            )
+            Tab(
+                selected = selectedTabIndex == 7,
+                onClick = {
+                    resetStates()
+                    showSearchDialog = true
+                    selectedTabIndex = 7
                 },
                 icon = { Icon(Icons.Default.Search, contentDescription = stringResource(R.string.search_mods)) }
             )
             if (newFeatureEnabledChecked) {
                 Tab(
-                    selected = selectedTabIndex == 7,
+                    selected = selectedTabIndex == 8,
                     onClick = {
                         resetStates()
                         terminal = true
-                        selectedTabIndex = 7
+                        selectedTabIndex = 8
                     },
                     text = { Text("Terminal") }
                 )
                 Tab(
-                    selected = selectedTabIndex == 8,
+                    selected = selectedTabIndex == 9,
                     onClick = {
                         resetStates()
                         kram = true
-                        selectedTabIndex = 8
+                        selectedTabIndex = 9
                     },
                     text = { Text("Kram") }
                 )

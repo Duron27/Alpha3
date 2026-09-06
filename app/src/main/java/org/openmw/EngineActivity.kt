@@ -366,13 +366,6 @@ class EngineActivity : SDLActivity() {
         })
     }
 
-    @OptIn(ExperimentalMaterial3Api::class)
-    private fun navigateToMain() {
-        val intent = Intent(this, MainActivity::class.java)
-        startActivity(intent)
-        finish()
-    }
-
     private fun initializeOffsetsFromStateFlow() {
         lifecycleScope.launch {
             val buttonStates = UIStateManager.buttonStates.value
