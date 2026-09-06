@@ -24,6 +24,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import kotlinx.coroutines.launch
 import org.openmw.ui.controls.UIStateManager
+import org.openmw.utils.GameFilesPreferences
 
 @Composable
 fun PerformanceHud(
@@ -204,7 +205,7 @@ fun HudSettingsDialog(onDismiss: () -> Unit) {
                                 ) {
                                     UIStateManager.userSetGPUTemp = "internal"
                                     scope.launch {
-                                        org.openmw.utils.GameFilesPreferences.setUserSetGPUTemp(context, "internal")
+                                        GameFilesPreferences.setPreference(context, GameFilesPreferences.USER_SET_GPU_TEMP_KEY, "internal")
                                     }
                                 }
                             }
@@ -240,19 +241,19 @@ fun HudSettingsDialog(onDismiss: () -> Unit) {
                                     "GPU Core" -> {
                                         UIStateManager.userSetGPU = folder
                                         scope.launch {
-                                            org.openmw.utils.GameFilesPreferences.setUserSetGPU(context, folder)
+                                            GameFilesPreferences.setPreference(context, GameFilesPreferences.USER_SET_GPU_KEY, folder)
                                         }
                                     }
                                     "CPU Temp" -> {
                                         UIStateManager.userSetTemp = folder
                                         scope.launch {
-                                            org.openmw.utils.GameFilesPreferences.setUserSetTemp(context, folder)
+                                            GameFilesPreferences.setPreference(context, GameFilesPreferences.USER_SET_TEMP_KEY, folder)
                                         }
                                     }
                                     "GPU Temp" -> {
                                         UIStateManager.userSetGPUTemp = folder
                                         scope.launch {
-                                            org.openmw.utils.GameFilesPreferences.setUserSetGPUTemp(context, folder)
+                                            GameFilesPreferences.setPreference(context, GameFilesPreferences.USER_SET_GPU_TEMP_KEY, folder)
                                         }
                                     }
                                 }

@@ -146,14 +146,7 @@ import org.openmw.ui.view.hasInternetPermission
 import org.openmw.ui.view.startLoggingUpdates
 import org.openmw.ui.view.startResourceInfoUpdates
 import org.openmw.utils.GameFilesPreferences
-import org.openmw.utils.GameFilesPreferences.getOffsetXMouse
-import org.openmw.utils.GameFilesPreferences.getOffsetYMouse
-import org.openmw.utils.GameFilesPreferences.getSensitivityMouse
-import org.openmw.utils.GameFilesPreferences.setOffsetXMouse
-import org.openmw.utils.GameFilesPreferences.setOffsetYMouse
-import org.openmw.utils.GameFilesPreferences.setSensitivityMouse
-import org.openmw.utils.GameFilesPreferences.setTutorial
-import org.openmw.utils.GameFilesPreferences.setWhatsNew
+import kotlinx.coroutines.flow.map
 import org.openmw.utils.TravelMenuPopup
 import org.openmw.utils.sendKeyEvent
 import org.openmw.utils.stringRes
@@ -180,19 +173,20 @@ fun OverlayUI(
 ) {
     var expanded by remember { mutableStateOf(false) }
     var expanded2 by remember { mutableStateOf(false) }
-    val iconGlowChecked by GameFilesPreferences.loadIconGlow(context).collectAsState(initial = true)
-    val matchIconColorChecked by GameFilesPreferences.loadMatchIconColorState(context).collectAsState(initial = false)
-    val newFeatureEnabledChecked by GameFilesPreferences.loadNewFeatureEnabledState(context).collectAsState(initial = false)
+    val iconGlowChecked by GameFilesPreferences.getPreference(context, GameFilesPreferences.ICON_GLOW_KEY, true).collectAsState(initial = true)
+    val matchIconColorCheckedFlow = remember { GameFilesPreferences.getPreference(context, GameFilesPreferences.MATCH_ICON_COLOR_KEY, "false").map { it.toBoolean() } }
+    val matchIconColorChecked by matchIconColorCheckedFlow.collectAsState(initial = false)
+    val newFeatureEnabledChecked by GameFilesPreferences.getPreference(context, GameFilesPreferences.NEW_FEATURE_ENABLED_KEY, false).collectAsState(initial = false)
     var showMouseMenu by remember { mutableStateOf(false) }
     var consoleOutput by remember { mutableStateOf("") }
-    val sensitivityMouseFlow = getSensitivityMouse(context).collectAsState(initial = 900f)
+    val sensitivityMouseFlow = GameFilesPreferences.getNullablePreference(context, GameFilesPreferences.SENSITIVITY_MOUSE).collectAsState(initial = 900f)
     var sensitivityMouse by remember { mutableFloatStateOf(sensitivityMouseFlow.value ?: 900f) }
-    val tutorial by GameFilesPreferences.getTutorial(context).collectAsState(initial = false)
-    val offsetXMouseFlow = getOffsetXMouse(context).collectAsState(initial = 0f)
+    val tutorial by GameFilesPreferences.getPreference(context, GameFilesPreferences.TUTORIAL_KEY, true).collectAsState(initial = false)
+    val offsetXMouseFlow = GameFilesPreferences.getNullablePreference(context, GameFilesPreferences.OFFSET_X_MOUSE).collectAsState(initial = 0f)
     var offsetXMouse by remember { mutableFloatStateOf(offsetXMouseFlow.value ?: 0f) }
-    val offsetYMouseFlow = getOffsetYMouse(context).collectAsState(initial = 0f)
+    val offsetYMouseFlow = GameFilesPreferences.getNullablePreference(context, GameFilesPreferences.OFFSET_Y_MOUSE).collectAsState(initial = 0f)
     var offsetYMouse by remember { mutableFloatStateOf(offsetYMouseFlow.value ?: 0f) }
-    val menuCorner by GameFilesPreferences.getMenuCorner(context).collectAsState(initial = 1)
+    val menuCorner by GameFilesPreferences.getPreference(context, GameFilesPreferences.MENU_CORNER_KEY, 1).collectAsState(initial = 1)
 
     val rotationAngle by animateFloatAsState(
         targetValue = if (expanded2) 360f else -360f, animationSpec = tween(1000),
@@ -343,8 +337,8 @@ fun OverlayUI(
                             delay(1000L)
                             countdown -= 1
                         }
-                        setWhatsNew(context, false)
-                        setTutorial(context, false)
+                        GameFilesPreferences.setPreference(context, GameFilesPreferences.WHATS_NEW_KEY, false)
+                        GameFilesPreferences.setPreference(context, GameFilesPreferences.TUTORIAL_KEY, false)
                         // After countdown reaches 0, execute these actions
                         highlightStep = 0
                         launchedActivity = false
@@ -642,7 +636,7 @@ fun OverlayUI(
                                                     onValueChange = { newValue ->
                                                         sensitivityMouse = newValue
                                                         CoroutineScope(Dispatchers.Main).launch {
-                                                            setSensitivityMouse(context, newValue)
+                                                            GameFilesPreferences.setNullablePreference(context, GameFilesPreferences.SENSITIVITY_MOUSE, newValue)
                                                         }
                                                     },
                                                     valueRange = 400f..9000f,
@@ -671,7 +665,7 @@ fun OverlayUI(
                                                     onClick = {
                                                         offsetXMouse = (offsetXMouse - 1f).coerceIn(-100f..100f)
                                                         CoroutineScope(Dispatchers.Main).launch {
-                                                            setOffsetXMouse(context, offsetXMouse)
+                                                            GameFilesPreferences.setNullablePreference(context, GameFilesPreferences.OFFSET_X_MOUSE, offsetXMouse)
                                                         }
                                                     }
                                                 ) {
@@ -691,7 +685,7 @@ fun OverlayUI(
                                                     onClick = {
                                                         offsetXMouse = (offsetXMouse + 1f).coerceIn(-100f..100f)
                                                         CoroutineScope(Dispatchers.Main).launch {
-                                                            setOffsetXMouse(context, offsetXMouse)
+                                                            GameFilesPreferences.setNullablePreference(context, GameFilesPreferences.OFFSET_X_MOUSE, offsetXMouse)
                                                         }
                                                     }
                                                 ) {
@@ -719,7 +713,7 @@ fun OverlayUI(
                                                     onClick = {
                                                         offsetYMouse = (offsetYMouse - 1f).coerceIn(-100f..100f)
                                                         CoroutineScope(Dispatchers.Main).launch {
-                                                            setOffsetYMouse(context, offsetYMouse)
+                                                            GameFilesPreferences.setNullablePreference(context, GameFilesPreferences.OFFSET_Y_MOUSE, offsetYMouse)
                                                         }
                                                     }
                                                 ) {
@@ -739,7 +733,7 @@ fun OverlayUI(
                                                     onClick = {
                                                         offsetYMouse = (offsetYMouse + 1f).coerceIn(-100f..100f)
                                                         CoroutineScope(Dispatchers.Main).launch {
-                                                            setOffsetYMouse(context, offsetYMouse)
+                                                            GameFilesPreferences.setNullablePreference(context, GameFilesPreferences.OFFSET_Y_MOUSE, offsetYMouse)
                                                         }
                                                     }
                                                 ) {
@@ -891,7 +885,7 @@ fun OverlayUI(
                                 }
                                 IconButton(onClick = {
                                     CoroutineScope(Dispatchers.Main).launch {
-                                        GameFilesPreferences.setMenuCorner(context, (menuCorner + 1) % 4)
+                                        GameFilesPreferences.setPreference(context, GameFilesPreferences.MENU_CORNER_KEY, (menuCorner + 1) % 4)
                                     }
                                 }) {
                                     if (iconGlowChecked) {

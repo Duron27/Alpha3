@@ -96,16 +96,9 @@ import org.openmw.ui.view.NoneBackground
 import org.openmw.ui.view.RotatingImageBackground
 import org.openmw.utils.FileBrowserPopup
 import org.openmw.utils.GameFilesPreferences
-import org.openmw.utils.GameFilesPreferences.getBackgroundAnimationFlow
-import org.openmw.utils.GameFilesPreferences.getLanguageFlow
-import org.openmw.utils.GameFilesPreferences.getScreenStayOn
-import org.openmw.utils.GameFilesPreferences.getSystemBars
-import org.openmw.utils.GameFilesPreferences.loadAutoMouseMode
-import org.openmw.utils.GameFilesPreferences.loadButtonShape
-import org.openmw.utils.GameFilesPreferences.readCodeGroup
-import org.openmw.utils.GameFilesPreferences.readTextureShrinkingOption
-import org.openmw.utils.GameFilesPreferences.saveAutoMouseMode
-import org.openmw.utils.GameFilesPreferences.saveIconGlow
+import org.openmw.utils.dataStore
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import org.openmw.utils.IniSettings
 import org.openmw.utils.InitialDirectorySelection
 import org.openmw.utils.UserManageAssets
@@ -119,9 +112,9 @@ import java.io.File
 @Composable
 fun SettingPage(navigateToHome: () -> Unit) {
     val context = LocalContext.current
-    val selectedBackgroundAnimation by getBackgroundAnimationFlow(context).collectAsState(initial = "BouncingBackground")
-    val newFeatureEnabledChecked by GameFilesPreferences.loadNewFeatureEnabledState(context).collectAsState(initial = false)
-    val codeGroupOption by readCodeGroup(context).collectAsState(initial = "OpenMW")
+    val selectedBackgroundAnimation by GameFilesPreferences.getPreference(context, GameFilesPreferences.BACKGROUND_ANIMATION_KEY, "BouncingBackground").collectAsState(initial = "BouncingBackground")
+    val newFeatureEnabledChecked by GameFilesPreferences.getPreference(context, GameFilesPreferences.NEW_FEATURE_ENABLED_KEY, false).collectAsState(initial = false)
+    val codeGroupOption by GameFilesPreferences.getPreference(context, GameFilesPreferences.CODE_GROUP_KEY, "OpenMW").collectAsState(initial = "OpenMW")
     val layoutType = getLayoutType()
 
     LaunchedEffect(Unit) {
@@ -303,7 +296,7 @@ fun SettingRow(
 fun GeneralSettingsSection() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val translationChecked by GameFilesPreferences.loadTranslationState(context).collectAsState(initial = false)
+    val translationChecked by GameFilesPreferences.getPreference(context, GameFilesPreferences.TRANSLATION_ENABLED_KEY, false).collectAsState(initial = false)
 
     SettingSectionCard(
         title = stringResource(R.string.launcher_settings),
@@ -319,7 +312,7 @@ fun GeneralSettingsSection() {
         ) {
             Switch(
                 checked = translationChecked,
-                onCheckedChange = { scope.launch { GameFilesPreferences.saveTranslationState(context, it) } }
+                onCheckedChange = { scope.launch { GameFilesPreferences.setPreference(context, GameFilesPreferences.TRANSLATION_ENABLED_KEY, it) } }
             )
         }
         
@@ -336,9 +329,9 @@ fun GeneralSettingsSection() {
 fun GraphicsSettingsSection() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val avoid16BitsChecked by GameFilesPreferences.readAvoid16Bits(context).collectAsState(initial = true)
-    val useAngle by GameFilesPreferences.readAngle(context).collectAsState(initial = true)
-    val useSPIRV by GameFilesPreferences.readSPIRV(context).collectAsState(initial = true)
+    val avoid16BitsChecked by GameFilesPreferences.getPreference(context, GameFilesPreferences.AVOID_16_BITS_KEY, true).collectAsState(initial = true)
+    val useAngle by GameFilesPreferences.getPreference(context, GameFilesPreferences.USE_ANGLE, false).collectAsState(initial = false)
+    val useSPIRV by GameFilesPreferences.getPreference(context, GameFilesPreferences.USE_SPIRV, false).collectAsState(initial = false)
 
     SettingSectionCard(
         title = "Graphics & Performance",
@@ -348,21 +341,21 @@ fun GraphicsSettingsSection() {
             title = "Use Angle driver",
             subtitle = "Using this setting will enable newer shaders on older hardware like shadows."
         ) {
-            Switch(checked = useAngle, onCheckedChange = { scope.launch { GameFilesPreferences.writeAngle(context, it) } })
+            Switch(checked = useAngle, onCheckedChange = { scope.launch { GameFilesPreferences.setPreference(context, GameFilesPreferences.USE_ANGLE, it) } })
         }
         
         SettingRow(
             title = "Enable SPIRV",
             subtitle = "Using this setting will enable newer shaders on hardware that doesn't support it."
         ) {
-            Switch(checked = useSPIRV, onCheckedChange = { scope.launch { GameFilesPreferences.writeSPIRV(context, it) } })
+            Switch(checked = useSPIRV, onCheckedChange = { scope.launch { GameFilesPreferences.setPreference(context, GameFilesPreferences.USE_SPIRV, it) } })
         }
         
         SettingRow(
             title = stringResource(R.string.avoid_16_bits),
             subtitle = stringResource(R.string.helps_with_devices_that_have_less_memory_feat)
         ) {
-            Switch(checked = avoid16BitsChecked, onCheckedChange = { scope.launch { GameFilesPreferences.writeAvoid16Bits(context, it) } })
+            Switch(checked = avoid16BitsChecked, onCheckedChange = { scope.launch { GameFilesPreferences.setPreference(context, GameFilesPreferences.AVOID_16_BITS_KEY, it) } })
         }
         
         HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = White.copy(alpha = 0.1f))
@@ -376,20 +369,21 @@ fun GraphicsSettingsSection() {
 fun ControlsSettingsSection() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val virtualKeyboard by GameFilesPreferences.useVirtualKeyboard(context).collectAsState(initial = true)
-    val isVibrationOn by GameFilesPreferences.loadVibrationState(context).collectAsState(initial = true)
-    val buttonGroupSwitch by GameFilesPreferences.getButtonGroupSwitch(context).collectAsState(initial = true)
+    val virtualKeyboard by GameFilesPreferences.getPreference(context, GameFilesPreferences.USE_VIRTUAL_KB, true).collectAsState(initial = true)
+    val isVibrationOnFlow = remember { GameFilesPreferences.getPreference(context, GameFilesPreferences.VIBRATION_STATE_KEY, "true").map { it.toBoolean() } }
+    val isVibrationOn by isVibrationOnFlow.collectAsState(initial = true)
+    val buttonGroupSwitch by GameFilesPreferences.getPreference(context, GameFilesPreferences.BUTTON_GROUP_SWITCH_KEY, false).collectAsState(initial = false)
 
     SettingSectionCard(
         title = stringResource(R.string.customize_controls),
         icon = Icons.Default.Gamepad
     ) {
         SettingRow(title = stringResource(R.string.use_virtual_keyboard)) {
-            Switch(checked = virtualKeyboard, onCheckedChange = { scope.launch { GameFilesPreferences.setVirtualKeyboard(context, it) } })
+            Switch(checked = virtualKeyboard, onCheckedChange = { scope.launch { GameFilesPreferences.setPreference(context, GameFilesPreferences.USE_VIRTUAL_KB, it) } })
         }
         
         SettingRow(title = if (isVibrationOn) stringResource(R.string.vibration_enabled) else stringResource(R.string.vibration_disabled)) {
-            Switch(checked = isVibrationOn, onCheckedChange = { scope.launch { GameFilesPreferences.saveVibrationState(context, it) } })
+            Switch(checked = isVibrationOn, onCheckedChange = { scope.launch { GameFilesPreferences.setPreference(context, GameFilesPreferences.VIBRATION_STATE_KEY, it.toString()) } })
         }
 
         HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = White.copy(alpha = 0.1f))
@@ -397,10 +391,10 @@ fun ControlsSettingsSection() {
         HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = White.copy(alpha = 0.1f))
         
         SettingRow(title = stringResource(R.string.allow_button_groups), subtitle = stringResource(R.string.allow_btn_group_feat)) {
-            Switch(checked = buttonGroupSwitch, onCheckedChange = { scope.launch { GameFilesPreferences.setButtonGroupSwitch(context, it) } })
+            Switch(checked = buttonGroupSwitch, onCheckedChange = { scope.launch { GameFilesPreferences.setPreference(context, GameFilesPreferences.BUTTON_GROUP_SWITCH_KEY, it) } })
         }
         
-        ButtonShapeDropdownMenu { scope.launch { GameFilesPreferences.saveButtonShape(context, it) } }
+        ButtonShapeDropdownMenu { scope.launch { GameFilesPreferences.setPreference(context, GameFilesPreferences.BUTTON_SHAPE, it) } }
         
         HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = White.copy(alpha = 0.1f))
         ControlsInsert()
@@ -411,9 +405,11 @@ fun ControlsSettingsSection() {
 fun InterfaceSettingsSection() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val isUIHidden by GameFilesPreferences.loadUIState(context).collectAsState(initial = false)
-    val matchIconColorChecked by GameFilesPreferences.loadMatchIconColorState(context).collectAsState(initial = false)
-    val iconGlowChecked by GameFilesPreferences.loadIconGlow(context).collectAsState(initial = true)
+    val isUIHiddenFlow = remember { GameFilesPreferences.getPreference(context, GameFilesPreferences.UI_HIDDEN_STATE_KEY, "false").map { it.toBoolean() } }
+    val isUIHidden by isUIHiddenFlow.collectAsState(initial = false)
+    val matchIconColorCheckedFlow = remember { GameFilesPreferences.getPreference(context, GameFilesPreferences.MATCH_ICON_COLOR_KEY, "false").map { it.toBoolean() } }
+    val matchIconColorChecked by matchIconColorCheckedFlow.collectAsState(initial = false)
+    val iconGlowChecked by GameFilesPreferences.getPreference(context, GameFilesPreferences.ICON_GLOW_KEY, true).collectAsState(initial = true)
     val controllerConnected = isControllerConnected(context)
 
     SettingSectionCard(
@@ -424,21 +420,21 @@ fun InterfaceSettingsSection() {
             title = if (controllerConnected || !isUIHidden) stringResource(R.string.ui_is_visible) else stringResource(R.string.ui_is_hidden),
             subtitle = stringResource(R.string.set_the_ui_visible_state_tip)
         ) {
-            Switch(checked = isUIHidden, onCheckedChange = { scope.launch { GameFilesPreferences.saveUIState(context, it) } })
+            Switch(checked = isUIHidden, onCheckedChange = { scope.launch { GameFilesPreferences.setPreference(context, GameFilesPreferences.UI_HIDDEN_STATE_KEY, it.toString()) } })
         }
         
         SettingRow(
             title = stringResource(R.string.match_icon_color_to_thumbstick),
             subtitle = stringResource(R.string.thumbstick_share_its_color_feat)
         ) {
-            Switch(checked = matchIconColorChecked, onCheckedChange = { scope.launch { GameFilesPreferences.saveMatchIconColorState(context, it) } })
+            Switch(checked = matchIconColorChecked, onCheckedChange = { scope.launch { GameFilesPreferences.setPreference(context, GameFilesPreferences.MATCH_ICON_COLOR_KEY, it.toString()) } })
         }
         
         SettingRow(
             title = stringResource(R.string.icon_glow),
             subtitle = stringResource(R.string.glow_to_all_the_icons_feat)
         ) {
-            Switch(checked = iconGlowChecked, onCheckedChange = { scope.launch { saveIconGlow(context, it) } })
+            Switch(checked = iconGlowChecked, onCheckedChange = { scope.launch { GameFilesPreferences.setPreference(context, GameFilesPreferences.ICON_GLOW_KEY, it) } })
         }
         
         HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = White.copy(alpha = 0.1f))
@@ -450,7 +446,7 @@ fun InterfaceSettingsSection() {
 fun SystemSettingsSection() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val newFeatureEnabledChecked by GameFilesPreferences.loadNewFeatureEnabledState(context).collectAsState(initial = false)
+    val newFeatureEnabledChecked by GameFilesPreferences.getPreference(context, GameFilesPreferences.NEW_FEATURE_ENABLED_KEY, false).collectAsState(initial = false)
     var showWarningDialog by remember { mutableStateOf(false) }
 
     SettingSectionCard(
@@ -482,7 +478,7 @@ fun SystemSettingsSection() {
                     checked = newFeatureEnabledChecked,
                     onCheckedChange = {
                         if (it) showWarningDialog = true
-                        else scope.launch { GameFilesPreferences.saveNewFeatureEnabledState(context, false) }
+                        else scope.launch { GameFilesPreferences.setPreference(context, GameFilesPreferences.NEW_FEATURE_ENABLED_KEY, false) }
                     }
                 )
             }
@@ -496,7 +492,7 @@ fun SystemSettingsSection() {
             text = { Text(stringResource(R.string.enable_dangerous_feature_tip)) },
             confirmButton = {
                 Button(onClick = {
-                    scope.launch { GameFilesPreferences.saveNewFeatureEnabledState(context, true) }
+                    scope.launch { GameFilesPreferences.setPreference(context, GameFilesPreferences.NEW_FEATURE_ENABLED_KEY, true) }
                     showWarningDialog = false
                 }) { Text(stringResource(R.string.btn_confirm)) }
             },
@@ -521,10 +517,12 @@ fun DeveloperToolsSection() {
 fun DevInsert() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val bypassGameCheck by GameFilesPreferences.loadBypassGameCheck(context).collectAsState(initial = false)
-    val avoidInsertion by GameFilesPreferences.readResolutionInsertion(context).collectAsState(initial = false)
-    val hideSystemBars by getSystemBars(context).collectAsState(initial = true)
-    val screenStayOn by getScreenStayOn(context).collectAsState(initial = true)
+    val bypassGameCheck by GameFilesPreferences.getPreference(context, GameFilesPreferences.BYPASS_GAME_FILES_KEY, false).collectAsState(initial = false)
+    val avoidInsertion by GameFilesPreferences.getPreference(context, GameFilesPreferences.AVOID_RESOLUTION_INSERTION, false).collectAsState(initial = false)
+    val hideSystemBarsFlow = remember { GameFilesPreferences.getPreference(context, GameFilesPreferences.HIDE_SYSTEM_BARS, false).map { !it } }
+    val hideSystemBars by hideSystemBarsFlow.collectAsState(initial = true)
+    val screenStayOnFlow = remember { GameFilesPreferences.getPreference(context, GameFilesPreferences.SCREEN_STAY_ON, false).map { !it } }
+    val screenStayOn by screenStayOnFlow.collectAsState(initial = true)
     var showPopup by remember { mutableStateOf(false) }
     var showFileBrowser by remember { mutableStateOf(false) }
     var selectedInitialDirectory by remember { mutableStateOf<File?>(null) }
@@ -535,16 +533,16 @@ fun DevInsert() {
         }
         LogcatLevelSelector()
         SettingRow(title = "Show / Hide system bars") {
-            Switch(checked = hideSystemBars, onCheckedChange = { scope.launch { GameFilesPreferences.setSystemBars(context, !it) } })
+            Switch(checked = hideSystemBars, onCheckedChange = { scope.launch { GameFilesPreferences.setPreference(context, GameFilesPreferences.HIDE_SYSTEM_BARS, !it) } })
         }
         SettingRow(title = "Toggle screen stay on") {
-            Switch(checked = screenStayOn, onCheckedChange = { scope.launch { GameFilesPreferences.setScreenStayOn(context, !it) } })
+            Switch(checked = screenStayOn, onCheckedChange = { scope.launch { GameFilesPreferences.setPreference(context, GameFilesPreferences.SCREEN_STAY_ON, !it) } })
         }
         SettingRow(title = stringResource(R.string.don_t_inject_resolution_settings_automatically), subtitle = stringResource(R.string.overwriting_resolution_settings_tip)) {
-            Switch(checked = avoidInsertion, onCheckedChange = { scope.launch { GameFilesPreferences.writeResolutionInsertion(context, it) } })
+            Switch(checked = avoidInsertion, onCheckedChange = { scope.launch { GameFilesPreferences.setPreference(context, GameFilesPreferences.AVOID_RESOLUTION_INSERTION, it) } })
         }
         SettingRow(title = stringResource(R.string.bypass_the_game_files_check_tip), subtitle = stringResource(R.string.this_enables_disables_the_launcher_files_check_tip)) {
-            Switch(checked = bypassGameCheck, onCheckedChange = { scope.launch { GameFilesPreferences.saveBypassGameCheck(context, it) } })
+            Switch(checked = bypassGameCheck, onCheckedChange = { scope.launch { GameFilesPreferences.setPreference(context, GameFilesPreferences.BYPASS_GAME_FILES_KEY, it) } })
         }
         HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = White.copy(alpha = 0.1f))
 
@@ -621,10 +619,12 @@ fun InGameSettings() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     
-    val isUIHidden by GameFilesPreferences.loadUIState(context).collectAsState(initial = false)
-    val virtualKeyboard by GameFilesPreferences.useVirtualKeyboard(context).collectAsState(initial = true)
-    val isVibrationOn by GameFilesPreferences.loadVibrationState(context).collectAsState(initial = true)
-    val buttonGroupSwitch by GameFilesPreferences.getButtonGroupSwitch(context).collectAsState(initial = true)
+    val isUIHiddenFlow = remember { GameFilesPreferences.getPreference(context, GameFilesPreferences.UI_HIDDEN_STATE_KEY, "false").map { it.toBoolean() } }
+    val isUIHidden by isUIHiddenFlow.collectAsState(initial = false)
+    val virtualKeyboard by GameFilesPreferences.getPreference(context, GameFilesPreferences.USE_VIRTUAL_KB, true).collectAsState(initial = true)
+    val isVibrationOnFlow = remember { GameFilesPreferences.getPreference(context, GameFilesPreferences.VIBRATION_STATE_KEY, "true").map { it.toBoolean() } }
+    val isVibrationOn by isVibrationOnFlow.collectAsState(initial = true)
+    val buttonGroupSwitch by GameFilesPreferences.getPreference(context, GameFilesPreferences.BUTTON_GROUP_SWITCH_KEY, false).collectAsState(initial = false)
     val controllerConnected = isControllerConnected(context)
 
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -676,18 +676,18 @@ fun InGameSettings() {
         SettingRow(
             title = if (controllerConnected || !isUIHidden) stringResource(R.string.ui_is_visible) else stringResource(R.string.ui_is_hidden)
         ) {
-            Switch(checked = isUIHidden, onCheckedChange = { scope.launch { GameFilesPreferences.saveUIState(context, it) } })
+            Switch(checked = isUIHidden, onCheckedChange = { scope.launch { GameFilesPreferences.setPreference(context, GameFilesPreferences.UI_HIDDEN_STATE_KEY, it.toString()) } })
         }
         
         // Controls
         SettingRow(title = stringResource(R.string.use_virtual_keyboard)) {
-            Switch(checked = virtualKeyboard, onCheckedChange = { scope.launch { GameFilesPreferences.setVirtualKeyboard(context, it) } })
+            Switch(checked = virtualKeyboard, onCheckedChange = { scope.launch { GameFilesPreferences.setPreference(context, GameFilesPreferences.USE_VIRTUAL_KB, it) } })
         }
         SettingRow(title = if (isVibrationOn) stringResource(R.string.vibration_enabled) else stringResource(R.string.vibration_disabled)) {
-            Switch(checked = isVibrationOn, onCheckedChange = { scope.launch { GameFilesPreferences.saveVibrationState(context, it) } })
+            Switch(checked = isVibrationOn, onCheckedChange = { scope.launch { GameFilesPreferences.setPreference(context, GameFilesPreferences.VIBRATION_STATE_KEY, it.toString()) } })
         }
         SettingRow(title = stringResource(R.string.allow_button_groups)) {
-            Switch(checked = buttonGroupSwitch, onCheckedChange = { scope.launch { GameFilesPreferences.setButtonGroupSwitch(context, it) } })
+            Switch(checked = buttonGroupSwitch, onCheckedChange = { scope.launch { GameFilesPreferences.setPreference(context, GameFilesPreferences.BUTTON_GROUP_SWITCH_KEY, it) } })
         }
         
         HorizontalDivider(color = White.copy(alpha = 0.1f))
@@ -748,7 +748,8 @@ fun DataStoreContentPopup(context: Context, onDismiss: () -> Unit) {
 
     LaunchedEffect(Unit) {
         scope.launch {
-            dataStoreContent = GameFilesPreferences.getAllPreferences(context)
+            val preferences = context.dataStore.data.first()
+            dataStoreContent = preferences.asMap().mapKeys { it.key.name }.mapValues { it.value.toString() }
         }
     }
 
@@ -790,26 +791,26 @@ fun DataStoreContentPopup(context: Context, onDismiss: () -> Unit) {
                         scope.launch {
                             updatedDataStoreContent.forEach { (key, value) ->
                                 when (key) {
-                                    GameFilesPreferences.GAME_FILES_URI_KEY.name -> GameFilesPreferences.storeGameFilesPath(context, value)
-                                    GameFilesPreferences.UI_HIDDEN_STATE_KEY.name -> GameFilesPreferences.saveUIState(context, value.toBoolean())
-                                    GameFilesPreferences.MATCH_ICON_COLOR_KEY.name -> GameFilesPreferences.saveMatchIconColorState(context, value.toBoolean())
-                                    GameFilesPreferences.RESOLUTION_X_KEY.name -> GameFilesPreferences.saveResolutionX(context, value.toInt())
-                                    GameFilesPreferences.RESOLUTION_Y_KEY.name -> GameFilesPreferences.saveResolutionY(context, value.toInt())
-                                    GameFilesPreferences.ICON_GLOW_KEY.name -> saveIconGlow(context, value.toBoolean())
-                                    GameFilesPreferences.ARG_LINE_KEY.name -> GameFilesPreferences.saveARGLine(context, value)
-                                    GameFilesPreferences.ENV_LINE_KEY.name -> GameFilesPreferences.saveENVLine(context, value)
-                                    //GameFilesPreferences.NEXUS_API_KEY.name -> GameFilesPreferences.saveNexusApi(context, value)
-                                    GameFilesPreferences.USER_OPTIONS_KEY.name -> GameFilesPreferences.saveUserOptions(context, value.split(",").toSet())
-                                    GameFilesPreferences.AUTO_MOUSE_MODE_KEY.name -> saveAutoMouseMode(context, value)
-                                    GameFilesPreferences.AVOID_16_BITS_KEY.name -> GameFilesPreferences.writeAvoid16Bits(context, value.toBoolean())
-                                    GameFilesPreferences.TEXTURE_SHRINKING_KEY.name -> GameFilesPreferences.writeTextureShrinkingOption(context, value)
-                                    GameFilesPreferences.SELECTED_MOUSE_KEYS.name -> GameFilesPreferences.setSelectedKeycodes(context, value)
-                                    GameFilesPreferences.ALLOWED_TO_TEXT_EDITOR.name -> GameFilesPreferences.setExtensionAllowedToEdit(context, value)
-                                    GameFilesPreferences.NEW_FEATURE_ENABLED_KEY.name -> GameFilesPreferences.saveUIState(context, value.toBoolean())
-                                    GameFilesPreferences.WHATS_NEW_KEY.name -> GameFilesPreferences.setWhatsNew(context, value.toBoolean())
-                                    GameFilesPreferences.TRANSLATION_ENABLED_KEY.name -> GameFilesPreferences.saveTranslationState(context, value.toBoolean())
-                                    GameFilesPreferences.TUTORIAL_KEY.name -> GameFilesPreferences.setTutorial(context, value.toBoolean())
-                                    GameFilesPreferences.SUPPORTED_LANGUAGES.name -> GameFilesPreferences.setSupportedLanguages(context, value)
+                                    GameFilesPreferences.GAME_FILES_URI_KEY.name -> GameFilesPreferences.setPreference(context, GameFilesPreferences.GAME_FILES_URI_KEY, value)
+                                    GameFilesPreferences.UI_HIDDEN_STATE_KEY.name -> GameFilesPreferences.setPreference(context, GameFilesPreferences.UI_HIDDEN_STATE_KEY, value)
+                                    GameFilesPreferences.MATCH_ICON_COLOR_KEY.name -> GameFilesPreferences.setPreference(context, GameFilesPreferences.MATCH_ICON_COLOR_KEY, value)
+                                    GameFilesPreferences.RESOLUTION_X_KEY.name -> GameFilesPreferences.setPreference(context, GameFilesPreferences.RESOLUTION_X_KEY, value.toIntOrNull() ?: 0)
+                                    GameFilesPreferences.RESOLUTION_Y_KEY.name -> GameFilesPreferences.setPreference(context, GameFilesPreferences.RESOLUTION_Y_KEY, value.toIntOrNull() ?: 0)
+                                    GameFilesPreferences.ICON_GLOW_KEY.name -> GameFilesPreferences.setPreference(context, GameFilesPreferences.ICON_GLOW_KEY, value.toBoolean())
+                                    GameFilesPreferences.ARG_LINE_KEY.name -> GameFilesPreferences.setNullablePreference(context, GameFilesPreferences.ARG_LINE_KEY, value)
+                                    GameFilesPreferences.ENV_LINE_KEY.name -> GameFilesPreferences.setPreference(context, GameFilesPreferences.ENV_LINE_KEY, value)
+                                    //GameFilesPreferences.NEXUS_API_KEY.name -> GameFilesPreferences.setPreference(context, GameFilesPreferences.NEXUS_API_KEY, value)
+                                    GameFilesPreferences.USER_OPTIONS_KEY.name -> GameFilesPreferences.setPreference(context, GameFilesPreferences.USER_OPTIONS_KEY, value)
+                                    GameFilesPreferences.AUTO_MOUSE_MODE_KEY.name -> GameFilesPreferences.setPreference(context, GameFilesPreferences.AUTO_MOUSE_MODE_KEY, value)
+                                    GameFilesPreferences.AVOID_16_BITS_KEY.name -> GameFilesPreferences.setPreference(context, GameFilesPreferences.AVOID_16_BITS_KEY, value.toBoolean())
+                                    GameFilesPreferences.TEXTURE_SHRINKING_KEY.name -> GameFilesPreferences.setPreference(context, GameFilesPreferences.TEXTURE_SHRINKING_KEY, value)
+                                    GameFilesPreferences.SELECTED_MOUSE_KEYS.name -> GameFilesPreferences.setPreference(context, GameFilesPreferences.SELECTED_MOUSE_KEYS, value)
+                                    GameFilesPreferences.ALLOWED_TO_TEXT_EDITOR.name -> GameFilesPreferences.setPreference(context, GameFilesPreferences.ALLOWED_TO_TEXT_EDITOR, value)
+                                    GameFilesPreferences.NEW_FEATURE_ENABLED_KEY.name -> GameFilesPreferences.setPreference(context, GameFilesPreferences.NEW_FEATURE_ENABLED_KEY, value.toBoolean())
+                                    GameFilesPreferences.WHATS_NEW_KEY.name -> GameFilesPreferences.setPreference(context, GameFilesPreferences.WHATS_NEW_KEY, value.toBoolean())
+                                    GameFilesPreferences.TRANSLATION_ENABLED_KEY.name -> GameFilesPreferences.setPreference(context, GameFilesPreferences.TRANSLATION_ENABLED_KEY, value.toBoolean())
+                                    GameFilesPreferences.TUTORIAL_KEY.name -> GameFilesPreferences.setPreference(context, GameFilesPreferences.TUTORIAL_KEY, value.toBoolean())
+                                    GameFilesPreferences.SUPPORTED_LANGUAGES.name -> GameFilesPreferences.setPreference(context, GameFilesPreferences.SUPPORTED_LANGUAGES, value)
                                 }
                             }
                             onDismiss()
@@ -838,7 +839,7 @@ fun DataStoreContentPopup(context: Context, onDismiss: () -> Unit) {
 fun TextureShrinkingOptionSelector() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val textureShrinkingOption by readTextureShrinkingOption(context).collectAsState(initial = "None")
+    val textureShrinkingOption by GameFilesPreferences.getPreference(context, GameFilesPreferences.TEXTURE_SHRINKING_KEY, "None").collectAsState(initial = "None")
     var expanded by remember { mutableStateOf(false) }
 
     Column {
@@ -867,7 +868,7 @@ fun TextureShrinkingOptionSelector() {
                                      onClick = {
                                          scope.launch {
                                              try {
-                                                 GameFilesPreferences.writeTextureShrinkingOption(context, "None")
+                                                 GameFilesPreferences.setPreference(context, GameFilesPreferences.TEXTURE_SHRINKING_KEY, "None")
                                              } catch (e: Exception) {
                                                  e.printStackTrace()
                                              }
@@ -879,7 +880,7 @@ fun TextureShrinkingOptionSelector() {
                                      onClick = {
                                          scope.launch {
                                              try {
-                                                 GameFilesPreferences.writeTextureShrinkingOption(context, "low")
+                                                 GameFilesPreferences.setPreference(context, GameFilesPreferences.TEXTURE_SHRINKING_KEY, "low")
                                              } catch (e: Exception) {
                                                  e.printStackTrace()
                                              }
@@ -891,7 +892,7 @@ fun TextureShrinkingOptionSelector() {
                                      onClick = {
                                          scope.launch {
                                              try {
-                                                 GameFilesPreferences.writeTextureShrinkingOption(context, "medium")
+                                                 GameFilesPreferences.setPreference(context, GameFilesPreferences.TEXTURE_SHRINKING_KEY, "medium")
                                              } catch (e: Exception) {
                                                  e.printStackTrace()
                                              }
@@ -903,7 +904,7 @@ fun TextureShrinkingOptionSelector() {
                         onClick = {
                                 scope.launch {
                                     try {
-                                        GameFilesPreferences.writeTextureShrinkingOption(context, "high")
+                                        GameFilesPreferences.setPreference(context, GameFilesPreferences.TEXTURE_SHRINKING_KEY, "high")
                                     } catch (e: Exception) {
                                         e.printStackTrace()
                                     }
@@ -918,10 +919,19 @@ fun TextureShrinkingOptionSelector() {
 
 @Composable
 fun LanguageSelector(context: Context) {
-    val languageSelection by getLanguageFlow(context).collectAsState(initial = "en")
-    val supportedLanguages by GameFilesPreferences.getSupportedLanguagesFlow(context).collectAsState(initial = listOf("en,ru,hr,fr"))
-    var expanded by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    val languageSelection by GameFilesPreferences.getPreference(context, GameFilesPreferences.LANGUAGE_KEY, "en").collectAsState(initial = "en")
+    val supportedLanguagesFlow = remember {
+        context.dataStore.data.map { preferences ->
+            preferences[GameFilesPreferences.SUPPORTED_LANGUAGES]?.split(",")?.map { it.trim() } ?: run {
+                val defaultLanguages = "en,ru,hr,fr,es,de,it,pt,ja,zh,ar,hi,pl,uk,vi,ko,th,bn,ta,ur,cs"
+                scope.launch { GameFilesPreferences.setPreference(context, GameFilesPreferences.SUPPORTED_LANGUAGES, defaultLanguages) }
+                defaultLanguages.split(",").map { it.trim() }
+            }
+        }
+    }
+    val supportedLanguages by supportedLanguagesFlow.collectAsState(initial = listOf("en", "ru", "hr", "fr"))
+    var expanded by remember { mutableStateOf(false) }
 
     Column {
         Row(
@@ -950,7 +960,7 @@ fun LanguageSelector(context: Context) {
                             onClick = {
                                 scope.launch {
                                     try {
-                                        GameFilesPreferences.setLanguage(context, language)
+                                        GameFilesPreferences.setPreference(context, GameFilesPreferences.LANGUAGE_KEY, language)
                                         println("Language set to: $language")
                                     } catch (e: Exception) {
                                         e.printStackTrace()
@@ -971,7 +981,7 @@ fun CodeGroupOptionSelector() {
     val scope = rememberCoroutineScope()
     var expanded by remember { mutableStateOf(false) }
     val context = LocalContext.current
-    val codeGroupOption by readCodeGroup(context).collectAsState(initial = "OpenMW")
+    val codeGroupOption by GameFilesPreferences.getPreference(context, GameFilesPreferences.CODE_GROUP_KEY, "OpenMW").collectAsState(initial = "OpenMW")
 
     Column {
         Row(
@@ -1000,7 +1010,7 @@ fun CodeGroupOptionSelector() {
                             onClick = {
                                 scope.launch {
                                     try {
-                                        GameFilesPreferences.setCodeGroup(context, game)
+                                        GameFilesPreferences.setPreference(context, GameFilesPreferences.CODE_GROUP_KEY, game)
                                         tempCodeGroup = game
                                     } catch (e: Exception) {
                                         e.printStackTrace()
@@ -1021,7 +1031,7 @@ fun AutoMouseModeOptionSelector() {
     var expanded by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
-    val autoMouseMode by loadAutoMouseMode(context).collectAsState(initial = "Hybrid")
+    val autoMouseMode by GameFilesPreferences.getPreference(context, GameFilesPreferences.AUTO_MOUSE_MODE_KEY, "Hybrid").collectAsState(initial = "Hybrid")
 
     Column {
         Row(
@@ -1070,7 +1080,7 @@ fun AutoMouseModeOptionSelector() {
                         onClick = {
                             scope.launch {
                                 try {
-                                    saveAutoMouseMode(context, "None")
+                                    GameFilesPreferences.setPreference(context, GameFilesPreferences.AUTO_MOUSE_MODE_KEY, "None")
                                 } catch (e: Exception) {
                                     e.printStackTrace()
                                 }
@@ -1082,7 +1092,7 @@ fun AutoMouseModeOptionSelector() {
                         onClick = {
                             scope.launch {
                                 try {
-                                    saveAutoMouseMode(context, "Hybrid")
+                                    GameFilesPreferences.setPreference(context, GameFilesPreferences.AUTO_MOUSE_MODE_KEY, "Hybrid")
                                 } catch (e: Exception) {
                                     e.printStackTrace()
                                 }
@@ -1168,7 +1178,7 @@ fun updateCharset(newEncoding: String) {
 @Composable
 fun BackgroundAnimationOptionSelector() {
     val context = LocalContext.current
-    val backgroundAnimation by getBackgroundAnimationFlow(context).collectAsState(initial = "BouncingBackground")
+    val backgroundAnimation by GameFilesPreferences.getPreference(context, GameFilesPreferences.BACKGROUND_ANIMATION_KEY, "BouncingBackground").collectAsState(initial = "BouncingBackground")
     var expanded by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
@@ -1198,7 +1208,7 @@ fun BackgroundAnimationOptionSelector() {
                         onClick = {
                             scope.launch {
                                 try {
-                                    GameFilesPreferences.setBackgroundAnimation(context, "None")
+                                    GameFilesPreferences.setPreference(context, GameFilesPreferences.BACKGROUND_ANIMATION_KEY, "None")
                                 } catch (e: Exception) {
                                     e.printStackTrace()
                                 }
@@ -1210,7 +1220,7 @@ fun BackgroundAnimationOptionSelector() {
                         onClick = {
                             scope.launch {
                                 try {
-                                    GameFilesPreferences.setBackgroundAnimation(context, "BouncingBackground")
+                                    GameFilesPreferences.setPreference(context, GameFilesPreferences.BACKGROUND_ANIMATION_KEY, "BouncingBackground")
                                 } catch (e: Exception) {
                                     e.printStackTrace()
                                 }
@@ -1222,7 +1232,7 @@ fun BackgroundAnimationOptionSelector() {
                         onClick = {
                             scope.launch {
                                 try {
-                                    GameFilesPreferences.setBackgroundAnimation(context, "RotatingImageBackground")
+                                    GameFilesPreferences.setPreference(context, GameFilesPreferences.BACKGROUND_ANIMATION_KEY, "RotatingImageBackground")
                                 } catch (e: Exception) {
                                     e.printStackTrace()
                                 }
@@ -1234,7 +1244,7 @@ fun BackgroundAnimationOptionSelector() {
                         onClick = {
                             scope.launch {
                                 try {
-                                    GameFilesPreferences.setBackgroundAnimation(context, "CircularBackground")
+                                    GameFilesPreferences.setPreference(context, GameFilesPreferences.BACKGROUND_ANIMATION_KEY, "CircularBackground")
                                 } catch (e: Exception) {
                                     e.printStackTrace()
                                 }
@@ -1339,7 +1349,7 @@ fun ButtonShapeDropdownMenu(updateShape: (String) -> Unit) {
     val context = LocalContext.current
     var expanded by remember { mutableStateOf(false) }
     val shapes = listOf("CircleShape", "RoundedCornerShape", "RectangleShape", "StadiumShape")
-    val currentShape by loadButtonShape(context).collectAsState(initial = "StadiumShape")
+    val currentShape by GameFilesPreferences.getPreference(context, GameFilesPreferences.BUTTON_SHAPE, "CircleShape").collectAsState(initial = "StadiumShape")
     var feedbackMessage by remember { mutableStateOf("") }
     val buttonShape = stringToShape(currentShape)
 

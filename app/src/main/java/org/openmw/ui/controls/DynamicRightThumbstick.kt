@@ -106,12 +106,7 @@ import org.openmw.ui.controls.UIStateManager.updateButtonState
 import org.openmw.ui.overlay.getAnimations
 import org.openmw.utils.ColorPickerWheel
 import org.openmw.utils.GameFilesPreferences
-import org.openmw.utils.GameFilesPreferences.getSelectedAnimation
-import org.openmw.utils.GameFilesPreferences.getSensitivityMouse
-import org.openmw.utils.GameFilesPreferences.getSensitivityRT
-import org.openmw.utils.GameFilesPreferences.loadAutoMouseMode
-import org.openmw.utils.GameFilesPreferences.setSensitivityRT
-import org.openmw.utils.GameFilesPreferences.writeVirtualRightThumbstick
+import kotlinx.coroutines.flow.map
 import org.openmw.ui.view.currentDeviceRealSize
 import org.openmw.utils.CustomIconPickerButton
 import org.openmw.utils.fromHex
@@ -152,7 +147,8 @@ fun ResizableDraggableRightThumbstick(
         val buttonTint = remember { mutableStateOf(state.buttonTint) }
         val offsetX = remember { mutableFloatStateOf(state.offsetX) }
         val offsetY = remember { mutableFloatStateOf(state.offsetY) }
-        val isUIHidden by GameFilesPreferences.loadUIState(context).collectAsState(initial = false)
+        val isUIHiddenFlow = remember { GameFilesPreferences.getPreference(context, GameFilesPreferences.UI_HIDDEN_STATE_KEY, "false").map { it.toBoolean() } }
+        val isUIHidden by isUIHiddenFlow.collectAsState(initial = false)
         var offset by remember { mutableStateOf(IntOffset.Zero) }
         val buttonUri = remember { mutableStateOf(state.uri) }
         val density = LocalDensity.current
@@ -160,12 +156,12 @@ fun ResizableDraggableRightThumbstick(
         val isDragging = remember { mutableStateOf(false) }
         val scrollState = rememberScrollState()
         val stateSB = rememberScrollAreaState(scrollState)
-        val autoMouseMode by loadAutoMouseMode(context).collectAsState(initial = "Hybrid")
-        val selectedAnimation by getSelectedAnimation(context).collectAsState(initial = "None")
-        val isVirtualRight by GameFilesPreferences.getVirtualRightThumbstick(context).collectAsState(initial = false)
-        val sensitivityMouseFlow = getSensitivityMouse(context).collectAsState(initial = 5000f)
+        val autoMouseMode by GameFilesPreferences.getPreference(context, GameFilesPreferences.AUTO_MOUSE_MODE_KEY, "Hybrid").collectAsState(initial = "Hybrid")
+        val selectedAnimation by GameFilesPreferences.getPreference(context, GameFilesPreferences.SELECTED_ANIMATION_KEY, "None").collectAsState(initial = "None")
+        val isVirtualRight by GameFilesPreferences.getPreference(context, GameFilesPreferences.VIRTUAL_RIGHT_THUMBSTICK, false).collectAsState(initial = false)
+        val sensitivityMouseFlow = GameFilesPreferences.getNullablePreference(context, GameFilesPreferences.SENSITIVITY_MOUSE).collectAsState(initial = 5000f)
         var sensitivityMouse by remember { mutableFloatStateOf(sensitivityMouseFlow.value ?: 5000f) }
-        val sensitivityRTFlow = getSensitivityRT(context).collectAsState(initial = 2500f)
+        val sensitivityRTFlow = GameFilesPreferences.getNullablePreference(context, GameFilesPreferences.SENSITIVITY_RT).collectAsState(initial = 2500f)
         var sensitivityRT by remember { mutableFloatStateOf(sensitivityRTFlow.value ?: 2500f) }
         val initialOffset =
             with(LocalDensity.current) { Offset(buttonSize.toPx() / 2, buttonSize.toPx() / 2) }
@@ -690,7 +686,7 @@ fun ResizableDraggableRightThumbstick(
                                                                     checked = !isVirtualRight,
                                                                     onCheckedChange = { isChecked ->
                                                                         CoroutineScope(Dispatchers.IO).launch {
-                                                                            writeVirtualRightThumbstick(context, !isChecked)
+                                                                            GameFilesPreferences.setPreference(context, GameFilesPreferences.VIRTUAL_RIGHT_THUMBSTICK, !isChecked)
                                                                         }
                                                                     },
                                                                     colors = SwitchDefaults.colors(
@@ -741,7 +737,7 @@ fun ResizableDraggableRightThumbstick(
                                                                     onValueChange = { newValue ->
                                                                         sensitivityRT = newValue
                                                                         CoroutineScope(Dispatchers.Main).launch {
-                                                                            setSensitivityRT(context, newValue)
+                                                                            GameFilesPreferences.setNullablePreference(context, GameFilesPreferences.SENSITIVITY_RT, newValue)
                                                                         }
                                                                     },
                                                                     valueRange = 1000f..5000f,

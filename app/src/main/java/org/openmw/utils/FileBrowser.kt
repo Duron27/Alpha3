@@ -97,7 +97,7 @@ import org.openmw.ui.controls.UIStateManager
 import org.openmw.ui.controls.UIStateManager.updateButtonState
 import org.openmw.ui.controls.UIStateManager.userUI
 import org.openmw.ui.view.addCustomLog
-import org.openmw.utils.GameFilesPreferences.getExtensionAllowedToEdit
+import org.openmw.utils.GameFilesPreferences
 import java.io.File
 import java.io.FileOutputStream
 import java.util.Base64
@@ -121,7 +121,7 @@ fun InitialDirectorySelection(
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
-    val newFeatureEnabledChecked by GameFilesPreferences.loadNewFeatureEnabledState(context).collectAsState(initial = false)
+    val newFeatureEnabledChecked by GameFilesPreferences.getPreference(context, GameFilesPreferences.NEW_FEATURE_ENABLED_KEY, false).collectAsState(initial = false)
     Dialog(onDismissRequest = { onDismiss() }) {
         Surface(
             shape = MaterialTheme.shapes.medium,
@@ -424,7 +424,7 @@ fun FileBrowserPopup(
     var showTextEditor by remember { mutableStateOf(false) }
     val context = LocalContext.current
     // Retrieve the allowed extensions as a list
-    val allowedExtensionsFlow = getExtensionAllowedToEdit(context).map { extensionsString ->
+    val allowedExtensionsFlow = GameFilesPreferences.getPreference(context, GameFilesPreferences.ALLOWED_TO_TEXT_EDITOR, "sh,txt,db,xml,cfg,json,py,yaml,lua,omwscripts,log,frag,vert,layout,glsl,omwfx").map { extensionsString ->
         extensionsString.split(",")
     }
     val allowedExtensions by allowedExtensionsFlow.collectAsState(initial = emptyList())

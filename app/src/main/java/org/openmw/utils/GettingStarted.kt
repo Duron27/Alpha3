@@ -32,8 +32,7 @@ import kotlinx.coroutines.launch
 import org.openmw.R
 import org.openmw.ui.controls.UIStateManager.configureControls
 import org.openmw.ui.controls.UIStateManager.highlightStep
-import org.openmw.utils.GameFilesPreferences.setTutorial
-import org.openmw.utils.GameFilesPreferences.setWhatsNew
+import org.openmw.utils.GameFilesPreferences
 
 @Composable
 fun MyAlertDialog(
@@ -41,8 +40,8 @@ fun MyAlertDialog(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val whatsNew by GameFilesPreferences.getWhatsNew(context).collectAsState(initial = false)
-    val tutorial by GameFilesPreferences.getTutorial(context).collectAsState(initial = false)
+    val whatsNew by GameFilesPreferences.getPreference(context, GameFilesPreferences.WHATS_NEW_KEY, true).collectAsState(initial = false)
+    val tutorial by GameFilesPreferences.getPreference(context, GameFilesPreferences.TUTORIAL_KEY, true).collectAsState(initial = false)
     val isChecked = whatsNew && tutorial
     if (showDialog.value) {
         AlertDialog(
@@ -77,8 +76,8 @@ fun MyAlertDialog(
                             checked = !isChecked,
                             onCheckedChange = { checked ->
                                 scope.launch {
-                                    setWhatsNew(context, false)
-                                    setTutorial(context, false)
+                                    GameFilesPreferences.setPreference(context, GameFilesPreferences.WHATS_NEW_KEY, false)
+                                    GameFilesPreferences.setPreference(context, GameFilesPreferences.TUTORIAL_KEY, false)
                                 }
                             }
                         )
@@ -90,7 +89,7 @@ fun MyAlertDialog(
                             highlightStep = 1
 
                             scope.launch {
-                                setTutorial(context, true)
+                                GameFilesPreferences.setPreference(context, GameFilesPreferences.TUTORIAL_KEY, true)
                             }
                             context.startGame()
                         },

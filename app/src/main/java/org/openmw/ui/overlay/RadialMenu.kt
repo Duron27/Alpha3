@@ -125,9 +125,7 @@ import org.openmw.ui.controls.keyCodeToChar
 import org.openmw.utils.ColorPickerWheel
 import org.openmw.utils.CustomIconPickerButton
 import org.openmw.utils.GameFilesPreferences
-import org.openmw.utils.GameFilesPreferences.getSelectedAnimation
-import org.openmw.utils.GameFilesPreferences.setSensitivityRT
-import org.openmw.utils.GameFilesPreferences.writeVirtualRightThumbstick
+import kotlinx.coroutines.flow.map
 import org.openmw.utils.fromHex
 import kotlin.math.PI
 import kotlin.math.cos
@@ -611,15 +609,15 @@ fun HiddenMenu(
         val offsetX = remember { mutableFloatStateOf(state.offsetX) }
         val offsetY = remember { mutableFloatStateOf(state.offsetY) }
         var buttonSize by remember { mutableStateOf(state.size.dp) }
-        val selectedAnimation by getSelectedAnimation(context).collectAsState(initial = "None")
+        val selectedAnimation by GameFilesPreferences.getPreference(context, GameFilesPreferences.SELECTED_ANIMATION_KEY, "None").collectAsState(initial = "None")
         val animations = getAnimations().toMutableMap()
             .apply { put("None", EnterTransition.None to ExitTransition.None) }
         val (currentEnterAnimation, currentExitAnimation) = animations[selectedAnimation]
             ?: (animations["None"] ?: error("Default animation not found"))
         val snapX = remember { mutableStateOf<Float?>(null) }
         val snapY = remember { mutableStateOf<Float?>(null) }
-        val isUIHidden by GameFilesPreferences.loadUIState(context)
-            .collectAsState(initial = false)
+        val isUIHiddenFlow = remember { GameFilesPreferences.getPreference(context, GameFilesPreferences.UI_HIDDEN_STATE_KEY, "false").map { it.toBoolean() } }
+        val isUIHidden by isUIHiddenFlow.collectAsState(initial = false)
         val buttonUri = remember { mutableStateOf(state.uri) }
         var hexCode by remember { mutableStateOf(state.color) }
         var buttonColor by remember { mutableStateOf(Color.fromHex(hexCode)) }

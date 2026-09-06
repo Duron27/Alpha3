@@ -185,7 +185,7 @@ fun IniSettings() {
     var searchQuery by remember { mutableStateOf("") }
     val view = LocalView.current
     val context = LocalContext.current
-    val translationChecked by GameFilesPreferences.loadTranslationState(context)
+    val translationChecked by GameFilesPreferences.getPreference(context, GameFilesPreferences.TRANSLATION_ENABLED_KEY, false)
         .collectAsState(initial = false)
 
     val filteredSettings = remember(settings, searchQuery) {

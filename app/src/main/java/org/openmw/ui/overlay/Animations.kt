@@ -189,7 +189,7 @@ fun AnimationSettings(context: Context, scope: CoroutineScope) {
     // Initialize selected animation from DataStore
     LaunchedEffect(Unit) {
         scope.launch {
-            GameFilesPreferences.getSelectedAnimation(context).collect { animation ->
+            GameFilesPreferences.getPreference(context, GameFilesPreferences.SELECTED_ANIMATION_KEY, "None").collect { animation ->
                 selectedAnimation = animation
             }
         }
@@ -224,7 +224,7 @@ fun AnimationSettings(context: Context, scope: CoroutineScope) {
                                 expanded = false
                                 scope.launch {
                                     // Save the selected animation to DataStore
-                                    GameFilesPreferences.setSelectedAnimation(context, animation)
+                                    GameFilesPreferences.setPreference(context, GameFilesPreferences.SELECTED_ANIMATION_KEY, animation)
                                 }
                             }
                         )

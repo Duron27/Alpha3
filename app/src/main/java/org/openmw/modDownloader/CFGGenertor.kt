@@ -7,8 +7,9 @@ import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
+import kotlinx.coroutines.flow.first
 import org.openmw.Constants
-import org.openmw.utils.GameFilesPreferences.getGameFilesUri
+import org.openmw.utils.GameFilesPreferences
 import java.io.File
 import java.io.FileOutputStream
 import java.net.URL
@@ -122,7 +123,7 @@ fun parseOpenMWConfig(jsonString: String): OpenMWConfig {
 
 suspend fun formatOpenMWConfig(context: Context, config: OpenMWConfig): String {
     loadPluginsToCommentOut()
-    val gameFilesUri = getGameFilesUri(context)
+    val gameFilesUri = GameFilesPreferences.getNullablePreference(context, GameFilesPreferences.GAME_FILES_URI_KEY).first()
     val builder = StringBuilder()
 
     // Fallback Values

@@ -111,9 +111,7 @@ import org.openmw.ui.overlay.getAnimations
 import org.openmw.utils.ColorPickerWheel
 import org.openmw.utils.CustomIconPickerButton
 import org.openmw.utils.GameFilesPreferences
-import org.openmw.utils.GameFilesPreferences.getOffsetXMouse
-import org.openmw.utils.GameFilesPreferences.getOffsetYMouse
-import org.openmw.utils.GameFilesPreferences.getSelectedAnimation
+import kotlinx.coroutines.flow.map
 import org.openmw.utils.fromHex
 import kotlin.math.roundToInt
 
@@ -123,8 +121,8 @@ fun MouseIcon(
     containerHeight: Float
 ) {
     val context = LocalContext.current
-    val offsetXMouse by getOffsetXMouse(context).collectAsState(initial = 0f)
-    val offsetYMouse by getOffsetYMouse(context).collectAsState(initial = 0f)
+    val offsetXMouse by GameFilesPreferences.getNullablePreference(context, GameFilesPreferences.OFFSET_X_MOUSE).collectAsState(initial = 0f)
+    val offsetYMouse by GameFilesPreferences.getNullablePreference(context, GameFilesPreferences.OFFSET_Y_MOUSE).collectAsState(initial = 0f)
     val sdlWidth = EngineActivity.resolutionX.toFloat()
     val sdlHeight = EngineActivity.resolutionY.toFloat()
 
@@ -178,13 +176,14 @@ fun ScrollWheelIndicator(
         val isMouseButton = remember { mutableStateOf(state.isMouseButton) }
         val mouseButton = remember { mutableIntStateOf(state.mouseButton) }
         val buttonVibrate = remember { mutableStateOf(state.vibrate) }
-        val isUIHidden by GameFilesPreferences.loadUIState(context).collectAsState(initial = false)
+        val isUIHiddenFlow = remember { GameFilesPreferences.getPreference(context, GameFilesPreferences.UI_HIDDEN_STATE_KEY, "false").map { it.toBoolean() } }
+        val isUIHidden by isUIHiddenFlow.collectAsState(initial = false)
         val coroutineScope = rememberCoroutineScope()
         val scrollStateBars = rememberScrollState()
         val stateSB = rememberScrollAreaState(scrollStateBars)
         val haptic = LocalHapticFeedback.current
         val isDragging = remember { mutableStateOf(false) }
-        val selectedAnimation by getSelectedAnimation(context).collectAsState(initial = "None")
+        val selectedAnimation by GameFilesPreferences.getPreference(context, GameFilesPreferences.SELECTED_ANIMATION_KEY, "None").collectAsState(initial = "None")
         val animations = getAnimations().toMutableMap()
             .apply { put("None", EnterTransition.None to ExitTransition.None) }
         val (currentEnterAnimation, currentExitAnimation) = animations[selectedAnimation]

@@ -61,7 +61,6 @@ import org.openmw.ui.controls.UIStateManager.launchedActivity
 import org.openmw.ui.controls.UIStateManager.transparentBlack
 import org.openmw.ui.page.setting.CodeGroupOptionSelector
 import org.openmw.utils.GameFilesPreferences
-import org.openmw.utils.GameFilesPreferences.readCodeGroup
 import org.openmw.utils.MToast
 import org.openmw.utils.UserManageAssets
 import org.openmw.utils.startGame
@@ -119,9 +118,9 @@ fun NavmeshScreen(onComplete: () -> Unit) {
 @Composable
 fun MyFloatingActionButton() {
     val context = LocalContext.current
-    val savedPath by GameFilesPreferences.getGameFilesUriState(context).collectAsState(initial = null)
-    val codeGroupOption by readCodeGroup(context).collectAsState(initial = "OpenMW")
-    val bypassGameCheck by GameFilesPreferences.loadBypassGameCheck(context).collectAsState(initial = false)
+    val savedPath by GameFilesPreferences.getNullablePreference(context, GameFilesPreferences.GAME_FILES_URI_KEY).collectAsState(initial = null)
+    val codeGroupOption by GameFilesPreferences.getPreference(context, GameFilesPreferences.CODE_GROUP_KEY, "OpenMW").collectAsState(initial = "OpenMW")
+    val bypassGameCheck by GameFilesPreferences.getPreference(context, GameFilesPreferences.BYPASS_GAME_FILES_KEY, false).collectAsState(initial = false)
     var isCopyingResources by remember { mutableStateOf(false) } // Track copying state
     val coroutineScope = rememberCoroutineScope()
 
@@ -198,7 +197,7 @@ fun BarOptions (context: Context) {
     var showDialog by remember { mutableStateOf(false) }
     var showResetResourcesDialog by remember { mutableStateOf(false) }
     val settingsFile = File(SETTINGS_FILE)
-    val codeGroupOption by readCodeGroup(context).collectAsState(initial = "OpenMW")
+    val codeGroupOption by GameFilesPreferences.getPreference(context, GameFilesPreferences.CODE_GROUP_KEY, "OpenMW").collectAsState(initial = "OpenMW")
     val scope = rememberCoroutineScope()
 
     IconButton(onClick = { isTabExpanded = !isTabExpanded }) {

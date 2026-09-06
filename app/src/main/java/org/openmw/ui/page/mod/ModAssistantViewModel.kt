@@ -49,7 +49,7 @@ class ModAssistantViewModel @Inject constructor(
     var showSearchDialog = mutableStateOf(false)
     var launchFloatingActionButton = mutableStateOf(false)
 
-    val newFeatureEnabledChecked = GameFilesPreferences.loadNewFeatureEnabledState(app)
+    val newFeatureEnabledChecked = GameFilesPreferences.getPreference(app, GameFilesPreferences.NEW_FEATURE_ENABLED_KEY, false)
 
 
     suspend fun pathCorrector(): Map<String, String> {

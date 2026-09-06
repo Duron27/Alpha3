@@ -87,6 +87,7 @@ import org.openmw.ui.controls.UIStateManager.menuAlpha
 import org.openmw.ui.controls.UIStateManager.menuColor
 import org.openmw.ui.view.addCustomLog
 import org.openmw.utils.GameFilesPreferences
+import kotlinx.coroutines.flow.map
 import org.openmw.utils.stringRes
 import java.io.File
 
@@ -941,9 +942,10 @@ fun DynamicButtonManager(
     scaleFactor:Float = 1.2f,
 ) {
     val buttonStates by UIStateManager.buttonStates.collectAsState()
-    val matchIconColorChecked by GameFilesPreferences.loadMatchIconColorState(context).collectAsState(initial = false)
-    val tutorial by GameFilesPreferences.getTutorial(context).collectAsState(initial = false)
-    val iconGlowChecked by GameFilesPreferences.loadIconGlow(context).collectAsState(initial = true)
+    val matchIconColorCheckedFlow = remember { GameFilesPreferences.getPreference(context, GameFilesPreferences.MATCH_ICON_COLOR_KEY, "false").map { it.toBoolean() } }
+    val matchIconColorChecked by matchIconColorCheckedFlow.collectAsState(initial = false)
+    val tutorial by GameFilesPreferences.getPreference(context, GameFilesPreferences.TUTORIAL_KEY, true).collectAsState(initial = false)
+    val iconGlowChecked by GameFilesPreferences.getPreference(context, GameFilesPreferences.ICON_GLOW_KEY, true).collectAsState(initial = true)
     val offsetX by animateDpAsState(
         targetValue = if (UIStateManager.editMode) 2.dp else 0.dp,
         animationSpec = infiniteRepeatable(
