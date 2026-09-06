@@ -46,6 +46,8 @@ class IniImporterService : Service() {
                 } catch (e: Exception) {
                     Log.e("IniImporterService", "Error running IniImporter", e)
                 } finally {
+                    val finishedIntent = Intent("org.openmw.ACTION_INI_IMPORT_FINISHED")
+                    sendBroadcast(finishedIntent)
                     stopSelf(startId)
                 }
             }

@@ -1,6 +1,9 @@
 package org.openmw.ui.page.mod
 
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.Build
@@ -57,7 +60,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.material3.adaptive.navigationsuite.NavigationSuiteType
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -319,10 +322,29 @@ fun ModValuesList(
         }
     }
 
-    LaunchedEffect(savedPath) {
-        delay(1600.milliseconds)
-        savedPath?.let { path ->
-            categorizedModValues = ModValue.updateUIFromModValues(categories.map { it.key })
+    DisposableEffect(context) {
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (intent?.action == "org.openmw.ACTION_INI_IMPORT_FINISHED") {
+                    savedPath?.let { path ->
+                        categorizedModValues = ModValue.updateUIFromModValues(categories.map { it.key })
+                    }
+                }
+            }
+        }
+        val filter = IntentFilter("org.openmw.ACTION_INI_IMPORT_FINISHED")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            context.registerReceiver(receiver, filter)
+        }
+        onDispose {
+            try {
+                context.unregisterReceiver(receiver)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
         }
     }
 
