@@ -22,6 +22,8 @@ import androidx.compose.animation.shrinkOut
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -441,29 +443,6 @@ fun ModValuesList(
                 Text(stringRes(R.string.search_mods), fontSize = 20.sp, fontWeight = FontWeight.Bold)
                 Spacer(modifier = Modifier.height(16.dp))
 
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    // Category Filter Checkboxes
-                    categories.forEach { category ->
-                        val isChecked = selectedCategory == category.key
-                        Checkbox(
-                            checked = isChecked,
-                            onCheckedChange = { checked ->
-                                selectedCategory = if (checked) category.key else null
-                                // Trigger search update when category changes
-                                searchResults = if (checked) {
-                                    viewModel.searchMods(searchQuery, modValues, category.key)  // Show only selected category
-                                } else {
-                                    emptyList()  // Or use searchMods(searchQuery, modValues, null) to show all
-                                }
-                            }
-                        )
-                        Text(category.tag)
-                    }
-                }
-                Spacer(modifier = Modifier.height(16.dp))
                 TextField(
                     value = searchQuery,
                     onValueChange = {
@@ -474,7 +453,54 @@ fun ModValuesList(
                     label = { Text(stringResource(R.string.search)) },
                     modifier = Modifier.fillMaxWidth()
                 )
-                Spacer(modifier = Modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Category Filter Chips (Horizontally Scrollable)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
+                        .padding(vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    val isAllChecked = selectedCategory == null
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = if (isAllChecked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+                        onClick = {
+                            selectedCategory = null
+                            searchResults = viewModel.searchMods(searchQuery, modValues, null)
+                        }
+                    ) {
+                        Text(
+                            text = "All",
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                            color = if (isAllChecked) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 12.sp
+                        )
+                    }
+
+                    categories.forEach { category ->
+                        val isChecked = selectedCategory == category.key
+                        Surface(
+                            shape = RoundedCornerShape(16.dp),
+                            color = if (isChecked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+                            onClick = {
+                                selectedCategory = if (isChecked) null else category.key
+                                searchResults = viewModel.searchMods(searchQuery, modValues, selectedCategory)
+                            }
+                        ) {
+                            Text(
+                                text = category.tag,
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                                color = if (isChecked) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontSize = 12.sp
+                            )
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(12.dp))
                 LazyColumn(
                     modifier = Modifier
                         .weight(1f)
@@ -485,10 +511,12 @@ fun ModValuesList(
                         Text(
                             text = result.value,
                             modifier = Modifier
-                                .padding(8.dp)
+                                .fillMaxWidth()
                                 .clickable {
                                     handleSearchResult(result)
                                 }
+                                .padding(12.dp),
+                            color = Color.White
                         )
                     }
                 }
