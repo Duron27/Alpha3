@@ -65,7 +65,7 @@ private fun readIniValues(): Map<String, List<Triple<String, Any, String?>>> {
         when {
             line.startsWith("[") && line.endsWith("]") -> {
                 currentSection = line.substring(1, line.length - 1).trim()
-                sections[currentSection!!] = mutableMapOf()
+                sections[currentSection] = mutableMapOf()
             }
             "=" in line -> {
                 val parts = line.split("=", limit = 2).map { it.trim() }
@@ -313,16 +313,15 @@ fun IniSettingItem(
     translationChecked: Boolean,
     onValueChange: (Any) -> Unit
 ) {
-    val context = LocalContext.current
     val extractedKey = propertyKey.substringAfterLast('.')
     
     var translatedKey by remember { mutableStateOf(extractedKey) }
     var translatedComment by remember { mutableStateOf(comment ?: "") }
 
     if (translationChecked) {
-        TranslateText(context, extractedKey) { translatedKey = it }
+        TranslateText(extractedKey) { translatedKey = it }
         if (comment != null) {
-            TranslateText(context, comment) { translatedComment = it }
+            TranslateText(comment) { translatedComment = it }
         }
     }
 

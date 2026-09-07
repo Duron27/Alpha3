@@ -721,7 +721,6 @@ fun ModValuesList(
                                         var translatedText by remember { mutableStateOf("") }
                                         if (translationChecked) {
                                             TranslateText(
-                                                context = context,
                                                 inputText = modValue.value,
                                                 onTranslationResult = { result ->
                                                     translatedText =

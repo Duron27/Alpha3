@@ -15,10 +15,14 @@ import android.os.Process
 import android.os.StatFs
 import android.os.VibrationEffect
 import android.os.Vibrator
-import android.system.Os
+import android.os.VibratorManager
 import android.view.WindowManager
-import androidx.annotation.RequiresApi
-import androidx.compose.animation.core.*
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -65,8 +69,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
@@ -102,6 +106,7 @@ import kotlin.math.cos
 import kotlin.math.ln
 import kotlin.math.pow
 import kotlin.math.sin
+import kotlin.time.Duration.Companion.milliseconds
 
 data class LogEntry(
     val message: String,
@@ -169,7 +174,7 @@ fun startLoggingUpdates() {
         while (UIStateManager.isLoggingEnabled || UIStateManager.showLogCat) {
             val logMessages = getMessages().joinToString("\n")
             logMessagesFlow.value = logMessages
-            delay(2000)
+            delay(2000.milliseconds)
         }
         logMessagesFlow.value = ""
     }
@@ -198,7 +203,7 @@ fun startResourceInfoUpdates(context: Context) {
             try {
                 // CPU Temperature
                 val cpuPath = "/sys/class/thermal/${UIStateManager.userSetTemp}/temp"
-                var cpuTempRaw = readProcessOutput("cat", cpuPath).trim().toDoubleOrNull() ?: 0.0
+                val cpuTempRaw = readProcessOutput("cat", cpuPath).trim().toDoubleOrNull() ?: 0.0
                 
                 cpuTemp = if (cpuTempRaw > 0) {
                     val temp = if (cpuTempRaw > 1000) cpuTempRaw / 1000 else cpuTempRaw
@@ -266,7 +271,7 @@ fun startResourceInfoUpdates(context: Context) {
             memoryInfoFlow.value = getDetailedSystemInfo(context, memoryInfo, cpuUsage, gpuModel, gpuUtilization, gpuTemp, gpuClock)
             cpuUsageFlow.value = cpuUsage
 
-            delay(1000)
+            delay(1000.milliseconds)
         }
 
         // Cleanup
@@ -276,7 +281,14 @@ fun startResourceInfoUpdates(context: Context) {
 }
 
 fun vibrate(context: Context, amplitude: Int = VibrationEffect.DEFAULT_AMPLITUDE, duration: Long = 100L) {
-    val vibrator = context.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+    val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        val vibratorManager = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
+        vibratorManager.defaultVibrator
+    } else {
+        @Suppress("DEPRECATION")
+        context.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+    }
+
     if (vibrator.hasVibrator()) {
         vibrator.vibrate(VibrationEffect.createOneShot(duration, amplitude))
     }
@@ -674,7 +686,7 @@ fun ProgressWithNavmesh(onComplete: () -> Unit) {
                     cpuUsage = usage
                 }
 
-                delay(1000)
+                delay(1000.milliseconds)
             }
             progressFlow.value = 1f
 
@@ -783,9 +795,9 @@ fun BouncingBackground() {
         else -> painterResource(id = R.drawable.backgroundbouncebw)
     }
 
-    val configuration = LocalConfiguration.current
-    val screenWidth = configuration.screenWidthDp * configuration.densityDpi / 160
-    val screenHeight = configuration.screenHeightDp * configuration.densityDpi / 160
+    val containerSize = LocalWindowInfo.current.containerSize
+    val screenWidth = containerSize.width
+    val screenHeight = containerSize.height
 
     val imageWidth = 2000 // Replace with your image width
     val imageHeight = 2337 // Replace with your image height
@@ -804,7 +816,7 @@ fun BouncingBackground() {
                 y = (offset.y + yDirection * stepSize) % screenHeight
             )
 
-            delay(16L) // Update every frame (approx 60fps)
+            delay(16L.milliseconds) // Update every frame (approx 60fps)
         }
     }
 
@@ -831,9 +843,9 @@ fun CircularBackground() {
         else -> painterResource(id = R.drawable.backgroundbouncebw)
     }
 
-    val configuration = LocalConfiguration.current
-    val screenWidth = configuration.screenWidthDp * configuration.densityDpi / 160
-    val screenHeight = configuration.screenHeightDp * configuration.densityDpi / 160
+    val containerSize = LocalWindowInfo.current.containerSize
+    val screenWidth = containerSize.width
+    val screenHeight = containerSize.height
 
     val imageWidth = 2000 // Replace with your image width
     val imageHeight = 2337 // Replace with your image height
@@ -851,7 +863,7 @@ fun CircularBackground() {
             )
             angle += speed // Adjust the speed by changing this value
 
-            delay(16L) // Update every frame (approx 60fps)
+            delay(16L.milliseconds) // Update every frame (approx 60fps)
         }
     }
 

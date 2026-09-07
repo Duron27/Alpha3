@@ -16,6 +16,8 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.HelpOutline
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -31,12 +33,15 @@ import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.*
 import org.openmw.Constants
 import java.io.File
+import kotlin.time.Duration.Companion.milliseconds
 
 @Composable
 fun Terminal() {
@@ -161,7 +166,7 @@ fun Terminal() {
 
     LaunchedEffect(temporaryStatus) {
         if (temporaryStatus != null) {
-            delay(3000)
+            delay(3000.milliseconds)
             temporaryStatus = null
         }
     }
@@ -295,7 +300,7 @@ fun TerminalHeader(status: String, isProcessing: Boolean, onClear: () -> Unit, o
                 Icon(Icons.Default.DeleteSweep, "Clear", tint = Color.Gray, modifier = Modifier.size(16.dp))
             }
             IconButton(onClick = onHelp, modifier = Modifier.size(32.dp)) {
-                Icon(Icons.Default.HelpOutline, "Help", tint = Color.Gray, modifier = Modifier.size(16.dp))
+                Icon(Icons.AutoMirrored.Filled.HelpOutline, "Help", tint = Color.Gray, modifier = Modifier.size(16.dp))
             }
         }
     }
@@ -340,7 +345,7 @@ fun TerminalInputRow(
             ),
             cursorBrush = SolidColor(Color.Green),
             singleLine = true,
-            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go, autoCorrect = false),
+            keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Unspecified, autoCorrectEnabled = false, keyboardType = KeyboardType.Unspecified, imeAction = ImeAction.Go,platformImeOptions = null, showKeyboardOnFocus = null,hintLocales = null),
             keyboardActions = KeyboardActions(onGo = { onExecute() }),
             enabled = !isProcessing
         )
@@ -352,7 +357,7 @@ fun TerminalInputRow(
             modifier = Modifier.size(32.dp)
         ) {
             Icon(
-                imageVector = Icons.Default.Send,
+                imageVector = Icons.AutoMirrored.Filled.Send,
                 contentDescription = "Send",
                 tint = if (!isProcessing && input.text.isNotBlank()) Color.Green else Color.Gray,
                 modifier = Modifier.size(20.dp)

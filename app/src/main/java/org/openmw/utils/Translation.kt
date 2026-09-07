@@ -1,6 +1,5 @@
 package org.openmw.utils
 
-import android.content.Context
 import android.util.Log
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -19,7 +18,6 @@ import kotlin.coroutines.resumeWithException
 
 @Composable
 fun TranslateText(
-    context: Context,
     inputText: String,
     onTranslationResult: (String) -> Unit
 ) {

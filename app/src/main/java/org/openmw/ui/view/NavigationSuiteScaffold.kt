@@ -19,6 +19,7 @@ import androidx.compose.material3.PermanentDrawerSheet
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.adaptive.currentWindowAdaptiveInfo
+import androidx.compose.material3.adaptive.currentWindowAdaptiveInfoV2
 import androidx.compose.material3.adaptive.navigationsuite.NavigationSuiteColors
 import androidx.compose.material3.adaptive.navigationsuite.NavigationSuiteDefaults
 import androidx.compose.material3.adaptive.navigationsuite.NavigationSuiteItemColors
@@ -152,7 +153,7 @@ fun NavigationSuiteScaffoldLayout(
 private val NoWindowInsets = WindowInsets(0, 0, 0, 0)
 
 internal val WindowAdaptiveInfoDefault
-    @Composable get() = currentWindowAdaptiveInfo()
+    @Composable get() = currentWindowAdaptiveInfoV2()
 
 @Composable
 fun NavigationSuite(

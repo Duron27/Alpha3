@@ -49,7 +49,6 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
-import kotlinx.coroutines.delay
 import org.libsdl.app.SDLActivity.nativeCommitText
 import org.libsdl.app.SDLActivity.onNativeKeyDown
 import org.libsdl.app.SDLActivity.onNativeKeyUp
@@ -293,8 +292,7 @@ fun VirtualKeyboard() {
 
                             if (translationChecked) {
                                 TranslateText(
-                                    context = context,
-                                    inputText = char, // Pass modValue.value here
+                                    inputText = char,
                                     onTranslationResult = { result ->
                                         translatedText =
                                             result // Update the state with the translated text

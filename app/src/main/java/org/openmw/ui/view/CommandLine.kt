@@ -79,9 +79,7 @@ fun CommandLineInputScreen(context: Context) {
     LaunchedEffect(Unit) {
         envLine = GameFilesPreferences.getOrCreateDefaultENVLine(context)
         val initialArg = GameFilesPreferences.getPreference(context, GameFilesPreferences.ARG_LINE_KEY, "").first()
-        if (initialArg != null) {
-            argLine = initialArg
-        }
+        argLine = initialArg
     }
 
     Row(modifier = Modifier, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
