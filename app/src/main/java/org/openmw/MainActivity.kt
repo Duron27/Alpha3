@@ -20,7 +20,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -48,7 +47,6 @@ import org.openmw.ui.view.updateResolutionInConfig
 import org.openmw.utils.CaptureCrash
 import org.openmw.utils.ConfigFileObserver
 import org.openmw.utils.GameFilesPreferences
-import kotlinx.coroutines.flow.map
 import org.openmw.utils.MyAlertDialog
 import org.openmw.utils.UserManageAssets
 
@@ -121,13 +119,14 @@ class MainActivity : ComponentActivity() {
             setContent {
                 OpenMWTheme(darkTheme = true) {
                     Surface(modifier = Modifier.fillMaxSize()) {
-                        val hideSystemBarsFlow = remember { GameFilesPreferences.getPreference(this@MainActivity, GameFilesPreferences.HIDE_SYSTEM_BARS, false).map { !it } }
-                        val hideSystemBars by hideSystemBarsFlow.collectAsState(initial = false)
-                        val screenStayOnFlow = remember { GameFilesPreferences.getPreference(this@MainActivity, GameFilesPreferences.SCREEN_STAY_ON, false).map { !it } }
-                        val screenStayOn by screenStayOnFlow.collectAsState(initial = false)
+                        val hideSystemBars by GameFilesPreferences.getPreference(this@MainActivity, GameFilesPreferences.HIDE_SYSTEM_BARS, false).collectAsState(initial = false)
+                        val screenStayOn by GameFilesPreferences.getPreference(this@MainActivity, GameFilesPreferences.SCREEN_STAY_ON, false).collectAsState(initial = false)
 
-                        SideEffect {
+                        LaunchedEffect(hideSystemBars) {
                             if (hideSystemBars) hideSystemBars(this@MainActivity) else showSystemBars(this@MainActivity)
+                        }
+
+                        LaunchedEffect(screenStayOn) {
                             if (screenStayOn) enableScreenStayOn(this@MainActivity) else disableScreenStayOn(this@MainActivity)
                         }
 

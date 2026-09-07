@@ -20,6 +20,9 @@ import android.view.ViewTreeObserver
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.WindowManager
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import android.widget.FrameLayout
 import androidx.activity.compose.BackHandler
 import androidx.activity.enableEdgeToEdge
@@ -602,30 +605,17 @@ fun Buttons(context: Context, containerWidth: Float, containerHeight: Float) {
 }
 
 fun showSystemBars(activity: Activity) {
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-        activity.window.insetsController?.show(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
-    } else {
-        @Suppress("DEPRECATION")
-        activity.window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
-    }
+    val window = activity.window
+    WindowCompat.getInsetsController(window, window.decorView).show(
+        WindowInsetsCompat.Type.statusBars() or WindowInsetsCompat.Type.navigationBars()
+    )
 }
 
-
 fun hideSystemBars(activity: Activity) {
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-        activity.window.insetsController?.let {
-            it.hide(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
-            it.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-        }
-    } else {
-        @Suppress("DEPRECATION")
-        activity.window.decorView.systemUiVisibility = (
-                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-                        or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                        or View.SYSTEM_UI_FLAG_FULLSCREEN
-                        or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-                        or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                        or View.SYSTEM_UI_FLAG_LAYOUT_STABLE)
+    val window = activity.window
+    WindowCompat.getInsetsController(window, window.decorView).let { controller ->
+        controller.hide(WindowInsetsCompat.Type.statusBars() or WindowInsetsCompat.Type.navigationBars())
+        controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
     }
 }
 

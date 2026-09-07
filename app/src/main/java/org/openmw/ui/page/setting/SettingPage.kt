@@ -519,10 +519,8 @@ fun DevInsert() {
     val scope = rememberCoroutineScope()
     val bypassGameCheck by GameFilesPreferences.getPreference(context, GameFilesPreferences.BYPASS_GAME_FILES_KEY, false).collectAsState(initial = false)
     val avoidInsertion by GameFilesPreferences.getPreference(context, GameFilesPreferences.AVOID_RESOLUTION_INSERTION, false).collectAsState(initial = false)
-    val hideSystemBarsFlow = remember { GameFilesPreferences.getPreference(context, GameFilesPreferences.HIDE_SYSTEM_BARS, false).map { !it } }
-    val hideSystemBars by hideSystemBarsFlow.collectAsState(initial = true)
-    val screenStayOnFlow = remember { GameFilesPreferences.getPreference(context, GameFilesPreferences.SCREEN_STAY_ON, false).map { !it } }
-    val screenStayOn by screenStayOnFlow.collectAsState(initial = true)
+    val hideSystemBars by GameFilesPreferences.getPreference(context, GameFilesPreferences.HIDE_SYSTEM_BARS, false).collectAsState(initial = false)
+    val screenStayOn by GameFilesPreferences.getPreference(context, GameFilesPreferences.SCREEN_STAY_ON, false).collectAsState(initial = false)
     var showPopup by remember { mutableStateOf(false) }
     var showFileBrowser by remember { mutableStateOf(false) }
     var selectedInitialDirectory by remember { mutableStateOf<File?>(null) }
@@ -533,10 +531,10 @@ fun DevInsert() {
         }
         LogcatLevelSelector()
         SettingRow(title = "Show / Hide system bars") {
-            Switch(checked = hideSystemBars, onCheckedChange = { scope.launch { GameFilesPreferences.setPreference(context, GameFilesPreferences.HIDE_SYSTEM_BARS, !it) } })
+            Switch(checked = hideSystemBars, onCheckedChange = { isChecked -> scope.launch { GameFilesPreferences.setPreference(context, GameFilesPreferences.HIDE_SYSTEM_BARS, isChecked) } })
         }
         SettingRow(title = "Toggle screen stay on") {
-            Switch(checked = screenStayOn, onCheckedChange = { scope.launch { GameFilesPreferences.setPreference(context, GameFilesPreferences.SCREEN_STAY_ON, !it) } })
+            Switch(checked = screenStayOn, onCheckedChange = { isChecked -> scope.launch { GameFilesPreferences.setPreference(context, GameFilesPreferences.SCREEN_STAY_ON, isChecked) } })
         }
         SettingRow(title = stringResource(R.string.don_t_inject_resolution_settings_automatically), subtitle = stringResource(R.string.overwriting_resolution_settings_tip)) {
             Switch(checked = avoidInsertion, onCheckedChange = { scope.launch { GameFilesPreferences.setPreference(context, GameFilesPreferences.AVOID_RESOLUTION_INSERTION, it) } })
