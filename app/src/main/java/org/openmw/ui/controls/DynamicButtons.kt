@@ -505,8 +505,8 @@ fun ResizableDraggableButton(
                                             val sdlWidth = EngineActivity.resolutionX.toFloat()
                                             val sdlHeight = EngineActivity.resolutionY.toFloat()
 
-                                            var curX: Float = 0f
-                                            var curY: Float = 0f
+                                            var curX = 0f
+                                            var curY = 0f
 
                                             if (UIStateManager.tempCodeGroup == "OpenMW") {
                                                 val startX = SDLActivity.getMouseX().toFloat() * (containerWidth / sdlWidth)
@@ -516,7 +516,7 @@ fun ResizableDraggableButton(
                                             }
 
                                             var draggingStarted = false
-                                            var downFrom = 0L
+                                            var downFrom: Long
 
                                             while (true) {
                                                 val event = awaitPointerEvent()
@@ -614,7 +614,6 @@ fun ResizableDraggableButton(
                                         }
                                     }
                                 },
-
                             contentAlignment = Alignment.Center
                         ) {
                             if (painter != null) {

@@ -56,6 +56,7 @@ import java.net.URL
 import java.time.Instant
 import java.util.concurrent.TimeUnit
 import kotlin.math.absoluteValue
+import kotlin.time.Duration.Companion.milliseconds
 
 @OptIn(DelicateCoroutinesApi::class)
 fun processModList(context: Context, isPremium: Boolean): Flow<List<ModDesc>> = flow {
@@ -624,7 +625,7 @@ object ModListManager {
                 .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
                 .build()
 
-            val response = withTimeout(90_000) { // 90 seconds timeout
+            val response = withTimeout(90_000.milliseconds) { // 90 seconds timeout
                 client.newCall(request).execute().also { response ->
                     NexusInfo.apply {
                         hourlyremaining = response.header("x-rl-hourly-remaining")?.toIntOrNull() ?: hourlyremaining
@@ -685,7 +686,7 @@ class DownloadViewModel : ViewModel() {
         completedDownloads.add(modId)
         // Clean up after a short delay to show completion
         viewModelScope.launch {
-            delay(2000) // Wait 2 seconds before cleanup
+            delay(2000.milliseconds) // Wait 2 seconds before cleanup
             NexusInfo.downloadProgressMap.remove(modId)
             NexusInfo.downloadProgressPercentMap.remove(modId)
             NexusInfo.downloadSpeedMap.remove(modId)

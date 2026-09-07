@@ -2,6 +2,7 @@
 
 package org.openmw.ui.controls
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.util.Log
 import android.view.MotionEvent.ACTION_SCROLL
@@ -156,6 +157,7 @@ fun MouseIcon(
     }
 }
 
+@SuppressLint("DefaultLocale")
 @Composable
 fun ScrollWheelIndicator(
     context: Context,

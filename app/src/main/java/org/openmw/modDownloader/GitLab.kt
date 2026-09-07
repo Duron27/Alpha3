@@ -58,7 +58,7 @@ suspend fun fetchGitProjectId(mod: ModDesc, modDao: ModDao): String? = withConte
                         // Parse ISO 8601 date format: "2026-02-12T18:28:18.334Z"
                         val dateFormat = java.time.format.DateTimeFormatter.ISO_DATE_TIME
                         java.time.OffsetDateTime.parse(createdAt, dateFormat)
-                    } catch (e: Exception) {
+                    } catch (_: Exception) {
                         // Fallback to epoch if parsing fails
                         java.time.OffsetDateTime.MIN
                     }

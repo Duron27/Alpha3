@@ -103,7 +103,7 @@ object ButtonConfigManager {
                 }
                 try {
                     jsonFormat.decodeFromString<UIConfig>(jsonString)
-                } catch (e: Exception) {
+                } catch (_: Exception) {
                     // Backward compatibility: if it's a list, wrap it in UIConfig
                     try {
                         val buttons = jsonFormat.decodeFromString<List<ButtonConfig>>(jsonString)

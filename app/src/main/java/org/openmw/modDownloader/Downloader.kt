@@ -1,5 +1,6 @@
 package org.openmw.modDownloader
 
+import android.annotation.SuppressLint
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -39,6 +40,7 @@ fun getModStatus(modId: String): ModStatus {
     }
 }
 
+@SuppressLint("SimpleDateFormat")
 fun appendToDownloadLog(message: String) {
     try {
         val logFile = File("${Constants.USER_FILE_STORAGE}/OpenMW/Download_$modList.log")
