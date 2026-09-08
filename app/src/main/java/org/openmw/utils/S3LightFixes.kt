@@ -1,6 +1,6 @@
 package org.openmw.utils
 
-import android.content.Context
+import android.system.Os
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -15,17 +15,14 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextField
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -37,12 +34,31 @@ import org.openmw.Constants
 import org.openmw.R
 import org.openmw.ui.controls.UIStateManager.customColor
 import java.io.File
-import java.io.PrintWriter
-import java.io.StringWriter
+
+object S3LightFixesNative {
+    init {
+        System.loadLibrary("s3lightfixes")
+
+        // Set environment variables
+        val overrideFolder = File(Constants.USER_FILE_STORAGE, "OpenMW/Override")
+        val cfgFolder = File(Constants.USER_FILE_STORAGE, "config")
+
+        // Set all environment variables
+        Os.setenv("S3L_DEBUG", "1", true)
+        Os.setenv("S3L_NO_NOTIFICATIONS", "1", true)
+        Os.setenv("RUST_BACKTRACE", "full", true)
+        Os.setenv("OPENMW_OVERRIDE_DIR", overrideFolder.absolutePath, true)
+        Os.setenv("OPENMW_CONFIG", cfgFolder.absolutePath, true)
+        Os.setenv("USER_OPENMW_CFG", Constants.USER_OPENMW_CFG, true)
+        Os.setenv("OPENMW_CFG", Constants.OPENMW_CFG, true)
+    }
+
+    @Suppress("KotlinJniMissingFunction")
+    external fun run(): Int
+}
 
 @Composable
 fun S3LightFixes() {
-    val context = LocalContext.current
     var output by remember { mutableStateOf("") }
     val scrollState = rememberScrollState()
 
@@ -58,7 +74,7 @@ fun S3LightFixes() {
             Button(
                 onClick = {
                     CoroutineScope(Dispatchers.IO).launch {
-                        s3LightFixesCMD(context) { commandOutput ->
+                        runS3LightFixesDirect { commandOutput ->
                             withContext(Dispatchers.Main) {
                                 output = output.plus(commandOutput).plus("\n")
                             }
@@ -66,8 +82,8 @@ fun S3LightFixes() {
                     }
                 },
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = customColor, // Background color
-                    contentColor = Color.White   // Text color
+                    containerColor = customColor,
+                    contentColor = Color.White
                 )
             ) {
                 Text(stringResource(R.string.run_s3lightfixes))
@@ -92,84 +108,17 @@ fun S3LightFixes() {
     }
 }
 
-fun s3LightFixesCMD(context: Context, onOutputUpdate: suspend (String) -> Unit) {
-    val overrideFolder = File(Constants.USER_FILE_STORAGE, "OpenMW/Override")
-    val cfgFolder = File(Constants.USER_FILE_STORAGE, "config")
-    val commands = listOf(
-        "./libS3LightFixes.so -o $overrideFolder"
-    )
-    appendFallbackArchives(context)
-    CoroutineScope(Dispatchers.IO).launch {
-        // Execute each command sequentially with real-time updates
-        for (command in commands) {
-            shellExec2(context, command) { outputLine ->
-                withContext(Dispatchers.Main) {
-                    onOutputUpdate(outputLine)
-                }
-            }
-        }
-    }
-}
-
-suspend fun shellExec2(context: Context, cmd: String, onOutputUpdate: suspend (String) -> Unit): String {
-    val output = StringBuilder()
-    val workingDir = context.applicationInfo.nativeLibraryDir
-    val overrideFolder = File(Constants.USER_FILE_STORAGE, "OpenMW/Override")
-    val cfgFolder = File(Constants.USER_FILE_STORAGE, "config")
-
-    // Ensure there's at least one empty line at the bottom of Constants.USER_OPENMW_CFG
-    val userOpenMWCfgFile = File(Constants.USER_OPENMW_CFG)
-    if (userOpenMWCfgFile.exists()) {
-        val content = userOpenMWCfgFile.readText()
-        if (!content.endsWith("\n")) {
-            userOpenMWCfgFile.appendText("\n")
-        }
-    }
-
-    try {
-        val processBuilder = ProcessBuilder().apply {
-            directory(File(workingDir))
-            command("/system/bin/sh", "-c",
-                """
-            export S3L_DEBUG=1 S3L_NO_NOTIFICATIONS=1;
-            export RUST_BACKTRACE=full;            
-            export OPENMW_OVERRIDE_DIR=$overrideFolder;
-            export OPENMW_CONFIG=$cfgFolder;
-            export USER_OPENMW_CFG=${Constants.USER_OPENMW_CFG};
-            export OPENMW_CFG=${Constants.OPENMW_CFG};
-            $cmd
-            """.trimIndent())
-            redirectErrorStream(true)
-        }
-
-        val process = withContext(Dispatchers.IO) {
-            processBuilder.start()
-        }
-        val reader = process.inputStream.bufferedReader()
-
-        var line: String?
-        while (withContext(Dispatchers.IO) {
-                reader.readLine()
-            }.also { line = it } != null) {
+suspend fun runS3LightFixesDirect(onOutputUpdate: suspend (String) -> Unit) {
+    withContext(Dispatchers.IO) {
+        try {
+            val result = S3LightFixesNative.run()
             withContext(Dispatchers.Main) {
-                onOutputUpdate(line ?: "")
+                onOutputUpdate("S3LightFixes Finished: $result")
             }
-            output.append(line).append("\n")
+        } catch (e: Exception) {
+            withContext(Dispatchers.Main) {
+                onOutputUpdate("Error: ${e.message}")
+            }
         }
-
-        withContext(Dispatchers.IO) {
-            process.waitFor()
-        }
-    } catch (e: Exception) {
-        val sw = StringWriter()
-        val pw = PrintWriter(sw)
-        e.printStackTrace(pw)
-        val errorOutput = "Error executing command: ${e.message}\nStacktrace:\n$sw"
-        withContext(Dispatchers.Main) {
-            onOutputUpdate(errorOutput)
-        }
-        output.append(errorOutput)
     }
-
-    return output.toString()
 }

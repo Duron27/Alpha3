@@ -918,13 +918,15 @@ ExternalProject_Add(openmw
 add_custom_target(copy_final ALL
     DEPENDS openmw dethrace uqm
 
-    #Copy extras
-    COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/openmw/extras/ ${jni_libs_dir}/
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/Libraries/ ${jni_libs_dir}/
 
     # Copy Rust binaries renamed to .so
-    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:s3lightfixes> ${jni_libs_dir}/libs3lightfixes.so
+    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:s3lightfixes-shared> ${jni_libs_dir}/libs3lightfixes.so
     COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:delta_plugin> ${jni_libs_dir}/libdelta_plugin.so
+
+    # Copy ANGLE binaries
+#    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:libEGL> ${jni_libs_dir}/libEGL.so
+#    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:libGLESv2> ${jni_libs_dir}/libGLESv2.so
 
     #Final Copy of assets
     COMMAND ${CMAKE_COMMAND} -E copy ${PROJECT_ROOT}/settings.fallback.cfg ${GENERATED_ASSETS_DIR}/libopenmw/openmw/
