@@ -28,12 +28,16 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.openmw.Constants
 import org.openmw.R
 import org.openmw.ui.controls.UIStateManager.customColor
+import java.io.BufferedReader
 import java.io.File
+import java.io.InputStreamReader
+import kotlin.time.Duration.Companion.milliseconds
 
 object S3LightFixesNative {
     init {
@@ -110,12 +114,41 @@ fun S3LightFixes() {
 
 suspend fun runS3LightFixesDirect(onOutputUpdate: suspend (String) -> Unit) {
     withContext(Dispatchers.IO) {
+        val logcatJob = launch {
+            try {
+                val process = Runtime.getRuntime().exec(arrayOf(
+                    "logcat",
+                    "-s",
+                    "s3lightfixes:I"
+                ))
+                val reader = BufferedReader(InputStreamReader(process.inputStream))
+
+                var line: String?
+                while (reader.readLine().also { line = it } != null) {
+                    line?.let { logLine ->
+                        val message = logLine.replace(Regex("""\w/s3lightfixes\(\d+\):\s*"""), "")
+                        if (message.isNotBlank()) {
+                            withContext(Dispatchers.Main) {
+                                onOutputUpdate(message)
+                            }
+                        }
+                    }
+                }
+            } catch (_: Exception) {
+                // Logcat reading failed, but we'll still show the result
+            }
+        }
+
         try {
             val result = S3LightFixesNative.run()
+            delay(300.milliseconds)
+            logcatJob.cancel()
+
             withContext(Dispatchers.Main) {
                 onOutputUpdate("S3LightFixes Finished: $result")
             }
         } catch (e: Exception) {
+            logcatJob.cancel()
             withContext(Dispatchers.Main) {
                 onOutputUpdate("Error: ${e.message}")
             }
