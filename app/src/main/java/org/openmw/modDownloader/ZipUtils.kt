@@ -8,7 +8,6 @@ import net.sf.sevenzipjbinding.ArchiveFormat
 import net.sf.sevenzipjbinding.ExtractAskMode
 import net.sf.sevenzipjbinding.ExtractOperationResult
 import net.sf.sevenzipjbinding.IArchiveExtractCallback
-import net.sf.sevenzipjbinding.ICryptoGetTextPassword
 import net.sf.sevenzipjbinding.IInArchive
 import net.sf.sevenzipjbinding.ISequentialOutStream
 import net.sf.sevenzipjbinding.PropID
@@ -98,19 +97,19 @@ suspend fun extractModFile(mod: ModDesc, info: DownloadInfo) {
                         extractionProgressMap[mod.slug] = "Extracting ${mod.name} ($num files)"
                     }
 
-                    override fun onProgressUpdate(item: String, fileSize: Long) {
+                    override fun onProgressUpdate(fileName: String, fileSize: Long) {
                         processedFiles++
                         val progressPercent = if (totalFiles > 0) (processedFiles * 100f) / totalFiles else 0f
-                        extractionProgressMap[mod.slug] = "Extracting ${mod.name}: $item"
+                        extractionProgressMap[mod.slug] = "Extracting ${mod.name}: $fileName"
                         extractionProgressPercentMap[mod.slug] = progressPercent
                     }
 
-                    override fun onError(message: String) {
-                        extractionProgressMap[mod.slug] = "Extraction error for ${mod.name}: $message"
+                    override fun onError(error: String) {
+                        extractionProgressMap[mod.slug] = "Extraction error for ${mod.name}: $error"
                         extractionProgressPercentMap[mod.slug] = 0f
                         Log.e(
                             "ProcessModList",
-                            "Extraction error for ${mod.slug}: $message"
+                            "Extraction error for ${mod.slug}: $error"
                         )
                     }
 

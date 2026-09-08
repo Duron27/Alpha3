@@ -51,7 +51,7 @@ class ModAssistantViewModel @Inject constructor(
 
     val newFeatureEnabledChecked = GameFilesPreferences.getPreference(app, GameFilesPreferences.NEW_FEATURE_ENABLED_KEY, false)
 
-
+    /*
     suspend fun pathCorrector(): Map<String, String> {
         val configFilePath = Constants.USER_OPENMW_CFG
         val configFile = File(configFilePath)
@@ -74,10 +74,11 @@ class ModAssistantViewModel @Inject constructor(
                 }
             }
         }
-
         return results
     }
+    */
 
+    /*
     fun applyChanges(changes: Map<String, String>) {
         val configFilePath = Constants.USER_OPENMW_CFG
         val configFile = File(configFilePath)
@@ -89,6 +90,7 @@ class ModAssistantViewModel @Inject constructor(
 
         configFile.writeText(updatedLines.joinToString("\n"))
     }
+     */
 
     fun searchFile(directory: File, fileName: String): String? {
         directory.listFiles()?.forEach { file ->
@@ -106,6 +108,7 @@ class ModAssistantViewModel @Inject constructor(
         return null
     }
 
+    /*
     suspend fun startSearch(updateStatus: (String) -> Unit): List<String> {
         val basePath = Environment.getExternalStorageDirectory().toString()
         val baseDirectory = File(basePath)
@@ -118,6 +121,7 @@ class ModAssistantViewModel @Inject constructor(
         }
         return results
     }
+     */
 
     suspend fun searchFiles(directory: File, extensions: Array<String>, results: MutableList<String>, updateStatus: (String) -> Unit, filterList: List<String>) {
         directory.listFiles()?.forEach { file ->
@@ -136,6 +140,7 @@ class ModAssistantViewModel @Inject constructor(
         }
     }
 
+    /*
     fun updateConfigFile(files: List<String>) {
         val configFilePath = Constants.USER_OPENMW_CFG
         val configFile = File(configFilePath)
@@ -178,7 +183,9 @@ class ModAssistantViewModel @Inject constructor(
         configFile.writeText(newLines.joinToString("\n"))
     }
 
-    fun modPathSelection(context: Context, directory: File, onPathPersisted: (String?) -> Unit) {
+     */
+
+    fun modPathSelection(directory: File, onPathPersisted: (String?) -> Unit) {
         try {
             CoroutineScope(Dispatchers.IO).launch {
                 val ignoreList = listOf("Morrowind.bsa", "Tribunal.bsa", "Bloodmoon.bsa")
@@ -308,6 +315,7 @@ class ModAssistantViewModel @Inject constructor(
      * Finds the start and end line numbers of a given category in the file.
      * Returns a Pair<Int, Int> (startLine, endLine), or null if not found.
      */
+    /*
     private fun findCategoryBounds(file: File, category: String): Pair<Int, Int>? {
         val lines = file.readLines()
         var start = -1
@@ -326,6 +334,7 @@ class ModAssistantViewModel @Inject constructor(
 
         return if (start != -1) Pair(start, end) else null
     }
+     */
 
     /**
      * save list to openmw.cfg

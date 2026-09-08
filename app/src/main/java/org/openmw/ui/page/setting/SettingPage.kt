@@ -739,6 +739,7 @@ fun LogcatLevelSelector() {
     }
 }
 
+@SuppressLint("MutableCollectionMutableState")
 @Composable
 fun DataStoreContentPopup(context: Context, onDismiss: () -> Unit) {
     val scope = rememberCoroutineScope()

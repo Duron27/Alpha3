@@ -31,9 +31,7 @@ import org.openmw.utils.stringRes
 
 @OptIn(ExperimentalMaterial3Api::class, InternalCoroutinesApi::class)
 @Composable
-fun MainScreen(
-    modifier: Modifier = Modifier,
-) {
+fun MainScreen() {
     val navController = rememberNavController()
     val currentBackStack by navController.currentBackStackEntryAsState()
     val currentDestination = currentBackStack?.destination
@@ -49,7 +47,7 @@ fun MainScreen(
             navigationDrawerContainerColor = transparentBlack
         ),
         navigationSuiteItems = {
-            MainPageDestination.entries.forEachIndexed { index, it ->
+            MainPageDestination.entries.forEachIndexed { _, it ->
                 item(
                     selected = it == currentScreen,
                     icon = {

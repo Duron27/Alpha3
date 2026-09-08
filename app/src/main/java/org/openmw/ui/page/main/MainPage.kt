@@ -1,9 +1,6 @@
 package org.openmw.ui.page.main
 
 import android.annotation.SuppressLint
-import android.content.Context
-import android.content.Intent
-import android.util.Log
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
@@ -54,7 +51,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -65,20 +61,17 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.hilt.navigation.compose.hiltViewModel
-import kotlinx.coroutines.CoroutineScope
+import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import kotlinx.coroutines.DelicateCoroutinesApi
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.launch
-import org.openmw.EngineActivity
 import org.openmw.R
 import org.openmw.ui.controls.UIStateManager
 import org.openmw.ui.controls.UIStateManager.customCFG
@@ -99,7 +92,6 @@ import org.openmw.utils.UqmDownloads
 import org.openmw.utils.getLayoutType
 import org.openmw.utils.stringRes
 import org.openmw.utils.updateConsoleOutput
-import java.io.File
 import kotlin.math.roundToInt
 
 @InternalCoroutinesApi
@@ -114,8 +106,7 @@ fun MainPage(
     val modValues by lazy { readModValues() }
     val context = LocalContext.current
     val density = LocalDensity.current
-    val screenHeight = LocalConfiguration.current.screenHeightDp.dp
-    val screenHeightPx = with(density) { screenHeight.toPx() }
+    val screenHeightPx = LocalWindowInfo.current.containerSize.height.toFloat()
 
     // Drag state for the logs overlay
     val offsetY = remember { Animatable(0f) }

@@ -89,7 +89,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
 import coil.compose.rememberAsyncImagePainter
-import coil.compose.rememberImagePainter
 import coil.decode.GifDecoder
 import coil.decode.ImageDecoderDecoder
 import coil.request.ImageRequest
@@ -103,7 +102,6 @@ import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import org.libsdl.app.SDLActivity
-import org.libsdl.app.SDLActivity.isMouseShown
 import org.libsdl.app.SDLActivity.onNativeKeyDown
 import org.libsdl.app.SDLActivity.onNativeKeyUp
 import org.openmw.EngineActivity
@@ -116,14 +114,11 @@ import org.openmw.ui.controls.UIStateManager.highlightStep
 import org.openmw.ui.controls.UIStateManager.isCursorVisible
 import org.openmw.ui.controls.UIStateManager.updateButtonState
 import org.openmw.ui.overlay.getAnimations
+import org.openmw.ui.view.vibrate
 import org.openmw.utils.ColorPickerWheel
 import org.openmw.utils.CustomIconPickerButton
 import org.openmw.utils.GameFilesPreferences
-import kotlinx.coroutines.flow.map
-import org.openmw.ui.view.currentDeviceRealSize
 import org.openmw.utils.fromHex
-import org.openmw.ui.view.vibrate
-import kotlin.collections.joinToString
 import kotlin.math.roundToInt
 
 private const val TAG = "ButtonInput"
@@ -593,7 +588,7 @@ fun ResizableDraggableButton(
                                                             }
                                                         } else {
                                                             if (!draggingStarted) {
-                                                                // No action required
+                                                                Log.i("DynamicButtons", "!draggingStarted line 591, this is just for info and means nothing.")
                                                             }
                                                             draggingStarted = false
                                                             break
@@ -1351,7 +1346,7 @@ fun keyCodeToChar(keyCode: Int): String {
 
         // ────── Letters A-Z (fallback) ──────
         else -> {
-            // Handles KEYCODE_A .. KEYCODE_Z automatically
+            // Handles KEYCODE_A / KEYCODE_Z automatically
             if (keyCode in KeyEvent.KEYCODE_A..KeyEvent.KEYCODE_Z) {
                 (keyCode - KeyEvent.KEYCODE_A + 'A'.code).toChar().toString()
             } else {

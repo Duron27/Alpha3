@@ -1,3 +1,5 @@
+@file:Suppress("DEPRECATION")
+
 package org.openmw.ui.overlay
 
 import android.annotation.SuppressLint
@@ -152,6 +154,7 @@ import org.openmw.utils.sendKeyEvent
 import org.openmw.utils.stringRes
 import org.openmw.utils.updateConsoleOutput
 import kotlin.math.roundToInt
+import kotlin.time.Duration.Companion.milliseconds
 
 data class MemoryInfo(
     val totalMemory: String,
@@ -246,7 +249,7 @@ fun OverlayUI(
     LaunchedEffect(UIStateManager.isBatteryStatusEnabled) {
         while (UIStateManager.isBatteryStatusEnabled) {
             UIStateManager.batteryStatus = getBatteryStatus(context)
-            delay(2000)
+            delay(2000.milliseconds)
         }
         UIStateManager.batteryStatus = ""
     }
@@ -334,7 +337,7 @@ fun OverlayUI(
 
                     LaunchedEffect(Unit) {
                         while (countdown > 0) {
-                            delay(1000L)
+                            delay(1000L.milliseconds)
                             countdown -= 1
                         }
                         GameFilesPreferences.setPreference(context, GameFilesPreferences.WHATS_NEW_KEY, false)
@@ -1333,7 +1336,9 @@ fun WebViewComponent(onClose: () -> Unit) {
                                     mediaPlaybackRequiresUserGesture = false
                                 }
 
-                                webViewClient = object : WebViewClient() {
+                                webViewClient = @SuppressLint("MissingOnRenderProcessGone", "WebViewClientOnReceivedSslError")
+                                object : WebViewClient() {
+                                    @SuppressLint("WebViewClientOnReceivedSslError")
                                     override fun onReceivedSslError(
                                         view: WebView?,
                                         handler: SslErrorHandler?,

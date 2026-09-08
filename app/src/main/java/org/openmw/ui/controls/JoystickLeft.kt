@@ -3,9 +3,6 @@ package org.openmw.ui.controls
 import android.util.Log
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -24,6 +21,7 @@ import androidx.compose.ui.unit.dp
 import org.libsdl.app.SDLControllerManager
 import kotlin.math.abs
 
+/*
 @Composable
 fun GamepadEmulatorScreen() {
     val deviceId = remember { 1384510555 }
@@ -85,8 +83,8 @@ fun GamepadEmulatorScreen() {
             onUpdateStick = ::updateStick
         )
     }
-
 }
+ */
 
 @Composable
 fun Joystick(

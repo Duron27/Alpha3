@@ -76,11 +76,6 @@ object ButtonConfigManager {
         }
     }
 
-    fun saveButtons(allConfigs: List<ButtonConfig>) {
-        val currentConfig = loadConfig()
-        saveConfig(currentConfig.copy(buttons = allConfigs))
-    }
-
     fun updateMultipleButtonsByTypes(types: List<String>, newConfigs: List<ButtonConfig>) {
         val currentConfig = loadConfig()
         val allButtons = currentConfig.buttons.toMutableList()

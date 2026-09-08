@@ -17,7 +17,6 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import org.openmw.modDownloader.StatusInfo.processing
 import org.openmw.ui.MainScreen
-import org.openmw.ui.controls.UIStateManager.configureControls
 import org.openmw.ui.view.BackgroundAnimation
 
 enum class RootDesc(

@@ -91,6 +91,7 @@ import com.composables.core.Thumb
 import com.composables.core.ThumbVisibility
 import com.composables.core.VerticalScrollbar
 import com.composables.core.rememberScrollAreaState
+import com.composeunstyled.rememberScrollAreaState
 import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.InternalCoroutinesApi
@@ -145,7 +146,6 @@ private fun ModTabRow(
     var showDialogSettings by viewModel.showDialogSettings
     var showSearchDialog by viewModel.showSearchDialog
     var launchFloatingActionButton by viewModel.launchFloatingActionButton
-    var showFileBrowser by viewModel.showFileBrowser
 
     val newFeatureEnabledChecked by viewModel.newFeatureEnabledChecked.collectAsState(initial = false)
 
@@ -280,16 +280,8 @@ fun ModValuesList(
     var selectedCategory by remember { mutableStateOf<String?>(null) }
     var selectedIndex by remember { mutableIntStateOf(0) }
     var searchQuery by remember { mutableStateOf("") }
-    var showDialogPC by remember { mutableStateOf(false) }
     var searchResults by remember { mutableStateOf(emptyList<ModValue>()) }
-    var searchInProgress by remember { mutableStateOf(false) }
-    var pathCorrectorInProgress by remember { mutableStateOf(false) }
-    var statusMessage by remember { mutableStateOf("Status") }
-    var changes by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
-    val foundFiles = remember { mutableStateListOf<String>() }
-    /*val orientation = LocalConfiguration.current.orientation
-    val newModValues by lazy { readModValues() }*/
-    val stateSB = rememberScrollAreaState(lazyListState)
+    val stateSB = com.composeunstyled.rememberScrollAreaState(lazyListState)
     var expanded by remember { mutableStateOf(false) }
     var showDialog by remember { mutableStateOf(false) }
     val settingsFile = File(SETTINGS_FILE)
@@ -300,7 +292,6 @@ fun ModValuesList(
     var showMods by viewModel.showMods
     var showNav by viewModel.showNav
     var showDelta by viewModel.showDelta
-    var autoMods by viewModel.autoMods
     var downloader by viewModel.downloader
     var s3LightsDialog by viewModel.s3LightsDialog
     var terminal by viewModel.terminal
@@ -328,7 +319,7 @@ fun ModValuesList(
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
                 if (intent?.action == "org.openmw.ACTION_INI_IMPORT_FINISHED") {
-                    savedPath?.let { path ->
+                    savedPath?.let { _ ->
                         categorizedModValues = ModValue.updateUIFromModValues(categories.map { it.key })
                     }
                 }
@@ -408,7 +399,7 @@ fun ModValuesList(
             FileBrowserPopup(
                 onDismiss = { showFileBrowser = false },
                 onFolderSelected = { folder ->
-                    viewModel.modPathSelection(context, folder) { modPath ->
+                    viewModel.modPathSelection(folder) { modPath ->
                         selectedModPath = modPath
                         Log.d("Add_Data", "Add_Data: $modPath")
                     }

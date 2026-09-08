@@ -193,7 +193,7 @@ fun ScrollWheelIndicator(
         val snapX = remember { mutableStateOf<Float?>(null) }
         val snapY = remember { mutableStateOf<Float?>(null) }
         val buttonUri = remember { mutableStateOf(state.uri) } // Handling URI state
-        val buttonTint = remember { mutableStateOf(state.buttonTint ?: true) }
+        val buttonTint = remember { mutableStateOf(state.buttonTint) }
         var hexCode by remember { mutableStateOf(state.color) } // Set initial hex code directly from state
         var buttonColor by remember { mutableStateOf(Color.fromHex(hexCode)) }
         var buttonAlpha by remember { mutableFloatStateOf(state.alpha) }
@@ -475,7 +475,7 @@ fun ScrollWheelIndicator(
                                                             change.consume()
                                                             offset = IntOffset(
                                                                 offset.x + dragAmount.x.roundToInt(),
-                                                                offset.y // + dragAmount.y.roundToInt()
+                                                                offset.y
                                                             )
                                                         }
                                                     }

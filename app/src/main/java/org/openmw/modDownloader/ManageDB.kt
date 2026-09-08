@@ -165,19 +165,11 @@ interface ModDao {
     @Transaction
     suspend fun replaceAllMods(mods: List<ModDesc>) {
         clearAllMods()
-        _insertAll(mods)
+        insertAll(mods)
     }
 
     @Query("SELECT * FROM mods WHERE slug IN (:slugs)")
     suspend fun getModsBySlugs(slugs: List<String>): List<ModDesc>
-
-    private fun deduplicateDownloadInfo(list: List<DownloadInfo>): List<DownloadInfo> {
-        return list.distinctBy { info ->
-            // Create a unique key that includes ALL fields
-            "${info.fileName}|${info.nexusFileId}|${info.directDownload}|${info.extractTo}|${info.fileSize}|${info.sourceLists.sorted().joinToString()}"
-        }
-    }
-
 
     @Transaction
     suspend fun insertOrAppendMods(mods: List<ModDesc>, currentList: String, context: Context) {
@@ -324,12 +316,10 @@ interface ModDao {
     suspend fun getAllModSlugs(): List<String>
 
     @Insert(onConflict = OnConflictStrategy.IGNORE)
-    suspend fun _insertAll(mods: List<ModDesc>): List<Long>
+    suspend fun insertAll(mods: List<ModDesc>): List<Long>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertOrUpdateMod(mod: ModDesc)
-
-    data class InsertResult(val insertedCount: Int, val duplicateCount: Int)
 
     @Query("SELECT * FROM mods WHERE tags LIKE '%' || :tag || '%' ORDER BY name COLLATE NOCASE ASC")
     suspend fun getModsByTag(tag: String): List<ModDesc>
@@ -382,22 +372,6 @@ class Converters {
 
     @TypeConverter
     fun toDownloadInfoList(value: String): List<DownloadInfo> {
-        return Json.decodeFromString(value)
-    }
-
-    @TypeConverter
-    fun fromActionList(value: List<Action>): String = json.encodeToString(value)
-
-    @TypeConverter
-    fun toActionList(value: String): List<Action> = json.decodeFromString(value)
-
-    @TypeConverter
-    fun fromDownloadInfoVersionList(value: List<DownloadInfo.Version>): String {
-        return Json.encodeToString(value)
-    }
-
-    @TypeConverter
-    fun toDownloadInfoVersionList(value: String): List<DownloadInfo.Version> {
         return Json.decodeFromString(value)
     }
 }
@@ -481,19 +455,6 @@ object ActionSerializer : JsonContentPolymorphicSerializer<Action>(Action::class
             "copy" -> Action.CopyAction.serializer()
             "rename" -> Action.RenameAction.serializer()
             else -> throw SerializationException("Unknown action type: $actionType")
-        }
-    }
-}
-// Function to update specific fields for a mod by modId
-suspend fun updateModById(context: Context, modId: String, updateBlock: (ModDesc) -> ModDesc) {
-    withContext(Dispatchers.IO) {
-        val modDao = ModDatabase.getDatabase(context).modDao()
-        val mod = modDao.getModById(modId)
-        if (mod != null) {
-            val updatedMod = updateBlock(mod)
-            modDao.updateMod(updatedMod)
-        } else {
-            Log.w("ModListManager", "Mod with modId $modId not found")
         }
     }
 }
@@ -1442,22 +1403,6 @@ fun ModItem(mod: ModDesc, onDelete: () -> Unit, modDao: ModDao) {
             }
         }
     }
-}
-
-@Composable
-private fun ActionItem(action: Action) {
-    val actionText = when (action) {
-        is Action.CopyAction -> "Copy: ${action.source} → ${action.destination}"
-        is Action.RenameAction -> "Rename: ${action.oldName} → ${action.newName}"
-        is Action.RemoveAction -> "Remove: ${action.path}"
-        is Action.CleanAction -> "Clean: ${action.path}"
-    }
-
-    Text(
-        text = "• $actionText",
-        style = MaterialTheme.typography.bodySmall,
-        modifier = Modifier.padding(start = 8.dp)
-    )
 }
 
 @Composable

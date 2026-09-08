@@ -34,6 +34,7 @@ import org.openmw.utils.stringRes
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
+import kotlin.time.Duration.Companion.milliseconds
 
 enum class TaskResult { SUCCESS, FAILED, SKIPPED_SMALL, SKIPPED_EXISTS }
 
@@ -139,6 +140,7 @@ fun KramConversion(context: Context) {
     Scaffold { innerPadding ->
         Column(
             modifier = Modifier
+                .padding(innerPadding)
                 .padding(6.dp)
                 .fillMaxSize()
         ) {
@@ -204,10 +206,7 @@ fun KramConversion(context: Context) {
                 modifier = Modifier.weight(1f),
                 state = conversionState,
                 logs = logMessages,
-                currentProgress = currentProgress,
-                onAddLog = { message ->
-                    logMessages = logMessages + message
-                }
+                currentProgress = currentProgress
             )
         }
     }
@@ -342,7 +341,7 @@ object MemoryInfoManager {
                 _memoryInfoFlow.value = """
                     ${stringRes(R.string.total_used_memory)}: ${memoryInfo.usedMemory} / ${memoryInfo.totalMemory}
                 """.trimIndent()
-                delay(1000)
+                delay(1000.milliseconds)
             }
         }
     }
@@ -353,8 +352,7 @@ fun ConversionStatusSection(
     modifier: Modifier = Modifier,
     state: ConversionState,
     logs: List<LogMessage>,
-    currentProgress: String,
-    onAddLog: (LogMessage) -> Unit
+    currentProgress: String
 ) {
     val listState = rememberLazyListState()
     val limitedLogs = remember(logs) {
@@ -609,7 +607,7 @@ class TextureProcessor {
         onLog: (LogMessage) -> Unit
     ): Boolean {
         return try {
-            val tempKtx = File(context.cacheDir, "temp_${System.currentTimeMillis()}.ktx")
+            //val tempKtx = File(context.cacheDir, "temp_${System.currentTimeMillis()}.ktx")
             val finalOutputFile = File(file.parent, "${file.nameWithoutExtension}.ktx")
             val intermediateKtx = File(file.parent, "${file.name}.ktx")
 
@@ -680,7 +678,7 @@ class TextureProcessor {
             } else {
                 false
             }
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             false
         }
     }

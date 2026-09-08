@@ -206,7 +206,7 @@ fun SSOHome() {
     val modDao = ModDatabase.getDatabase(context).modDao()
     var settings by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
-    val _mods = remember { MutableStateFlow<List<ModDesc>>(emptyList()) }
+    val mods = remember { MutableStateFlow<List<ModDesc>>(emptyList()) }
     var currentTabIndex by rememberSaveable { mutableIntStateOf(0) }
     var showInitiatingDialog by rememberSaveable { mutableStateOf(false) }
     val webViewTabs by NexusInfo.webViewTabsFlow.collectAsState(initial = emptyList())
@@ -283,7 +283,7 @@ fun SSOHome() {
 
     LaunchedEffect(Unit) {
         launch(Dispatchers.Default) {
-            _mods.value = ModListManager.downloadAndParseModList(context)
+            mods.value = ModListManager.downloadAndParseModList(context)
 
             val potiFile = File("${Constants.USER_FILE_STORAGE}/OpenMW/POTI.modlist")
             if (potiFile.exists()) {

@@ -1,13 +1,19 @@
+@file:Suppress("DEPRECATION")
+@file:SuppressLint("MissingOnRenderProcessGone", "WebViewClientOnReceivedSslError")
+
 package org.openmw.modDownloader
 
 import android.annotation.SuppressLint
 import android.graphics.Bitmap
-import android.net.Uri
+import android.net.http.SslError
 import android.util.Log
 import android.view.View
 import android.webkit.CookieManager
+import android.webkit.RenderProcessGoneDetail
+import android.webkit.SslErrorHandler
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
+import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.foundation.background
@@ -17,13 +23,14 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material.LinearProgressIndicator
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.ScrollableTabRow
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.ProgressIndicatorDefaults
+import androidx.compose.material3.SecondaryScrollableTabRow
 import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -57,6 +64,7 @@ import java.io.FileOutputStream
 import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import androidx.core.net.toUri
 
 @SuppressLint("JavascriptInterface", "SetJavaScriptEnabled")
 @Composable
@@ -76,7 +84,6 @@ fun WebViewScreen(
 
     val modId = currentTab?.id
     val fileName = currentTab?.fileName
-    val url = currentTab?.url
 
     LaunchedEffect(currentTabIndex, tabs) {
         if (tabs.isNotEmpty() && currentTabIndex in tabs.indices) {
@@ -176,15 +183,20 @@ fun WebViewScreen(
 
                     // Progress bar for download or extraction
                     LinearProgressIndicator(
-                        progress = if (isDownloading) {
+                    progress = {
+                        if (isDownloading) {
                             (NexusInfo.downloadProgressPercentMap[modId] ?: 0) / 100f
                         } else {
                             (extractionProgressPercentMap[modId] ?: 0f) / 100f
-                        },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(4.dp)
-                            .padding(horizontal = 8.dp)
+                        }
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(4.dp)
+                        .padding(horizontal = 8.dp),
+                    color = ProgressIndicatorDefaults.linearColor,
+                    trackColor = ProgressIndicatorDefaults.linearTrackColor,
+                    strokeCap = ProgressIndicatorDefaults.LinearStrokeCap,
                     )
                 }
             }
@@ -199,21 +211,22 @@ fun WebViewScreen(
                     Icon(Icons.Default.Close, contentDescription = "Close Tab")
                 }
                 if (tabs.size > 1) {
-                    ScrollableTabRow(
+                    SecondaryScrollableTabRow(
                         selectedTabIndex = currentTabIndex,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .background(gold),
+                        modifier = Modifier.fillMaxWidth(),
+                        containerColor = gold,
+                        contentColor = Color.White,
                         edgePadding = 0.dp,
                         divider = {}
                     ) {
                         tabs.forEachIndexed { index, tab ->
+                            val tabTitle = tab.fileName.ifEmpty { "Tab ${index + 1}" }
                             Tab(
                                 selected = currentTabIndex == index,
                                 onClick = { onTabChange(index) },
                                 text = {
                                     Text(
-                                        text = "Tab ${index + 1}",
+                                        text = tabTitle,
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis,
                                         color = Color.White
@@ -237,11 +250,13 @@ fun WebViewScreen(
             key(tabs.hashCode(), currentTabIndex) {
                 AndroidView(
                     factory = { context ->
+                        @Suppress("DEPRECATION")
                         WebView(context).apply {
                             setLayerType(View.LAYER_TYPE_HARDWARE, null)
                             settings.apply {
                                 javaScriptEnabled = true
                                 domStorageEnabled = true
+                                databaseEnabled = true
                                 setSupportZoom(true)
                                 builtInZoomControls = true
                                 displayZoomControls = false
@@ -249,6 +264,23 @@ fun WebViewScreen(
                                 loadWithOverviewMode = true
                                 allowContentAccess = true
                                 allowFileAccess = true
+                                javaScriptCanOpenWindowsAutomatically = true
+                                setSupportMultipleWindows(true)
+
+                                allowFileAccessFromFileURLs = true
+                                allowUniversalAccessFromFileURLs = true
+
+                                safeBrowsingEnabled = false
+                                setGeolocationEnabled(true)
+
+                                userAgentString =
+                                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+
+                                mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                                cacheMode = WebSettings.LOAD_DEFAULT
+
+                                loadsImagesAutomatically = true
+                                mediaPlaybackRequiresUserGesture = false
                             }
 
                             webChromeClient = object : WebChromeClient() {
@@ -274,12 +306,28 @@ fun WebViewScreen(
                                     view: WebView?,
                                     request: WebResourceRequest?
                                 ): Boolean {
-                                    view?.loadUrl(request?.url.toString())
+                                    return false
+                                }
+
+                                @SuppressLint("WebViewClientOnReceivedSslError")
+                                override fun onReceivedSslError(
+                                    view: WebView?,
+                                    handler: SslErrorHandler?,
+                                    error: SslError?
+                                ) {
+                                    handler?.proceed()
+                                }
+
+                                @SuppressLint("MissingOnRenderProcessGone")
+                                override fun onRenderProcessGone(
+                                    view: WebView?,
+                                    detail: RenderProcessGoneDetail?
+                                ): Boolean {
                                     return true
                                 }
                             }
 
-                            setDownloadListener { url, userAgent, contentDisposition, mimetype, contentLength ->
+                            setDownloadListener { url, _, _, _, _ ->
 
                                 Log.d(
                                     "WebViewScreen",
@@ -292,13 +340,6 @@ fun WebViewScreen(
                                         ?: tabs.getOrNull(currentTabIndex)
 
                                 if (tabToClose != null) {
-                                    // Update the tab with the filename if not already set
-                                    if (tabToClose.fileName == null) {
-                                        CoroutineScope(Dispatchers.Default).launch {
-                                            NexusInfo.updateTabFileName(tabToClose.id, "$fileName")
-                                        }
-                                    }
-
                                     Log.d(
                                         "WebViewScreen",
                                         "Closing tab with ID: ${tabToClose.id} for file: $fileName"
@@ -431,7 +472,7 @@ fun WebViewScreen(
 
 fun extractModIdFromUrl(url: String): String? {
     return try {
-        val uri = Uri.parse(url)
+        val uri = url.toUri()
         val pathSegments = uri.pathSegments
         // URL format: https://www.nexusmods.com/morrowind/mods/<modId>?tab=files&file_id=<nexusFileId>
         // pathSegments: ["morrowind", "mods", "<modId>"]

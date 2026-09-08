@@ -29,7 +29,6 @@ import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.time.temporal.ChronoUnit
 import java.util.UUID
-import java.util.regex.Pattern
 import kotlin.collections.isNotEmpty
 
 data class WebTab(
@@ -258,7 +257,6 @@ suspend fun getFileIds(mod: ModDesc): List<DownloadInfo> = withContext(Dispatche
         }
 
         val targetFileName = downloadInfo.fileName ?: return@map downloadInfo
-        downloadInfo.copy(versions = allFileVersions)
 
         var selectedFileId: String? = null
         var selectedFileName: String? = null
@@ -310,6 +308,7 @@ suspend fun getFileIds(mod: ModDesc): List<DownloadInfo> = withContext(Dispatche
     }
 }
 
+/*
 // Function to get archived Nexus file IDs
 suspend fun getArchivedNexusFileIds(modId: String): List<String>? {
     val searchUrl = "https://www.nexusmods.com/morrowind/mods/$modId?tab=files"
@@ -328,6 +327,7 @@ suspend fun getArchivedNexusFileIds(modId: String): List<String>? {
     }
     return null
 }
+*/
 
 fun formatRemainingTime(expiresTimestamp: Long, currentTimestamp: Long): String {
     val secondsRemaining = expiresTimestamp - currentTimestamp

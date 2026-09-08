@@ -922,6 +922,10 @@ add_custom_target(copy_final ALL
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/openmw/extras/ ${jni_libs_dir}/
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/Libraries/ ${jni_libs_dir}/
 
+    # Copy Rust binaries renamed to .so
+    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:s3lightfixes> ${jni_libs_dir}/libs3lightfixes.so
+    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:delta_plugin> ${jni_libs_dir}/libdelta_plugin.so
+
     #Final Copy of assets
     COMMAND ${CMAKE_COMMAND} -E copy ${PROJECT_ROOT}/settings.fallback.cfg ${GENERATED_ASSETS_DIR}/libopenmw/openmw/
     COMMAND ${CMAKE_COMMAND} -E copy ${PROJECT_ROOT}/openmw.cfg ${GENERATED_ASSETS_DIR}/libopenmw/openmw/

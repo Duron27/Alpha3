@@ -135,7 +135,7 @@ val DeletedButtonState = ButtonState(
 
 object UIStateManager {
     var useNavmesh by mutableStateOf(false)
-    var useBsaTool by mutableStateOf(false)
+    //var useBsaTool by mutableStateOf(false)
     var buttonsGroup by mutableIntStateOf(1)
     var globalColorChange by mutableStateOf(false)
     var globalColor by mutableStateOf("#FFFFFF") // Default color
@@ -404,7 +404,7 @@ object UIStateManager {
 }
 
 @Composable
-fun KeySelectionMenu(context: Context, onKeySelected: (Int) -> Unit, usedKeys: List<Int>, containerWidth: Float, containerHeight: Float) {
+fun KeySelectionMenu(onKeySelected: (Int) -> Unit, usedKeys: List<Int>, containerWidth: Float, containerHeight: Float) {
     // Add A, S, D, and W to usedKeys
     val reservedKeys = listOf(
         KeyEvent.KEYCODE_A,
@@ -953,7 +953,7 @@ fun DynamicButtonManager(
             repeatMode = RepeatMode.Reverse
         ),
         finishedListener = {
-            if (!UIStateManager.editMode) 0.dp else it
+            if (!UIStateManager.editMode) 0.dp
         }, label = ""
     )
 
@@ -1047,7 +1047,6 @@ fun DynamicButtonManager(
 
                 },
                 usedKeys = buttonStates.values.map { it.keyCode },
-                context = context,
                 containerWidth = containerGlobalWidth.floatValue,
                 containerHeight = containerGlobalHeight.floatValue
             )
