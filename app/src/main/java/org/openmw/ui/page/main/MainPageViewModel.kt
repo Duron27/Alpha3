@@ -84,14 +84,45 @@ class MainPageViewModel @Inject constructor() : ViewModel() {
             walkDir(targetDir)
         }
 
-        val pluginLinesToAdd = foundFiles.map { file ->
+        // Separate required vanilla files from other plugins
+        val vanillaFiles = listOf(
+            "morrowind",
+            "tribunal",
+            "bloodmoon"
+        )
+        
+        val requiredVanillaBSAs = mutableListOf<String>()
+        val requiredVanillaESMs = mutableListOf<String>()
+        val otherPlugins = mutableListOf<String>()
+        
+        foundFiles.forEach { file ->
             val fileName = file.name
-            if (file.extension.lowercase() == "bsa") {
-                "fallback-archive=$fileName"
+            val nameWithoutExt = file.nameWithoutExtension.lowercase()
+            
+            if (nameWithoutExt in vanillaFiles) {
+                if (file.extension.lowercase() == "bsa") {
+                    requiredVanillaBSAs.add("fallback-archive=$fileName")
+                } else if (file.extension.lowercase() == "esm") {
+                    requiredVanillaESMs.add("content=$fileName")
+                }
             } else {
-                "content=$fileName"
+                if (file.extension.lowercase() == "bsa") {
+                    otherPlugins.add("fallback-archive=$fileName")
+                } else {
+                    otherPlugins.add("content=$fileName")
+                }
             }
         }
+        
+        // Sort vanilla files to ensure Morrowind -> Tribunal -> Bloodmoon order
+        requiredVanillaBSAs.sortBy { line -> 
+            vanillaFiles.indexOf(line.substringAfter("=").substringBefore(".").lowercase()) 
+        }
+        requiredVanillaESMs.sortBy { line -> 
+            vanillaFiles.indexOf(line.substringAfter("=").substringBefore(".").lowercase()) 
+        }
+
+        val pluginLinesToAdd = requiredVanillaBSAs + requiredVanillaESMs + otherPlugins
 
         File(Constants.OPENMW_CFG).takeIf { it.exists() }?.let { file ->
             val lines = file.readLines().map { line ->

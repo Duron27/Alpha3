@@ -8,7 +8,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.launch
+import org.openmw.Constants
 import org.openmw.ui.page.mod.ModUIState
+import java.io.File
 
 @OptIn(InternalCoroutinesApi::class)
 class IniImporterService : Service() {
@@ -18,11 +20,10 @@ class IniImporterService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val gameFilesPath = intent?.getStringExtra("gameFilesPath")
-        val configPath = intent?.getStringExtra("configPath")
         
         Log.d("IniImporterService", "onStartCommand in process: ${android.os.Process.myPid()}")
 
-        if (gameFilesPath != null && configPath != null) {
+        if (gameFilesPath != null) {
             serviceScope.launch {
                 try {
                     Log.d("IniImporterService", "Starting IniImporter in separate process...")
@@ -43,7 +44,29 @@ class IniImporterService : Service() {
                         }
                     }
 
-                    NativeAppLauncher.launchIniImporter(gameFilesPath, configPath)
+                    NativeAppLauncher.launchIniImporter(gameFilesPath, Constants.OPENMW_CFG)
+                    
+                    val cfgFile = File(Constants.OPENMW_CFG)
+                    if (cfgFile.exists()) {
+                        val linesToDisable = setOf(
+                            "fallback-archive=morrowind.bsa",
+                            "fallback-archive=tribunal.bsa",
+                            "fallback-archive=bloodmoon.bsa",
+                            "content=morrowind.esm",
+                            "content=tribunal.esm",
+                            "content=bloodmoon.esm"
+                        )
+                        val updatedLines = cfgFile.readLines().map { line ->
+                            val trimmed = line.trim()
+                            if (linesToDisable.contains(trimmed.lowercase())) {
+                                ";$line"
+                            } else {
+                                line
+                            }
+                        }
+                        cfgFile.writeText(updatedLines.joinToString("\n") + "\n")
+                    }
+
                     ModUIState.refreshUI()
                     Log.d("IniImporterService", "IniImporter finished.")
                 } catch (e: Exception) {
