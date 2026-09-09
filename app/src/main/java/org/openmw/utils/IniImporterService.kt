@@ -8,6 +8,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.launch
+import org.openmw.ui.page.mod.ModUIState
+
 @OptIn(InternalCoroutinesApi::class)
 class IniImporterService : Service() {
     private val serviceScope = CoroutineScope(Dispatchers.IO)
@@ -42,6 +44,7 @@ class IniImporterService : Service() {
                     }
 
                     NativeAppLauncher.launchIniImporter(gameFilesPath, configPath)
+                    ModUIState.refreshUI()
                     Log.d("IniImporterService", "IniImporter finished.")
                 } catch (e: Exception) {
                     Log.e("IniImporterService", "Error running IniImporter", e)

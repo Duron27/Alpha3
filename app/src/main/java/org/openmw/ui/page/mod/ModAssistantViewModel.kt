@@ -15,17 +15,24 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.MutableSharedFlow
 import org.openmw.Constants
 import org.openmw.ui.view.addCustomLog
 import org.openmw.utils.GameFilesPreferences
 import org.openmw.utils.OpenMWConfigUtils
 import org.openmw.utils.findFilesWithExtensions
 import java.io.File
-import java.util.regex.Pattern
 import javax.inject.Inject
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.uuid.ExperimentalUuidApi
 import kotlin.uuid.Uuid
+
+object ModUIState {
+    val refreshTrigger = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    fun refreshUI() {
+        refreshTrigger.tryEmit(Unit)
+    }
+}
 
 @HiltViewModel
 class ModAssistantViewModel @Inject constructor(

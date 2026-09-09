@@ -3,8 +3,6 @@ package org.openmw.utils
 import android.util.Log
 import org.openmw.ui.controls.UIStateManager
 import org.openmw.OPENMW_MAIN_LIB
-import org.openmw.OPENMW_NAVMESH
-import org.openmw.OPENMW_BSATOOL
 import org.openmw.UQM_MAIN_LIB
 import org.openmw.DETHRACE_MAIN_LIB
 

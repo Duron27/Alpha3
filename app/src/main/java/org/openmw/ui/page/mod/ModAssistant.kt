@@ -24,6 +24,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -63,10 +64,10 @@ import androidx.compose.material3.TextField
 import androidx.compose.material3.adaptive.navigationsuite.NavigationSuiteType
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -90,8 +91,6 @@ import com.composables.core.ScrollArea
 import com.composables.core.Thumb
 import com.composables.core.ThumbVisibility
 import com.composables.core.VerticalScrollbar
-import com.composables.core.rememberScrollAreaState
-import com.composeunstyled.rememberScrollAreaState
 import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.InternalCoroutinesApi
@@ -319,9 +318,7 @@ fun ModValuesList(
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
                 if (intent?.action == "org.openmw.ACTION_INI_IMPORT_FINISHED") {
-                    savedPath?.let { _ ->
-                        categorizedModValues = ModValue.updateUIFromModValues(categories.map { it.key })
-                    }
+                    ModUIState.refreshUI()
                 }
             }
         }
@@ -338,6 +335,12 @@ fun ModValuesList(
             } catch (e: Exception) {
                 e.printStackTrace()
             }
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        ModUIState.refreshTrigger.collect {
+            categorizedModValues = ModValue.updateUIFromModValues(categories.map { it.key })
         }
     }
 
@@ -947,42 +950,93 @@ fun ModValuesList(
                                 }
 
                                 if (showDeleteConfirmation) {
+                                    var associatedPluginsForDelete by remember { mutableStateOf(emptySet<String>()) }
+                                    LaunchedEffect(showDeleteConfirmation, modValue) {
+                                        if (showDeleteConfirmation && modValue.category == "data") {
+                                            withContext(Dispatchers.IO) {
+                                                val set = mutableSetOf<String>()
+                                                val dataDir = File(modValue.value.removeSurrounding("\"").trim())
+                                                val extensions = arrayOf("bsa", "esm", "esp", "esl", "omwaddon", "omwgame", "omwscripts")
+                                                fun getMatchingFiles(dir: File, set: MutableSet<String>) {
+                                                    dir.listFiles()?.forEach { f ->
+                                                        if (f.isFile) {
+                                                            if (f.extension.lowercase() in extensions) {
+                                                                set.add(f.name)
+                                                            }
+                                                        } else if (f.isDirectory) {
+                                                            getMatchingFiles(f, set)
+                                                        }
+                                                    }
+                                                }
+                                                if (dataDir.exists() && dataDir.isDirectory) {
+                                                    getMatchingFiles(dataDir, set)
+                                                }
+                                                associatedPluginsForDelete = set
+                                            }
+                                        } else {
+                                            associatedPluginsForDelete = emptySet()
+                                        }
+                                    }
+
                                     AlertDialog(
                                         onDismissRequest = { showDeleteConfirmation = false },
                                         title = { Text(stringResource(R.string.confirm_deletion)) },
-                                        text = { Text(stringResource(R.string.are_you_sure_you_want_to_delete_this_mod)) },
+                                        text = { 
+                                            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                                                Text(stringResource(R.string.are_you_sure_you_want_to_delete_this_mod))
+                                                if (associatedPluginsForDelete.isNotEmpty()) {
+                                                    Spacer(modifier = Modifier.height(8.dp))
+                                                    Text(
+                                                        text = "The following associated mods will also be removed from the configuration:",
+                                                        color = Color.Red,
+                                                        fontWeight = FontWeight.Bold,
+                                                        fontSize = 14.sp
+                                                    )
+                                                    Spacer(modifier = Modifier.height(4.dp))
+                                                    associatedPluginsForDelete.forEach { plugin ->
+                                                        Text(text = "- $plugin", color = Color.White, fontSize = 12.sp)
+                                                    }
+                                                }
+                                            }
+                                        },
                                         confirmButton = {
                                             TextButton(
                                                 onClick = {
-                                                    // Handle the delete action
-                                                    val updatedList = categorizedModValues[selectedTabIndex].toMutableList()
-                                                    val index = updatedList.indexOfFirst { it.id == modValue.id }
-                                                    if (index != -1) {
-                                                        updatedList.removeAt(index)
-                                                        categorizedModValues = categorizedModValues.toMutableList().apply {
-                                                            this[selectedTabIndex] = updatedList
-                                                        }
-
-                                                        // Update the file by removing the matching line
+                                                    coroutineScope.launch(Dispatchers.IO) {
                                                         val file = File(Constants.USER_OPENMW_CFG)
                                                         val updatedLines = mutableListOf<String>()
+                                                        val pluginsToRemoveLowerCase = associatedPluginsForDelete.map { it.lowercase() }.toSet()
+                                                        
                                                         if (file.exists()) {
                                                             file.forEachLine { line ->
-                                                                // Skip the line that matches the modValue to remove it
-                                                                if (line.trim() != ";${modValue.category}=${modValue.value}" && line.trim() != "${modValue.category}=${modValue.value}") {
+                                                                val trimmed = line.trim()
+                                                                val cleanLine = trimmed.removePrefix(";")
+                                                                val isSelf = trimmed == ";${modValue.category}=${modValue.value}" || trimmed == "${modValue.category}=${modValue.value}"
+                                                                
+                                                                var isPlugin = false
+                                                                if (modValue.category == "data" && cleanLine.contains("=")) {
+                                                                    val keyPart = cleanLine.substringBefore("=").trim().lowercase()
+                                                                    val valPart = cleanLine.substringAfter("=").trim().removeSurrounding("\"").trim()
+                                                                    if (keyPart in setOf("content", "groundcover", "fallback-archive") && pluginsToRemoveLowerCase.contains(valPart.lowercase())) {
+                                                                        isPlugin = true
+                                                                    }
+                                                                }
+                                                                
+                                                                if (!isSelf && !isPlugin) {
                                                                     updatedLines.add(line)
                                                                 }
                                                             }
                                                         }
-
+                                                        
                                                         // Write the updated content back to the file, ensuring no trailing empty line
                                                         file.writeText(updatedLines.joinToString("\n") + if (updatedLines.lastOrNull()?.isNotEmpty() == true) "\n" else "")
-
-                                                        // Reload the mod values and update the UI
-                                                        categorizedModValues = ModValue.updateUIFromModValues(categories.map { it.key })
+                                                        
+                                                        withContext(Dispatchers.Main) {
+                                                            ModUIState.refreshUI()
+                                                            showDeleteConfirmation = false
+                                                            showPopup = false
+                                                        }
                                                     }
-                                                    showDeleteConfirmation = false
-                                                    showPopup = false
                                                 }
                                             ) {
                                                 Text(stringRes(R.string.btn_confirm))

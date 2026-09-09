@@ -34,6 +34,7 @@ import kotlinx.coroutines.withContext
 import org.openmw.Constants
 import org.openmw.R
 import org.openmw.ui.controls.UIStateManager.customColor
+import org.openmw.ui.page.mod.ModUIState
 import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
@@ -113,6 +114,7 @@ fun S3LightFixes() {
 }
 
 suspend fun runS3LightFixesDirect(onOutputUpdate: suspend (String) -> Unit) {
+    val overrideFolder = File(Constants.USER_FILE_STORAGE, "OpenMW/Override")
     withContext(Dispatchers.IO) {
         val logcatJob = launch {
             try {
@@ -143,6 +145,35 @@ suspend fun runS3LightFixesDirect(onOutputUpdate: suspend (String) -> Unit) {
             val result = S3LightFixesNative.run()
             delay(300.milliseconds)
             logcatJob.cancel()
+
+            val cfgFile = File(Constants.USER_OPENMW_CFG)
+            if (cfgFile.exists()) {
+                val lines = cfgFile.readLines().toMutableList()
+
+                val dataEntry = "data=${overrideFolder.absolutePath}"
+                if (!lines.contains(dataEntry)) {
+                    val lastDataIndex = lines.indexOfLast { it.trimStart().startsWith("data=") }
+                    if (lastDataIndex != -1) {
+                        lines.add(lastDataIndex + 1, dataEntry)
+                    } else {
+                        lines.add(dataEntry)
+                    }
+                }
+
+                val contentEntry = "content=S3LightFixes.omwaddon"
+                if (!lines.contains(contentEntry)) {
+                    val lastContentIndex = lines.indexOfLast { it.trimStart().startsWith("content=") }
+                    if (lastContentIndex != -1) {
+                        lines.add(lastContentIndex + 1, contentEntry)
+                    } else {
+                        lines.add(contentEntry)
+                    }
+                }
+
+                cfgFile.writeText(lines.joinToString("\n") + "\n")
+            }
+            
+            ModUIState.refreshUI()
 
             withContext(Dispatchers.Main) {
                 onOutputUpdate("S3LightFixes Finished: $result")
