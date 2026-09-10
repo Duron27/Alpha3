@@ -56,9 +56,9 @@ ExternalProject_Add(vcpkgMain
     ${VCPKG_EXE} install angle:arm64-android
     --overlay-triplets=${CMAKE_CURRENT_SOURCE_DIR}/vcpkg-triplets
 
-    # Copy ANGLE binaries (vcpkg generates them with a 'lib' prefix on top of the 'lib' prefix CMake adds by default)
-    COMMAND ${CMAKE_COMMAND} -E copy installed/arm64-android/lib/liblibEGL_angle.so ${jni_libs_dir}/libEGL_angle.so
-    COMMAND ${CMAKE_COMMAND} -E copy installed/arm64-android/lib/liblibGLESv2_angle.so ${jni_libs_dir}/libGLESv2_angle.so
+    # Copy ANGLE binaries
+    COMMAND ${CMAKE_COMMAND} -E copy installed/arm64-android/lib/liblibEGL_angle.so ${jni_libs_dir}/liblibEGL_angle.so
+    COMMAND ${CMAKE_COMMAND} -E copy installed/arm64-android/lib/liblibGLESv2_angle.so ${jni_libs_dir}/liblibGLESv2_angle.so
 
     BUILD_IN_SOURCE 1
     USES_TERMINAL_BUILD ON

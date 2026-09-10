@@ -1,0 +1,127 @@
+From afa1e82093487dac6c2fb9c517e9d773f59f1b2b Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Thu, 10 Sep 2026 13:17:16 -0400
+Subject: [PATCH] Simplify max supported ES version logic
+
+Removed checks for mock ICD and various limitations on ES version support.
+---
+ src/libANGLE/renderer/vulkan/vk_renderer.cpp | 106 -------------------
+ 1 file changed, 106 deletions(-)
+
+diff --git a/src/libANGLE/renderer/vulkan/vk_renderer.cpp b/src/libANGLE/renderer/vulkan/vk_renderer.cpp
+index dd115d47edb..af26ec1ed85 100644
+--- a/src/libANGLE/renderer/vulkan/vk_renderer.cpp
++++ b/src/libANGLE/renderer/vulkan/vk_renderer.cpp
+@@ -5231,112 +5231,6 @@ gl::Version Renderer::getMaxSupportedESVersion() const
+ {
+     // Current highest supported version
+     gl::Version maxVersion = gl::Version(3, 2);
+-
+-    // Early out without downgrading ES version if mock ICD enabled.
+-    // Mock ICD doesn't expose sufficient capabilities yet.
+-    // https://github.com/KhronosGroup/Vulkan-Tools/issues/84
+-    if (isMockICDEnabled())
+-    {
+-        return maxVersion;
+-    }
+-
+-    ensureCapsInitialized();
+-
+-    // Limit to ES3.1 if there are any blockers for 3.2.
+-    if (mFeatures.exposeES32ForTesting.enabled)
+-    {
+-        return maxVersion;
+-    }
+-    if (!CanSupportGLES32(mNativeExtensions))
+-    {
+-        maxVersion = LimitVersionTo(maxVersion, {3, 1});
+-    }
+-
+-    // Limit to ES3.0 if there are any blockers for 3.1.
+-
+-    // ES3.1 requires at least one atomic counter buffer and four storage buffers in compute.
+-    // Atomic counter buffers are emulated with storage buffers.  For simplicity, we always support
+-    // either none or IMPLEMENTATION_MAX_ATOMIC_COUNTER_BUFFERS atomic counter buffers.  So if
+-    // Vulkan doesn't support at least that many storage buffers in compute, we don't support 3.1.
+-    const uint32_t kMinimumStorageBuffersForES31 =
+-        gl::limits::kMinimumComputeStorageBuffers +
+-        gl::IMPLEMENTATION_MAX_ATOMIC_COUNTER_BUFFER_BINDINGS;
+-    if (mPhysicalDeviceProperties.limits.maxPerStageDescriptorStorageBuffers <
+-        kMinimumStorageBuffersForES31)
+-    {
+-        maxVersion = LimitVersionTo(maxVersion, {3, 0});
+-    }
+-
+-    // ES3.1 requires at least a maximum offset of at least 2047.
+-    // If the Vulkan implementation can't support that, we cannot support 3.1.
+-    if (mPhysicalDeviceProperties.limits.maxVertexInputAttributeOffset < 2047)
+-    {
+-        maxVersion = LimitVersionTo(maxVersion, {3, 0});
+-    }
+-
+-    // SSO is in ES3.1 core, so we have to cap to ES3.0 for SSO disablement.
+-    if (mFeatures.disableSeparateShaderObjects.enabled)
+-    {
+-        maxVersion = LimitVersionTo(maxVersion, {3, 0});
+-    }
+-
+-    // Limit to ES2.0 if there are any blockers for 3.0.
+-
+-    // VK_EXT_provoking_vertex is required for flat shading.
+-    if (!mFeatures.provokingVertex.enabled)
+-    {
+-        maxVersion = LimitVersionTo(maxVersion, {2, 0});
+-    }
+-
+-    // Multisample textures (ES3.1) and multisample renderbuffers (ES3.0) require the Vulkan driver
+-    // to support the standard sample locations (in order to pass dEQP tests that check these
+-    // locations).  If the Vulkan implementation can't support that, we cannot support 3.0/3.1.
+-    if (mPhysicalDeviceProperties.limits.standardSampleLocations != VK_TRUE)
+-    {
+-        maxVersion = LimitVersionTo(maxVersion, {2, 0});
+-    }
+-
+-    // If independentBlend is not supported, we can't have a mix of has-alpha and emulated-alpha
+-    // render targets in a framebuffer.  We also cannot perform masked clears of multiple render
+-    // targets.
+-    if (!mPhysicalDeviceFeatures.independentBlend)
+-    {
+-        maxVersion = LimitVersionTo(maxVersion, {2, 0});
+-    }
+-
+-    // If the Vulkan transform feedback extension is not present, we use an emulation path that
+-    // requires the vertexPipelineStoresAndAtomics feature. Without the extension or this feature,
+-    // we can't currently support transform feedback.
+-    if (!vk::CanSupportTransformFeedbackExtension(mTransformFeedbackFeatures) &&
+-        !vk::CanSupportTransformFeedbackEmulation(mPhysicalDeviceFeatures))
+-    {
+-        maxVersion = LimitVersionTo(maxVersion, {2, 0});
+-    }
+-
+-    // Limit to GLES 2.0 if maxPerStageDescriptorUniformBuffers is too low.
+-    // Table 6.31 MAX_VERTEX_UNIFORM_BLOCKS minimum value = 12
+-    // Table 6.32 MAX_FRAGMENT_UNIFORM_BLOCKS minimum value = 12
+-    // NOTE: We reserve some uniform buffers for emulation, so use the NativeCaps which takes this
+-    // into account, rather than the physical device maxPerStageDescriptorUniformBuffers limits.
+-    for (gl::ShaderType shaderType : gl::AllShaderTypes())
+-    {
+-        if (static_cast<GLuint>(getNativeCaps().maxShaderUniformBlocks[shaderType]) <
+-            gl::limits::kMinimumShaderUniformBlocks)
+-        {
+-            maxVersion = LimitVersionTo(maxVersion, {2, 0});
+-        }
+-    }
+-
+-    // Limit to GLES 2.0 if maxVertexOutputComponents is too low.
+-    // Table 6.31 MAX VERTEX OUTPUT COMPONENTS minimum value = 64
+-    // NOTE: We reserve some vertex output components for emulation, so use the NativeCaps which
+-    // takes this into account, rather than the physical device maxVertexOutputComponents limits.
+-    if (static_cast<GLuint>(getNativeCaps().maxVertexOutputComponents) <
+-        gl::limits::kMinimumVertexOutputComponents)
+-    {
+-        maxVersion = LimitVersionTo(maxVersion, {2, 0});
+-    }
+-
+     return maxVersion;
+ }
+ 

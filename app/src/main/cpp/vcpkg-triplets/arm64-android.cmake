@@ -14,6 +14,7 @@ if(${PORT} MATCHES "angle")
     set(VCPKG_CMAKE_CONFIGURE_OPTIONS
             -DANDROID_ABI=arm64-v8a
             -DBUILD_SHARED_LIBS=ON
+            -DANGLE_EXPOSE_NON_CONFORMANT_EXTENSIONS_AND_VERSIONS=ON
     )
     set(VCPKG_LINKER_FLAGS "-llog -landroid -lnativewindow")
 elseif(${PORT} MATCHES "openal|sdl2|collada")
