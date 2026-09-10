@@ -918,6 +918,8 @@ ExternalProject_Add(openmw
 add_custom_target(copy_final ALL
     DEPENDS openmw dethrace uqm
 
+    COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/Libraries/ ${jni_libs_dir}/
+
     # Copy Rust binaries renamed to .so
     COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:s3lightfixes-shared> ${jni_libs_dir}/libs3lightfixes.so
     COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:delta_plugin> ${jni_libs_dir}/libdelta_plugin.so

@@ -407,6 +407,16 @@ class EngineActivity : SDLActivity() {
             val envLine = runBlocking {
                 val prefs = context.dataStore.data.first()
                 val existing = prefs[GameFilesPreferences.ENV_LINE_KEY]
+                val enableANGLE = prefs[GameFilesPreferences.USE_ANGLE] == true
+                val enableSPIRV = prefs[GameFilesPreferences.USE_SPIRV] == true
+                if (enableSPIRV) {
+                    setEnv("OPENMW_SPIRV_SHADERCONV", "1")
+                }
+                if (enableANGLE) {
+                    setEnv("OSG_USE_ANGLE", "1")
+                    setEnv("SDL_VIDEO_GL_DRIVER", "libGLESv2_angle.so")
+                    setEnv("SDL_VIDEO_EGL_DRIVER", "libEGL_angle.so")
+                }
                 if (!existing.isNullOrBlank()) {
                     existing
                 } else {
@@ -418,17 +428,6 @@ class EngineActivity : SDLActivity() {
                     defaults.add("OSG_VERTEX_BUFFER_HINT=VBO")
                     defaults.add("DETHRACE_ROOT_DIR=${Constants.USER_FILE_STORAGE}/dethrace/")
                     defaults.add("HARNESS_OPENGL=1")
-
-                    val enableANGLE = prefs[GameFilesPreferences.USE_ANGLE] == true
-                    val enableSPIRV = prefs[GameFilesPreferences.USE_SPIRV] == true
-                    if (enableSPIRV) {
-                        defaults.add("OPENMW_SPIRV_SHADERCONV=1")
-                    }
-                    if (enableANGLE) {
-                        defaults.add("OSG_USE_ANGLE=1")
-                        defaults.add("SDL_VIDEO_GL_DRIVER=libGLESv2_angle.so")
-                        defaults.add("SDL_VIDEO_EGL_DRIVER=libEGL_angle.so")
-                    }
 
                     val avoid16 = prefs[GameFilesPreferences.AVOID_16_BITS_KEY] == true
                     defaults.add(if (avoid16) "LIBGL_AVOID16BITS=1" else "LIBGL_AVOID16BITS=0")

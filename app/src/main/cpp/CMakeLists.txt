@@ -65,4 +65,4 @@ ExternalProject_Add(vcpkgMain
     USES_TERMINAL_INSTALL ON
 )
 
-add_dependencies(Alpha3 vcpkgMain s3lightfixes-shared delta_plugin copy_final)
+add_dependencies(Alpha3 s3lightfixes-shared delta_plugin copy_final)
