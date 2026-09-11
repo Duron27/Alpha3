@@ -36,6 +36,7 @@ FetchContent_MakeAvailable(DeltaPlugin)
 corrosion_import_crate(MANIFEST_PATH "${deltaplugin_SOURCE_DIR}/Cargo.toml")
 
 add_subdirectory(Alpha3)
+add_subdirectory(Zink)
 add_subdirectory(openmw)
 
 set(BOOTSTRAP_SCRIPT "./bootstrap-vcpkg.sh")
@@ -65,4 +66,4 @@ ExternalProject_Add(vcpkgMain
     USES_TERMINAL_INSTALL ON
 )
 
-add_dependencies(Alpha3 s3lightfixes-shared delta_plugin copy_final)
+add_dependencies(Alpha3 s3lightfixes-shared delta_plugin copy_zink copy_final)
