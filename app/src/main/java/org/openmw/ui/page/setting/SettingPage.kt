@@ -331,6 +331,7 @@ fun GraphicsSettingsSection() {
     val scope = rememberCoroutineScope()
     val avoid16BitsChecked by GameFilesPreferences.getPreference(context, GameFilesPreferences.AVOID_16_BITS_KEY, true).collectAsState(initial = true)
     val useAngle by GameFilesPreferences.getPreference(context, GameFilesPreferences.USE_ANGLE, false).collectAsState(initial = false)
+    val useZink by GameFilesPreferences.getPreference(context, GameFilesPreferences.USE_ZINK, false).collectAsState(initial = false)
     val useSPIRV by GameFilesPreferences.getPreference(context, GameFilesPreferences.USE_SPIRV, false).collectAsState(initial = false)
 
     SettingSectionCard(
@@ -341,7 +342,28 @@ fun GraphicsSettingsSection() {
             title = "Use Angle driver",
             subtitle = "Using this setting will enable newer shaders on older hardware like shadows."
         ) {
-            Switch(checked = useAngle, onCheckedChange = { scope.launch { GameFilesPreferences.setPreference(context, GameFilesPreferences.USE_ANGLE, it) } })
+            Switch(checked = useAngle, onCheckedChange = { 
+                scope.launch { 
+                    GameFilesPreferences.setPreference(context, GameFilesPreferences.USE_ANGLE, it)
+                    if (it) {
+                        GameFilesPreferences.setPreference(context, GameFilesPreferences.USE_ZINK, false)
+                    }
+                } 
+            })
+        }
+
+        SettingRow(
+            title = "Use Zink driver",
+            subtitle = "Uses Vulkan for rendering, can improve performance and compatibility on some devices."
+        ) {
+            Switch(checked = useZink, onCheckedChange = { 
+                scope.launch { 
+                    GameFilesPreferences.setPreference(context, GameFilesPreferences.USE_ZINK, it)
+                    if (it) {
+                        GameFilesPreferences.setPreference(context, GameFilesPreferences.USE_ANGLE, false)
+                    }
+                } 
+            })
         }
         
         SettingRow(

@@ -57,13 +57,14 @@ ExternalProject_Add(
     -Dgallium-drivers=zink -Dvulkan-drivers=freedreno -Dfreedreno-kmds=kgsl
     -Dbuildtype=release -Dllvm=disabled -Dshared-glapi=disabled -Degl=enabled
     -Dgles1=enabled -Dgles2=enabled -Dglx=disabled -Dopengl=true -Dzstd=disabled
+    -Degl-lib-suffix=_zink -Dgles-lib-suffix=_zink
   BUILD_COMMAND ${MESON_EXECUTABLE} compile -C <BINARY_DIR>
   INSTALL_COMMAND ${MESON_EXECUTABLE} install -C <BINARY_DIR>
   BUILD_IN_SOURCE 0
   USES_TERMINAL_BUILD ON
   USES_TERMINAL_INSTALL ON)
 
-# Copy the compiled libraries (libvulkan_freedreno.so, libEGL.so, libGLESv2.so,
+# Copy the compiled libraries (libvulkan_freedreno.so, libEGL_zink.so, libGLESv2_zink.so,
 # etc.) to jniLibs
 add_custom_target(copy_zink ALL
         DEPENDS MesaZinkTurnip

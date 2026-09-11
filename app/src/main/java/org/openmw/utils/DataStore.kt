@@ -43,6 +43,7 @@ object GameFilesPreferences {
     val AUTO_MOUSE_MODE_KEY = stringPreferencesKey("autoMouseMode")
     val AVOID_16_BITS_KEY = booleanPreferencesKey("avoid16bits")
     val USE_ANGLE = booleanPreferencesKey("enableANGLE")
+    val USE_ZINK = booleanPreferencesKey("enableZINK")
     val USE_SPIRV = booleanPreferencesKey("enableSPIRV")
     val USE_VIRTUAL_KB = booleanPreferencesKey("virtualKB")
     val TEXTURE_SHRINKING_KEY = stringPreferencesKey("textureShrinking")

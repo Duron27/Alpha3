@@ -408,11 +408,24 @@ class EngineActivity : SDLActivity() {
                 val prefs = context.dataStore.data.first()
                 val existing = prefs[GameFilesPreferences.ENV_LINE_KEY]
                 val enableANGLE = prefs[GameFilesPreferences.USE_ANGLE] == true
+                val enableZINK = prefs[GameFilesPreferences.USE_ZINK] == true
                 val enableSPIRV = prefs[GameFilesPreferences.USE_SPIRV] == true
                 if (enableSPIRV) {
                     setEnv("OPENMW_SPIRV_SHADERCONV", "1")
                 }
-                if (enableANGLE) {
+                if (enableZINK) {
+                    setEnv("OSG_USE_ZINK", "1")
+                    setEnv("SDL_VIDEO_GL_DRIVER", "libGLESv2_zink.so")
+                    setEnv("SDL_VIDEO_EGL_DRIVER", "libEGL_zink.so")
+                    Os.setenv("VSYNC_IN_ZINK","1",true)
+                    Os.setenv("MESA_LOADER_DRIVER_OVERRIDE","zink",true);
+                    Os.setenv("GALLIUM_DRIVER","zink",true);
+                    Os.setenv("MESA_GL_VERSION_OVERRIDE", "2.0",true);
+                    Os.setenv("MESA_GLSL_VERSION_OVERRIDE", "120",true);
+                    Os.setenv("NATIVE_LIB_DIR", applicationInfo.nativeLibraryDir, true)
+                    Os.setenv("TMPDIR", cacheDir.absolutePath, true)
+                    Os.setenv("MESA_LOG_FILE", Constants.USER_FILE_STORAGE + "/config/mesa.log", true)
+                } else if (enableANGLE) {
                     setEnv("OSG_USE_ANGLE", "1")
                     setEnv("SDL_VIDEO_GL_DRIVER", "libGLESv2_angle.so")
                     setEnv("SDL_VIDEO_EGL_DRIVER", "libEGL_angle.so")
