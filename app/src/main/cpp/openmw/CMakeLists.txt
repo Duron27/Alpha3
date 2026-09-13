@@ -67,30 +67,9 @@ if(NPROC EQUAL 0)
     set(NPROC 2)  # Fallback to 2 cores if detection fails
 endif()
 
-# Detect ABI and setup architecture-specific variables for the Gradle environment
-if(NOT DEFINED ARCH)
-    if(ANDROID_ABI STREQUAL "arm64-v8a")
-        set(ARCH "arm64")
-        set(GN_CPU "arm64")
-        set(NDK_TRIPLET "aarch64-linux-android")
-        set(FFMPEG_CPU "armv8-a")
-    elseif(ANDROID_ABI STREQUAL "armeabi-v7a")
-        set(ARCH "arm")
-        set(GN_CPU "arm")
-        set(NDK_TRIPLET "arm-linux-androideabi")
-        set(FFMPEG_CPU "armv7-a")
-    elseif(ANDROID_ABI STREQUAL "x86_64")
-        set(ARCH "x86_64")
-        set(GN_CPU "x64")
-        set(NDK_TRIPLET "x86_64-linux-android")
-        set(FFMPEG_CPU "x86_64")
-    elseif(ANDROID_ABI STREQUAL "x86")
-        set(ARCH "x86")
-        set(GN_CPU "x86")
-        set(NDK_TRIPLET "i686-linux-android")
-        set(FFMPEG_CPU "i686")
-    endif()
-endif()
+set(ARCH "arm64")
+set(NDK_TRIPLET "aarch64-linux-android")
+set(FFMPEG_CPU "armv8-a")
 
 if(NOT DEFINED ANDROID_API)
     set(ANDROID_API ${ANDROID_NATIVE_API_LEVEL})
@@ -161,26 +140,29 @@ endif()
 file(MAKE_DIRECTORY "${GENERATED_ASSETS_DIR}")
 file(MAKE_DIRECTORY "${jni_libs_dir}")
 
-set(wrapper_command ${CMAKE_BINARY_DIR}/command_wrapper.sh)
-file(WRITE ${wrapper_command}
-"#!/bin/bash
-export PATH=\"${NDK_TOOLCHAIN_BIN}:\$PATH\"
-export CC=\"${CC_WRAPPER}${NDK_TRIPLET}${ANDROID_API}-clang\"
-export CXX=\"${CC_WRAPPER}${NDK_TRIPLET}${ANDROID_API}-clang++\"
-export CFLAGS=\"${GLOBAL_CFLAGS}\"
-export CXXFLAGS=\"${GLOBAL_CXXFLAGS}\"
-export LDFLAGS=\"${GLOBAL_LDFLAGS}\"
-export AR=\"llvm-ar\"
-export RANLIB=\"llvm-ranlib\"
-export STRIP=\"llvm-strip\"
+if(CMAKE_HOST_WIN32)
+    set(PATH_SEPARATOR "\\;")
+    string(REPLACE ";" "\\;" ESCAPED_PATH "$ENV{PATH}")
+    set(ENV_PATH_VAR "PATH=${NDK_TOOLCHAIN_BIN}\\;${ESCAPED_PATH}")
+else()
+    set(PATH_SEPARATOR ":")
+    set(ENV_PATH_VAR "PATH=${NDK_TOOLCHAIN_BIN}:$ENV{PATH}")
+endif()
 
-# --- pkg-config paths ---
-export PKG_CONFIG_LIBDIR=\"${prefix}/lib/pkgconfig:${prefix}/share/pkgconfig\"
-export PKG_CONFIG_PATH=\"${prefix}/lib/pkgconfig:${prefix}/share/pkgconfig\"
-
-exec \"\$@\"
-")
-execute_process(COMMAND chmod +x ${wrapper_command})
+set(wrapper_command
+    ${CMAKE_COMMAND} -E env
+    "${ENV_PATH_VAR}"
+    "CC=${CC_WRAPPER}${NDK_TRIPLET}${ANDROID_API}-clang"
+    "CXX=${CC_WRAPPER}${NDK_TRIPLET}${ANDROID_API}-clang++"
+    "CFLAGS=${GLOBAL_CFLAGS}"
+    "CXXFLAGS=${GLOBAL_CXXFLAGS}"
+    "LDFLAGS=${GLOBAL_LDFLAGS}"
+    "AR=llvm-ar"
+    "RANLIB=llvm-ranlib"
+    "STRIP=llvm-strip"
+    "PKG_CONFIG_LIBDIR=${prefix}/lib/pkgconfig${PATH_SEPARATOR}${prefix}/share/pkgconfig"
+    "PKG_CONFIG_PATH=${prefix}/lib/pkgconfig${PATH_SEPARATOR}${prefix}/share/pkgconfig"
+)
 
 ExternalProject_Add(openmw_deps
     GIT_REPOSITORY https://github.com/Duron27/openmw-deps-build.git
