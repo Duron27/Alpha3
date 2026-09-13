@@ -94,6 +94,7 @@ import org.openmw.utils.LibraryLoader
 import org.openmw.utils.dataStore
 import org.openmw.utils.patchShadersLinking
 import org.openmw.utils.patchShadersToGLES
+import java.io.File
 import kotlin.math.roundToInt
 
 @Suppress("DEPRECATION")
@@ -107,7 +108,6 @@ class EngineActivity : SDLActivity() {
 
     init {
         System.loadLibrary("Alpha3")
-        setEnvironmentVariables(this@EngineActivity)
     }
 
     @SuppressLint("UnsafeDynamicallyLoadedCode")
@@ -142,6 +142,7 @@ class EngineActivity : SDLActivity() {
         }
 
         super.onCreate(savedInstanceState)
+        setEnvironmentVariables(this@EngineActivity)
 
         launchedActivity = true
         val controllerConnected = isControllerConnected(this)
@@ -415,16 +416,15 @@ class EngineActivity : SDLActivity() {
                 }
                 if (enableZINK) {
                     setEnv("OSG_USE_ZINK", "1")
+                    setEnv("EGL_PLATFORM", "android")
+                    setEnv("MESA_LOADER_DRIVER_OVERRIDE", "zink")
                     setEnv("SDL_VIDEO_GL_DRIVER", "libGLESv2_zink.so")
                     setEnv("SDL_VIDEO_EGL_DRIVER", "libEGL_zink.so")
-                    Os.setenv("VSYNC_IN_ZINK","1",true)
-                    Os.setenv("MESA_LOADER_DRIVER_OVERRIDE","zink",true);
-                    Os.setenv("GALLIUM_DRIVER","zink",true);
-                    Os.setenv("MESA_GL_VERSION_OVERRIDE", "2.0",true);
-                    Os.setenv("MESA_GLSL_VERSION_OVERRIDE", "120",true);
-                    Os.setenv("NATIVE_LIB_DIR", applicationInfo.nativeLibraryDir, true)
-                    Os.setenv("TMPDIR", cacheDir.absolutePath, true)
-                    Os.setenv("MESA_LOG_FILE", Constants.USER_FILE_STORAGE + "/config/mesa.log", true)
+                    setEnv("MESA_GLES_VERSION_OVERRIDE", "3.2")
+                    setEnv("MESA_GLSL_VERSION_OVERRIDE", "320")
+                    setEnv("NATIVE_LIB_DIR", applicationInfo.nativeLibraryDir)
+                    setEnv("TMPDIR", cacheDir.absolutePath)
+                    setEnv("MESA_LOG_FILE", Constants.USER_FILE_STORAGE + "/config/mesa.log")
                 } else if (enableANGLE) {
                     setEnv("OSG_USE_ANGLE", "1")
                     setEnv("SDL_VIDEO_GL_DRIVER", "libGLESv2_angle.so")
