@@ -18,3 +18,4 @@ app/mainline
 app/release
 .kotlin
 .cxx
+.clangd

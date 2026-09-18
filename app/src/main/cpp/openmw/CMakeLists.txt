@@ -1,5 +1,30 @@
 cmake_minimum_required(VERSION 3.2.0)
 
+# Generate .clangd file pointing to compilation database
+file(WRITE "/home/arinmal/AndroidStudioProjects/alpha3/.clangd"
+"CompileFlags:\n"
+"  CompilationDatabase: \"${CMAKE_CURRENT_BINARY_DIR}\"\n"
+"  Add:\n"
+"    - \"-I${CMAKE_CURRENT_BINARY_DIR}/../prefix/include\"\n"
+"    - \"-isystem${CMAKE_CURRENT_BINARY_DIR}/../prefix/include\"\n"
+"    - \"-L${CMAKE_CURRENT_BINARY_DIR}/../prefix/lib\"\n"
+"    - \"-I${CMAKE_CURRENT_BINARY_DIR}/../prefix/include/SDL2\"\n"
+"    - \"-I${CMAKE_CURRENT_BINARY_DIR}/../prefix/include/MYGUI\"\n"
+"    - \"-I${CMAKE_CURRENT_BINARY_DIR}/../prefix/include/bullet\"\n"
+"    - \"-I${CMAKE_CURRENT_BINARY_DIR}/../prefix/include/AL\"\n"
+"    - \"-I${CMAKE_CURRENT_BINARY_DIR}/../prefix/include/boost\"\n"
+"    - \"-I${CMAKE_CURRENT_BINARY_DIR}/openmw-prefix/src/openmw\"\n"
+"    - \"-I${CMAKE_CURRENT_BINARY_DIR}/openmw-prefix/src/openmw/extern\"\n"
+"    - \"-I${CMAKE_CURRENT_BINARY_DIR}/openmw-prefix/src/openmw/extern/oics/include\"\n"
+"    - \"-I${CMAKE_CURRENT_BINARY_DIR}/openmw-prefix/src/openmw/extern/oics/tinyxml\"\n"
+"    - \"-I${CMAKE_CURRENT_BINARY_DIR}/openmw-prefix/src/openmw/extern/sol3\"\n"
+"    - \"-I${CMAKE_CURRENT_BINARY_DIR}/openmw-prefix/src/openmw/extern/sol_config\"\n"
+"    - \"-I${CMAKE_CURRENT_BINARY_DIR}/openmw-prefix/src/openmw-build/extern/fetched/googletest/googletest/include\"\n"
+"    - \"-I${CMAKE_CURRENT_BINARY_DIR}/openmw-prefix/src/openmw-build/extern/fetched/googletest/googlemock/include\"\n"
+"    - \"-I${CMAKE_CURRENT_BINARY_DIR}/openmw-prefix/src/openmw-build/extern/fetched/recastnavigation/Detour/Include\"\n"
+"    - \"-I${CMAKE_CURRENT_BINARY_DIR}/openmw-prefix/src/openmw-build/extern/fetched/recastnavigation/Recast/Include\"\n"
+)
+
 # https://github.com/libjpeg-turbo/libjpeg-turbo/releases
 set(LIBJPEG_TURBO_VERSION 3.1.0)
 set(LIBJPEG_TURBO_HASH SHA256=9564c72b1dfd1d6fe6274c5f95a8d989b59854575d4bbee44ade7bc17aa9bc93)
@@ -838,8 +863,7 @@ set(OPENMW_PATCH
     patch -d <SOURCE_DIR> -p1 -t -N < ${CMAKE_SOURCE_DIR}/openmw/patches/openmw/spirv.patch &&
     patch -d <SOURCE_DIR> -p1 -t -N < ${CMAKE_SOURCE_DIR}/openmw/patches/openmw/glad.patch &&
     patch -d <SOURCE_DIR> -p1 -t -N < ${CMAKE_SOURCE_DIR}/openmw/patches/openmw/bcdec.patch &&
-    patch -d <SOURCE_DIR> -p1 -t -N < ${CMAKE_SOURCE_DIR}/openmw/patches/openmw/logcatSTDout.patch &&
-    patch -d <SOURCE_DIR> -p1 -t -N < ${CMAKE_SOURCE_DIR}/openmw/patches/openmw/hackyRumble.patch
+    patch -d <SOURCE_DIR> -p1 -t -N < ${CMAKE_SOURCE_DIR}/openmw/patches/openmw/logcatSTDout.patch
 )
 
 if(OPENMW_SRC)

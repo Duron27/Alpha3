@@ -41,8 +41,7 @@ data class ButtonConfig(
 
 @Serializable
 data class UIConfig(
-    val buttons: List<ButtonConfig> = emptyList(),
-    val soundHaptics: Map<String, HapticEffect> = emptyMap()
+    val buttons: List<ButtonConfig> = emptyList()
 )
 
 object UriSerializer : KSerializer<Uri> {

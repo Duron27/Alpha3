@@ -27,18 +27,29 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkOut
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.wrapContentSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Text
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
@@ -50,13 +61,13 @@ import androidx.lifecycle.lifecycleScope
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.InternalCoroutinesApi
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.libsdl.app.SDLActivity
 import org.openmw.Constants.USER_OPENMW_CFG
-import org.openmw.ui.controls.HapticEffect
 import org.openmw.ui.controls.MouseIcon
 import org.openmw.ui.controls.ResizableDraggableButton
 import org.openmw.ui.controls.ResizableDraggableRightThumbstick
@@ -77,7 +88,6 @@ import org.openmw.ui.controls.UIStateManager.isRadialMenuExpanded
 import org.openmw.ui.controls.UIStateManager.launchedActivity
 import org.openmw.ui.controls.UIStateManager.offsetXFlow
 import org.openmw.ui.controls.UIStateManager.offsetYFlow
-import org.openmw.ui.controls.UIStateManager.soundHaptics
 import org.openmw.ui.controls.UIStateManager.uqmJNI
 import org.openmw.ui.controls.VirtualKeyboard
 import org.openmw.ui.overlay.ExpandableCircleButton
@@ -94,17 +104,34 @@ import org.openmw.utils.LibraryLoader
 import org.openmw.utils.dataStore
 import org.openmw.utils.patchShadersLinking
 import org.openmw.utils.patchShadersToGLES
-import java.io.File
 import kotlin.math.roundToInt
+import kotlin.time.Duration.Companion.milliseconds
 
 @Suppress("DEPRECATION")
 @InternalCoroutinesApi
 @AndroidEntryPoint
 class EngineActivity : SDLActivity() {
     private lateinit var sdlView: View
-    external fun getLastResourceName(): String
     external fun initAlpha3()
     external fun setNativeEnv(key: String, value: String)
+    external fun omwIsGameRunning(): Boolean
+    //external fun omwQuitGame()
+    external fun omwGetPlayerHealthCurrent(): Float
+    external fun omwGetPlayerHealthModified(): Float
+    external fun omwGetPlayerHealthBase(): Float
+    external fun omwGetPlayerMagickaCurrent(): Float
+    external fun omwGetPlayerMagickaModified(): Float
+    external fun omwGetPlayerFatigueCurrent(): Float
+    external fun omwGetPlayerFatigueModified(): Float
+    external fun omwGetPlayerLevel(): Int
+    external fun omwGetPlayerX(): Float
+    external fun omwGetPlayerY(): Float
+    external fun omwGetPlayerZ(): Float
+    external fun omwGetPlayerCellName(): String
+    external fun omwGetPlayerInventorySummary(): String
+    external fun omwGetDrawState(): Int
+    external fun omwGetSelectedWeaponName(): String
+    external fun omwGetSelectedSpellId(): String
 
     init {
         System.loadLibrary("Alpha3")
@@ -211,16 +238,24 @@ class EngineActivity : SDLActivity() {
 
                         if (UIStateManager.tempCodeGroup == "OpenMW") {
                             AutoMouseModeComposable()
-                            SoundWatcher { name ->
-                                val effect = findHapticForSound(name)
-                                if (effect != null && isVibrationOn) {
-                                    vibrateHelper(this@EngineActivity, effect.amplitude, effect.duration)
-                                }
+                            //OpenMWDebugStatsOverlay(this@EngineActivity)
+                            
+                            DamageWatcher(this@EngineActivity) { damage ->
+                                Log.d(TAG, "Player took $damage damage!")
                                 addCustomLog(
-                                    "Sound: $name",
+                                    "Ouch! Took $damage damage",
                                     textSize = 10,
-                                    textColor = Color.White
+                                    textColor = Color.Red
                                 )
+                                
+                                if (isVibrationOn) {
+                                    // Scale amplitude from 50 (light hit) up to 255 (massive hit)
+                                    val amplitude = (damage * 8).toInt().coerceIn(50, 255)
+                                    // Scale duration from 100ms up to 300ms
+                                    val duration = (damage * 5).toLong().coerceIn(100L, 300L)
+                                    
+                                    vibrateHelper(this@EngineActivity, amplitude, duration)
+                                }
                             }
                         } else {
                             Box(
@@ -517,26 +552,108 @@ class EngineActivity : SDLActivity() {
         external fun getPathToJni(path_global: String, path_user: String)
     }
 
-    fun findHapticForSound(name: String): HapticEffect? {
-        val lower = name.lowercase()
-        return soundHaptics.entries.firstOrNull { (pattern, _) ->
-            lower.contains(pattern)
-        }?.value
-    }
-
     @Composable
-    fun SoundWatcher(onSound: (String) -> Unit) {
-        var last by remember { mutableStateOf("") }
+    fun DamageWatcher(activity: EngineActivity, onDamageTaken: (amount: Float) -> Unit) {
+        var lastHealth by remember { mutableFloatStateOf(-1f) }
 
         LaunchedEffect(Unit) {
             while (true) {
                 withFrameNanos {
-                    val name = getLastResourceName()
-                    if (name.isNotEmpty() && name != last) {
-                        last = name
-                        onSound(name)
+                    runCatching {
+                        if (activity.omwIsGameRunning()) {
+                            val currentHealth = activity.omwGetPlayerHealthCurrent()
+                            
+                            // Initialize lastHealth if this is the first frame
+                            if (lastHealth == -1f) {
+                                lastHealth = currentHealth
+                            } else {
+                                // If current health is less than last frame's health, we took damage!
+                                if (currentHealth < lastHealth) {
+                                    val damageAmount = lastHealth - currentHealth
+                                    onDamageTaken(damageAmount)
+                                }
+                                lastHealth = currentHealth
+                            }
+                        } else {
+                            lastHealth = -1f // Reset when game is not running
+                        }
                     }
                 }
+            }
+        }
+    }
+
+    @Composable
+    fun OpenMWDebugStatsOverlay(activity: EngineActivity) {
+        var isRunning by remember { mutableStateOf(false) }
+        var healthCur by remember { mutableFloatStateOf(0f) }
+        var healthMod by remember { mutableFloatStateOf(0f) }
+        var healthBase by remember { mutableFloatStateOf(0f) }
+        var magickaCur by remember { mutableFloatStateOf(0f) }
+        var magickaMod by remember { mutableFloatStateOf(0f) }
+        var fatigueCur by remember { mutableFloatStateOf(0f) }
+        var fatigueMod by remember { mutableFloatStateOf(0f) }
+        var level by remember { mutableIntStateOf(0) }
+        var posX by remember { mutableFloatStateOf(0f) }
+        var posY by remember { mutableFloatStateOf(0f) }
+        var posZ by remember { mutableFloatStateOf(0f) }
+        var cellName by remember { mutableStateOf("") }
+        var inventorySummary by remember { mutableStateOf("") }
+        var drawState by remember { mutableIntStateOf(0) }
+        var weaponName by remember { mutableStateOf("") }
+        var spellId by remember { mutableStateOf("") }
+
+        LaunchedEffect(Unit) {
+            while (true) {
+                runCatching {
+                    isRunning = activity.omwIsGameRunning()
+                    if (isRunning) {
+                        healthCur = activity.omwGetPlayerHealthCurrent()
+                        healthMod = activity.omwGetPlayerHealthModified()
+                        healthBase = activity.omwGetPlayerHealthBase()
+                        magickaCur = activity.omwGetPlayerMagickaCurrent()
+                        magickaMod = activity.omwGetPlayerMagickaModified()
+                        fatigueCur = activity.omwGetPlayerFatigueCurrent()
+                        fatigueMod = activity.omwGetPlayerFatigueModified()
+                        level = activity.omwGetPlayerLevel()
+                        posX = activity.omwGetPlayerX()
+                        posY = activity.omwGetPlayerY()
+                        posZ = activity.omwGetPlayerZ()
+                        cellName = activity.omwGetPlayerCellName()
+                        inventorySummary = activity.omwGetPlayerInventorySummary()
+                        drawState = activity.omwGetDrawState()
+                        weaponName = activity.omwGetSelectedWeaponName()
+                        spellId = activity.omwGetSelectedSpellId()
+                    }
+
+                }
+                delay(1000.milliseconds)
+            }
+        }
+
+        Box(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.Center
+        ) {
+            Column(
+                modifier = Modifier
+                    .background(Color.Black.copy(alpha = 0.3f), RoundedCornerShape(8.dp))
+                    .padding(12.dp)
+                    .verticalScroll(rememberScrollState()),
+                horizontalAlignment = Alignment.Start
+            ) {
+                Text("=== OpenMW Stats ===", color = Color.Green, fontSize = 14.sp)
+                Text("Game Running: $isRunning", color = Color.White, fontSize = 12.sp)
+                Text("Health: ${healthCur.toInt()} / ${healthMod.toInt()} (Base: ${healthBase.toInt()})", color = Color.White, fontSize = 12.sp)
+                Text("Magicka: ${magickaCur.toInt()} / ${magickaMod.toInt()}", color = Color.White, fontSize = 12.sp)
+                Text("Fatigue: ${fatigueCur.toInt()} / ${fatigueMod.toInt()}", color = Color.White, fontSize = 12.sp)
+                Text("Level: $level", color = Color.White, fontSize = 12.sp)
+                Text("Pos: X:%.1f Y:%.1f Z:%.1f".format(posX, posY, posZ), color = Color.White, fontSize = 12.sp)
+                Text("Cell: $cellName", color = Color.White, fontSize = 12.sp)
+                Text("Draw State: $drawState", color = Color.White, fontSize = 12.sp)
+                Text("Weapon: $weaponName", color = Color.White, fontSize = 12.sp)
+                Text("Spell: $spellId", color = Color.White, fontSize = 12.sp)
+                Text("Inventory: $inventorySummary", color = Color.White, fontSize = 10.sp)
             }
         }
     }
