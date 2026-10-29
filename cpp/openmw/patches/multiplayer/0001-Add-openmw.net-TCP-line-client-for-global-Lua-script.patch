@@ -1,0 +1,939 @@
+From b358946bec5482263cd8809c70c517e439ca4778 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Wed, 7 Oct 2026 01:24:34 -0400
+Subject: [PATCH] Add openmw.net: TCP line client for global Lua scripts
+
+- components/net: Boost.Asio line-based TCP client on a worker thread
+- openmw.net package (global scripts): connect/disconnect/isConnected/send/encodeJson
+- global engine handlers: onNetConnected, onNetDisconnected, onNetMessage
+- unit tests (loopback) and docs
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ apps/components_tests/CMakeLists.txt          |   2 +
+ apps/components_tests/net/client.cpp          | 111 +++++++++
+ apps/openmw/CMakeLists.txt                    |   2 +-
+ apps/openmw/mwlua/globalscripts.hpp           |  10 +-
+ apps/openmw/mwlua/luabindings.cpp             |   3 +
+ apps/openmw/mwlua/luamanagerimp.cpp           |  17 ++
+ apps/openmw/mwlua/luamanagerimp.hpp           |   4 +
+ apps/openmw/mwlua/netbindings.cpp             | 161 +++++++++++++
+ apps/openmw/mwlua/netbindings.hpp             |  18 ++
+ components/CMakeLists.txt                     |   6 +-
+ components/net/client.cpp                     | 225 ++++++++++++++++++
+ components/net/client.hpp                     |  59 +++++
+ .../lua-scripting/engine_handlers.rst         |   7 +
+ .../lua-scripting/index_packages.rst          |   1 +
+ .../reference/lua-scripting/openmw_net.rst    |   7 +
+ .../lua-scripting/tables/packages.rst         |   3 +
+ files/lua_api/CMakeLists.txt                  |   1 +
+ files/lua_api/openmw/net.lua                  |  48 ++++
+ 18 files changed, 682 insertions(+), 3 deletions(-)
+ create mode 100644 apps/components_tests/net/client.cpp
+ create mode 100644 apps/openmw/mwlua/netbindings.cpp
+ create mode 100644 apps/openmw/mwlua/netbindings.hpp
+ create mode 100644 components/net/client.cpp
+ create mode 100644 components/net/client.hpp
+ create mode 100644 docs/source/reference/lua-scripting/openmw_net.rst
+ create mode 100644 files/lua_api/openmw/net.lua
+
+diff --git a/apps/components_tests/CMakeLists.txt b/apps/components_tests/CMakeLists.txt
+index b83e7475d8..d0ccff0ed1 100644
+--- a/apps/components_tests/CMakeLists.txt
++++ b/apps/components_tests/CMakeLists.txt
+@@ -97,6 +97,8 @@ file(GLOB UNITTEST_SRC_FILES
+     shader/shadervisitor.cpp
+     shader/sunpenumbra.cpp
+ 
++    net/client.cpp
++
+     sqlite3/db.cpp
+     sqlite3/request.cpp
+     sqlite3/statement.cpp
+diff --git a/apps/components_tests/net/client.cpp b/apps/components_tests/net/client.cpp
+new file mode 100644
+index 0000000000..2bb9e43c37
+--- /dev/null
++++ b/apps/components_tests/net/client.cpp
+@@ -0,0 +1,111 @@
++#include <components/net/client.hpp>
++
++#include <chrono>
++#include <thread>
++
++#include <boost/asio.hpp>
++#include <gtest/gtest.h>
++
++namespace
++{
++    using namespace testing;
++    namespace asio = boost::asio;
++    using asio::ip::tcp;
++
++    std::vector<Net::Event> waitForEvents(Net::Client& client, std::size_t count)
++    {
++        std::vector<Net::Event> result;
++        for (int i = 0; i < 500 && result.size() < count; ++i)
++        {
++            for (Net::Event& e : client.poll())
++                result.push_back(std::move(e));
++            std::this_thread::sleep_for(std::chrono::milliseconds(10));
++        }
++        return result;
++    }
++
++    struct NetClientTest : Test
++    {
++        asio::io_context mIo;
++        tcp::acceptor mAcceptor{ mIo, tcp::endpoint(asio::ip::make_address("127.0.0.1"), 0) };
++        Net::Client mClient;
++
++        std::uint16_t port() const { return mAcceptor.local_endpoint().port(); }
++    };
++
++    TEST_F(NetClientTest, shouldExchangeLines)
++    {
++        std::thread server([this] {
++            tcp::socket socket(mIo);
++            mAcceptor.accept(socket);
++            asio::streambuf buf;
++            asio::read_until(socket, buf, '\n');
++            std::istream in(&buf);
++            std::string line;
++            std::getline(in, line);
++            asio::write(socket, asio::buffer("echo:" + line + "\r\nsecond\n"));
++            boost::system::error_code ec;
++            asio::read(socket, buf, ec); // wait for the client to go away
++        });
++
++        mClient.connect("127.0.0.1", port());
++        auto events = waitForEvents(mClient, 1);
++        ASSERT_EQ(events.size(), 1u);
++        EXPECT_EQ(events[0].mType, Net::Event::Type::Connected);
++        EXPECT_TRUE(mClient.isConnected());
++
++        EXPECT_TRUE(mClient.send("hello"));
++        events = waitForEvents(mClient, 2);
++        ASSERT_EQ(events.size(), 2u);
++        EXPECT_EQ(events[0].mType, Net::Event::Type::Message);
++        EXPECT_EQ(events[0].mData, "echo:hello");
++        EXPECT_EQ(events[1].mData, "second");
++
++        mClient.disconnect();
++        EXPECT_FALSE(mClient.isConnected());
++        server.join();
++    }
++
++    TEST_F(NetClientTest, shouldReportDisconnectFromServer)
++    {
++        std::thread server([this] {
++            tcp::socket socket(mIo);
++            mAcceptor.accept(socket);
++        });
++        mClient.connect("127.0.0.1", port());
++        const auto events = waitForEvents(mClient, 2);
++        server.join();
++        ASSERT_EQ(events.size(), 2u);
++        EXPECT_EQ(events[0].mType, Net::Event::Type::Connected);
++        EXPECT_EQ(events[1].mType, Net::Event::Type::Disconnected);
++        EXPECT_FALSE(mClient.isConnected());
++    }
++
++    TEST_F(NetClientTest, shouldReportConnectionFailure)
++    {
++        const std::uint16_t closedPort = port();
++        mAcceptor.close();
++        mClient.connect("127.0.0.1", closedPort);
++        const auto events = waitForEvents(mClient, 1);
++        ASSERT_EQ(events.size(), 1u);
++        EXPECT_EQ(events[0].mType, Net::Event::Type::Disconnected);
++    }
++
++    TEST_F(NetClientTest, sendShouldRejectInvalidInput)
++    {
++        EXPECT_FALSE(mClient.send("not connected"));
++        std::thread server([this] {
++            tcp::socket socket(mIo);
++            mAcceptor.accept(socket);
++            boost::system::error_code ec;
++            asio::streambuf buf;
++            asio::read(socket, buf, ec);
++        });
++        mClient.connect("127.0.0.1", port());
++        ASSERT_EQ(waitForEvents(mClient, 1).size(), 1u);
++        EXPECT_FALSE(mClient.send("a\nb"));
++        EXPECT_FALSE(mClient.send(std::string(Net::Client::sMaxLineSize + 1, 'x')));
++        mClient.disconnect();
++        server.join();
++    }
++}
+diff --git a/apps/openmw/CMakeLists.txt b/apps/openmw/CMakeLists.txt
+index daef207579..ccebbd46c8 100644
+--- a/apps/openmw/CMakeLists.txt
++++ b/apps/openmw/CMakeLists.txt
+@@ -77,7 +77,7 @@ add_openmw_dir (mwlua
+     context menuscripts globalscripts localscripts playerscripts luabindings objectbindings cellbindings coremwscriptbindings
+     mwscriptbindings camerabindings vfsbindings uibindings soundbindings inputbindings nearbybindings dialoguebindings
+     postprocessingbindings stats recordstore debugbindings corebindings worldbindings worker landbindings magicbindings factionbindings
+-    classbindings itemdata inputprocessor animationbindings birthsignbindings racebindings markupbindings weatherbindings regionbindings
++    classbindings itemdata inputprocessor animationbindings birthsignbindings racebindings markupbindings netbindings weatherbindings regionbindings
+     usertypes directregistry types/types types/door types/item types/actor types/container types/lockable types/weapon types/npc types/bodypart
+     types/creature types/player types/activator types/book types/lockpick types/probe types/apparatus
+     types/potion types/ingredient types/misc types/repair types/armor types/light types/static
+diff --git a/apps/openmw/mwlua/globalscripts.hpp b/apps/openmw/mwlua/globalscripts.hpp
+index e632f71cd9..6eeed28a1c 100644
+--- a/apps/openmw/mwlua/globalscripts.hpp
++++ b/apps/openmw/mwlua/globalscripts.hpp
+@@ -26,7 +26,8 @@ namespace MWLua
+         {
+             registerEngineHandlers({ &mObjectActiveHandlers, &mActorActiveHandlers, &mItemActiveHandlers,
+                 &mNewGameHandlers, &mPlayerAddedHandlers, &mOnActivateHandlers, &mOnUseItemHandlers,
+-                &mOnNewExteriorHandlers, &mOnDroppedHandlers, &mOnPlacedHandlers, &mOnProjectileHit });
++                &mOnNewExteriorHandlers, &mOnDroppedHandlers, &mOnPlacedHandlers, &mOnProjectileHit,
++                &mNetConnectedHandlers, &mNetDisconnectedHandlers, &mNetMessageHandlers });
+         }
+ 
+         void newGameStarted() { callEngineHandlers(mNewGameHandlers); }
+@@ -46,6 +47,10 @@ namespace MWLua
+             callEngineHandlers(mOnProjectileHit, projectile, hitResult);
+         }
+ 
++        void onNetConnected() { callEngineHandlers(mNetConnectedHandlers); }
++        void onNetDisconnected(const std::string& reason) { callEngineHandlers(mNetDisconnectedHandlers, reason); }
++        void onNetMessage(const std::string& message) { callEngineHandlers(mNetMessageHandlers, message); }
++
+     private:
+         EngineHandlerList mObjectActiveHandlers{ "onObjectActive" };
+         EngineHandlerList mActorActiveHandlers{ "onActorActive" };
+@@ -58,6 +63,9 @@ namespace MWLua
+         EngineHandlerList mOnUseItemHandlers{ "_onUseItem" };
+         EngineHandlerList mOnNewExteriorHandlers{ "onNewExterior" };
+         EngineHandlerList mOnProjectileHit{ "_onProjectileHit" };
++        EngineHandlerList mNetConnectedHandlers{ "onNetConnected" };
++        EngineHandlerList mNetDisconnectedHandlers{ "onNetDisconnected" };
++        EngineHandlerList mNetMessageHandlers{ "onNetMessage" };
+     };
+ 
+ }
+diff --git a/apps/openmw/mwlua/luabindings.cpp b/apps/openmw/mwlua/luabindings.cpp
+index d4fe9a2285..42abc57300 100644
+--- a/apps/openmw/mwlua/luabindings.cpp
++++ b/apps/openmw/mwlua/luabindings.cpp
+@@ -16,6 +16,8 @@
+ #include "inputbindings.hpp"
+ #include "localscripts.hpp"
+ #include "markupbindings.hpp"
++#include "luamanagerimp.hpp"
++#include "netbindings.hpp"
+ #include "menuscripts.hpp"
+ #include "nearbybindings.hpp"
+ #include "objectbindings.hpp"
+@@ -56,6 +58,7 @@ namespace MWLua
+         initObjectBindingsForGlobalScripts(context);
+         initCellBindingsForGlobalScripts(context);
+         return {
++            { "openmw.net", initNetPackage(context, context.mLuaManager->netClient()) },
+             { "openmw.types", initTypesPackage(context) },
+             { "openmw.core", initCorePackage(context) },
+             { "openmw.world", initWorldPackage(context) },
+diff --git a/apps/openmw/mwlua/luamanagerimp.cpp b/apps/openmw/mwlua/luamanagerimp.cpp
+index 7b914c8c48..c363bef013 100644
+--- a/apps/openmw/mwlua/luamanagerimp.cpp
++++ b/apps/openmw/mwlua/luamanagerimp.cpp
+@@ -466,6 +466,22 @@ namespace MWLua
+                 const ScopedEnginePart handlersPart(*this, mLua, LuaEnginePart::EngineHandlers);
+                 mEngineEvents.callEngineHandlers();
+             }
++
++            for (const Net::Event& event : mNetClient.poll())
++            {
++                switch (event.mType)
++                {
++                    case Net::Event::Type::Connected:
++                        mGlobalScripts.onNetConnected();
++                        break;
++                    case Net::Event::Type::Disconnected:
++                        mGlobalScripts.onNetDisconnected(event.mData);
++                        break;
++                    case Net::Event::Type::Message:
++                        mGlobalScripts.onNetMessage(event.mData);
++                        break;
++                }
++            }
+             bool isPaused = timeManager.isPaused();
+ 
+             {
+@@ -735,6 +751,7 @@ namespace MWLua
+         mActiveLocalScripts.clear();
+         mLuaEvents.clear();
+         mEngineEvents.clear();
++        mNetClient.disconnect();
+         mInputEvents.clear();
+         mMenuInputEvents.clear();
+         mObjectLists.clear();
+diff --git a/apps/openmw/mwlua/luamanagerimp.hpp b/apps/openmw/mwlua/luamanagerimp.hpp
+index d25963cc58..becfb85afb 100644
+--- a/apps/openmw/mwlua/luamanagerimp.hpp
++++ b/apps/openmw/mwlua/luamanagerimp.hpp
+@@ -15,6 +15,7 @@
+ #include <components/lua/scripttracker.hpp>
+ #include <components/lua/storage.hpp>
+ #include <components/lua_ui/resources.hpp>
++#include <components/net/client.hpp>
+ #include <components/misc/color.hpp>
+ 
+ #include "../mwbase/luamanager.hpp"
+@@ -81,6 +82,8 @@ namespace MWLua
+         void contentFilesLoaded() override;
+         void initPostLoad();
+ 
++        Net::Client& netClient() { return mNetClient; }
++
+         void loadPermanentStorage(const std::filesystem::path& userConfigPath);
+         void savePermanentStorage(const std::filesystem::path& userConfigPath) override;
+ 
+@@ -366,6 +369,7 @@ namespace MWLua
+ 
+         LuaEvents mLuaEvents{ mGlobalScripts, mMenuScripts, mLua };
+         EngineEvents mEngineEvents{ mGlobalScripts };
++        Net::Client mNetClient;
+         std::vector<MWBase::LuaManager::InputEvent> mInputEvents;
+         std::vector<MWBase::LuaManager::InputEvent> mMenuInputEvents;
+ 
+diff --git a/apps/openmw/mwlua/netbindings.cpp b/apps/openmw/mwlua/netbindings.cpp
+new file mode 100644
+index 0000000000..8a620532d8
+--- /dev/null
++++ b/apps/openmw/mwlua/netbindings.cpp
+@@ -0,0 +1,161 @@
++#include "netbindings.hpp"
++
++#include <cmath>
++#include <cstdio>
++#include <limits>
++#include <stdexcept>
++
++#include <components/lua/luastate.hpp>
++#include <components/net/client.hpp>
++
++#include "context.hpp"
++
++namespace MWLua
++{
++    namespace
++    {
++        constexpr int sMaxJsonDepth = 32;
++
++        void appendJsonString(std::string& out, std::string_view str)
++        {
++            out.push_back('"');
++            for (const unsigned char c : str)
++            {
++                switch (c)
++                {
++                    case '"':
++                        out += "\\\"";
++                        break;
++                    case '\\':
++                        out += "\\\\";
++                        break;
++                    case '\n':
++                        out += "\\n";
++                        break;
++                    case '\r':
++                        out += "\\r";
++                        break;
++                    case '\t':
++                        out += "\\t";
++                        break;
++                    default:
++                        if (c < 0x20)
++                        {
++                            char buf[8];
++                            std::snprintf(buf, sizeof(buf), "\\u%04x", c);
++                            out += buf;
++                        }
++                        else
++                            out.push_back(static_cast<char>(c));
++                }
++            }
++            out.push_back('"');
++        }
++
++        void appendJson(std::string& out, const sol::object& value, int depth)
++        {
++            if (depth > sMaxJsonDepth)
++                throw std::runtime_error("encodeJson: table is nested too deeply or contains a cycle");
++            switch (value.get_type())
++            {
++                case sol::type::lua_nil:
++                    out += "null";
++                    return;
++                case sol::type::boolean:
++                    out += value.as<bool>() ? "true" : "false";
++                    return;
++                case sol::type::number:
++                {
++                    const double d = value.as<double>();
++                    if (!std::isfinite(d))
++                        throw std::runtime_error("encodeJson: NaN and infinity can not be encoded");
++                    char buf[32];
++                    std::snprintf(buf, sizeof(buf), "%.17g", d);
++                    out += buf;
++                    return;
++                }
++                case sol::type::string:
++                    appendJsonString(out, value.as<std::string_view>());
++                    return;
++                case sol::type::table:
++                {
++                    const sol::table table = value.as<sol::table>();
++                    std::size_t count = 0;
++                    bool isArray = true;
++                    for (const auto& [k, v] : table)
++                    {
++                        ++count;
++                        if (!(k.is<double>() && k.as<double>() >= 1 && k.as<double>() == std::floor(k.as<double>())))
++                            isArray = false;
++                    }
++                    if (count == 0)
++                    {
++                        out += "[]";
++                        return;
++                    }
++                    if (isArray)
++                    {
++                        // Keys must be exactly 1..count
++                        for (std::size_t i = 1; i <= count; ++i)
++                            if (!table[i].valid() || table[i].get_type() == sol::type::lua_nil)
++                                isArray = false;
++                    }
++                    if (isArray)
++                    {
++                        out.push_back('[');
++                        for (std::size_t i = 1; i <= count; ++i)
++                        {
++                            if (i > 1)
++                                out.push_back(',');
++                            appendJson(out, table[i], depth + 1);
++                        }
++                        out.push_back(']');
++                        return;
++                    }
++                    out.push_back('{');
++                    bool first = true;
++                    for (const auto& [k, v] : table)
++                    {
++                        if (!k.is<std::string_view>() || k.get_type() != sol::type::string)
++                            throw std::runtime_error("encodeJson: object keys must be strings");
++                        if (!first)
++                            out.push_back(',');
++                        first = false;
++                        appendJsonString(out, k.as<std::string_view>());
++                        out.push_back(':');
++                        appendJson(out, v, depth + 1);
++                    }
++                    out.push_back('}');
++                    return;
++                }
++                default:
++                    throw std::runtime_error(std::string("encodeJson: unsupported value type: ")
++                        + sol::type_name(value.lua_state(), value.get_type()));
++            }
++        }
++    }
++
++    sol::table initNetPackage(const Context& context, Net::Client& client)
++    {
++        sol::state_view lua = context.sol();
++        sol::table api(lua, sol::create);
++
++        api["connect"] = [&client](std::string_view host, int port) {
++            if (host.empty())
++                throw std::invalid_argument("net.connect: empty host");
++            if (port < 1 || port > std::numeric_limits<std::uint16_t>::max())
++                throw std::invalid_argument("net.connect: port out of range");
++            client.connect(std::string(host), static_cast<std::uint16_t>(port));
++        };
++        api["disconnect"] = [&client]() { client.disconnect(); };
++        api["isConnected"] = [&client]() { return client.isConnected(); };
++        api["send"] = [&client](std::string_view message) { return client.send(message); };
++        api["encodeJson"] = [](const sol::object& value) {
++            std::string out;
++            appendJson(out, value, 0);
++            return out;
++        };
++
++        return LuaUtil::makeReadOnly(api);
++    }
++}
+diff --git a/apps/openmw/mwlua/netbindings.hpp b/apps/openmw/mwlua/netbindings.hpp
+new file mode 100644
+index 0000000000..9ecb28cb83
+--- /dev/null
++++ b/apps/openmw/mwlua/netbindings.hpp
+@@ -0,0 +1,18 @@
++#ifndef MWLUA_NETBINDINGS_H
++#define MWLUA_NETBINDINGS_H
++
++#include <sol/forward.hpp>
++
++namespace Net
++{
++    class Client;
++}
++
++namespace MWLua
++{
++    struct Context;
++
++    sol::table initNetPackage(const Context& context, Net::Client& client);
++}
++
++#endif // MWLUA_NETBINDINGS_H
+diff --git a/components/CMakeLists.txt b/components/CMakeLists.txt
+index 635185a91a..0accb411c8 100644
+--- a/components/CMakeLists.txt
++++ b/components/CMakeLists.txt
+@@ -503,6 +503,10 @@ add_component_dir(serialization
+     sizeaccumulator
+     )
+ 
++add_component_dir(net
++    client
++    )
++
+ add_component_dir(sqlite3
+     db
+     request
+@@ -723,7 +727,7 @@ if (OSG_STATIC AND CMAKE_SYSTEM_NAME MATCHES "Linux")
+ endif()
+ 
+ if (WIN32)
+-    target_link_libraries(components shlwapi)
++    target_link_libraries(components shlwapi ws2_32 mswsock)
+ endif()
+ 
+ # Fix for not visible pthreads functions for linker with glibc 2.15
+diff --git a/components/net/client.cpp b/components/net/client.cpp
+new file mode 100644
+index 0000000000..ba464b99f8
+--- /dev/null
++++ b/components/net/client.cpp
+@@ -0,0 +1,225 @@
++#include "client.hpp"
++
++#include <atomic>
++#include <deque>
++#include <mutex>
++#include <optional>
++#include <thread>
++
++#include <boost/asio.hpp>
++
++namespace Net
++{
++    namespace asio = boost::asio;
++    using asio::ip::tcp;
++
++    namespace
++    {
++        struct EventQueue
++        {
++            std::mutex mMutex;
++            std::vector<Event> mEvents;
++            std::atomic<bool> mConnected = false;
++
++            void push(Event::Type type, std::string data = {})
++            {
++                const std::lock_guard lock(mMutex);
++                mEvents.push_back({ type, std::move(data) });
++            }
++        };
++
++        // Lives on the io thread; all members except mQueue are touched only there.
++        class Session : public std::enable_shared_from_this<Session>
++        {
++        public:
++            Session(asio::io_context& io, std::shared_ptr<EventQueue> queue)
++                : mResolver(io)
++                , mSocket(io)
++                , mQueue(std::move(queue))
++            {
++            }
++
++            void start(const std::string& host, std::uint16_t port)
++            {
++                mResolver.async_resolve(host, std::to_string(port),
++                    [self = shared_from_this()](const boost::system::error_code& ec, tcp::resolver::results_type r) {
++                        if (ec)
++                            return self->fail(ec);
++                        asio::async_connect(self->mSocket, r,
++                            [self](const boost::system::error_code& connectEc, const tcp::endpoint&) {
++                                if (connectEc)
++                                    return self->fail(connectEc);
++                                boost::system::error_code ignored;
++                                self->mSocket.set_option(tcp::no_delay(true), ignored);
++                                self->mOpen = true;
++                                self->mQueue->mConnected = true;
++                                self->mQueue->push(Event::Type::Connected);
++                                self->read();
++                            });
++                    });
++            }
++
++            void write(std::string line)
++            {
++                if (!mOpen || mClosed)
++                    return;
++                line.push_back('\n');
++                const bool idle = mOut.empty();
++                mOut.push_back(std::move(line));
++                if (idle)
++                    doWrite();
++            }
++
++            void close()
++            {
++                mClosed = true;
++                boost::system::error_code ignored;
++                mResolver.cancel();
++                mSocket.close(ignored);
++            }
++
++        private:
++            void read()
++            {
++                asio::async_read_until(mSocket, asio::dynamic_buffer(mIn, Client::sMaxLineSize), '\n',
++                    [self = shared_from_this()](const boost::system::error_code& ec, std::size_t n) {
++                        if (ec)
++                            return self->fail(ec);
++                        std::size_t len = n - 1;
++                        if (len > 0 && self->mIn[len - 1] == '\r')
++                            --len;
++                        self->mQueue->push(Event::Type::Message, self->mIn.substr(0, len));
++                        self->mIn.erase(0, n);
++                        self->read();
++                    });
++            }
++
++            void doWrite()
++            {
++                asio::async_write(mSocket, asio::buffer(mOut.front()),
++                    [self = shared_from_this()](const boost::system::error_code& ec, std::size_t) {
++                        if (ec)
++                            return self->fail(ec);
++                        self->mOut.pop_front();
++                        if (!self->mOut.empty())
++                            self->doWrite();
++                    });
++            }
++
++            void fail(const boost::system::error_code& ec)
++            {
++                if (mClosed)
++                    return; // closed locally, nobody is listening
++                mClosed = true;
++                mOpen = false;
++                mQueue->mConnected = false;
++                mQueue->push(Event::Type::Disconnected, ec.message());
++                boost::system::error_code ignored;
++                mSocket.close(ignored);
++            }
++
++            tcp::resolver mResolver;
++            tcp::socket mSocket;
++            std::shared_ptr<EventQueue> mQueue;
++            std::string mIn;
++            std::deque<std::string> mOut;
++            bool mOpen = false;
++            bool mClosed = false;
++        };
++    }
++
++    class Client::Impl
++    {
++    public:
++        ~Impl()
++        {
++            if (mThread.joinable())
++            {
++                mWork.reset();
++                mIo.stop();
++                mThread.join();
++            }
++        }
++
++        void connect(const std::string& host, std::uint16_t port)
++        {
++            disconnect();
++            if (!mThread.joinable())
++            {
++                mWork.emplace(asio::make_work_guard(mIo));
++                mThread = std::thread([this] { mIo.run(); });
++            }
++            mQueue = std::make_shared<EventQueue>();
++            mSession = std::make_shared<Session>(mIo, mQueue);
++            asio::post(mIo, [s = mSession, host, port] { s->start(host, port); });
++        }
++
++        void disconnect()
++        {
++            if (mSession)
++                asio::post(mIo, [s = std::move(mSession)] { s->close(); });
++            mSession.reset();
++            mQueue.reset();
++        }
++
++        bool isConnected() const { return mQueue && mQueue->mConnected; }
++
++        bool send(std::string_view line)
++        {
++            if (!isConnected() || line.size() > sMaxLineSize || line.find_first_of("\r\n") != std::string_view::npos)
++                return false;
++            asio::post(mIo, [s = mSession, l = std::string(line)]() mutable { s->write(std::move(l)); });
++            return true;
++        }
++
++        std::vector<Event> poll()
++        {
++            std::vector<Event> result;
++            if (mQueue)
++            {
++                const std::lock_guard lock(mQueue->mMutex);
++                result.swap(mQueue->mEvents);
++            }
++            return result;
++        }
++
++    private:
++        asio::io_context mIo;
++        std::optional<asio::executor_work_guard<asio::io_context::executor_type>> mWork;
++        std::thread mThread;
++        std::shared_ptr<EventQueue> mQueue;
++        std::shared_ptr<Session> mSession;
++    };
++
++    Client::Client()
++        : mImpl(std::make_unique<Impl>())
++    {
++    }
++
++    Client::~Client() = default;
++
++    void Client::connect(const std::string& host, std::uint16_t port)
++    {
++        mImpl->connect(host, port);
++    }
++
++    void Client::disconnect()
++    {
++        mImpl->disconnect();
++    }
++
++    bool Client::isConnected() const
++    {
++        return mImpl->isConnected();
++    }
++
++    bool Client::send(std::string_view line)
++    {
++        return mImpl->send(line);
++    }
++
++    std::vector<Event> Client::poll()
++    {
++        return mImpl->poll();
++    }
++}
+diff --git a/components/net/client.hpp b/components/net/client.hpp
+new file mode 100644
+index 0000000000..6408f8ea62
+--- /dev/null
++++ b/components/net/client.hpp
+@@ -0,0 +1,59 @@
++#ifndef OPENMW_COMPONENTS_NET_CLIENT_H
++#define OPENMW_COMPONENTS_NET_CLIENT_H
++
++#include <cstdint>
++#include <memory>
++#include <string>
++#include <string_view>
++#include <vector>
++
++namespace Net
++{
++    struct Event
++    {
++        enum class Type
++        {
++            Connected,
++            Disconnected, // mData holds the reason. Not emitted after a local disconnect().
++            Message, // mData holds one received line, without the line terminator.
++        };
++        Type mType;
++        std::string mData;
++    };
++
++    // Line-oriented TCP client. All socket work happens on a background thread;
++    // the owner drives it with non-blocking calls and collects results with poll().
++    // Not thread-safe: use from a single thread.
++    class Client
++    {
++    public:
++        static constexpr std::size_t sMaxLineSize = 1024 * 1024;
++
++        Client();
++        ~Client();
++        Client(const Client&) = delete;
++        Client& operator=(const Client&) = delete;
++
++        // Starts connecting asynchronously, dropping any existing connection.
++        // The outcome is reported by a Connected or Disconnected event.
++        void connect(const std::string& host, std::uint16_t port);
++
++        // Drops the connection and discards pending events.
++        void disconnect();
++
++        bool isConnected() const;
++
++        // Queues a message; a newline is appended. Returns false if not connected,
++        // if the message contains a line break, or if it exceeds sMaxLineSize.
++        bool send(std::string_view line);
++
++        // Returns and clears the events received since the last call.
++        std::vector<Event> poll();
++
++    private:
++        class Impl;
++        std::unique_ptr<Impl> mImpl;
++    };
++}
++
++#endif
+diff --git a/docs/source/reference/lua-scripting/engine_handlers.rst b/docs/source/reference/lua-scripting/engine_handlers.rst
+index 5e21b6e461..9d48f8b968 100644
+--- a/docs/source/reference/lua-scripting/engine_handlers.rst
++++ b/docs/source/reference/lua-scripting/engine_handlers.rst
+@@ -53,6 +53,13 @@ Engine handler is a function defined by a script, that can be called by the engi
+   * - onPlayerAdded(player)
+     - | Player added to the game world. The argument is a `Game object`. 
+       | Note that this is triggered at the start of a game, and when a game is loaded.
++  * - onNetConnected()
++    - The connection requested with ``openmw.net.connect`` is established.
++  * - onNetDisconnected(reason)
++    - | The connection failed or was closed by the server. ``reason`` is a string.
++      | Not called after ``openmw.net.disconnect``.
++  * - onNetMessage(message)
++    - A line was received from the server. ``message`` is a string without the line terminator.
+   * - onObjectActive(object)
+     - Object becomes active.
+   * - onActorActive(actor)
+diff --git a/docs/source/reference/lua-scripting/index_packages.rst b/docs/source/reference/lua-scripting/index_packages.rst
+index d73865e7db..3885f69b7c 100644
+--- a/docs/source/reference/lua-scripting/index_packages.rst
++++ b/docs/source/reference/lua-scripting/index_packages.rst
+@@ -18,6 +18,7 @@ Packages
+     markup <openmw_markup>
+     menu <openmw_menu>
+     nearby <openmw_nearby>
++    net <openmw_net>
+     postprocessing <openmw_postprocessing>
+     self <openmw_self>
+     storage <openmw_storage>
+diff --git a/docs/source/reference/lua-scripting/openmw_net.rst b/docs/source/reference/lua-scripting/openmw_net.rst
+new file mode 100644
+index 0000000000..dfd2325c13
+--- /dev/null
++++ b/docs/source/reference/lua-scripting/openmw_net.rst
+@@ -0,0 +1,7 @@
++Package openmw.net
++==================
++
++.. include:: version.rst
++
++.. raw:: html
++   :file: generated_html/openmw_net.html
+diff --git a/docs/source/reference/lua-scripting/tables/packages.rst b/docs/source/reference/lua-scripting/tables/packages.rst
+index e0d2bbd52e..4255130adf 100644
+--- a/docs/source/reference/lua-scripting/tables/packages.rst
++++ b/docs/source/reference/lua-scripting/tables/packages.rst
+@@ -41,6 +41,9 @@
+    * - :doc:`nearby </reference/lua-scripting/openmw_nearby>`
+      - |bdg-ctx-local|
+      - Read-only access to the nearest area of the game world.
++   * - :doc:`net </reference/lua-scripting/openmw_net>`
++     - |bdg-ctx-global|
++     - TCP connection to an external server (multiplayer).
+    * - :doc:`postprocessing </reference/lua-scripting/openmw_postprocessing>`
+      - |bdg-ctx-player|
+      - Controls post-process shaders.
+diff --git a/files/lua_api/CMakeLists.txt b/files/lua_api/CMakeLists.txt
+index 2327e89de1..2f61fc4346 100644
+--- a/files/lua_api/CMakeLists.txt
++++ b/files/lua_api/CMakeLists.txt
+@@ -21,6 +21,7 @@ set(LUA_API_FILES
+     openmw/markup.lua
+     openmw/menu.lua
+     openmw/nearby.lua
++    openmw/net.lua
+     openmw/postprocessing.lua
+     openmw/self.lua
+     openmw/storage.lua
+diff --git a/files/lua_api/openmw/net.lua b/files/lua_api/openmw/net.lua
+new file mode 100644
+index 0000000000..f5c002eb76
+--- /dev/null
++++ b/files/lua_api/openmw/net.lua
+@@ -0,0 +1,48 @@
++---
++-- Line-based TCP connection to an external server, for multiplayer and
++-- other out-of-process integrations.
++-- There is a single connection shared by all global scripts.
++-- Messages are UTF-8 strings terminated by a line break; the payload format is
++-- up to the script (see @{#net.encodeJson} and @{openmw.markup#markup.decodeYaml}, which also parses JSON).
++-- Connection progress and incoming data are delivered through the engine handlers
++-- `onNetConnected()`, `onNetDisconnected(reason)` and `onNetMessage(message)`.
++-- The connection is dropped when a game is unloaded.
++-- @context global
++-- @module net
++-- @usage local net = require('openmw.net')
++
++
++
++---
++-- Start connecting to a server. Does not block; the result is reported by
++-- the `onNetConnected` or `onNetDisconnected` handler. Replaces the current connection, if any.
++-- @function [parent=#net] connect
++-- @param #string host Host name or IP address.
++-- @param #number port TCP port, 1-65535.
++
++---
++-- Close the connection. `onNetDisconnected` is not called for a disconnect requested by a script.
++-- @function [parent=#net] disconnect
++
++---
++-- Whether the connection is established.
++-- @function [parent=#net] isConnected
++-- @return #boolean
++
++---
++-- Send a message to the server. A line break is appended.
++-- @function [parent=#net] send
++-- @param #string message Must not contain line breaks (`\r` or `\n`) and must be at most 1 MiB.
++-- @return #boolean `false` if not connected or the message was rejected.
++
++---
++-- Convert a Lua value to a JSON string, which contains no line breaks and can be passed to @{#net.send}.
++-- Supports nil, booleans, numbers, strings and tables; a table with keys 1..n is
++-- an array, any other table (with string keys) is an object. An empty table is an empty array.
++-- Throws an error for unsupported values (functions, userdata such as vectors and game objects),
++-- non-finite numbers, non-string object keys and cyclic tables.
++-- @function [parent=#net] encodeJson
++-- @param value Value to encode.
++-- @return #string
++
++return nil
+-- 
+2.55.0
+

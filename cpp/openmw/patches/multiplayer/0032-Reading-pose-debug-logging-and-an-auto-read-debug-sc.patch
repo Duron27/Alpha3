@@ -1,0 +1,74 @@
+From e0ffa729365ebac378231350e1a0ef1b44b263c1 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Fri, 9 Oct 2026 09:38:54 -0400
+Subject: [PATCH] Reading-pose debug logging and an auto-read debug script
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ multiplayer/debug/autoread.omwscripts          |  1 +
+ .../debug/scripts/mp_debug/autoread.lua        | 18 ++++++++++++++++++
+ multiplayer/mod/scripts/mp/remote.lua          |  1 +
+ multiplayer/run-two.sh                         |  2 +-
+ 4 files changed, 21 insertions(+), 1 deletion(-)
+ create mode 100644 multiplayer/debug/autoread.omwscripts
+ create mode 100644 multiplayer/debug/scripts/mp_debug/autoread.lua
+
+diff --git a/multiplayer/debug/autoread.omwscripts b/multiplayer/debug/autoread.omwscripts
+new file mode 100644
+index 0000000000..ec352b4b66
+--- /dev/null
++++ b/multiplayer/debug/autoread.omwscripts
+@@ -0,0 +1 @@
++PLAYER: scripts/mp_debug/autoread.lua
+diff --git a/multiplayer/debug/scripts/mp_debug/autoread.lua b/multiplayer/debug/scripts/mp_debug/autoread.lua
+new file mode 100644
+index 0000000000..7c00485852
+--- /dev/null
++++ b/multiplayer/debug/scripts/mp_debug/autoread.lua
+@@ -0,0 +1,18 @@
++-- Test helper (player script): opens a menu for a while, like opening the inventory (pauses the game).
++local I = require('openmw.interfaces')
++local t, opened = 0, false
++return {
++    engineHandlers = {
++        onFrame = function()
++            t = t + require('openmw.core').getRealFrameDuration()
++            if t > 40 and t < 70 and not opened then
++                opened = true
++                I.UI.setMode('Interface', { windows = {} })
++            elseif t >= 70 and opened then
++                opened = false
++                I.UI.setMode()
++                t = 1000
++            end
++        end,
++    },
++}
+diff --git a/multiplayer/mod/scripts/mp/remote.lua b/multiplayer/mod/scripts/mp/remote.lua
+index 5e7692f7d2..814817499e 100644
+--- a/multiplayer/mod/scripts/mp/remote.lua
++++ b/multiplayer/mod/scripts/mp/remote.lua
+@@ -144,6 +144,7 @@ end
+ setReading = function(on)
+     if on == reading then return end
+     reading = on
++    print('[mp-anim] reading ' .. tostring(on) .. ' book ' .. tostring(findBook()) .. ' group ' .. tostring(anim.hasGroup(self, READ_GROUP)))
+     if on then
+         local model = findBook()
+         if model then pcall(anim.addVfx, self, model, { boneName = 'Bip01 L Hand', vfxId = 'mp_book', loop = true,
+diff --git a/multiplayer/run-two.sh b/multiplayer/run-two.sh
+index 947107c60a..9a2e6c1d97 100755
+--- a/multiplayer/run-two.sh
++++ b/multiplayer/run-two.sh
+@@ -12,7 +12,7 @@ common=(--data "$HERE/mod" --data "$HERE/debug" --load-savegame "$SAVE")
+ HOST=$!
+ trap 'kill $HOST ${JOIN:-} 2>/dev/null' EXIT
+ sleep 25   # let the host load and start listening
+-"$OPENMW" "${common[@]}" --content mp.omwscripts --content autojoin.omwscripts --user-data "$OUT/join" "$@" > "$OUT/join.log" 2>&1 &
++"$OPENMW" "${common[@]}" --content mp.omwscripts --content autojoin.omwscripts --content autoread.omwscripts --user-data "$OUT/join" "$@" > "$OUT/join.log" 2>&1 &
+ JOIN=$!
+ echo "host log: $OUT/host.log   join log: $OUT/join.log"
+ wait
+-- 
+2.55.0
+

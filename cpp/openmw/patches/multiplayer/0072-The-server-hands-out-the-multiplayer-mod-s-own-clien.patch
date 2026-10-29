@@ -1,0 +1,281 @@
+From 01ea89198b76a4aacc83b3b108e62ae59d9e9b13 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Thu, 15 Oct 2026 15:32:10 -0400
+Subject: [PATCH] The server hands out the multiplayer mod's own client scripts
+ straight from its mod folder (stored once), and its bundle has a clientmods
+ folder
+
+- clientmods: setExtraMod offers a folder the server already has (scripts, l10n, textures) as one more mod, plus an empty
+  <id>.omwscripts so the client adds the folder to its data directories without loading anything twice. A real folder of
+  that name in clientmods takes over. The mod's own mp.omwscripts and anything else in the folder is never offered
+- openmw-mp-server serves <mod> as "multiplayer", so the bundle no longer holds a second copy of the scripts
+- the bundle gets an empty clientmods folder with a note; README and a unit test
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ apps/components_tests/misc/testclientmods.cpp | 45 ++++++++++++
+ apps/mpserver/bundle.cmake                    | 12 ++++
+ apps/mpserver/servercore.cpp                  |  1 +
+ components/misc/clientmods.cpp                | 71 +++++++++++++++++--
+ components/misc/clientmods.hpp                |  5 ++
+ multiplayer/README.md                         |  3 +
+ 6 files changed, 130 insertions(+), 7 deletions(-)
+
+diff --git a/apps/components_tests/misc/testclientmods.cpp b/apps/components_tests/misc/testclientmods.cpp
+index f85a9c022d..520957775b 100644
+--- a/apps/components_tests/misc/testclientmods.cpp
++++ b/apps/components_tests/misc/testclientmods.cpp
+@@ -4,6 +4,7 @@
+ #include <gtest/gtest.h>
+ 
+ #include <filesystem>
++#include <fstream>
+ 
+ namespace
+ {
+@@ -102,4 +103,48 @@ namespace
+         std::filesystem::remove_all(root);
+         CM::setRoot({});
+     }
++
++    TEST(MiscClientMods, extraModServedFromAFolder)
++    {
++        const std::filesystem::path base = std::filesystem::temp_directory_path() / "omw_clientmods_extra";
++        std::filesystem::remove_all(base);
++        std::filesystem::create_directories(base / "mod" / "scripts" / "mp");
++        std::filesystem::create_directories(base / "mod" / "secret");
++        std::filesystem::create_directories(base / "root");
++        auto put = [](const std::filesystem::path& p, const std::string& text) { std::ofstream(p, std::ios::binary) << text; };
++        put(base / "mod" / "scripts" / "mp" / "a.lua", "print(1)");
++        put(base / "mod" / "mp.omwscripts", "GLOBAL: scripts/mp/a.lua\n"); // must not be offered: it would load the scripts twice
++        put(base / "mod" / "secret" / "s.lua", "x");
++        CM::setRoot(base / "root");
++        CM::setExtraMod("multiplayer", base / "mod");
++
++        const auto mods = CM::installed();
++        ASSERT_EQ(mods.size(), 1u);
++        EXPECT_EQ(mods[0].mId, "multiplayer");
++        ASSERT_EQ(mods[0].mFiles.size(), 2u);
++        EXPECT_EQ(mods[0].mFiles[0].mPath, "multiplayer.omwscripts");
++        EXPECT_EQ(mods[0].mFiles[1].mPath, "scripts/mp/a.lua");
++        EXPECT_EQ(mods[0].mFiles[1].mHash, Misc::sha256Hex("print(1)"));
++        EXPECT_EQ(CM::read("multiplayer", "scripts/mp/a.lua"), "print(1)");
++        const auto stub = CM::read("multiplayer", "multiplayer.omwscripts");
++        ASSERT_TRUE(stub);
++        EXPECT_EQ(Misc::sha256Hex(*stub), mods[0].mFiles[0].mHash);
++        EXPECT_EQ(stub->find("GLOBAL"), std::string::npos);
++        EXPECT_FALSE(CM::read("multiplayer", "mp.omwscripts"));
++        EXPECT_FALSE(CM::read("multiplayer", "secret/s.lua"));
++
++        // a real folder of the same name takes over
++        put(base / "root" / "x", "");
++        std::filesystem::remove(base / "root" / "x");
++        std::filesystem::create_directories(base / "root" / "multiplayer");
++        EXPECT_EQ(CM::write("multiplayer", "b.lua", "y", Misc::sha256Hex("y")), "");
++        const auto own = CM::installed();
++        ASSERT_EQ(own.size(), 1u);
++        ASSERT_EQ(own[0].mFiles.size(), 1u);
++        EXPECT_EQ(own[0].mFiles[0].mPath, "b.lua");
++
++        std::filesystem::remove_all(base);
++        CM::setExtraMod("", {});
++        CM::setRoot({});
++    }
+ }
+diff --git a/apps/mpserver/bundle.cmake b/apps/mpserver/bundle.cmake
+index e1127f88c5..72ed96dbb4 100644
+--- a/apps/mpserver/bundle.cmake
++++ b/apps/mpserver/bundle.cmake
+@@ -34,6 +34,18 @@ foreach (part mod server README.md)
+     file(COPY "${MULTIPLAYER_DIR}/${part}" DESTINATION "${dir}/multiplayer")
+ endforeach ()
+ 
++# The client mods this server hands out: the multiplayer mod's own client scripts are served straight from the mod folder
++# (so they are stored once), and any mods kept in multiplayer/clientmods are added.
++if (EXISTS "${MULTIPLAYER_DIR}/clientmods")
++    file(COPY "${MULTIPLAYER_DIR}/clientmods" DESTINATION "${dir}/multiplayer")
++endif ()
++# ...and an empty folder for the operator's own: clientmods/<name>/<name>.omwscripts, scripts/...
++file(MAKE_DIRECTORY "${dir}/clientmods")
++file(WRITE "${dir}/clientmods/README.txt"
++    "Client mods this server hands out go here, one folder each:  clientmods/<name>/<name>.omwscripts, scripts/..., textures/...\n"
++    "Players are asked before anything is installed, and only the files that differ are downloaded. The multiplayer mod's own\n"
++    "client scripts are handed out automatically from multiplayer/mod. See multiplayer/README.md (Client mods kept on the server).\n")
++
+ file(COPY "${FILES_DIR}/start-server.sh" DESTINATION "${dir}" FILE_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE
+     GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
+ # (a batch file wants Windows line endings, whatever git did to the one in the source tree)
+diff --git a/apps/mpserver/servercore.cpp b/apps/mpserver/servercore.cpp
+index 5b08012744..8a1eff2267 100644
+--- a/apps/mpserver/servercore.cpp
++++ b/apps/mpserver/servercore.cpp
+@@ -660,6 +660,7 @@ namespace MpServer
+         mImpl->mOptions = options;
+         mImpl->mHost.mModDir = options.mMod;
+         Misc::ClientMods::setRoot(options.mClientMods);
++        Misc::ClientMods::setExtraMod("multiplayer", options.mMod); // the mod's own client scripts, served from where the relay reads them
+         gHost = &mImpl->mHost;
+     }
+ 
+diff --git a/components/misc/clientmods.cpp b/components/misc/clientmods.cpp
+index 80ef96b608..ddede1662f 100644
+--- a/components/misc/clientmods.cpp
++++ b/components/misc/clientmods.cpp
+@@ -25,6 +25,9 @@ namespace Misc::ClientMods
+         namespace fs = std::filesystem;
+ 
+         fs::path sRoot;
++        std::string sExtraId;
++        fs::path sExtraDir;
++        const std::vector<std::string> sExtraFolders = { "scripts", "l10n", "textures" };
+         std::atomic<bool> sRestart{ false };
+ 
+         bool nameChar(char c)
+@@ -94,11 +97,18 @@ namespace Misc::ClientMods
+         }
+ 
+         // The files of one mod folder (only plain files with allowed names; anything else is ignored)
+-        std::vector<File> filesOf(const fs::path& dir, bool withHashes)
++        std::vector<File> filesOf(const fs::path& dir, bool withHashes, const std::vector<std::string>& only = {})
+         {
+             std::vector<File> files;
+             std::error_code ec;
+-            for (fs::recursive_directory_iterator it(dir, fs::directory_options::none, ec), end; !ec && it != end;
++            std::vector<fs::path> starts;
++            if (only.empty())
++                starts.push_back(dir);
++            else
++                for (const std::string& sub : only)
++                    starts.push_back(dir / sub);
++            for (const fs::path& start : starts)
++            for (fs::recursive_directory_iterator it(start, fs::directory_options::none, ec), end; !ec && it != end;
+                  it.increment(ec))
+             {
+                 if (!it->is_regular_file(ec) || it->is_symlink(ec))
+@@ -122,18 +132,43 @@ namespace Misc::ClientMods
+             return files;
+         }
+ 
++        bool isExtra(std::string_view id)
++        {
++            std::error_code ec;
++            return !sExtraId.empty() && id == sExtraId && !fs::is_directory(sRoot / std::string(id), ec);
++        }
++
++        std::string extraStub()
++        {
++            return "# The client scripts of this server's own mod, kept in step with the server. They replace the copies built into the\n"
++                   "# game, which already registers them, so nothing is listed here.\n";
++        }
++
++        std::vector<File> extraFiles(bool withHashes)
++        {
++            std::vector<File> files = filesOf(sExtraDir, withHashes, sExtraFolders);
++            File stub;
++            stub.mPath = sExtraId + ".omwscripts";
++            stub.mSize = extraStub().size();
++            if (withHashes)
++                stub.mHash = sha256Hex(extraStub());
++            files.push_back(std::move(stub));
++            std::sort(files.begin(), files.end(), [](const File& a, const File& b) { return a.mPath < b.mPath; });
++            return files;
++        }
++
+         std::vector<std::string> modIds()
+         {
+             std::vector<std::string> ids;
+-            if (sRoot.empty())
+-                return ids;
+             std::error_code ec;
+-            for (fs::directory_iterator it(sRoot, ec), end; !ec && it != end; it.increment(ec))
++            for (fs::directory_iterator it(sRoot, ec), end; !sRoot.empty() && !ec && it != end; it.increment(ec))
+             {
+                 const std::string id = it->path().filename().string();
+                 if (it->is_directory(ec) && !it->is_symlink(ec) && validId(id))
+                     ids.push_back(id);
+             }
++            if (!sExtraId.empty() && !fs::is_directory(sRoot / sExtraId, ec))
++                ids.push_back(sExtraId);
+             std::sort(ids.begin(), ids.end());
+             if (ids.size() > sMaxMods)
+                 ids.resize(sMaxMods);
+@@ -154,6 +189,12 @@ namespace Misc::ClientMods
+         sRoot = root;
+     }
+ 
++    void setExtraMod(const std::string& id, const fs::path& dir)
++    {
++        sExtraId = validId(id) ? id : std::string();
++        sExtraDir = dir;
++    }
++
+     const fs::path& root()
+     {
+         return sRoot;
+@@ -198,7 +239,7 @@ namespace Misc::ClientMods
+         {
+             Mod mod;
+             mod.mId = id;
+-            mod.mFiles = filesOf(sRoot / id, true);
++            mod.mFiles = isExtra(id) ? extraFiles(true) : filesOf(sRoot / id, true);
+             if (!mod.mFiles.empty())
+                 mods.push_back(std::move(mod));
+         }
+@@ -229,7 +270,23 @@ namespace Misc::ClientMods
+ 
+     std::optional<std::string> read(std::string_view id, std::string_view path)
+     {
+-        if (sRoot.empty() || !validId(id) || !validPath(path))
++        if (!validId(id) || !validPath(path))
++            return std::nullopt;
++        if (isExtra(id))
++        {
++            if (path == sExtraId + ".omwscripts")
++                return extraStub();
++            const std::size_t slash = path.find('/');
++            if (slash == std::string_view::npos
++                || std::find(sExtraFolders.begin(), sExtraFolders.end(), std::string(path.substr(0, slash))) == sExtraFolders.end())
++                return std::nullopt;
++            const fs::path extra = sExtraDir / std::string(path);
++            std::error_code ec;
++            if (!fs::is_regular_file(extra, ec) || fs::is_symlink(extra, ec))
++                return std::nullopt;
++            return readWhole(extra, sMaxFileSize);
++        }
++        if (sRoot.empty())
+             return std::nullopt;
+         const fs::path file = sRoot / std::string(id) / std::string(path);
+         std::error_code ec;
+diff --git a/components/misc/clientmods.hpp b/components/misc/clientmods.hpp
+index 4728dc9b2c..4b2161df9e 100644
+--- a/components/misc/clientmods.hpp
++++ b/components/misc/clientmods.hpp
+@@ -32,6 +32,11 @@ namespace Misc::ClientMods
+         std::vector<File> mFiles;
+     };
+ 
++    // A server can also hand out a folder it already has as one more mod (the multiplayer mod's own client scripts, so they are
++    // not stored twice): only its scripts, l10n and textures folders are offered, plus an empty <id>.omwscripts so that the
++    // client adds the folder to its data directories without loading anything twice. A folder <root>/<id> wins over it.
++    void setExtraMod(const std::string& id, const std::filesystem::path& dir);
++
+     // The folder everything lives in. Set once at startup; empty means the feature is off.
+     void setRoot(const std::filesystem::path& root);
+     const std::filesystem::path& root();
+diff --git a/multiplayer/README.md b/multiplayer/README.md
+index 09fd6bdbda..f2592e8c6d 100644
+--- a/multiplayer/README.md
++++ b/multiplayer/README.md
+@@ -164,6 +164,9 @@ installing anything by hand.
+   jpg, nif, kf, wav, mp3, ogg; at most 8 MB a file, 64 MB and 500 files a mod, 32 mods). Then the game restarts (Linux and
+   Windows; elsewhere the player starts it again) and the new scripts load at startup. The player joins again.
+ 
++The multiplayer mod's own client scripts (`multiplayer/mod/scripts`, `l10n`, `textures`) are always handed out too, as the mod
++  `multiplayer`: change a script on the server and the players' copy follows without a new build.
++
+ A player trusts the server's owner with this: the scripts run in their game like any mod. They are only ever asked first.
+ 
+ ## Playing together
+-- 
+2.55.0
+

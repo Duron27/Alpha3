@@ -1,0 +1,14 @@
+--- a/apps/openmw/mwrender/clockwork/device/renderer.cpp
++++ b/apps/openmw/mwrender/clockwork/device/renderer.cpp
+@@ -455,6 +455,11 @@
+         facts.mDeviceName = description.mName;
+         facts.mDriver = description.mDriverName + " " + description.mDriverInfo;
+         facts.mDiscrete = description.mType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
++#ifdef ANDROID
++        // A phone's GPU shares memory with the CPU, but it is the one device the game has: size the world shadows (moving
++        // objects included) as for a discrete GPU. Every size is still taken from the memory budget.
++        facts.mDiscrete = true;
++#endif
+         facts.mMaxArrayLayers = description.mMaxArrayLayers;
+         for (const Vulkan::MemoryHeapInfo& heap : description.mHeaps)
+             if ((heap.mFlags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0)

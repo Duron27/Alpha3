@@ -1,0 +1,698 @@
+From 84c8d296d66e6418606a8c21542f08466401fb52 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Wed, 7 Oct 2026 02:25:23 -0400
+Subject: [PATCH] Non-pausing chat, player-to-player trade window
+
+- chat: no UI mode (game keeps running); fix lock-up caused by polling the lagging I.UI.getMode()
+- trade: avatar menu entry, shared deal with both inventories visible, revisioned accept, MpTradeExec in global
+- relay: forward trade_* messages between any two players
+- bot: accepts trades; test hooks for the UI
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ multiplayer/README.md                         |  25 +-
+ multiplayer/debug/scripts/mp_debug/give.lua   |  12 +-
+ .../debug/scripts/mp_debug/maxstats.lua       |  22 +-
+ multiplayer/mod/scripts/mp/global.lua         |  40 +++
+ multiplayer/mod/scripts/mp/player.lua         |  50 ++-
+ multiplayer/mod/scripts/mp/trade.lua          | 299 ++++++++++++++++++
+ multiplayer/server/owner_bot.py               |  14 +-
+ multiplayer/server/relay.py                   |   6 +
+ 8 files changed, 429 insertions(+), 39 deletions(-)
+ create mode 100644 multiplayer/mod/scripts/mp/trade.lua
+
+diff --git a/multiplayer/README.md b/multiplayer/README.md
+index 2b3b7cae51..0e4d9f3368 100644
+--- a/multiplayer/README.md
++++ b/multiplayer/README.md
+@@ -8,18 +8,21 @@
+ Run: `multiplayer/run-test.sh [path/to/openmw]`, then load a save. Watch `openmw.log` for `[mp]` lines.
+ Protocol: one JSON object per line, `{"t":"state","name","cell","pos":[x,y,z],"yaw"}`; the server adds `id`.
+ 
+-## Per-player worlds and groups (stage 3)
++## How it works
+ Every player keeps their **own** world; nothing a group member does changes yours.
+-Only players in the same *group* (Options -> Scripts -> Multiplayer; default group `lobby`, empty = solo) see each other:
+-- Members appear as stand-in NPCs with their look and gear (visible only when you share a cell).
+-- If a member has an NPC/creature **alive** that is dead or missing in **your** world, you get a *proxy* copy named
+-  `Name [Alice's world]`: its own record, no script, no AI, can't be talked to. You can fight it; the damage is sent to
+-  Alice, whose real actor takes it (so she can finish her quest) while your world stays untouched.
+-  Proxies mirror the owner's actor position and health. Hits on a proxy never give you a bounty (best effort).
+-- Leaving the group (or the member disconnecting) removes their avatar and all their proxies.
++- **Presence:** everyone online appears as a stand-in NPC (look + gear) when you share a cell. Activate one for a menu:
++  invite to party, accept/decline, leave party, **trade**.
++- **Parties (max 3):** shared party chat, health/magicka/fatigue panel, and *proxies*: if a member has an NPC/creature
++  alive that is dead or missing in your world you get a marked copy `Name [Alice's world]` (own record, no script, no AI).
++  Damage you do to it is applied to the owner's real actor, so they can finish their quest. Your world is untouched.
++- **Chat:** Enter or Y opens the input (the game keeps running); Enter sends, Tab switches Global/Party.
++  `/accept [name]`, `/decline [name]`, `/leave`, `/g text`, `/p text`.
++- **Trade:** both inventories are shown (like a merchant's goods). Click to add an item to the deal, right-click adds
++  the whole stack; both players must accept the same revision. Items are recreated from their record id on the receiving
++  side (condition/enchant charge reset; runtime-generated items can't be traded). It is not atomic across a crash.
+ 
+-Test with one client: `server/owner_bot.py [--hurt <contentfile>:<index>]` pretends to be a member owning a scrib
+-that doesn't exist in your world, and applies/prints damage you do to it.
++Test with one client: `run-test.sh [--cheat]` starts the relay, a "Bot" player (auto-accepts party invites and trades,
++owns a scrib that doesn't exist in your world) and OpenMW. `server/owner_bot.py --help` lists bot options.
+ 
+ Not done: members' attacks on you, shared fights where both worlds have the actor alive, container contents,
+-weather/time, quest sync (by design none), proxies for actors that are alive-but-unloaded in your world.
++weather/time, proxies for actors that are alive-but-unloaded in your world, trade of enchanted/generated items.
+diff --git a/multiplayer/debug/scripts/mp_debug/give.lua b/multiplayer/debug/scripts/mp_debug/give.lua
+index 27c6c857db..b7de6f9453 100644
+--- a/multiplayer/debug/scripts/mp_debug/give.lua
++++ b/multiplayer/debug/scripts/mp_debug/give.lua
+@@ -1,8 +1,8 @@
+--- DEBUG ONLY: gives the player a strong weapon (once per session, if they don't have one).
++-- DEBUG ONLY: gives the player a melee weapon, a bow and arrows (once per session, only what is missing).
+ local world = require('openmw.world')
+ local types = require('openmw.types')
+ 
+-local WEAPON = 'daedric longsword'
++local ITEMS = { { 'daedric longsword', 1 }, { 'daedric long bow', 1 }, { 'daedric arrow', 200 } }
+ local timer = 0
+ local done = false
+ 
+@@ -13,8 +13,10 @@ return { engineHandlers = { onUpdate = function(dt)
+     if timer < 1 then return end
+     done = true
+     local inv = types.Actor.inventory(p)
+-    if inv:countOf(WEAPON) == 0 then
+-        world.createObject(WEAPON, 1):moveInto(inv)
+-        print('[mp-debug] gave ' .. WEAPON)
++    for _, item in ipairs(ITEMS) do
++        if inv:countOf(item[1]) == 0 then
++            world.createObject(item[1], item[2]):moveInto(inv)
++            print('[mp-debug] gave ' .. item[2] .. ' x ' .. item[1])
++        end
+     end
+ end } }
+diff --git a/multiplayer/debug/scripts/mp_debug/maxstats.lua b/multiplayer/debug/scripts/mp_debug/maxstats.lua
+index 4d097b492d..8bf92e6f85 100644
+--- a/multiplayer/debug/scripts/mp_debug/maxstats.lua
++++ b/multiplayer/debug/scripts/mp_debug/maxstats.lua
+@@ -1,10 +1,10 @@
+--- DEBUG ONLY: maxes the player's attributes, skills and vitals and equips the debug weapon.
++-- DEBUG ONLY: maxes the player's attributes, skills and vitals and equips a bow with arrows.
+ -- Changes live in the running game; they reach a save only if you save while this is active.
+ local self = require('openmw.self')
+ local types = require('openmw.types')
+ 
+ local Actor, NPC = types.Actor, types.NPC
+-local WEAPON = 'daedric longsword'
++local WEAPON, AMMO = 'daedric long bow', 'daedric arrow'
+ local ATTRIBUTES = { 'strength', 'intelligence', 'willpower', 'agility', 'speed', 'endurance', 'personality', 'luck' }
+ local SKILLS = { 'block', 'armorer', 'mediumarmor', 'heavyarmor', 'bluntweapon', 'longblade', 'axe', 'spear',
+     'athletics', 'enchant', 'destruction', 'alteration', 'illusion', 'conjuration', 'mysticism', 'restoration',
+@@ -29,15 +29,17 @@ return { engineHandlers = {
+         elapsed = elapsed + dt
+         if not applied and elapsed > 0.5 then applied = true; apply() end
+         equipTimer = equipTimer - dt
+-        if elapsed > 3 and equipTimer <= 0 and elapsed < 30 then
++        if elapsed > 3 and equipTimer <= 0 and elapsed < 40 then
+             equipTimer = 2
+-            local right = Actor.getEquipment(self, Actor.EQUIPMENT_SLOT.CarriedRight)
+-            if not right or right.recordId ~= WEAPON then
+-                if Actor.inventory(self):countOf(WEAPON) > 0 then
+-                    Actor.setEquipment(self, { [Actor.EQUIPMENT_SLOT.CarriedRight] = WEAPON })
+-                end
+-            else
+-                elapsed = 30 -- equipped, stop checking
++            local slots = Actor.EQUIPMENT_SLOT
++            local right = Actor.getEquipment(self, slots.CarriedRight)
++            local ammo = Actor.getEquipment(self, slots.Ammunition)
++            local inv = Actor.inventory(self)
++            if (not right or right.recordId ~= WEAPON or not ammo or ammo.recordId ~= AMMO)
++                and inv:countOf(WEAPON) > 0 and inv:countOf(AMMO) > 0 then
++                Actor.setEquipment(self, { [slots.CarriedRight] = WEAPON, [slots.Ammunition] = AMMO })
++            elseif right and ammo then
++                elapsed = 40 -- equipped, stop checking
+             end
+         end
+     end,
+diff --git a/multiplayer/mod/scripts/mp/global.lua b/multiplayer/mod/scripts/mp/global.lua
+index c0d59126a8..38dcb893c3 100644
+--- a/multiplayer/mod/scripts/mp/global.lua
++++ b/multiplayer/mod/scripts/mp/global.lua
+@@ -324,6 +324,8 @@ local function onCommand(d)
+         net.send(net.encodeJson({ t = 'leave_party' }))
+     elseif cmd == 'sync' then
+         pushUi()
++    elseif cmd == 'trade_send' then
++        if net.isConnected() then net.send(net.encodeJson(d.msg)) end
+     end
+     pushUi()
+ end
+@@ -390,11 +392,17 @@ local function onMessage(msg)
+         return
+     end
+     if t == 'leave' then
++        toUi('MpTrade', { t = 'trade_cancel', id = msg.id, name = nameOf(msg.id), left = true })
+         invitesIn[msg.id], invitesOut[msg.id] = nil, nil
+         vitals[msg.id] = nil
+         removeRemote(msg.id)
+         return
+     end
++    if type(t) == 'string' and t:sub(1, 6) == 'trade_' then
++        msg.name = nameOf(msg.id)
++        toUi('MpTrade', msg)
++        return
++    end
+     if t == 'vitals' then vitals[msg.id] = msg return end
+     if proxies.onMessage(msg) then return end
+     local id = msg.id
+@@ -493,6 +501,38 @@ return {
+             end
+         end,
+         MpProxyDamage = proxies.onProxyDamage,
++        -- Player-to-player trade: d.give / d.get are { [recordId] = count }. Items leave this world's
++        -- inventory and are recreated from their record id on the other side (conditions/enchant charges reset,
++        -- generated records can't be traded).
++        MpTradeExec = function(d)
++            local p = player()
++            local function fail(err) toUi('MpTradeResult', { ok = false, err = err }) end
++            if not p then return fail('no player') end
++            local inv = types.Actor.inventory(p)
++            for rid, count in pairs(d.give or {}) do
++                if inv:countOf(rid) < count then return fail('You no longer have ' .. count .. ' x ' .. rid) end
++            end
++            local created = {}
++            for rid, count in pairs(d.get or {}) do
++                local ok, obj = pcall(world.createObject, rid, count)
++                if not ok or count < 1 then
++                    for _, o in ipairs(created) do pcall(function() o:remove() end) end
++                    return fail('Unknown item ' .. rid)
++                end
++                created[#created + 1] = obj
++            end
++            for rid, count in pairs(d.give or {}) do
++                local left = count
++                for _, obj in ipairs(inv:findAll(rid)) do
++                    if left <= 0 then break end
++                    local n = math.min(left, obj.count)
++                    obj:remove(n)
++                    left = left - n
++                end
++            end
++            for _, obj in ipairs(created) do obj:moveInto(inv) end
++            toUi('MpTradeResult', { ok = true })
++        end,
+         MpCmd = function(d)
+             if d.cmd == 'accept' and not d.id then d.id = resolveInviter(d.name) end
+             if (d.cmd == 'accept' or d.cmd == 'decline') and not d.id then
+diff --git a/multiplayer/mod/scripts/mp/player.lua b/multiplayer/mod/scripts/mp/player.lua
+index 5ae92cd416..caa4067125 100644
+--- a/multiplayer/mod/scripts/mp/player.lua
++++ b/multiplayer/mod/scripts/mp/player.lua
+@@ -6,6 +6,7 @@ local core = require('openmw.core')
+ local input = require('openmw.input')
+ local async = require('openmw.async')
+ local I = require('openmw.interfaces')
++local trade = require('scripts/mp/trade')
+ 
+ I.Settings.registerPage {
+     key = 'MultiplayerPage', l10n = 'Multiplayer', name = 'Multiplayer',
+@@ -146,6 +147,13 @@ end
+ 
+ ------------------------------------------------------------------ input
+ 
++trade.init({
++    send = function(msg) core.sendGlobalEvent('MpCmd', { cmd = 'trade_send', msg = msg }) end,
++    notice = function(str) addLine('system', '* ' .. str) end,
++    setMode = function() I.UI.setMode('Interface', { windows = {} }) end,
++    unsetMode = function() I.UI.setMode() end,
++})
++
+ local closeChat
+ 
+ local function sendChat(str)
+@@ -176,7 +184,8 @@ local function openChat()
+     unread[tab] = 0
+     local scr = screen()
+     local height = 28 + LINES * LINE_H + 6
+-    I.UI.setMode('Interface', { windows = {} })
++    -- No UI mode: the game keeps running. The focused text box makes the engine route typing to it
++    -- (movement/hotkeys are suppressed while it has keyboard focus).
+     inputEl = ui.create {
+         layer = 'HUD', type = ui.TYPE.Widget,
+         props = { position = V2(10, scr.y * 0.5 + height / 2 + 4), size = V2(CHAT_W, 26) },
+@@ -211,8 +220,7 @@ end
+ closeChat = function()
+     if not chatOpen then return end
+     chatOpen = false
+-    inputEl = destroy(inputEl)
+-    if I.UI.getMode() == 'Interface' then I.UI.setMode() end
++    inputEl = destroy(inputEl) -- also drops keyboard focus
+     dirty.chat = true
+ end
+ 
+@@ -299,17 +307,17 @@ end
+ 
+ ------------------------------------------------------------------ avatar menu
+ 
+-local function closeMenu()
++local function closeMenu(keepMode)
+     if not menuOpen then return end
+     menuOpen = false
+     menuEl = destroy(menuEl)
+-    if I.UI.getMode() == 'Interface' then I.UI.setMode() end
++    if not keepMode then I.UI.setMode() end
+ end
+ 
+ local function openMenu(d)
+     closeMenu()
+     local options = {}
+-    local function opt(label, fn) options[#options + 1] = { label = label, fn = fn } end
++    local function opt(label, fn, opensMode) options[#options + 1] = { label = label, fn = fn, opensMode = opensMode } end
+     local note
+     if not d.connected then
+         note = 'Not connected to the server.'
+@@ -328,6 +336,16 @@ local function openMenu(d)
+         note = d.name
+         opt('Invite to party', function() core.sendGlobalEvent('MpCmd', { cmd = 'invite', id = d.id }) end)
+     end
++    if d.connected and not trade.active() then
++        if trade.hasIncoming(d.id) then
++            opt('Accept trade', function() trade.accept(d.id) end, true)
++            opt('Decline trade', function() trade.decline(d.id) end)
++        elseif trade.pendingOutgoing(d.id) then
++            note = note .. ' (trade request pending)'
++        else
++            opt('Trade', function() trade.request(d.id, d.name) end)
++        end
++    end
+     opt('Close', function() end)
+ 
+     local content = { text { position = V2(12, 10), text = note, textColor = COLORS.system, textSize = 16 } }
+@@ -336,7 +354,7 @@ local function openMenu(d)
+             position = V2(24, 14 + i * 26), text = '> ' .. o.label, textColor = COLORS.tab_on, textSize = 16,
+             events = {
+                 mouseClick = async:callback(function()
+-                    closeMenu()
++                    closeMenu(o.opensMode)
+                     o.fn()
+                 end),
+             },
+@@ -362,11 +380,6 @@ return {
+                 synced = true
+                 core.sendGlobalEvent('MpCmd', { cmd = 'sync' })
+             end
+-            -- Escape (or anything else) closed our UI mode
+-            if (chatOpen or menuOpen) and I.UI.getMode() == nil then
+-                if chatOpen then chatOpen = false; inputEl = destroy(inputEl); dirty.chat = true end
+-                if menuOpen then menuOpen = false; menuEl = destroy(menuEl) end
+-            end
+             local shouldShow = chatOpen or (now() - lastMsgTime < FADE_AFTER)
+             if shouldShow ~= logVisible then dirty.chat = true end
+             if dirty.chat then dirty.chat = false; renderChat() end
+@@ -404,6 +417,19 @@ return {
+             if changed then dirty.party = true; dirty.invites = true end
+         end,
+         MpAvatar = function(d) openMenu(d) end,
++        MpTrade = function(msg) trade.onMessage(msg) end,
++        MpTradeResult = function(r) trade.onResult(r) end,
+         MpUiOpenChat = function() openChat() end, -- for tests/macros
++        MpUiTrade = function(d) trade.request(d.id, d.name) end, -- for tests/macros
++        MpUiTradeDebug = function(d) -- for tests/macros
++            if d.action == 'accept' then trade.debugAccept() else trade.debugEdit(d.action, d.rid, d.n) end
++        end,
++        -- Another window opened, or Escape closed our menu's Interface mode: drop our widgets.
++        -- (I.UI.getMode() lags a frame behind setMode, so it can't be polled for this.)
++        UiModeChanged = function(d)
++            if d.newMode ~= nil and chatOpen then chatOpen = false; inputEl = destroy(inputEl); dirty.chat = true end
++            trade.onMode(d.newMode)
++            if d.newMode ~= 'Interface' and menuOpen then menuOpen = false; menuEl = destroy(menuEl) end
++        end,
+     },
+ }
+diff --git a/multiplayer/mod/scripts/mp/trade.lua b/multiplayer/mod/scripts/mp/trade.lua
+new file mode 100644
+index 0000000000..84b770c646
+--- /dev/null
++++ b/multiplayer/mod/scripts/mp/trade.lua
+@@ -0,0 +1,299 @@
++-- Player-to-player trade (player script side): protocol state machine and the trade window.
++-- Both players see both inventories (like a merchant's goods) and edit one shared deal:
++-- "you give" (from your inventory) and "they give" (from theirs). Any edit resets both accepts;
++-- when both have accepted the same revision each client applies it through global.lua (MpTradeExec).
++local ui = require('openmw.ui')
++local util = require('openmw.util')
++local core = require('openmw.core')
++local self = require('openmw.self')
++local types = require('openmw.types')
++local async = require('openmw.async')
++local I = require('openmw.interfaces')
++
++local V2, rgb = util.vector2, util.color.rgb
++local WHITE = ui.texture { path = 'white' }
++
++local W, H = 980, 580
++local ROW_H, TEXT_SIZE = 20, 14
++local INV_ROWS, DEAL_ROWS = 18, 8
++local REQUEST_TTL = 60
++
++local C = {
++    text = rgb(0.92, 0.92, 0.92), dim = rgb(0.6, 0.6, 0.6), head = rgb(1, 0.85, 0.35),
++    give = rgb(0.95, 0.6, 0.45), get = rgb(0.5, 0.9, 0.55), ok = rgb(0.45, 0.95, 0.5),
++    button = rgb(1, 1, 1), panel = rgb(0.12, 0.1, 0.08),
++}
++
++local ITEM_TYPES = { types.Weapon, types.Armor, types.Clothing, types.Book, types.Potion, types.Ingredient,
++    types.Miscellaneous, types.Apparatus, types.Lockpick, types.Probe, types.Repair, types.Light }
++
++local M = {}
++local ctx -- { send(msg), notice(text), setMode(), unsetMode() }
++local session -- see start()
++local pendingIn = {} -- partner id -> { name, expires }
++local outgoing -- { id, name, expires }
++local window
++local nameCache = {}
++local ignoreModeUntil = 0
++
++function M.init(context) ctx = context end
++
++local function now() return core.getRealTime() end
++
++local function itemName(rid)
++    if nameCache[rid] then return nameCache[rid] end
++    local name = rid
++    for _, T in ipairs(ITEM_TYPES) do
++        local ok, rec = pcall(function() return T.records[rid] end)
++        if ok and rec and rec.name and rec.name ~= '' then name = rec.name break end
++    end
++    nameCache[rid] = name
++    return name
++end
++
++local function snapshot()
++    local items = {}
++    for _, obj in ipairs(types.Actor.inventory(self):getAll()) do
++        local rid = obj.recordId
++        if not rid:find('^generated:') then items[rid] = (items[rid] or 0) + obj.count end
++    end
++    return items
++end
++
++local function sorted(map)
++    local list = {}
++    for rid, count in pairs(map) do
++        if count > 0 then list[#list + 1] = { rid = rid, count = count, name = itemName(rid) } end
++    end
++    table.sort(list, function(a, b) return a.name:lower() < b.name:lower() end)
++    return list
++end
++
++local function send(t) t.to = session and session.partner or t.to; ctx.send(t) end
++
++------------------------------------------------------------------ window
++
++local function destroyWindow()
++    if window then window:destroy() window = nil end
++end
++
++local render
++
++local function bump()
++    session.rev = session.rev + 1
++    session.meOk, session.themOk = false, false
++    send({ t = 'trade_deal', rev = session.rev, a = session.a, b = session.b })
++    render()
++end
++
++local function edit(map, limitMap, rid, delta)
++    local cur = map[rid] or 0
++    local new = math.max(0, math.min(limitMap[rid] or 0, cur + delta))
++    if new == cur then return end
++    map[rid] = new > 0 and new or nil
++    bump()
++end
++
++local function close(sendCancel, text)
++    if session and sendCancel then send({ t = 'trade_cancel' }) end
++    session = nil
++    destroyWindow()
++    ignoreModeUntil = now() + 0.3
++    ctx.unsetMode()
++    if text then ctx.notice(text) end
++end
++
++local function execute()
++    if session.executed then return end
++    session.executed = true
++    core.sendGlobalEvent('MpTradeExec', { give = session.a, get = session.b })
++end
++
++local function text(props, events)
++    props.textSize = props.textSize or TEXT_SIZE
++    return { template = I.MWUI.templates.textNormal, props = props, events = events }
++end
++
++local function listRows(content, x, y, w, list, offset, rows, color, onPress, onWheel)
++    for i = 1, rows do
++        local item = list[offset + i]
++        if not item then break end
++        content[#content + 1] = text({
++            position = V2(x, y + (i - 1) * ROW_H), text = item.name .. '  x' .. item.count, textColor = color,
++        }, {
++            mousePress = async:callback(function(e) onPress(item, e.button) end),
++            mouseWheel = async:callback(function(e) onWheel(-e.delta.y) end),
++        })
++    end
++end
++
++render = function()
++    if not session or session.phase ~= 'active' then return end
++    local content = {
++        { type = ui.TYPE.Image, props = { resource = WHITE, relativeSize = V2(1, 1), color = C.panel, alpha = 0.92 } },
++        text({ position = V2(14, 10), text = 'Trade with ' .. session.name, textColor = C.head, textSize = 18 }),
++        text({ position = V2(14, 36), text = 'Click an item to add one, right-click to add all. Click items in the deal to remove them.', textColor = C.dim, textSize = 12 }),
++    }
++    local function panel(x, title, color)
++        content[#content + 1] = text({ position = V2(x, 62), text = title, textColor = color or C.head, textSize = 15 })
++    end
++    local myList, theirList = sorted(session.myInv), sorted(session.theirInv)
++    local giveList, getList = sorted(session.a), sorted(session.b)
++    local colMine, colDeal, colTheirs = 14, 330, 670
++
++    panel(colMine, 'Your items')
++    listRows(content, colMine, 86, 300, myList, session.scrollMine, INV_ROWS, C.text,
++        function(item, b) edit(session.a, session.myInv, item.rid, b == 3 and item.count or 1) end,
++        function(d) session.scrollMine = math.max(0, math.min(math.max(0, #myList - INV_ROWS), session.scrollMine + d)); render() end)
++
++    panel(colDeal, 'You give', C.give)
++    listRows(content, colDeal, 86, 320, giveList, 0, DEAL_ROWS, C.give,
++        function(item, b) edit(session.a, session.myInv, item.rid, b == 3 and -item.count or -1) end, function() end)
++    panel(colDeal, session.name .. ' gives', C.get)
++    content[#content].props.position = V2(colDeal, 86 + DEAL_ROWS * ROW_H + 24)
++    listRows(content, colDeal, 86 + DEAL_ROWS * ROW_H + 48, 320, getList, 0, DEAL_ROWS, C.get,
++        function(item, b) edit(session.b, session.theirInv, item.rid, b == 3 and -item.count or -1) end, function() end)
++
++    panel(colTheirs, session.name .. "'s items")
++    listRows(content, colTheirs, 86, 300, theirList, session.scrollTheirs, INV_ROWS, C.text,
++        function(item, b) edit(session.b, session.theirInv, item.rid, b == 3 and item.count or 1) end,
++        function(d) session.scrollTheirs = math.max(0, math.min(math.max(0, #theirList - INV_ROWS), session.scrollTheirs + d)); render() end)
++
++    local status = (session.meOk and 'You accepted. ' or '') .. (session.themOk and (session.name .. ' accepted.') or '')
++    if status == '' then status = 'Waiting for both players to accept the deal.' end
++    content[#content + 1] = text({ position = V2(14, H - 70), text = status, textColor = C.ok })
++    content[#content + 1] = text({
++        position = V2(14, H - 40), textSize = 17, textColor = C.button,
++        text = session.meOk and '[ Accepted - waiting ]' or '[ Accept deal ]',
++    }, { mouseClick = async:callback(function()
++        if session.meOk then return end
++        session.meOk = true
++        send({ t = 'trade_ok', rev = session.rev })
++        if session.themOk then execute() end
++        render()
++    end) })
++    content[#content + 1] = text({
++        position = V2(W - 130, H - 40), textSize = 17, textColor = C.button, text = '[ Cancel ]',
++    }, { mouseClick = async:callback(function() close(true, 'Trade cancelled.') end) })
++
++    local scr = ui.screenSize()
++    local layout = {
++        layer = 'Windows', type = ui.TYPE.Widget,
++        props = { position = V2(math.max(0, (scr.x - W) / 2), math.max(0, (scr.y - H) / 2)), size = V2(W, H) },
++        content = ui.content(content),
++    }
++    if window then
++        window.layout = layout
++        window:update()
++    else
++        window = ui.create(layout)
++    end
++end
++
++------------------------------------------------------------------ session control
++
++local function start(partner, name)
++    session = {
++        phase = 'active', partner = partner, name = name, rev = 0, a = {}, b = {},
++        myInv = snapshot(), theirInv = {}, meOk = false, themOk = false,
++        scrollMine = 0, scrollTheirs = 0,
++    }
++    outgoing = nil
++    pendingIn[partner] = nil
++    ctx.setMode()
++    send({ t = 'trade_inv', items = session.myInv })
++    render()
++end
++
++function M.active() return session ~= nil end
++function M.hasIncoming(id) local p = pendingIn[id] return p ~= nil and p.expires > now() end
++function M.pendingOutgoing(id) return outgoing ~= nil and outgoing.id == id and outgoing.expires > now() end
++
++function M.request(id, name)
++    if session then ctx.notice('You are already trading.') return end
++    outgoing = { id = id, name = name, expires = now() + REQUEST_TTL }
++    ctx.send({ t = 'trade_request', to = id })
++    ctx.notice('Trade request sent to ' .. name .. '.')
++end
++
++function M.accept(id)
++    local p = pendingIn[id]
++    if not p or session then return end
++    ctx.send({ t = 'trade_accept', to = id })
++    start(id, p.name)
++end
++
++function M.decline(id)
++    local p = pendingIn[id]
++    pendingIn[id] = nil
++    ctx.send({ t = 'trade_decline', to = id })
++    if p then ctx.notice('Declined the trade with ' .. p.name .. '.') end
++end
++
++function M.onMode(newMode)
++    -- the Interface mode that hosts the window was closed (Escape) or replaced
++    if session and newMode ~= 'Interface' and now() > ignoreModeUntil then
++        close(true, 'Trade cancelled.')
++    end
++end
++
++function M.onMessage(msg)
++    local t, from = msg.t, msg.id
++    if t == 'trade_request' then
++        if session then ctx.send({ t = 'trade_decline', to = from }) return end
++        pendingIn[from] = { name = msg.name, expires = now() + REQUEST_TTL }
++        ctx.notice(msg.name .. ' wants to trade. Activate them to accept.')
++    elseif t == 'trade_accept' then
++        if outgoing and outgoing.id == from and not session then start(from, msg.name) end
++    elseif t == 'trade_decline' then
++        if outgoing and outgoing.id == from then outgoing = nil ctx.notice(msg.name .. ' declined the trade.') end
++    elseif t == 'trade_cancel' then
++        pendingIn[from] = nil
++        if outgoing and outgoing.id == from then outgoing = nil end
++        if session and session.partner == from then
++            close(false, msg.left and (msg.name .. ' left the game. Trade cancelled.') or (msg.name .. ' cancelled the trade.'))
++        end
++    elseif session and session.partner == from then
++        if t == 'trade_inv' then
++            session.theirInv = msg.items or {}
++            -- drop deal entries the partner can no longer cover
++            render()
++        elseif t == 'trade_deal' and msg.rev >= session.rev then
++            session.rev = msg.rev
++            session.b, session.a = msg.a or {}, msg.b or {} -- their "give" is what we get, and vice versa
++            session.meOk, session.themOk = false, false
++            render()
++        elseif t == 'trade_ok' and msg.rev == session.rev then
++            session.themOk = true
++            if session.meOk then execute() end
++            render()
++        end
++    end
++end
++
++-- test hooks (same code paths as clicking)
++function M.debugEdit(side, rid, delta)
++    if not session or session.phase ~= 'active' then return end
++    if side == 'give' then edit(session.a, session.myInv, rid, delta) else edit(session.b, session.theirInv, rid, delta) end
++end
++
++function M.debugAccept()
++    if not session or session.meOk then return end
++    session.meOk = true
++    send({ t = 'trade_ok', rev = session.rev })
++    if session.themOk then execute() end
++    render()
++end
++
++function M.onResult(r)
++    if not session then return end
++    if r.ok then
++        local partner = session.partner
++        send({ t = 'trade_done' })
++        close(false, 'Trade complete.')
++    else
++        close(true, 'Trade failed: ' .. tostring(r.err))
++    end
++end
++
++return M
+diff --git a/multiplayer/server/owner_bot.py b/multiplayer/server/owner_bot.py
+index ab807092a9..c6decbe861 100644
+--- a/multiplayer/server/owner_bot.py
++++ b/multiplayer/server/owner_bot.py
+@@ -3,7 +3,7 @@
+ 
+ Connects as a normal player (profile + state near the game player), auto-accepts party invites,
+ sends vitals, and once in a party owns a living actor (default: a scrib) that doesn't exist in the
+-game's world. Prints invites, chat and damage reported against its actor.
++game's world. Accepts trade requests (offers a few items and accepts every deal). Prints invites, chat and damage reported against its actor.
+ 
+ usage: owner_bot.py [host] [port] [--rec scrib] [--invite] [--hurt <file>:<index>] [--say "text"]
+   --invite  invite the game player as soon as it is seen
+@@ -31,6 +31,7 @@ say = opt("--say")
+ host = args[0] if len(args) > 0 else "127.0.0.1"
+ port = int(args[1]) if len(args) > 1 else 25565
+ 
++BOT_ITEMS = {"gold_001": 500, "iron dagger": 2, "ingred_bread_01": 5, "p_restore_health_c": 3, "misc_com_bottle_01": 4}
+ s = socket.create_connection((host, port))
+ f = s.makefile("rwb", buffering=0)
+ def send(m): f.write((json.dumps(m) + "\n").encode())
+@@ -64,6 +65,17 @@ while True:
+         elif t == "party": party = m["members"]; print("party", m, flush=True)
+         elif t == "chat": print(f"chat[{m['scope']}] {m['id']}: {m['text']}", flush=True)
+         elif t == "invite_result": print("invite_result", m, flush=True)
++        elif t == "trade_request":
++            print("trade request from", m["id"], "-> accepting", flush=True)
++            send({"t": "trade_accept", "to": m["id"]})
++            send({"t": "trade_inv", "to": m["id"], "items": BOT_ITEMS})
++        elif t == "trade_inv": print("trade: their inventory has", len(m["items"]), "item types", flush=True)
++        elif t == "trade_deal":
++            print("trade deal rev", m["rev"], "they give", m["a"], "I give", m["b"], "-> accepting", flush=True)
++            send({"t": "trade_ok", "to": m["id"], "rev": m["rev"]})
++        elif t == "trade_ok": print("trade: peer accepted rev", m["rev"], flush=True)
++        elif t == "trade_cancel": print("trade cancelled by peer", flush=True)
++        elif t == "trade_done": print("trade done", flush=True)
+         elif t == "dmg":
+             hp = max(0.0, hp - m["frac"]); print(f"damage {m['frac']:.2f} -> hp {hp:.2f}", flush=True)
+     if pos0 is not None:
+diff --git a/multiplayer/server/relay.py b/multiplayer/server/relay.py
+index fd6d94c6d1..0e06db5a93 100644
+--- a/multiplayer/server/relay.py
++++ b/multiplayer/server/relay.py
+@@ -10,6 +10,7 @@ Client -> server (anything else is stamped with the sender's "id" and routed by
+   {"t":"chat","scope":"global"|"party","text":"..."}
+   global routing : profile, equip, state, chat(global)         -> everyone else
+   party routing  : actors, vitals, dmg, chat(party)             -> other party members
++  trade_*        : any message with "to":ID is forwarded to that player (trade request/inv/deal/ok/cancel)
+   any message with "to":ID goes only to that player (if allowed for its type)
+ Server -> client:
+   {"t":"hello","id":N}  {"t":"leave","id":N} (disconnect)  {"t":"party","members":[..],"leader":ID}
+@@ -190,6 +191,11 @@ async def handle(reader, writer):
+             if t == "decline": handle_decline(cid, msg); continue
+             if t == "leave_party": remove_from_party(cid); continue
+             msg["id"] = cid
++            if isinstance(t, str) and t.startswith("trade_"):
++                target = msg.get("to")  # trades are between two players, party or not
++                if target in clients and target != cid:
++                    send_to(target, msg)
++                continue
+             if t in CACHED:
+                 clients[cid]["last"][t] = msg
+             if t == "chat":
+-- 
+2.55.0
+

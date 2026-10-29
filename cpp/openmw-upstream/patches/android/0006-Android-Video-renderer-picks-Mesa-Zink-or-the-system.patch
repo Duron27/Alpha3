@@ -1,0 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Sun, 25 Oct 2026 20:37:16 -0400
+Subject: [PATCH 06/17] Android: [Video] renderer picks Mesa Zink or the system
+ GLES 3.2 driver
+
+The choice is made by the support library (Alpha3::prepareRenderer); the window is made without SDL_WINDOW_OPENGL for Zink.
+---
+ apps/openmw/engine.cpp | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/apps/openmw/engine.cpp b/apps/openmw/engine.cpp
+index 5088f432dd..3bfdd6864c 100644
+--- a/apps/openmw/engine.cpp
++++ b/apps/openmw/engine.cpp
+@@ -521,6 +521,11 @@ void OMW::Engine::setSkipMenu(bool skipMenu, bool newGame)
+     mNewGame = newGame;
+ }
+ 
++#ifdef ANDROID
++// Alpha3's support library (C linkage, so the declaration needs no include of the library)
++extern "C" bool alpha3PrepareRenderer();
++#endif
++
+ void OMW::Engine::createWindow()
+ {
+     const int screen = Settings::video().mScreen;
+@@ -546,6 +551,15 @@ void OMW::Engine::createWindow()
+     else if (windowMode == Settings::WindowMode::WindowedFullscreen)
+         flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
+ 
++#ifdef ANDROID
++    {
++        // Alpha3's support library: [Video] renderer picks Mesa Zink (desktop GL, no EGL surface on the window) or the
++        // system OpenGL ES 3.2 driver
++        if (alpha3PrepareRenderer())
++            flags &= ~SDL_WINDOW_OPENGL;
++    }
++#endif
++
+     // Allows for Windows snapping features to properly work in borderless window
+     SDL_SetHint("SDL_BORDERLESS_WINDOWED_STYLE", "1");
+     SDL_SetHint("SDL_BORDERLESS_RESIZABLE_STYLE", "1");

@@ -1,0 +1,282 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: scratch <a@b.c>
+Date: Fri, 23 Oct 2026 12:47:50 -0400
+Subject: [PATCH 08/17] Android: resolution list offers fractions of the native
+ size and resizes the surface in place
+
+SDL lists only the native display mode on Android. The settings window offers 100% down to 25% of it, applied at once, through
+SDLActivity.setSurfaceResolution; the stored mouse position is scaled with the new window size.
+As on the desktop, a smaller resolution makes the interface larger on the screen. The settings window's gamma slider,
+which does nothing on Android, sets the interface scale ([GUI] scaling factor) instead, laid out again at once.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ apps/openmw/mwgui/settingswindow.cpp          | 48 ++++++++++++++++++-
+ apps/openmw/mwgui/windowmanagerimp.cpp        | 10 ++++
+ apps/openmw/mwinput/mousemanager.cpp          |  2 +-
+ .../myguiplatform/myguirendermanager.cpp      |  6 +++
+ .../myguiplatform/myguirendermanager.hpp      |  3 ++
+ components/sdlutil/sdlinputwrapper.cpp        | 19 ++++++++
+ components/sdlutil/sdlvideowrapper.cpp        | 36 ++++++++++++++
+ files/data/l10n/OMWEngine/en.yaml             |  3 ++
+ 8 files changed, 124 insertions(+), 3 deletions(-)
+
+diff --git a/apps/openmw/mwgui/settingswindow.cpp b/apps/openmw/mwgui/settingswindow.cpp
+index c692988220..a5541a653d 100644
+--- a/apps/openmw/mwgui/settingswindow.cpp
++++ b/apps/openmw/mwgui/settingswindow.cpp
+@@ -269,6 +269,27 @@ namespace MWGui
+         getWidget(unusedSlider, widgetName);
+         unusedSlider->setVisible(false);
+ 
++#ifdef ANDROID
++        {
++            // Gamma does nothing on Android: its slider sets the interface scale instead, applied at once
++            MyGUI::ScrollBar* scaleSlider;
++            getWidget(scaleSlider, "GammaSlider");
++            scaleSlider->setScrollRange(36); // 0.5 to 4.0 in steps of 0.1
++            scaleSlider->setScrollPage(1);
++            scaleSlider->setScrollWheelPage(1);
++            scaleSlider->setUserString("SettingCategory", "GUI");
++            scaleSlider->setUserString("SettingName", "scaling factor");
++            scaleSlider->setUserString("SettingMin", "0.5");
++            scaleSlider->setUserString("SettingMax", "4.0");
++            scaleSlider->setUserString("SettingLabelCaption", "InterfaceScaleValue");
++            MyGUI::TextBox* textBox;
++            getWidget(textBox, "GammaTextDark");
++            textBox->setCaption("#{OMWEngine:InterfaceScaleSmaller}");
++            getWidget(textBox, "GammaTextLight");
++            textBox->setCaption("#{OMWEngine:InterfaceScaleLarger}");
++        }
++#endif
++
+         configureWidgets(mMainWidget, true);
+ 
+         setTitle("#{OMWEngine:SettingsWindow}");
+@@ -311,7 +332,7 @@ namespace MWGui
+         getWidget(mObjectShadowsButton, "ObjectShadowsButton");
+         getWidget(mShadowMapResolution, "ShadowMapResolution");
+ 
+-#ifndef WIN32
++#if !defined(WIN32) && !defined(ANDROID)
+         // hide gamma controls since it currently does not work under Linux
+         MyGUI::ScrollBar* gammaSlider;
+         getWidget(gammaSlider, "GammaSlider");
+@@ -379,14 +400,31 @@ namespace MWGui
+ 
+         // fill resolution list
+         const int screen = Settings::video().mScreen;
+-        int numDisplayModes = SDL_GetNumDisplayModes(screen);
+         std::vector<std::pair<int, int>> resolutions;
++#ifdef ANDROID
++        // SDL lists only the native mode on Android. Offer fractions of it: choosing one resizes the surface in place
++        // (see VideoWrapper::setVideoMode), so this works as a render scale.
++        SDL_DisplayMode nativeMode;
++        if (SDL_GetDesktopDisplayMode(screen, &nativeMode) == 0)
++        {
++            const int nativeW = std::max(nativeMode.w, nativeMode.h);
++            const int nativeH = std::min(nativeMode.w, nativeMode.h);
++            for (const int percent : { 100, 90, 80, 75, 67, 60, 50, 40, 33, 25 })
++            {
++                const int w = (nativeW * percent / 100) / 2 * 2;
++                const int h = (nativeH * percent / 100) / 2 * 2;
++                resolutions.emplace_back(w, h);
++            }
++        }
++#else
++        int numDisplayModes = SDL_GetNumDisplayModes(screen);
+         for (int i = 0; i < numDisplayModes; i++)
+         {
+             SDL_DisplayMode mode;
+             SDL_GetDisplayMode(screen, i, &mode);
+             resolutions.emplace_back(mode.w, mode.h);
+         }
++#endif
+         std::sort(resolutions.begin(), resolutions.end(), sortResolutions);
+         for (std::pair<int, int>& resolution : resolutions)
+         {
+@@ -504,6 +542,12 @@ namespace MWGui
+         if (index == MyGUI::ITEM_NONE)
+             return;
+ 
++#ifdef ANDROID
++        // Applies at once, and a bad pick is one tap away from being undone.
++        onResolutionAccept();
++        return;
++#endif
++
+         ConfirmationDialog* dialog = MWBase::Environment::get().getWindowManager()->getConfirmationDialog();
+         dialog->askForConfirmation("#{OMWEngine:ConfirmResolution}");
+         dialog->eventOkClicked.clear();
+diff --git a/apps/openmw/mwgui/windowmanagerimp.cpp b/apps/openmw/mwgui/windowmanagerimp.cpp
+index ab8950d14d..e15b6f35e1 100644
+--- a/apps/openmw/mwgui/windowmanagerimp.cpp
++++ b/apps/openmw/mwgui/windowmanagerimp.cpp
+@@ -1318,6 +1318,11 @@ namespace MWGui
+                 mVideoWrapper->setSyncToVBlank(Settings::video().mVsyncMode);
+             else if (setting.first == "Video" && (setting.second == "gamma" || setting.second == "contrast"))
+                 mVideoWrapper->setGammaContrast(Settings::video().mGamma, Settings::video().mContrast);
++#ifdef ANDROID
++            // the settings window's interface scale slider: laid out again at once, as after a resize
++            else if (setting.first == "GUI" && setting.second == "scaling factor")
++                windowResized(Settings::video().mResolutionX, Settings::video().mResolutionY);
++#endif
+         }
+ 
+         if (changeRes)
+@@ -1343,6 +1348,11 @@ namespace MWGui
+ 
+         Settings::Manager::resetPendingChanges(filter);
+ 
++#ifdef ANDROID
++        // the settings window's interface scale slider may have changed it
++        mScalingFactor = Settings::gui().mScalingFactor;
++        mGuiPlatform->getRenderManagerPtr()->setScalingFactor(mScalingFactor);
++#endif
+         mGuiPlatform->getRenderManagerPtr()->setViewSize(x, y);
+ 
+         // scaled size
+diff --git a/apps/openmw/mwinput/mousemanager.cpp b/apps/openmw/mwinput/mousemanager.cpp
+index 8aeb4f6412..41805ab0b4 100644
+--- a/apps/openmw/mwinput/mousemanager.cpp
++++ b/apps/openmw/mwinput/mousemanager.cpp
+@@ -299,7 +299,7 @@ namespace MWInput
+ 
+     void MouseManager::warpMouse()
+     {
+-        float guiUiScale = Settings::gui().mScalingFactor;
++        float guiUiScale = MWBase::Environment::get().getWindowManager()->getScalingFactor();
+         mInputWrapper->warpMouse(
+             static_cast<int>(mGuiCursorX * guiUiScale), static_cast<int>(mGuiCursorY * guiUiScale));
+     }
+diff --git a/components/myguiplatform/myguirendermanager.cpp b/components/myguiplatform/myguirendermanager.cpp
+index 16e5788ecb..f909674f62 100644
+--- a/components/myguiplatform/myguirendermanager.cpp
++++ b/components/myguiplatform/myguirendermanager.cpp
+@@ -483,6 +483,12 @@ namespace MyGUIPlatform
+         mUpdate = false;
+     }
+ 
++    void RenderManager::setScalingFactor(float scalingFactor)
++    {
++        if (scalingFactor != 0.f)
++            mInvScalingFactor = 1.f / scalingFactor;
++    }
++
+     void RenderManager::setViewSize(int width, int height)
+     {
+         if (width < 1)
+diff --git a/components/myguiplatform/myguirendermanager.hpp b/components/myguiplatform/myguirendermanager.hpp
+index df0bb7d8a0..26ecbc23e0 100644
+--- a/components/myguiplatform/myguirendermanager.hpp
++++ b/components/myguiplatform/myguirendermanager.hpp
+@@ -115,6 +115,9 @@ namespace MyGUIPlatform
+ 
+         void setViewSize(int width, int height) override;
+ 
++        /// Takes effect at the next setViewSize
++        void setScalingFactor(float scalingFactor);
++
+         void registerShader(const std::string& shaderName, const std::string& vertexProgramFile,
+             const std::string& fragmentProgramFile) override;
+ 
+diff --git a/components/sdlutil/sdlinputwrapper.cpp b/components/sdlutil/sdlinputwrapper.cpp
+index f80eb9faa2..44a819271e 100644
+--- a/components/sdlutil/sdlinputwrapper.cpp
++++ b/components/sdlutil/sdlinputwrapper.cpp
+@@ -266,6 +266,25 @@ namespace SDLUtil
+                 if (w == 0 && h == 0)
+                     return;
+ 
++#ifdef ANDROID
++                {
++                    // The stored mouse position is in the old window's coordinates (the in-game resolution list resizes
++                    // the surface): scale it so the on-screen cursor stays where the player last touched.
++                    static int lastWidth = 0;
++                    static int lastHeight = 0;
++                    if (lastWidth > 0 && lastHeight > 0 && (lastWidth != w || lastHeight != h)
++                        && SDL_ShowCursor(SDL_QUERY) == SDL_ENABLE)
++                    {
++                        int mouseX = 0;
++                        int mouseY = 0;
++                        SDL_GetMouseState(&mouseX, &mouseY);
++                        SDL_WarpMouseInWindow(mSDLWindow, mouseX * w / lastWidth, mouseY * h / lastHeight);
++                    }
++                    lastWidth = w;
++                    lastHeight = h;
++                }
++#endif
++
+                 mViewer->getCamera()->getGraphicsContext()->resized(x, y, w, h);
+ 
+                 mViewer->getEventQueue()->windowResize(x, y, w, h);
+diff --git a/components/sdlutil/sdlvideowrapper.cpp b/components/sdlutil/sdlvideowrapper.cpp
+index 69153bb40b..cd3418f939 100644
+--- a/components/sdlutil/sdlvideowrapper.cpp
++++ b/components/sdlutil/sdlvideowrapper.cpp
+@@ -8,8 +8,39 @@
+ 
+ #include <SDL_video.h>
+ 
++#ifdef ANDROID
++#include <SDL_system.h>
++#include <jni.h>
++#endif
++
+ namespace SDLUtil
+ {
++#ifdef ANDROID
++    namespace
++    {
++        // The Android surface has a fixed size that the activity can change (SDLActivity.setSurfaceResolution). SDL then
++        // reports an ordinary resize, which the rest of the engine already handles.
++        bool setAndroidSurfaceResolution(int width, int height)
++        {
++            auto* env = static_cast<JNIEnv*>(SDL_AndroidGetJNIEnv());
++            auto activity = static_cast<jobject>(SDL_AndroidGetActivity());
++            if (env == nullptr || activity == nullptr)
++                return false;
++
++            jclass activityClass = env->GetObjectClass(activity);
++            jmethodID method = env->GetMethodID(activityClass, "setSurfaceResolution", "(II)V");
++            const bool found = method != nullptr;
++            if (found)
++                env->CallVoidMethod(activity, method, width, height);
++            else
++                env->ExceptionClear();
++            env->DeleteLocalRef(activityClass);
++            env->DeleteLocalRef(activity);
++            return found;
++        }
++    }
++#endif
++
+ 
+     VideoWrapper::VideoWrapper(SDL_Window* window, osg::ref_ptr<osgViewer::Viewer> viewer)
+         : mWindow(window)
+@@ -81,6 +112,11 @@ namespace SDLUtil
+ 
+     void VideoWrapper::setVideoMode(int width, int height, Settings::WindowMode windowMode, bool windowBorder)
+     {
++#ifdef ANDROID
++        if (setAndroidSurfaceResolution(width, height))
++            return;
++#endif
++
+         SDL_SetWindowFullscreen(mWindow, 0);
+ 
+         if (SDL_GetWindowFlags(mWindow) & SDL_WINDOW_MAXIMIZED)
+diff --git a/files/data/l10n/OMWEngine/en.yaml b/files/data/l10n/OMWEngine/en.yaml
+index 799089bda8..85d4e9468b 100644
+--- a/files/data/l10n/OMWEngine/en.yaml
++++ b/files/data/l10n/OMWEngine/en.yaml
+@@ -123,6 +123,9 @@ ForcePerPixelLightingTooltip: |-
+ FrameRateHint: "Hint: press F3 to show\nthe current frame rate."
+ GammaCorrection: "Gamma Correction"
+ GammaCorrectionValue: "Gamma Correction ({value, number, ::.00})"
++InterfaceScaleValue: "Interface Scale ({value, number, ::.00})"
++InterfaceScaleSmaller: "Smaller"
++InterfaceScaleLarger: "Larger"
+ GammaDark: "Dark"
+ GammaLight: "Light"
+ GmstOverridesL10n: "Strings From ESM Files Have Priority"

@@ -1,0 +1,12 @@
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm b/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm
+index 9772757..c564144 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm
+@@ -2733,6 +2733,7 @@ void MVKPhysicalDevice::initMetalFeatures() {
+ 	// Affects push constants limit so keep it reasonable.
+ 	if (isTier2MetalArgumentBuffers()) {
+ 		_metalFeatures.maxPerStageTextureCount = 256;
++		_metalFeatures.maxPerStageSamplerCount = 1024;
+ 	}
+ 	_metalFeatures.maxPerStageStorageTextureCount = _metalFeatures.maxPerStageTextureCount;
+ 

@@ -1,0 +1,26 @@
+From db26900958bb7e26d776ca6b2a8a8fedaa10ef55 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Thu, 15 Oct 2026 14:56:17 -0400
+Subject: [PATCH] Build the standalone multiplayer server by default
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ CMakeLists.txt | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 610d25c741..946ffce1c0 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -27,7 +27,7 @@ option(DEPLOY_QT_TRANSLATIONS "Deploy standard Qt translations to resources fold
+ 
+ # Apps and tools
+ option(BUILD_OPENMW             "Build OpenMW" ON)
+-option(BUILD_MP_SERVER          "Build the standalone multiplayer server" OFF)
++option(BUILD_MP_SERVER          "Build the standalone multiplayer server" ON)
+ option(BUILD_LAUNCHER           "Build Launcher" ON)
+ option(BUILD_WIZARD             "Build Installation Wizard" ON)
+ option(BUILD_MWINIIMPORTER      "Build MWiniImporter" ON)
+-- 
+2.55.0
+

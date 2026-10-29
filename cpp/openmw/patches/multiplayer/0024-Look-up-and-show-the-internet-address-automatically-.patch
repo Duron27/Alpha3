@@ -1,0 +1,90 @@
+From 28e671deeaa2e7a88bf3db5e7e844333d9d6873e Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Fri, 9 Oct 2026 08:45:55 -0400
+Subject: [PATCH] Look up and show the internet address automatically when
+ hosting; LAN address is secondary
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ multiplayer/mod/scripts/mp/global.lua | 19 +++++++++++--------
+ multiplayer/mod/scripts/mp/menu.lua   |  4 ++--
+ multiplayer/mod/scripts/mp/player.lua |  8 ++++----
+ 3 files changed, 17 insertions(+), 14 deletions(-)
+
+diff --git a/multiplayer/mod/scripts/mp/global.lua b/multiplayer/mod/scripts/mp/global.lua
+index 958bc20bd9..cf0cd4cece 100644
+--- a/multiplayer/mod/scripts/mp/global.lua
++++ b/multiplayer/mod/scripts/mp/global.lua
+@@ -115,10 +115,11 @@ local function connect()
+             end
+             hostErrorShown = false
+             log('hosting on port ' .. tostring(port))
+-            hostInfo = { port = port, lan = net.localAddress() }
+-            notice('Hosting on port ' .. tostring(port) .. '. Players on your network join at '
+-                .. tostring(hostInfo.lan or 'your LAN address') .. ':' .. tostring(port)
+-                .. '. Type /ip to look up the internet address friends outside your network need.')
++            hostInfo = { port = port, lan = net.localAddress(), looking = true }
++            -- hosting is pointless without the address people outside the network must use, so look it up now
++            -- (one request to api.ipify.org)
++            net.lookupPublicAddress()
++            notice('Hosting on port ' .. tostring(port) .. '. Looking up your internet address (api.ipify.org)...')
+         end
+         net.connect('127.0.0.1', port)
+     else
+@@ -748,12 +749,14 @@ return {
+                     hostInfo.looking = false
+                     if address then
+                         hostInfo.public, hostInfo.error = address, nil
+-                        notice('Your internet address is ' .. address .. ':' .. tostring(hostInfo.port)
+-                            .. '. Friends join with that; forward TCP port ' .. tostring(hostInfo.port) .. ' on your router to this computer ('
+-                            .. tostring(hostInfo.lan or '?') .. ').')
++                        notice('Others join you at ' .. address .. ':' .. tostring(hostInfo.port)
++                            .. ' (forward TCP port ' .. tostring(hostInfo.port) .. ' on your router to this computer, '
++                            .. tostring(hostInfo.lan or '?') .. '). Same network: ' .. tostring(hostInfo.lan or '?') .. ':'
++                            .. tostring(hostInfo.port) .. '.')
+                     else
+                         hostInfo.error = err
+-                        notice('Could not look up your internet address: ' .. tostring(err))
++                        notice('Could not look up your internet address (' .. tostring(err)
++                            .. '). Type /ip to try again. Same network: ' .. tostring(hostInfo.lan or '?') .. ':' .. tostring(hostInfo.port) .. '.')
+                     end
+                 end
+             end
+diff --git a/multiplayer/mod/scripts/mp/menu.lua b/multiplayer/mod/scripts/mp/menu.lua
+index 89007b2f7c..c62a2007ae 100644
+--- a/multiplayer/mod/scripts/mp/menu.lua
++++ b/multiplayer/mod/scripts/mp/menu.lua
+@@ -145,8 +145,8 @@ render = function()
+             'Everyone keeps their own world; you only share a world state inside a party.',
+         }
+         if mode == 'host' then
+-            info[#info + 1] = 'Hosting starts when your game does. In the game, type /ip to see your internet address:'
+-            info[#info + 1] = 'friends outside your network join with it (forward the TCP port on your router).'
++            info[#info + 1] = 'Hosting starts when your game does and shows the internet address friends join with'
++            info[#info + 1] = '(forward the TCP port on your router; this contacts api.ipify.org once).'
+             info[#info + 1] = 'While hosting you cannot join another server.'
+         else
+             info[#info + 1] = 'You can be connected to one host at a time.'
+diff --git a/multiplayer/mod/scripts/mp/player.lua b/multiplayer/mod/scripts/mp/player.lua
+index aac4c2d69c..39fed7802b 100644
+--- a/multiplayer/mod/scripts/mp/player.lua
++++ b/multiplayer/mod/scripts/mp/player.lua
+@@ -572,11 +572,11 @@ return {
+         MpHostInfo = function(d)
+             local text = ''
+             if d.port then
+-                text = 'Hosting on port ' .. d.port .. '\nOn your network: ' .. tostring(d.lan or '?') .. ':' .. d.port
+-                if d.public then text = text .. '\nFrom the internet: ' .. d.public .. ':' .. d.port
++                if d.public then text = 'Internet address: ' .. d.public .. ':' .. d.port
+                     .. '  (forward TCP port ' .. d.port .. ' on your router)'
+-                elseif d.looking then text = text .. '\nLooking up your internet address...'
+-                else text = text .. '\nInternet address: type /ip in chat to look it up' end
++                elseif d.looking then text = 'Internet address: looking it up...'
++                else text = 'Internet address: unknown (type /ip in chat to try again)' end
++                text = text .. '\nSame network: ' .. tostring(d.lan or '?') .. ':' .. d.port
+             end
+             pcall(function() playersSection:set('Address', text) end)
+         end,
+-- 
+2.55.0
+

@@ -1,0 +1,118 @@
+diff --git a/components/sdlutil/sdlgraphicswindow.cpp b/components/sdlutil/sdlgraphicswindow.cpp
+--- a/components/sdlutil/sdlgraphicswindow.cpp
++++ b/components/sdlutil/sdlgraphicswindow.cpp
+@@ -7,8 +7,12 @@
+ #include <components/debug/debuglog.hpp>
+ 
+ #ifdef ANDROID
++#include <EGL/egl.h>
+ #include <android/native_window.h>
++#include <swappy/swappyGL.h>
+ #include <SDL_syswm.h>
++#include <SDL_system.h>
++#include <jni.h>
+ #include <dlfcn.h>
+ #include <sys/system_properties.h>
+ #include <algorithm>
+@@ -407,6 +411,9 @@
+ #endif
+ 
+         setSwapInterval(mVSyncMode);
++#ifdef ANDROID
++        initSwappy();
++#endif
+ 
+         // Update traits with what we've actually been given
+         // Use intermediate to avoid signed/unsigned mismatch
+@@ -494,6 +501,9 @@
+     void GraphicsWindowSDL2::closeImplementation()
+     {
+ #ifdef ANDROID
++        if (mUseSwappy)
++            SwappyGL_destroy();
++        mUseSwappy = false;
+         if (mZinkContext)
+             osmesa().destroyContext(mZinkContext);
+         mZinkContext = nullptr;
+@@ -512,11 +522,53 @@
+         mRealized = false;
+     }
+ 
++#ifdef ANDROID
++    void GraphicsWindowSDL2::initSwappy()
++    {
++        mUseSwappy = false;
++        // ANGLE brings its own EGL, which Swappy (it talks to the system's) cannot swap; Zink never gets here.
++        if (std::getenv("OSG_USE_ANGLE") != nullptr || std::getenv("OPENMW_NO_SWAPPY") != nullptr)
++            return;
++        auto* env = static_cast<JNIEnv*>(SDL_AndroidGetJNIEnv());
++        jobject activity = static_cast<jobject>(SDL_AndroidGetActivity());
++        SDL_SysWMinfo info;
++        SDL_VERSION(&info.version);
++        if (env == nullptr || activity == nullptr || !SDL_GetWindowWMInfo(mWindow, &info))
++        {
++            Log(Debug::Warning) << "Frame pacing: no Java environment or native window, using plain swaps";
++            return;
++        }
++        if (!SwappyGL_init(env, activity))
++        {
++            Log(Debug::Warning) << "Frame pacing: Swappy could not start, using plain swaps";
++            return;
++        }
++        if (!SwappyGL_setWindow(info.info.android.window))
++        {
++            Log(Debug::Warning) << "Frame pacing: Swappy rejected the window, using plain swaps";
++            SwappyGL_destroy();
++            return;
++        }
++        // Swappy times the swaps itself and needs the driver's vertical sync on.
++        SDL_GL_SetSwapInterval(1);
++        mUseSwappy = true;
++        Log(Debug::Info) << "Frame pacing: Swappy, display period " << SwappyGL_getRefreshPeriodNanos() / 1.0e6 << " ms";
++    }
++#endif
++
+     void GraphicsWindowSDL2::swapBuffersImplementation()
+     {
+         if (!mRealized)
+             return;
+ 
++#ifdef ANDROID
++        if (mUseSwappy && SwappyGL_isEnabled())
++        {
++            SwappyGL_swap(eglGetCurrentDisplay(), eglGetCurrentSurface(EGL_DRAW));
++            return;
++        }
++#endif
++
+         if (mUseZink)
+         {
+             swapBuffersZink();
+@@ -550,6 +602,13 @@
+     void GraphicsWindowSDL2::setSwapInterval(VSyncMode mode)
+     {
+         mVSyncMode = mode;
++#ifdef ANDROID
++        if (mUseSwappy)
++        {
++            SDL_GL_SetSwapInterval(1); // Swappy needs the driver's vertical sync, whatever the setting says
++            return;
++        }
++#endif
+ 
+         if (mode == VSyncMode::Adaptive)
+         {
+diff --git a/components/sdlutil/sdlgraphicswindow.hpp b/components/sdlutil/sdlgraphicswindow.hpp
+--- a/components/sdlutil/sdlgraphicswindow.hpp
++++ b/components/sdlutil/sdlgraphicswindow.hpp
+@@ -24,6 +24,10 @@
+         int mZinkWidth = 0;
+         int mZinkHeight = 0;
+ 
++        // Android, OpenGL ES through the system driver: Swappy (Android Frame Pacing) schedules every swap.
++        bool mUseSwappy = false;
++        void initSwappy();
++
+         void initZink();
+         bool makeCurrentZink();
+         void swapBuffersZink();

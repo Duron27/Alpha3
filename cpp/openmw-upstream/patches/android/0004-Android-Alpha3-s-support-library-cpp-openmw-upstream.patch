@@ -1,0 +1,27 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Sun, 25 Oct 2026 20:36:00 -0400
+Subject: [PATCH 04/17] Android: Alpha3's support library
+ (cpp/openmw-upstream/support) in the engine
+
+The library does most of what this patch series did inside the engine through OSG's RuntimeHooks: shader translation
+and merging for OpenGL ES, the program binary cache, Swappy, texture conversion, mimalloc and logcat.
+---
+ apps/openmw/CMakeLists.txt | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/apps/openmw/CMakeLists.txt b/apps/openmw/CMakeLists.txt
+index 9bfc1b51ba..f21b9d2ea5 100644
+--- a/apps/openmw/CMakeLists.txt
++++ b/apps/openmw/CMakeLists.txt
+@@ -158,6 +158,10 @@ if(BUILD_OPENMW)
+     if (ANDROID)
+         # Ships next to the fork's libopenmw.so in the same APK
+         set_target_properties(openmw PROPERTIES OUTPUT_NAME openmw_upstream)
++        # Alpha3's support library (OSG RuntimeHooks: shader translation, caches, frame pacing, ...), see its CMakeLists.txt
++        if (ALPHA3_SUPPORT_DIR)
++            add_subdirectory(${ALPHA3_SUPPORT_DIR} ${CMAKE_BINARY_DIR}/alpha3-support)
++        endif()
+     endif()
+ 
+     # Workaround necessary to ensure osgAnimation::MatrixLinearSampler dynamic casts work under Clang

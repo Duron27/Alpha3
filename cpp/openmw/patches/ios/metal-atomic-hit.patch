@@ -1,0 +1,41 @@
+diff --git a/files/shaders/compatibility/gpuscene_raycast.comp b/files/shaders/compatibility/gpuscene_raycast.comp
+index 5b4da930cf..74c96d8f71 100644
+--- a/files/shaders/compatibility/gpuscene_raycast.comp
++++ b/files/shaders/compatibility/gpuscene_raycast.comp
+@@ -38,9 +38,13 @@ layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer Ta
+     Task values[];
+ };
+ 
++// metaX..metaW were a uvec4; Metal cannot take the address of a vector element for atomics
+ struct Hit
+ {
+-    uvec4 meta;
++    uint metaX;
++    uint metaY;
++    uint metaZ;
++    uint metaW;
+     uvec4 detail;
+ };
+ 
+@@ -122,16 +126,16 @@ void main()
+     uint encoded = fixedRatio(ratio);
+     if (rayPass == 0u)
+     {
+-        atomicMin(hitBuffer.values[task.meta.x].meta.x, encoded);
++        atomicMin(hitBuffer.values[task.meta.x].metaX, encoded);
+         return;
+     }
+-    if (hitBuffer.values[task.meta.x].meta.x != encoded
+-        || atomicCompSwap(hitBuffer.values[task.meta.x].meta.y, noHit, taskIndex) != noHit)
++    if (hitBuffer.values[task.meta.x].metaX != encoded
++        || atomicCompSwap(hitBuffer.values[task.meta.x].metaY, noHit, taskIndex) != noHit)
+         return;
+ 
+     vec3 normal = normalize(cross(b - a, c - a));
+-    hitBuffer.values[task.meta.x].meta.z = triangle;
+-    hitBuffer.values[task.meta.x].meta.w = floatBitsToUint(bary.x);
++    hitBuffer.values[task.meta.x].metaZ = triangle;
++    hitBuffer.values[task.meta.x].metaW = floatBitsToUint(bary.x);
+     hitBuffer.values[task.meta.x].detail.x = floatBitsToUint(bary.y);
+     hitBuffer.values[task.meta.x].detail.y = floatBitsToUint(normal.x);
+     hitBuffer.values[task.meta.x].detail.z = floatBitsToUint(normal.y);

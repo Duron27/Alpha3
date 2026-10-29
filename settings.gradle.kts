@@ -26,7 +26,10 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "Openmw"
+rootProject.name = "Alpha3"
+enableFeaturePreview("TYPESAFE_PROJECT_ACCESSORS")
+
 include(
-    ":app"
+    ":androidApp",   // native Android app (OpenMW + Compose UI)
+    ":composeApp"    // KMP launcher: iOS framework (+ Android library)
 )

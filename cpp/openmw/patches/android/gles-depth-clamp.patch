@@ -1,0 +1,69 @@
+--- a/components/sceneutil/rtt.cpp
++++ b/components/sceneutil/rtt.cpp
+@@ -122,8 +122,11 @@
+         }
+         textureArray->setSourceFormat(sourceFormat);
+         textureArray->setSourceType(sourceType);
+-        textureArray->setFilter(osg::Texture::MIN_FILTER, osg::Texture::LINEAR);
+-        textureArray->setFilter(osg::Texture::MAG_FILTER, osg::Texture::LINEAR);
++        // A depth texture cannot be filtered linearly (OpenGL ES calls it incomplete)
++        const osg::Texture::FilterMode filter
++            = SceneUtil::isDepthFormat(internalFormat) ? osg::Texture::NEAREST : osg::Texture::LINEAR;
++        textureArray->setFilter(osg::Texture::MIN_FILTER, filter);
++        textureArray->setFilter(osg::Texture::MAG_FILTER, filter);
+         textureArray->setWrap(osg::Texture::WRAP_S, osg::Texture::CLAMP_TO_EDGE);
+         textureArray->setWrap(osg::Texture::WRAP_T, osg::Texture::CLAMP_TO_EDGE);
+         textureArray->setWrap(osg::Texture::WRAP_R, osg::Texture::CLAMP_TO_EDGE);
+@@ -147,8 +150,10 @@
+         }
+         texture->setSourceFormat(sourceFormat);
+         texture->setSourceType(sourceType);
+-        texture->setFilter(osg::Texture::MIN_FILTER, osg::Texture::LINEAR);
+-        texture->setFilter(osg::Texture::MAG_FILTER, osg::Texture::LINEAR);
++        const osg::Texture::FilterMode filter
++            = SceneUtil::isDepthFormat(internalFormat) ? osg::Texture::NEAREST : osg::Texture::LINEAR;
++        texture->setFilter(osg::Texture::MIN_FILTER, filter);
++        texture->setFilter(osg::Texture::MAG_FILTER, filter);
+         texture->setWrap(osg::Texture::WRAP_S, osg::Texture::CLAMP_TO_EDGE);
+         texture->setWrap(osg::Texture::WRAP_T, osg::Texture::CLAMP_TO_EDGE);
+         texture->setWrap(osg::Texture::WRAP_R, osg::Texture::CLAMP_TO_EDGE);
+--- a/apps/openmw/mwrender/precipitationocclusion.cpp
++++ b/apps/openmw/mwrender/precipitationocclusion.cpp
+@@ -108,8 +108,8 @@
+         mDepthTexture->setSourceType(GL_UNSIGNED_INT);
+         mDepthTexture->setWrap(osg::Texture::WRAP_S, osg::Texture::CLAMP_TO_BORDER);
+         mDepthTexture->setWrap(osg::Texture::WRAP_T, osg::Texture::CLAMP_TO_BORDER);
+-        mDepthTexture->setFilter(osg::Texture::MIN_FILTER, osg::Texture::LINEAR);
+-        mDepthTexture->setFilter(osg::Texture::MAG_FILTER, osg::Texture::LINEAR);
++        mDepthTexture->setFilter(osg::Texture::MIN_FILTER, osg::Texture::NEAREST);
++        mDepthTexture->setFilter(osg::Texture::MAG_FILTER, osg::Texture::NEAREST);
+         mDepthTexture->setBorderColor(
+             SceneUtil::AutoDepth::isReversed() ? osg::Vec4(0, 0, 0, 0) : osg::Vec4(1, 1, 1, 1));
+ 
+--- a/files/shaders/lib/core/profile_vertex.glsl
++++ b/files/shaders/lib/core/profile_vertex.glsl
+@@ -71,5 +71,14 @@
+ #define osg_Attribute(loc, type, name) layout(location = loc) in type name;
+ #define osg_VaryingFlat(type, name) layout(location = OSG_VARYING_ ## name) flat out type name;
+ #endif
++// Without GL_DEPTH_CLAMP (OpenGL ES, and Zink as built here) a triangle past the near or far plane is cut away, so the huge
++// water surface loses whole pieces and shadow casters in front of the shadow camera cast nothing. Moving the vertex depth
++// onto the plane keeps them drawn. Vertices behind the eye are left alone, their depth is what the clipping of the part
++// in front interpolates from.
++#if __VERSION__ < 450
++#define osg_ClampDepth(position) if (position.w > 0.0) position.z = clamp(position.z, -position.w, position.w)
++#else
++#define osg_ClampDepth(position)
++#endif
+ // clockwork profile end
+ #endif
+--- a/files/shaders/compatibility/shadowcasting.vert
++++ b/files/shaders/compatibility/shadowcasting.vert
+@@ -56,6 +56,7 @@
+ #endif
+ #endif
+ 
++    osg_ClampDepth(gl_Position);
+     vec4 viewPos = (osg_ModelViewMatrix * vertex);
+     osg_ClipVertex(viewPos);
+ 

@@ -1,0 +1,75 @@
+{
+  "dependencies": [
+    "boost-asio",
+    "boost-geometry",
+    "boost-iostreams",
+    "boost-program-options",
+    {
+      "name": "bullet3",
+      "features": [
+        "double-precision",
+        "multithreading"
+      ]
+    },
+    {
+      "name": "ffmpeg",
+      "default-features": false,
+      "features": [
+        "avcodec",
+        "avformat",
+        "swresample",
+        "swscale"
+      ],
+      "platform": "android | ios"
+    },
+    {
+      "name": "ffmpeg",
+      "platform": "!android & !ios"
+    },
+    "freetype",
+    "glslang",
+    {
+      "name": "vulkan-headers",
+      "platform": "android"
+    },
+    "spirv-cross",
+    {
+      "name": "libvorbis",
+      "platform": "android"
+    },
+    "icu",
+    "lz4",
+    {
+      "name": "mygui",
+      "platform": "!osx & !ios"
+    },
+    "openal-soft",
+    {
+      "name": "openmw-mygui-osx",
+      "platform": "osx | ios"
+    },
+    "openmw-osg",
+    {
+      "name": "sdl2",
+      "platform": "!ios & !android"
+    },
+    {
+      "name": "sdl2",
+      "features": [
+        "vulkan"
+      ],
+      "platform": "android"
+    },
+    {
+      "name": "sdl2",
+      "features": [
+        "vulkan"
+      ],
+      "platform": "ios"
+    },
+    {
+      "name": "unshield",
+      "platform": "osx"
+    }
+  ]
+}

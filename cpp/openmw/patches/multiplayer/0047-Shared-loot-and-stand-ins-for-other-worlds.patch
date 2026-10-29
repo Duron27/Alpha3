@@ -1,0 +1,1187 @@
+From: Duron27 <duron27@gmail.com>
+Subject: [PATCH] Shared loot inside a group; stand-ins for characters alive in other players' worlds
+
+- loot.lua: what a member takes from a container or corpse (gold, ingredients, potions, lockpicks, probes, repair tools,
+  ammunition; with a second setting plain weapons and armor) is removed from the other members' copies. Removal only, never
+  scripted/enchanted/generated items, keys, books; the receiver decides what is shareable. Waiting removals are saved.
+- proxies.lua: players outside the group list the characters around them (pubactors, relayed only to the same cell and
+  outside the party); after an actor has been gone from our world for five minutes another world's copy stands in,
+  labelled with its owner. Hits and kills stay local; at most eight; a cap on the records it can create.
+- relay: loot (party only) and pubactors (same cell, not party) with validation and rate limits
+- settings: shared loot, shared loot gear, other worlds' stand-ins
+- loot_test.lua, standins_test.lua, relay tests, a real-server check
+
+---
+diff --git a/multiplayer/README.md b/multiplayer/README.md
+index df7c254..5789873 100644
+--- a/multiplayer/README.md
++++ b/multiplayer/README.md
+@@ -107,7 +107,15 @@ Every player keeps their **own** world; nothing a group member does changes your
+ - **Parties (max 3):** shared party chat, vitals panel (with their poison, diseases and other harmful effects, so a healer
+   knows what to cure; cast a helpful spell such as a heal or cure at a member's avatar and it takes effect on them), and stand-ins for actors that are alive in a member's world but dead
+   or missing in yours (one per actor, never next to a living twin). **Kills are shared** (setting, on by default): if a member
+-  kills an NPC or creature it dies for everybody in the group (essential NPCs excepted).
++  kills an NPC or creature it dies for everybody in the group (essential NPCs excepted). **Loot is shared** (setting, on by
++  default): what a member takes from a container or a corpse is taken from your copy of it too, so the group does not loot
++  the same chest twice. Only ordinary loot: gold, ingredients, potions, lockpicks, probes, repair tools and ammunition
++  (a second setting adds plain weapons and armor). Anything with a script or an enchantment, keys, books and every other
++  kind of item is never touched, so nothing a quest needs can vanish from your world. It only ever removes.
++- **Other worlds:** players outside your group share nothing of this, and an NPC you kill stays dead for you. But after it
++  has been gone for five minutes, a copy from another player's world (where it is alive) can stand in for it, labelled
++  "[Name's world]" (setting *Show characters that are alive in other players' worlds*). Hitting or killing it changes only your
++  world; the owner never hears of it. At most eight at a time, only for players in your cell.
+ - **Time and weather:** the host's clock and the weather in the host's region.
+ - **Chat:** Enter or Y opens the input (the game keeps running); Tab switches Global/Party.
+ 
+@@ -123,7 +131,7 @@ puts a fake player next to you that accepts invites, chats, trades and shows vit
+ automated runs (auto-host, auto-join with a walking character, auto-bot, kill test).
+ 
+ ## Not done
+-Container contents, stand-ins for actors that are alive but unloaded in your world. Trades of items made while playing
++Stand-ins for actors that are alive but unloaded in your world. Trades of items made while playing
+ (enchanted weapons/armor/clothing, your own potions and scrolls) rebuild them from a description; traded items always arrive
+ with full condition and charge. Shared fights are approximate: damage to an actor alive in several worlds is synced as "lowest health wins"
+ (setting *Damage to actors is shared*), so simultaneous hits by two players are not added up. Projectiles do not collide with
+diff --git a/multiplayer/TODO.md b/multiplayer/TODO.md
+index e6afef1..ce5e7fe 100644
+--- a/multiplayer/TODO.md
++++ b/multiplayer/TODO.md
+@@ -31,8 +31,10 @@ Risks to check first: a reload in the middle of a session drops script state; av
+ one must clean them up first; adding a directory to the VFS and reloading in one go is not tried yet.
+ 
+ ## Parked / known gaps
+-- Container contents (an allowlist of ordinary loot; never quest items - they would lock other players out).
+-- Duplicate NPCs / stand-ins for players who are not in your group.
++- Loot sharing and stand-ins for other worlds are in but only tested with faked engine objects: try them in a real game
++  (a chest and a corpse looted by a party member; an NPC killed, then five minutes later its other-world copy).
++- Shared loot ignores containers that have no stable id (made at runtime) and the edges of exterior cells (only the cell the
++  player stands in is watched).
+ - NAT traversal for hosted games: UPnP port mapping and/or a public relay.
+ - A normal quit looks like a lost connection (place held for 90 s); needs an engine hook to say "I am leaving".
+ - State is broadcast to everyone, so cost grows with the square of the player count (127 players max, ~30 comfortable on a
+diff --git a/multiplayer/mod/scripts/mp/global.lua b/multiplayer/mod/scripts/mp/global.lua
+index a544601..09da244 100644
+--- a/multiplayer/mod/scripts/mp/global.lua
++++ b/multiplayer/mod/scripts/mp/global.lua
+@@ -13,6 +13,7 @@ local markup = require('openmw.markup')
+ local I = require('openmw.interfaces')
+ local proxies = require('scripts/mp/proxies')
+ local shots = require('scripts/mp/shots')
++local loot = require('scripts/mp/loot')
+ local items = require('scripts/mp/items')
+ local relay = require('scripts/mp/relay')
+ local bot = require('scripts/mp/bot')
+@@ -42,6 +43,9 @@ I.Settings.registerGroup {
+           argument = { integer = true, min = 2, max = 64 } },
+         { key = 'Motd', renderer = 'textLine', name = 'Message of the day when hosting', default = '' },
+         { key = 'SharedKills', renderer = 'checkbox', name = 'Kills are shared with your group', default = true },
++        { key = 'OtherWorldStandins', renderer = 'checkbox', name = "Show characters that are alive in other players' worlds (after a few minutes)", default = true },
++        { key = 'SharedLoot', renderer = 'checkbox', name = 'Ordinary loot taken from containers is shared with your group', default = true },
++        { key = 'SharedLootGear', renderer = 'checkbox', name = 'Also share plain weapons and armor (never enchanted or scripted ones)', default = false },
+         { key = 'SharedFights', renderer = 'checkbox', name = 'Damage to actors is shared with your group', default = true },
+         { key = 'Port', renderer = 'number', name = 'Server port', default = 25565,
+           argument = { integer = true, min = 1, max = 65535 } },
+@@ -108,6 +112,9 @@ proxies.init({
+     ownerName = nameOf,
+     sharedKills = function() return settings:get('SharedKills') ~= false end,
+     sharedFights = function() return settings:get('SharedFights') ~= false end,
++    strangerStandins = function() return settings:get('OtherWorldStandins') ~= false end,
++    connected = function() return net.isConnected() end,
++    isMember = isMember,
+ })
+ 
+ shots.init({
+@@ -285,6 +292,20 @@ end
+ local myInput = { sneak = false, seq = 0, jseq = 0, reading = false, pitch = 0 } -- from player.lua (MpInput)
+ local lastSent -- { pos, time, cell } of the previous state message, for the velocity estimate
+ 
++loot.init({
++    send = function(t) net.send(net.encodeJson(t)) end,
++    dlog = dlog,
++    notice = notice,
++    player = player,
++    objectById = proxies.objectById,
++    contentId = proxies.contentId,
++    isAvatar = function(obj) return avatarIds[obj.id] ~= nil end,
++    enabled = function() return settings:get('SharedLoot') ~= false end,
++    gear = function() return settings:get('SharedLootGear') == true end,
++    active = function() return net.isConnected() and inParty() end,
++    containerOpen = function() return myInput.mode == 'Container' end,
++})
++
+ local function sendState()
+     local p = player()
+     if not p then return end
+@@ -425,6 +446,7 @@ clearRemotes = function()
+     for _, id in ipairs(ids) do removeRemote(id) end
+     proxies.reset()
+     shots.reset()
++    loot.reset()
+     releaseClock()
+     players = {}
+     party = { members = {}, leader = nil }
+@@ -856,6 +878,7 @@ local function onMessage(msg)
+     end
+     if t == 'vitals' then vitals[msg.id] = msg return end
+     if t == 'shot' then onShot(msg) return end
++    if t == 'loot' then loot.onMessage(msg) return end
+     if t == 'aid' then onAid(msg) return end
+     if proxies.onMessage(msg) then return end
+     local id = msg.id
+@@ -965,7 +988,7 @@ return {
+             for _, r in pairs(remotes) do if r.obj then objs[#objs + 1] = r.obj end end
+             for _, o in ipairs(proxies.savedObjects()) do objs[#objs + 1] = o end
+             for _, o in ipairs(shots.savedObjects()) do objs[#objs + 1] = o end
+-            return { objs = objs, kills = proxies.getPendingKills() }
++            return { objs = objs, kills = proxies.getPendingKills(), loot = loot.getPending() }
+         end,
+         onLoad = function(saved)
+             remotes, avatarIds, lastEquipJson = {}, {}, nil
+@@ -973,6 +996,8 @@ return {
+             proxies.reset()
+             shots.reset()
+             proxies.setPendingKills(saved and saved.kills)
++            loot.reset()
++            loot.setPending(saved and saved.loot)
+             for _, obj in ipairs(saved and saved.objs or {}) do
+                 if obj:isValid() then pcall(function() obj:remove() end) end
+             end
+@@ -1031,6 +1056,7 @@ return {
+                 toUi('MpAvatars', { list = list })
+             end
+             proxies.onUpdate(gameDt)
++            loot.onUpdate(dt) -- (real time: looting happens in a window that pauses the game)
+             shots.onUpdate(gameDt)
+             for _, r in pairs(remotes) do updateRemote(r, gameDt) end
+             if net.isConnected() and core.getRealTime() - lastServerMessage > SERVER_SILENCE then
+diff --git a/multiplayer/mod/scripts/mp/loot.lua b/multiplayer/mod/scripts/mp/loot.lua
+new file mode 100644
+index 0000000..dfc2335
+--- /dev/null
++++ b/multiplayer/mod/scripts/mp/loot.lua
+@@ -0,0 +1,254 @@
++-- Shared loot inside a group. Every player keeps their own world, so a chest one member empties is still full for the
++-- others. With this on, what a member takes from a container or a corpse is taken from the same container in the other
++-- members' worlds too, so the group does not loot the same thing twice.
++--
++-- It only ever REMOVES, and only ordinary loot: gold, ingredients, potions, lockpicks, probes, repair tools and ammunition
++-- (and, with a second setting, plain weapons and armor). Anything with a script, an enchantment or a generated record, keys,
++-- books, soul gems and every other kind of item is left alone, so nothing a quest depends on can disappear from someone
++-- else's world. The receiver decides what is shareable from its own objects, never from what the sender claims.
++local types = require('openmw.types')
++
++local M = {}
++
++local WATCH_RANGE = 450 -- containers and corpses this near the player are watched while a container window is open
++local TICK = 0.25 -- seconds between looks at what changed
++local LINGER = 1.5 -- keep watching this long after the window closes (the last click)
++local APPLY_INTERVAL = 1.0
++local MAX_ENTRIES = 30 -- item kinds in one message
++local MAX_COUNT = 1000000
++local MAX_ATTEMPTS = 20 -- a removal that keeps failing is dropped
++
++local ctx -- { send, dlog, notice, player, objectById, contentId, isAvatar, enabled, gear, active, containerOpen }
++local watching = {} -- object id -> { obj, cid, items }
++local pending = {} -- container content id -> { items = { [recordId] = count }, tries = n }
++local tickTimer, applyTimer, linger = 0, 0, 0
++local wasOpen = false
++local told = false
++
++function M.init(context) ctx = context end
++
++function M.reset()
++    watching, wasOpen, linger = {}, false, 0
++end
++
++------------------------------------------------------------------ what may be shared
++
++local function emptyScript(rec) return rec.mwscript == nil or rec.mwscript == '' end
++local function plain(rec) return emptyScript(rec) and (rec.enchant == nil or rec.enchant == '') end
++
++-- Gold, ingredients, potions, lockpicks, probes, repair tools and ammunition; with `gear` also unenchanted weapons and
++-- armor and clothing. Never anything with a script, an enchantment or a generated record.
++function M.shareable(item, gear)
++    local ok, result = pcall(function()
++        local id = item.recordId
++        if id:lower():find('^generated:') then return false end
++        local t = item.type
++        local rec = t.record(item)
++        if not emptyScript(rec) then return false end
++        if t == types.Miscellaneous then return id:lower():find('^gold_%d+$') ~= nil end
++        if t == types.Ingredient or t == types.Potion or t == types.Lockpick or t == types.Probe or t == types.Repair then
++            return true
++        end
++        if t == types.Weapon then
++            if not plain(rec) then return false end
++            local w = types.Weapon.TYPE
++            if rec.type == w.Arrow or rec.type == w.Bolt or rec.type == w.MarksmanThrown then return true end
++            return gear and true or false
++        end
++        if t == types.Armor or t == types.Clothing then return gear and plain(rec) and true or false end
++        return false
++    end)
++    return ok and result or false
++end
++
++local function inventoryOf(obj)
++    if obj.type == types.Container then return types.Container.inventory(obj) end
++    return types.Actor.inventory(obj)
++end
++
++-- { [recordId] = count } of the shareable items in a container or corpse, or nil if it has not been filled in yet.
++function M.snapshot(obj, gear)
++    local ok, items = pcall(function()
++        local inv = inventoryOf(obj)
++        if not inv:isResolved() then return nil end
++        local out = {}
++        for _, item in ipairs(inv:getAll()) do
++            if M.shareable(item, gear) then out[item.recordId] = (out[item.recordId] or 0) + item.count end
++        end
++        return out
++    end)
++    return ok and items or nil
++end
++
++-- What went missing between two snapshots: { [recordId] = count removed }, and whether anything did.
++function M.removed(before, after)
++    local out, any = {}, false
++    for id, n in pairs(before) do
++        local now = after[id] or 0
++        if now < n then out[id] = n - now any = true end
++    end
++    return out, any
++end
++
++------------------------------------------------------------------ sending what we took
++
++local function candidates(p)
++    local list = {}
++    local function add(obj)
++        if (obj.position - p.position):length() <= WATCH_RANGE and ctx.contentId(obj) then list[#list + 1] = obj end
++    end
++    pcall(function()
++        for _, c in ipairs(p.cell:getAll(types.Container)) do add(c) end
++        for _, kind in ipairs({ types.NPC, types.Creature }) do
++            for _, a in ipairs(p.cell:getAll(kind)) do
++                if a ~= p and types.Actor.isDead(a) and not ctx.isAvatar(a) then add(a) end
++            end
++        end
++    end)
++    return list
++end
++
++local function startWatching(p)
++    watching = {}
++    local gear = ctx.gear()
++    for _, obj in ipairs(candidates(p)) do
++        local items = M.snapshot(obj, gear)
++        if items then watching[obj.id] = { obj = obj, cid = ctx.contentId(obj), items = items } end
++    end
++end
++
++local function send(cid, removed)
++    local batch, n = {}, 0
++    for id, count in pairs(removed) do
++        batch[id] = count
++        n = n + 1
++        if n >= MAX_ENTRIES then
++            ctx.send({ t = 'loot', cid = cid, items = batch })
++            batch, n = {}, 0
++        end
++    end
++    if n > 0 then ctx.send({ t = 'loot', cid = cid, items = batch }) end
++end
++
++local function look()
++    local gear = ctx.gear()
++    for id, w in pairs(watching) do
++        if not w.obj:isValid() then
++            watching[id] = nil
++        else
++            local now = M.snapshot(w.obj, gear)
++            if now then
++                local gone, any = M.removed(w.items, now)
++                w.items = now
++                if any then
++                    ctx.dlog('loot', w.cid, 'taken here, telling the group')
++                    send(w.cid, gone)
++                end
++            end
++        end
++    end
++end
++
++------------------------------------------------------------------ applying what the others took
++
++-- Returns true if the message was ours. Removals wait (and are saved with the game) until their container is loaded.
++function M.onMessage(msg)
++    if not ctx.enabled() or type(msg.cid) ~= 'string' or #msg.cid > 100 or type(msg.items) ~= 'table' then return end
++    local entry = pending[msg.cid] or { items = {}, tries = 0 }
++    local n, added = 0, 0
++    for id, count in pairs(msg.items) do
++        n = n + 1
++        if n > MAX_ENTRIES then break end
++        if type(id) == 'string' and #id <= 120 and type(count) == 'number' and count >= 1 and count <= MAX_COUNT then
++            entry.items[id] = (entry.items[id] or 0) + math.floor(count)
++            added = added + 1
++        end
++    end
++    if added == 0 then return end -- nothing usable: nothing to remember
++    pending[msg.cid] = entry
++    if not told then
++        told = true
++        ctx.notice('Ordinary loot your group takes is taken from your copy of the container too.')
++    end
++end
++
++local function applyTo(obj, items)
++    local gear = ctx.gear()
++    local inv = inventoryOf(obj)
++    if not inv:isResolved() then inv:resolve() end
++    for id, count in pairs(items) do
++        local left = count
++        for _, item in ipairs(inv:findAll(id)) do
++            if left <= 0 then break end
++            if M.shareable(item, gear) then -- what counts as ordinary loot is decided here, from our own object
++                local take = math.min(left, item.count)
++                item:remove(take)
++                left = left - take
++            end
++        end
++    end
++end
++
++local function apply()
++    for cid, entry in pairs(pending) do
++        local obj = ctx.objectById(cid)
++        if obj then
++            local ok, err = pcall(applyTo, obj, entry.items)
++            if ok then
++                pending[cid] = nil
++                local w = watching[obj.id]
++                if w then w.items = M.snapshot(obj, ctx.gear()) or w.items end -- (our own removal is not news)
++                ctx.dlog('loot', cid, 'removed what the group took')
++            else
++                entry.tries = entry.tries + 1
++                if entry.tries >= MAX_ATTEMPTS then
++                    pending[cid] = nil
++                    ctx.dlog('loot', cid, 'gave up:', tostring(err))
++                end
++            end
++        end
++    end
++end
++
++------------------------------------------------------------------ per frame, saving
++
++function M.onUpdate(dt)
++    if not ctx.enabled() then return end
++    local p = ctx.player()
++    if not p then return end
++    local open = ctx.containerOpen()
++    if ctx.active() then
++        if open and not wasOpen then
++            startWatching(p) -- a container window just opened: remember what is in everything around us
++        end
++        if open then linger = LINGER else linger = math.max(0, linger - dt) end
++        tickTimer = tickTimer + dt
++        if (open or linger > 0) and tickTimer >= TICK then
++            tickTimer = 0
++            look()
++        end
++        if not open and linger <= 0 then watching = {} end
++    end
++    wasOpen = open
++    applyTimer = applyTimer + dt
++    if applyTimer >= APPLY_INTERVAL then
++        applyTimer = 0
++        if not open and next(pending) then apply() end -- (never change a container the player is looking at)
++    end
++end
++
++-- For the save file: removals still waiting for their container.
++function M.getPending()
++    local out = {}
++    for cid, entry in pairs(pending) do out[cid] = entry.items end
++    return out
++end
++
++function M.setPending(saved)
++    pending = {}
++    for cid, items in pairs(saved or {}) do
++        if type(cid) == 'string' and type(items) == 'table' then pending[cid] = { items = items, tries = 0 } end
++    end
++end
++
++return M
+diff --git a/multiplayer/mod/scripts/mp/player.lua b/multiplayer/mod/scripts/mp/player.lua
+index 2baed62..4d3c413 100644
+--- a/multiplayer/mod/scripts/mp/player.lua
++++ b/multiplayer/mod/scripts/mp/player.lua
+@@ -53,18 +53,18 @@ local self = require('openmw.self')
+ local types = require('openmw.types')
+ local wasUsing, wasAir, attackSeq, jumpSeq, lastAttack, lastInputSig = false, false, 0, 0, nil, ''
+ local releaseSeq, releaseKind, releaseStrength, pressedAt, holding = 0, nil, 0, 0, false
+-local inputData = { sneak = false, reading = false, pitch = 0 }
++local inputData = { sneak = false, reading = false, pitch = 0, mode = nil }
+ local inputSentAt = -10
+ 
+ -- Sends our animation-relevant input to the global script when it changed (and once a second regardless).
+ local function pushInput(force)
+     inputData.atk, inputData.seq, inputData.jseq = lastAttack, attackSeq, jumpSeq
+-    local sig = table.concat({ tostring(inputData.sneak), tostring(inputData.reading), attackSeq, releaseSeq, jumpSeq,
++    local sig = table.concat({ tostring(inputData.sneak), tostring(inputData.reading), tostring(inputData.mode), attackSeq, releaseSeq, jumpSeq,
+         math.floor(inputData.pitch * 20 + 0.5) }, '|')
+     local t = core.getRealTime()
+     if force or sig ~= lastInputSig or t - inputSentAt > 1 then
+         lastInputSig, inputSentAt = sig, t
+-        core.sendGlobalEvent('MpInput', { sneak = inputData.sneak, reading = inputData.reading, pitch = inputData.pitch,
++        core.sendGlobalEvent('MpInput', { sneak = inputData.sneak, reading = inputData.reading, pitch = inputData.pitch, mode = inputData.mode,
+             atk = lastAttack, seq = attackSeq, jseq = jumpSeq, rkind = releaseKind, rseq = releaseSeq, str = releaseStrength })
+     end
+ end
+@@ -673,6 +673,7 @@ return {
+             updateStatus()
+             -- onFrame also runs while the game is paused, which is exactly when a menu is open
+             inputData.reading = I.UI.getMode() ~= nil and not chatOpen
++            inputData.mode = I.UI.getMode() -- (a container window open = the player is looting)
+             inputData.pitch = camera.getPitch() + camera.getExtraPitch()
+             pushInput(false)
+             if not synced then
+diff --git a/multiplayer/mod/scripts/mp/proxies.lua b/multiplayer/mod/scripts/mp/proxies.lua
+index c35bc33..f642d16 100644
+--- a/multiplayer/mod/scripts/mp/proxies.lua
++++ b/multiplayer/mod/scripts/mp/proxies.lua
+@@ -32,6 +32,21 @@ local previousRoster = {} -- nid -> true
+ local damageQueue = {} -- { obj, frac, wait, kill }
+ local pendingKills = {} -- nid -> true: actors a group member killed that we have not been able to kill yet
+ local killTimer = 0
++-- Stand-ins for characters that are alive in other players' worlds (players who are NOT in our group). Their kills are
++-- not ours, so an actor we killed stays dead here; but after a while another world's copy of it appears, labelled with
++-- whose world it comes from. These never touch the owner's world: hitting or killing one changes only ours.
++local STRANGER_DELAY = 300 -- seconds an actor must have been gone from our world before another world's copy shows up
++local STRANGER_MAX = 8 -- stand-ins from other worlds at once
++local STRANGER_STALE = 10 -- seconds without its owner listing it before the stand-in goes
++local DEAD_STANDIN_LINGER = 60 -- seconds a killed stand-in stays as a corpse
++local PUBLIC_INTERVAL = 1.0
++local PUBLIC_RANGE = 3000
++local PUBLIC_MAX = 30
++local MAX_RECORDS = 200 -- custom records stand-ins may create in total (they are saved with the game)
++local goneSince = {} -- nid -> clock when our own copy was first seen dead or disabled
++local finished = {} -- nid..'|'..owner -> true: a stand-in we killed does not come back this session
++local publicTimer, goneTimer = 0, 0
++local recordCount = 0
+ local fightSync = {} -- nid -> seconds until a group member's damage may be applied to our copy again
+ local FIGHT_MIN_DROP = 0.02 -- health ratio difference worth syncing
+ local FIGHT_COOLDOWN = 1.0 -- the damage is delivered within ~0.2 s; roster messages must not apply it twice
+@@ -46,7 +61,7 @@ function M.reset()
+         if px.obj and px.obj:isValid() then pcall(function() px.obj:remove() end) end
+     end
+     proxies, proxyById, ownerCells, previousRoster, recentDead, damageQueue = {}, {}, {}, {}, {}, {}
+-    pendingKills, fightSync = {}, {}
++    pendingKills, fightSync, goneSince, finished = {}, {}, {}, {}
+ end
+ 
+ function M.isProxy(obj) return proxyById[obj.id] ~= nil end
+@@ -138,6 +153,48 @@ local function sendRoster()
+     ctx.send({ t = 'actors', cell = ctx.cellKey(p.cell), list = list, dead = dead })
+ end
+ 
++-- Everybody who shares our cell (outside our group) hears which characters are alive around us, once a second.
++local function sendPublicRoster()
++    local p = ctx.player()
++    if not p then return end
++    local near = {}
++    for _, a in ipairs(world.activeActors) do
++        if a ~= p and (a.type == types.NPC or a.type == types.Creature) and not ctx.isAvatar(a) and not M.isProxy(a) then
++            local nid = contentId(a)
++            local dist = (a.position - p.position):length()
++            if nid and a.enabled and dist < PUBLIC_RANGE and not types.Actor.isDead(a) then
++                near[#near + 1] = { dist = dist, a = a, nid = nid }
++            end
++        end
++    end
++    table.sort(near, function(x, y) return x.dist < y.dist end)
++    local list = {}
++    for i = 1, math.min(#near, PUBLIC_MAX) do
++        local a = near[i].a
++        local pos = a.position
++        list[i] = { n = near[i].nid, r = a.recordId, h = healthRatio(a),
++            p = { round(pos.x, 1), round(pos.y, 1), round(pos.z, 1) }, y = round(a.rotation:getYaw(), 0.01) }
++    end
++    ctx.send({ t = 'pubactors', cell = ctx.cellKey(p.cell), list = list })
++end
++
++-- When did each of our dead (or disabled) actors go? A copy from another world only appears after STRANGER_DELAY.
++local function trackGone()
++    local seen = {}
++    for _, a in ipairs(world.activeActors) do
++        if (a.type == types.NPC or a.type == types.Creature) and not ctx.isAvatar(a) and not M.isProxy(a) then
++            local nid = contentId(a)
++            if nid and (types.Actor.isDead(a) or not a.enabled) then
++                seen[nid] = true
++                goneSince[nid] = goneSince[nid] or clock
++            end
++        end
++    end
++    for nid in pairs(goneSince) do
++        if not seen[nid] then goneSince[nid] = nil end
++    end
++end
++
+ ------------------------------------------------------------------ proxies
+ 
+ local function needsProxy(nid)
+@@ -178,6 +235,7 @@ local function recordFor(owner, recordId)
+         template = T.records[recordId]
+     end
+     if not template then return nil end
++    if recordCount >= MAX_RECORDS then return nil end
+     local fields = {
+         template = template,
+         name = (template.name or recordId) .. ' [' .. ctx.ownerName(owner) .. "'s world]",
+@@ -193,6 +251,7 @@ local function recordFor(owner, recordId)
+     end
+     if not ok then ctx.log('cannot create proxy record for ' .. recordId .. ': ' .. tostring(draft)) return nil end
+     records[cacheKey] = world.createRecord(draft)
++    recordCount = recordCount + 1
+     return records[cacheKey]
+ end
+ 
+@@ -257,6 +316,48 @@ local function onRoster(msg)
+     end
+ end
+ 
++-- Is this entry from another player something we can use? (Strangers' messages are checked, not trusted.)
++local function usableEntry(e)
++    if type(e) ~= 'table' or type(e.n) ~= 'string' or #e.n > 100 or type(e.r) ~= 'string' or #e.r > 100 then return false end
++    if type(e.p) ~= 'table' or type(e.p[1]) ~= 'number' or type(e.p[2]) ~= 'number' or type(e.p[3]) ~= 'number' then return false end
++    return e.y == nil or type(e.y) == 'number'
++end
++
++local function strangerCount()
++    local n = 0
++    for _, px in pairs(proxies) do if px.stranger then n = n + 1 end end
++    return n
++end
++
++-- A player who is not in our group lists the characters alive around them.
++local function onPublicRoster(msg)
++    if not ctx.strangerStandins() or not msg.id or ctx.isMember(msg.id) or type(msg.list) ~= 'table' then return end
++    local p = ctx.player()
++    if not p or msg.cell ~= ctx.cellKey(p.cell) then return end
++    local count = 0
++    for _, e in ipairs(msg.list) do
++        count = count + 1
++        if count > PUBLIC_MAX + 10 then break end
++        if usableEntry(e) then
++            local key = e.n
++            local px = proxies[key]
++            if px then
++                if px.stranger and px.owner == msg.id then
++                    px.last, px.seenAt = e, clock
++                    if not px.gone and px.obj:isValid() and px.obj.enabled then
++                        -- where their copy stands; its health is ours alone
++                        px.obj:sendEvent('MpTarget', { pos = util.vector3(e.p[1], e.p[2], e.p[3]), yaw = e.y })
++                    end
++                end
++            elseif goneSince[key] and clock - goneSince[key] >= STRANGER_DELAY and not finished[key .. '|' .. msg.id]
++                and strangerCount() < STRANGER_MAX and needsProxy(key) and not livingTwinNearby(e) then
++                local s = spawn(msg.id, e, key)
++                if s then s.stranger, s.seenAt = true, clock end
++            end
++        end
++    end
++end
++
+ -- Shared fights: both worlds have this actor alive, so each client lowers its own copy to the lowest health any
+ -- group member reports (never raises it: that is idempotent, so two clients cannot echo damage back and forth).
+ -- The damage goes through damage.lua, which never kills (the kill itself is shared separately) and makes the
+@@ -286,6 +387,7 @@ end
+ 
+ function M.onMessage(msg)
+     if msg.t == 'actors' then onRoster(msg) return true end
++    if msg.t == 'pubactors' then onPublicRoster(msg) return true end
+     if msg.t == 'dmg' then
+         if msg.to == ctx.myId() then onDamage(msg) end
+         return true
+@@ -296,7 +398,13 @@ end
+ -- Event from a proxy's local script: it died here, so its owner's real actor must die too.
+ function M.onProxyDied(d)
+     local px = proxies[d.key]
+-    if not px or not ctx.sharedKills() then return end
++    if not px then return end
++    if px.stranger then -- killed here: it stays dead here, and the other world never hears of it
++        finished[px.key .. '|' .. px.owner] = true
++        px.gone, px.removeAt = true, clock + DEAD_STANDIN_LINGER
++        return
++    end
++    if not ctx.sharedKills() then return end
+     ctx.send({ t = 'dmg', to = px.owner, nid = px.last.n, kill = true })
+ end
+ 
+@@ -315,7 +423,7 @@ end
+ function M.onProxyDamage(d)
+     local px = proxies[d.key]
+     if not px then return end
+-    ctx.send({ t = 'dmg', to = px.owner, nid = px.last.n, frac = d.frac })
++    if not px.stranger then ctx.send({ t = 'dmg', to = px.owner, nid = px.last.n, frac = d.frac }) end -- (strangers: ours only)
+     crimeGuard = CRIME_WINDOW + 0.5
+ end
+ 
+@@ -390,6 +498,19 @@ function M.onUpdate(dt)
+         end
+     end
+ 
++    -- other worlds' stand-ins: note which of our actors are gone, drop stand-ins nobody lists any more
++    goneTimer = goneTimer + dt
++    if goneTimer >= 2 then
++        goneTimer = 0
++        trackGone()
++        for _, px in pairs(proxies) do
++            if px.stranger and ((px.gone and px.removeAt and clock >= px.removeAt)
++                or (not px.gone and clock - (px.seenAt or clock) > STRANGER_STALE)) then
++                removeProxy(px)
++            end
++        end
++    end
++
+     -- proxies are only present while their owner shares our cell
+     local here = ctx.cellKey(p.cell)
+     for _, px in pairs(proxies) do
+@@ -406,6 +527,13 @@ function M.onUpdate(dt)
+         end
+     end
+ 
++    if ctx.connected() and ctx.strangerStandins() then
++        publicTimer = publicTimer + dt
++        if publicTimer >= PUBLIC_INTERVAL then
++            publicTimer = 0
++            sendPublicRoster()
++        end
++    end
+     if ctx.active() then
+         rosterTimer = rosterTimer + dt
+         if rosterTimer >= ROSTER_INTERVAL then
+@@ -427,4 +555,8 @@ function M.onSnap(actor)
+     return false
+ end
+ 
++-- (loot.lua finds containers and corpses by the same cross-client id)
++M.contentId = contentId
++M.objectById = objectById
++
+ return M
+diff --git a/multiplayer/mod/scripts/mp/relay.lua b/multiplayer/mod/scripts/mp/relay.lua
+index be4212e..87bf7af 100644
+--- a/multiplayer/mod/scripts/mp/relay.lua
++++ b/multiplayer/mod/scripts/mp/relay.lua
+@@ -10,8 +10,9 @@ local MAX_PARTY = 3
+ local INVITE_TTL = 60
+ local CHAT_MAX = 240
+ local GLOBAL_TYPES = { profile = true, equip = true, state = true }
++local PUBLIC_TYPES = { pubactors = true } -- shown to the others in the sender's cell who are not in their party
+ local SHOT_TYPES = { shot = true } -- shown to everyone, never cached (a late joiner must not see old shots)
+-local PARTY_TYPES = { actors = true, vitals = true, dmg = true, aid = true }
++local PARTY_TYPES = { actors = true, vitals = true, dmg = true, aid = true, loot = true }
+ local CACHED = { profile = true, equip = true, state = true, actors = true, vitals = true }
+ local GLOBAL_ORDER = { 'profile', 'equip', 'state' }
+ 
+@@ -41,7 +42,7 @@ local trades = {} -- 'low:high' -> { from, to, state = 'requested' | 'active', e
+ local GRACE = 90 -- seconds a player that lost their connection keeps their name, party and place
+ local TRADE_REQUEST_TTL = 60
+ -- messages per second and player, by type; more is dropped (the general limit above still applies)
+-local RATE = { state = 30, vitals = 5, actors = 8, equip = 3, profile = 3, shot = 8, aid = 4, dmg = 30, world = 4,
++local RATE = { pubactors = 2, state = 30, vitals = 5, actors = 8, equip = 3, profile = 3, shot = 8, aid = 4, dmg = 30, world = 4, loot = 10,
+     trade = 30 }
+ 
+ local M = {}
+@@ -277,6 +278,7 @@ local VALID = {
+         for _, k in ipairs({ 'h', 'hm', 'm', 'mm', 'f', 'fm' }) do if not optNum(m[k]) then return false end end
+         return m.bad == nil or (type(m.bad) == 'table' and #m.bad <= 8)
+     end,
++    pubactors = function(m) return type(m.list) == 'table' and #m.list <= 40 and isStr(m.cell or '', 200) end,
+     actors = function(m) return type(m.list) == 'table' and #m.list <= 80
+         and (m.dead == nil or (type(m.dead) == 'table' and #m.dead <= 200)) end,
+     dmg = function(m) return isNum(m.to) and isStr(m.nid or '', 100) and (m.frac == nil or (isNum(m.frac) and m.frac >= 0 and m.frac <= 10)) end,
+@@ -284,6 +286,11 @@ local VALID = {
+     shot = function(m) return isStr(m.k, 8) and (m.rec == nil or isStr(m.rec, 120)) and (m.from == nil or isVec3(m.from))
+         and (m.to == nil or isVec3(m.to)) and optNum(m.spd) end,
+     equip = function(m) return type(m.slots) == 'table' end,
++    loot = function(m)
++        if not isStr(m.cid, 100) or not isCountMap(m.items, 30) then return false end
++        for _, count in pairs(m.items) do if count > 1000000 then return false end end
++        return true
++    end,
+     trade_inv = function(m) return isCountMap(m.items, 2000) and (m.gens == nil or (type(m.gens) == 'table')) end,
+     trade_deal = function(m) return isNum(m.rev) and isCountMap(m.a, 200) and isCountMap(m.b, 200) end,
+     trade_ok = function(m) return isNum(m.rev) end,
+@@ -762,6 +769,14 @@ process = function(id, msg)
+         if msg.scope == 'party' then toParty(id, json) else broadcastOthers(id, json) end
+         return
+     end
++    if t == 'state' then c.cell = msg.cell or '' end -- (where players are, for what is only for those who share a cell)
++    if PUBLIC_TYPES[t] then
++        local json = enc(msg)
++        for o, oc in pairs(clients) do
++            if o ~= id and oc.authed and oc.cell == c.cell and not (oc.party and oc.party == c.party) then sendRaw(o, json) end
++        end
++        return
++    end
+     if SHOT_TYPES[t] then
+         if type(msg.k) == 'string' and #msg.k < 8 then broadcastOthers(id, enc(msg)) end
+         return
+diff --git a/multiplayer/test/loot_test.lua b/multiplayer/test/loot_test.lua
+new file mode 100644
+index 0000000..79becd8
+--- /dev/null
++++ b/multiplayer/test/loot_test.lua
+@@ -0,0 +1,195 @@
++-- Runs the shared-loot logic without the game:  luajit multiplayer/test/loot_test.lua
++-- The engine modules are replaced by small fakes.
++local records = {} -- recordId -> record (what types.X.record returns)
++local function recordFn(id) return records[id] end
++local function kind(name) return { name = name, record = function(item) return records[item.recordId] end } end
++
++local types = {
++    Miscellaneous = kind('Miscellaneous'), Ingredient = kind('Ingredient'), Potion = kind('Potion'),
++    Lockpick = kind('Lockpick'), Probe = kind('Probe'), Repair = kind('Repair'), Weapon = kind('Weapon'),
++    Armor = kind('Armor'), Clothing = kind('Clothing'), Book = kind('Book'),
++    Container = kind('Container'), NPC = kind('NPC'), Creature = kind('Creature'),
++}
++types.Weapon.TYPE = { Arrow = 12, Bolt = 13, MarksmanThrown = 11, LongBladeOneHand = 1 }
++local inventories = {} -- object id -> inventory
++types.Container.inventory = function(obj) return inventories[obj.id] end
++types.Actor = { inventory = function(obj) return inventories[obj.id] end, isDead = function(a) return a.dead end }
++package.loaded['openmw.types'] = types
++
++local nextId = 0
++local function newItem(type_, recordId, count, rec)
++    records[recordId] = rec or {}
++    nextId = nextId + 1
++    return { id = 'item' .. nextId, type = type_, recordId = recordId, count = count or 1 }
++end
++
++local function newInventory(items, resolved)
++    local inv = { items = items, resolved = resolved ~= false }
++    function inv:isResolved() return self.resolved end
++    function inv:resolve() self.resolved = true end
++    function inv:getAll() local out = {} for _, i in ipairs(self.items) do out[#out + 1] = i end return out end
++    function inv:findAll(id) local out = {} for _, i in ipairs(self.items) do if i.recordId == id then out[#out + 1] = i end end return out end
++    for _, item in ipairs(items) do
++        function item:remove(n)
++            self.count = self.count - (n or self.count)
++            if self.count <= 0 then for i, x in ipairs(inv.items) do if x == self then table.remove(inv.items, i) break end end end
++        end
++    end
++    return inv
++end
++
++local vec = {}
++vec.__index = vec
++vec.__sub = function(a, b) return setmetatable({ x = a.x - b.x, y = a.y - b.y, z = a.z - b.z }, vec) end
++function vec:length() return math.sqrt(self.x * self.x + self.y * self.y + self.z * self.z) end
++local function v(x, y, z) return setmetatable({ x = x, y = y, z = z }, vec) end
++
++local function newContainer(id, items, pos)
++    local obj = { id = id, type = types.Container, position = pos or v(0, 0, 0), contentFile = 'Morrowind.esm' }
++    function obj:isValid() return true end
++    inventories[id] = newInventory(items)
++    return obj
++end
++
++package.path = 'multiplayer/mod/?.lua;' .. package.path
++local loot = require('scripts/mp/loot')
++
++local failures = 0
++local function check(cond, what) if not cond then failures = failures + 1 print('FAIL: ' .. what) end end
++
++-- ---------------------------------------------------------------- what is shareable
++local gold = newItem(types.Miscellaneous, 'gold_001', 100)
++check(loot.shareable(gold, false), 'gold is shareable')
++check(not loot.shareable(newItem(types.Miscellaneous, 'key_ald_ruhn', 1, {}), false), 'a key is not')
++check(not loot.shareable(newItem(types.Miscellaneous, 'misc_dwrv_artifact60', 1, {}), false), 'other miscellaneous items are not')
++check(loot.shareable(newItem(types.Ingredient, 'ingred_bread_01', 3), false), 'an ingredient is')
++check(loot.shareable(newItem(types.Potion, 'p_restore_health_c', 2), false), 'a potion is')
++check(not loot.shareable(newItem(types.Potion, 'generated:77', 1), false), 'a potion made by a player is not')
++check(not loot.shareable(newItem(types.Potion, 'p_quest', 1, { mwscript = 'questScript' }), false), 'anything with a script is not')
++check(loot.shareable(newItem(types.Lockpick, 'pick_apprentice_01', 1), false), 'a lockpick is')
++check(loot.shareable(newItem(types.Probe, 'probe_apprentice_01', 1), false), 'a probe is')
++check(loot.shareable(newItem(types.Repair, 'hammer_repair', 1), false), 'a repair tool is')
++check(loot.shareable(newItem(types.Weapon, 'iron arrow', 30, { type = 12 }), false), 'an arrow is')
++check(loot.shareable(newItem(types.Weapon, 'steel bolt', 30, { type = 13 }), false), 'a bolt is')
++check(loot.shareable(newItem(types.Weapon, 'iron dart', 10, { type = 11 }), false), 'a thrown weapon is')
++check(not loot.shareable(newItem(types.Weapon, 'enchanted arrow', 5, { type = 12, enchant = 'ench_fire' }), false), 'an enchanted arrow is not')
++local sword = newItem(types.Weapon, 'iron longsword', 1, { type = 1 })
++check(not loot.shareable(sword, false), 'a sword is not, by default')
++check(loot.shareable(sword, true), 'a plain sword is, when weapons and armor are shared too')
++check(not loot.shareable(newItem(types.Weapon, 'fire sword', 1, { type = 1, enchant = 'ench_fire' }), true), 'an enchanted sword never is')
++check(not loot.shareable(newItem(types.Weapon, 'sword_with_script', 1, { type = 1, mwscript = 'x' }), true), 'a scripted sword never is')
++check(not loot.shareable(newItem(types.Armor, 'iron cuirass', 1, {}), false) and loot.shareable(newItem(types.Armor, 'iron cuirass2', 1, {}), true), 'armor only when asked')
++check(not loot.shareable(newItem(types.Book, 'bk_quest_note', 1, {}), true), 'a book never is')
++check(not loot.shareable({ recordId = 'x', type = {} }, true), 'something odd is not (and does not crash)')
++
++-- ---------------------------------------------------------------- snapshots and what was taken
++local chest = newContainer('chest1', { newItem(types.Miscellaneous, 'gold_001', 100), newItem(types.Potion, 'p_restore_health_c', 2),
++    newItem(types.Miscellaneous, 'key_x', 1, {}), newItem(types.Weapon, 'iron longsword', 1, { type = 1 }) })
++local snap = loot.snapshot(chest, false)
++check(snap and snap.gold_001 == 100 and snap.p_restore_health_c == 2 and not snap.key_x and not snap.iron_longsword, 'a snapshot has only shareable items')
++check(loot.snapshot(chest, true)['iron longsword'] == 1, 'with weapons shared, a sword is in it')
++inventories.chest1.resolved = false
++check(loot.snapshot(chest, false) == nil, 'a container that is not filled in yet has no snapshot')
++inventories.chest1.resolved = true
++local gone, any = loot.removed({ gold_001 = 100, p = 2 }, { gold_001 = 60, p = 2, extra = 5 })
++check(any and gone.gold_001 == 40 and gone.p == nil and gone.extra == nil, 'only what went missing counts')
++check(select(2, loot.removed({ a = 1 }, { a = 1 })) == false, 'nothing missing, nothing sent')
++
++-- ---------------------------------------------------------------- the whole flow
++local sent, notices = {}, {}
++local open = false
++local settings = { enabled = true, gear = false, active = true }
++local byCid = {}
++local player = { position = v(0, 0, 0) }
++player.cell = { getAll = function(_, t)
++    if t == types.Container then return { chest } end
++    return {}
++end }
++loot.init({
++    send = function(m) sent[#sent + 1] = m end, dlog = function() end, notice = function(t) notices[#notices + 1] = t end,
++    player = function() return player end,
++    objectById = function(cid) return byCid[cid] end,
++    contentId = function(obj) return obj.contentFile and ('Morrowind.esm:' .. obj.id) or nil end,
++    isAvatar = function() return false end,
++    enabled = function() return settings.enabled end, gear = function() return settings.gear end,
++    active = function() return settings.active end, containerOpen = function() return open end,
++})
++
++loot.onUpdate(0.1) -- window closed: nothing watched
++open = true
++loot.onUpdate(0.01) -- the window opens: what is in the chest is remembered
++-- the player takes 40 gold and a potion
++for _, i in ipairs(inventories.chest1.items) do
++    if i.recordId == 'gold_001' then i:remove(40) end
++    if i.recordId == 'p_restore_health_c' then i:remove(1) end
++end
++loot.onUpdate(0.3)
++check(#sent == 1 and sent[1].t == 'loot' and sent[1].cid == 'Morrowind.esm:chest1', 'taking loot is reported for that container')
++check(sent[1] and sent[1].items.gold_001 == 40 and sent[1].items.p_restore_health_c == 1, 'with what was taken')
++loot.onUpdate(0.3)
++check(#sent == 1, 'it is reported once')
++-- the player drops the potion back in and takes it again
++table.insert(inventories.chest1.items, 1, newItem(types.Potion, 'p_restore_health_c', 1))
++loot.onUpdate(0.3)
++check(#sent == 1, 'putting something in sends nothing')
++open = false
++loot.onUpdate(0.3); loot.onUpdate(2); loot.onUpdate(0.3)
++check(#sent == 1, 'closing the window sends nothing more')
++
++-- ---------------------------------------------------------------- what the others took
++local other = newContainer('chest2', { newItem(types.Miscellaneous, 'gold_001', 50), newItem(types.Ingredient, 'ingred_bread_01', 4),
++    newItem(types.Miscellaneous, 'key_x', 1, {}), newItem(types.Weapon, 'iron longsword', 1, { type = 1 }) })
++byCid['Morrowind.esm:chest2'] = other
++loot.onMessage({ t = 'loot', cid = 'Morrowind.esm:chest2', items = { gold_001 = 30, ingred_bread_01 = 9, key_x = 1, ['iron longsword'] = 1, nothing = 3 } })
++check(#notices == 1, 'the player is told once what this does')
++loot.onUpdate(1.1)
++local left = {}
++for _, i in ipairs(inventories.chest2.items) do left[i.recordId] = i.count end
++check(left.gold_001 == 20, 'gold the group took is removed here')
++check(left.ingred_bread_01 == nil, 'removal stops at what is there')
++check(left.key_x == 1, 'a key is never removed, whatever the sender claims')
++check(left['iron longsword'] == 1, 'a sword is not removed when weapons are not shared')
++check(next(loot.getPending()) == nil, 'nothing is left waiting')
++
++loot.onMessage({ t = 'loot', cid = 'Morrowind.esm:later', items = { gold_001 = 5 } })
++check(loot.getPending()['Morrowind.esm:later'].gold_001 == 5, 'a removal for a container that is not loaded waits')
++loot.setPending(loot.getPending())
++check(loot.getPending()['Morrowind.esm:later'].gold_001 == 5, 'and survives saving and loading')
++loot.onMessage({ t = 'loot', cid = 'x', items = { gold_001 = -5 } })
++loot.onMessage({ t = 'loot', cid = 'y', items = { gold_001 = 0 } })
++loot.onMessage({ t = 'loot', cid = string.rep('z', 200), items = { gold_001 = 1 } })
++loot.onMessage({ t = 'loot', cid = 'w', items = 'nope' })
++check(loot.getPending().x == nil and loot.getPending().y == nil and loot.getPending().w == nil and loot.getPending()[string.rep('z', 200)] == nil,
++    'nonsense counts and ids are dropped')
++
++settings.enabled = false
++local before = 0
++for _ in pairs(loot.getPending()) do before = before + 1 end
++loot.onMessage({ t = 'loot', cid = 'off', items = { gold_001 = 1 } })
++local after = 0
++for _ in pairs(loot.getPending()) do after = after + 1 end
++check(before == after, 'with sharing switched off nothing is accepted')
++
++-- weapons and armor shared: the same message now takes the sword
++settings.enabled, settings.gear = true, true
++loot.onMessage({ t = 'loot', cid = 'Morrowind.esm:chest2', items = { ['iron longsword'] = 1 } })
++loot.onUpdate(1.1)
++local swords = 0
++for _, i in ipairs(inventories.chest2.items) do if i.recordId == 'iron longsword' then swords = swords + i.count end end
++check(swords == 0, 'a plain sword is removed when weapons and armor are shared')
++
++-- while the receiver looks at a container nothing is changed under them
++open = true
++loot.onMessage({ t = 'loot', cid = 'Morrowind.esm:chest2', items = { gold_001 = 5 } })
++loot.onUpdate(1.1)
++local goldNow = 0
++for _, i in ipairs(inventories.chest2.items) do if i.recordId == 'gold_001' then goldNow = goldNow + i.count end end
++check(goldNow == 20, 'nothing changes while a container window is open')
++open = false
++loot.onUpdate(0.01)
++loot.onUpdate(1.1)
++goldNow = 0
++for _, i in ipairs(inventories.chest2.items) do if i.recordId == 'gold_001' then goldNow = goldNow + i.count end end
++check(goldNow == 15, 'it is applied once the window is closed')
++
++if failures == 0 then print('loot tests: all passed') else print(failures .. ' failed') os.exit(1) end
+diff --git a/multiplayer/test/relay_test.lua b/multiplayer/test/relay_test.lua
+index 3708b47..3096d91 100644
+--- a/multiplayer/test/relay_test.lua
++++ b/multiplayer/test/relay_test.lua
+@@ -267,4 +267,44 @@ check(relay.console('kick Ann'):find('was kicked'), 'console: kick')
+ check(relay.console('bogus'):find('Unknown command'), 'console: unknown command')
+ check(relay.console('weather cycle'):find('by itself'), 'console: weather cycles again')
+ 
++-- ---------------------------------------------------------------- shared loot and other worlds' actors
++sent, kicked = {}, {}
++check(relay.start(25568, { password = '', maxPlayers = 8 }) == nil, 'restart for loot')
++join(51, 'Host'); join(52, 'Ann'); join(53, 'Ben'); join(54, 'Cy'); join(55, 'Dee')
++say(52, { t = 'invite', to = 53 }); tick(1.1); say(53, { t = 'accept', from = 52 })
++say(52, { t = 'loot', cid = 'Morrowind.esm:77', items = { gold_001 = 40 } })
++check(last(53, 'loot') and last(53, 'loot').id == 52 and last(53, 'loot').items.gold_001 == 40, 'loot goes to the party')
++check(not last(54, 'loot') and not last(51, 'loot') and not last(52, 'loot'), 'but to nobody else, not even the sender')
++local lootBefore = count(53, 'loot')
++local many = {}
++for i = 1, 31 do many['item' .. i] = 1 end
++say(52, { t = 'loot', cid = 'c', items = many })
++say(52, { t = 'loot', cid = 'c', items = { gold_001 = -1 } })
++say(52, { t = 'loot', cid = 'c', items = { gold_001 = 1e9 } })
++say(52, { t = 'loot', cid = string.rep('x', 101), items = { gold_001 = 1 } })
++say(52, { t = 'loot', cid = 'c', items = 'gold' })
++check(count(53, 'loot') == lootBefore, 'too many kinds, negative or huge counts, a long id and a non-table are dropped')
++for _ = 1, 50 do say(52, { t = 'loot', cid = 'c', items = { gold_001 = 1 } }) end
++check(count(53, 'loot') - lootBefore <= 10, 'loot is rate limited')
++
++tick(1.1)
++for _, id in ipairs({ 52, 53, 54 }) do say(id, { t = 'state', cell = 'Balmora', pos = { 1, 2, 3 } }) end
++say(55, { t = 'state', cell = 'Vivec', pos = { 1, 2, 3 } })
++local entry = { n = 'Morrowind.esm:5', r = 'ordinator', h = 1, p = { 1, 2, 3 }, y = 0 }
++say(52, { t = 'pubactors', cell = 'Balmora', list = { entry } })
++check(last(54, 'pubactors') and last(54, 'pubactors').id == 52 and #last(54, 'pubactors').list == 1, 'someone outside the party in the same cell hears it')
++check(not last(53, 'pubactors'), 'a party member does not (they get the party roster)')
++check(not last(55, 'pubactors'), 'somebody in another cell does not')
++check(not last(52, 'pubactors') and not last(51, 'pubactors'), 'and not the sender, nor the host in another place')
++tick(1.1)
++local pubBefore = count(54, 'pubactors')
++local big = {}
++for i = 1, 41 do big[i] = entry end
++say(52, { t = 'pubactors', cell = 'Balmora', list = big })
++check(count(54, 'pubactors') == pubBefore, 'an oversized list is dropped')
++for _ = 1, 20 do say(52, { t = 'pubactors', cell = 'Balmora', list = { entry } }) end
++check(count(54, 'pubactors') - pubBefore <= 2, 'the public roster is rate limited')
++join(56, 'Late')
++check(not last(56, 'pubactors') and not last(56, 'loot'), 'neither is replayed to a late joiner')
++
+ if failures == 0 then print('relay tests: all passed') else print(failures .. ' failed') os.exit(1) end
+diff --git a/multiplayer/test/server_test.py b/multiplayer/test/server_test.py
+index 1f7615a..5d168f3 100644
+--- a/multiplayer/test/server_test.py
++++ b/multiplayer/test/server_test.py
+@@ -78,6 +78,14 @@ try:
+     b.pump(0.5)
+     check(b.last('state') and b.last('state')['pos'] == [100, 200, 300], 'positions are relayed')
+ 
++    # other worlds' actors reach players in the same cell outside the party; loot only reaches the party
++    b.send(t='state', cell='Balmora', pos=[1, 2, 3], yaw=0); b.pump(0.2)
++    a.send(t='pubactors', cell='Balmora', list=[{'n': 'Morrowind.esm:5', 'r': 'ordinator', 'h': 1, 'p': [1, 2, 3], 'y': 0}])
++    a.send(t='loot', cid='Morrowind.esm:77', items={'gold_001': 40})
++    b.pump(0.6)
++    check(b.last('pubactors') and b.last('pubactors')['id'] == a.last('hello')['id'], 'players outside the party in the same cell get the public actor roster')
++    check(not b.last('loot'), 'loot does not go to players outside the party')
++
+     a.pump(2.5)
+     players = a.last('players')
+     check(players and len(players['list']) == 2 and all('ip' not in p for p in players['list']), 'the player list has no addresses')
+@@ -85,7 +93,7 @@ try:
+     out = console('players')
+     check('Alice' in out and '127.0.0.1' in out and 'ms' in out and 'Balmora' in out and 'at 100, 200, 300' in out,
+           'console lists name, latency, address and location: ' + out.strip())
+-    check('Bob' in out and 'unknown' in out, 'a player who has not sent a position shows an unknown location: ' + out.strip())
++    check('Bob' in out and 'Balmora  at 1, 2, 3' in out, 'every player shows their last position: ' + out.strip())
+     check('? ms' not in out, 'latency is measured: ' + out.strip())
+ 
+     a.send(t='admin', cmd='kick', name='Bob'); a.pump(0.4)
+diff --git a/multiplayer/test/standins_test.lua b/multiplayer/test/standins_test.lua
+new file mode 100644
+index 0000000..05f8cc2
+--- /dev/null
++++ b/multiplayer/test/standins_test.lua
+@@ -0,0 +1,170 @@
++-- Runs the stand-in logic (proxies.lua) without the game:  luajit multiplayer/test/standins_test.lua
++-- Covers the stand-ins for characters that are alive in other players' worlds (players outside the group).
++local vec = {}
++vec.__index = vec
++vec.__sub = function(a, b) return setmetatable({ x = a.x - b.x, y = a.y - b.y, z = a.z - b.z }, vec) end
++function vec:length() return math.sqrt(self.x * self.x + self.y * self.y + self.z * self.z) end
++local function v(x, y, z) return setmetatable({ x = x or 0, y = y or 0, z = z or 0 }, vec) end
++
++local actorsByIndex, activeActors = {}, {}
++local created, removed, records = {}, {}, {}
++local crimeSet = {}
++
++local types = { NPC = {}, Creature = {}, Actor = {}, Player = {} }
++types.NPC.records = setmetatable({}, { __index = function(_, id) return { name = 'Person ' .. id } end })
++types.Creature.records = {}
++types.NPC.createRecordDraft = function(fields) return fields end
++types.Creature.createRecordDraft = function(fields) return fields end
++types.Actor.isDead = function(a) return a.dead end
++types.Actor.stats = { dynamic = { health = function() return { current = 100, base = 100, modifier = 0 } end } }
++types.Player.getCrimeLevel = function() return 0 end
++types.Player.setCrimeLevel = function(_, level) crimeSet[#crimeSet + 1] = level end
++
++local util = { vector3 = v, transform = { rotateZ = function(a) return a end } }
++local core = { getFormId = function(file, index) return index end }
++local world = {
++    activeActors = activeActors,
++    getObjectByFormId = function(i) return actorsByIndex[i] end,
++    createRecord = function(draft) local n = #records + 1 draft.id = 'standin_record_' .. n records[n] = draft return draft end,
++    createObject = function(recordId)
++        local obj = { id = 'new' .. (#created + 1), recordId = recordId, enabled = true, events = {}, scripts = {} }
++        function obj:isValid() return not self.removed end
++        function obj:addScript(name, data) self.scripts[name] = data or true end
++        function obj:teleport() end
++        function obj:sendEvent(name, data) self.events[#self.events + 1] = { name = name, data = data } end
++        function obj:remove() self.removed = true removed[#removed + 1] = self end
++        created[#created + 1] = obj
++        return obj
++    end,
++}
++package.loaded['openmw.core'], package.loaded['openmw.world'], package.loaded['openmw.types'], package.loaded['openmw.util'] =
++    core, world, types, util
++
++package.path = 'multiplayer/mod/?.lua;' .. package.path
++local proxies = require('scripts/mp/proxies')
++
++local function actor(index, dead, pos)
++    local a = { id = tostring(0x1000000 + index), contentFile = 'Morrowind.esm', type = types.NPC, recordId = 'ordinator', dead = dead,
++        enabled = true, position = pos or v(index * 10, 0, 0), rotation = { getYaw = function() return 0 end } }
++    function a:isValid() return true end
++    actorsByIndex[index] = a
++    activeActors[#activeActors + 1] = a
++    return a
++end
++
++local sent = {}
++local settings = { standins = true, connected = true }
++local members = {}
++local player = { position = v(0, 0, 0), cell = { isExterior = true } }
++proxies.init({
++    send = function(m) sent[#sent + 1] = m end, log = function() end, dlog = function() end,
++    blockActivation = function() end, player = function() return player end, cellKey = function() return '' end,
++    myId = function() return 1 end, active = function() return false end, isAvatar = function() return false end,
++    ownerName = function(id) return id == 7 and 'Bob' or 'Cy' end, sharedKills = function() return true end,
++    sharedFights = function() return true end, strangerStandins = function() return settings.standins end,
++    connected = function() return settings.connected end, isMember = function(id) return members[id] == true end,
++})
++
++local failures = 0
++local function check(cond, what) if not cond then failures = failures + 1 print('FAIL: ' .. what) end end
++local function roster(owner, list, cell) proxies.onMessage({ t = 'pubactors', id = owner, cell = cell or '', list = list }) end
++local function entry(index, extra)
++    local e = { n = 'Morrowind.esm:' .. index, r = 'ordinator', h = 0.5, p = { index * 10, 0, 0 }, y = 0 }
++    for k, val in pairs(extra or {}) do e[k] = val end
++    return e
++end
++local function run(seconds, step)
++    step = step or 1
++    for _ = 1, math.floor(seconds / step) do proxies.onUpdate(step) end
++end
++local function publicRosters() local n = 0 for _, m in ipairs(sent) do if m.t == 'pubactors' then n = n + 1 end end return n end
++
++-- ---------------------------------------------------------------- the delay
++local killed = actor(1, true)
++run(4)
++roster(7, { entry(1) })
++check(#created == 0, 'an actor that has only just been gone gets no stand-in')
++run(200)
++roster(7, { entry(1) })
++check(#created == 0, 'nor after three minutes')
++run(110)
++roster(7, { entry(1) })
++check(#created == 1, 'after five minutes another world\'s copy appears')
++local px = created[1]
++check(px.scripts['scripts/mp/remote.lua'] and px.scripts['scripts/mp/remote.lua'].proxy, 'it is a stand-in (proxy script)')
++check(records[1] and records[1].name:find("Bob's world", 1, true), 'labelled with whose world it comes from')
++roster(7, { entry(1) })
++check(#created == 1, 'one stand-in per actor')
++local moved = px.events[#px.events]
++check(moved and moved.name == 'MpTarget' and moved.data.hp == nil, 'it follows its owner\'s copy but its health is ours alone')
++
++-- ---------------------------------------------------------------- group members and bad input
++members[8] = true
++local second = actor(2, true)
++for _ = 1, 62 do -- (their world keeps listing the first one, so its stand-in stays)
++    roster(7, { entry(1) })
++    run(5)
++end
++roster(8, { entry(2) })
++check(#created == 1, 'a group member\'s public roster is ignored (they use the party roster)')
++members[8] = nil
++roster(7, { { n = 'Morrowind.esm:2' } })
++roster(7, { entry(2, { p = { 'x', 0, 0 } }) })
++roster(7, { entry(2, { n = string.rep('a', 200) }) })
++roster(7, { entry(2, { y = 'north' }) })
++roster(7, { 'junk', 5, true })
++roster(7, 'nope')
++check(#created == 1, 'malformed entries are ignored')
++roster(7, { entry(2) }, 'Vivec, Temple')
++check(#created == 1, 'a roster from another cell is ignored')
++settings.standins = false
++roster(7, { entry(2) })
++check(#created == 1, 'switched off: nothing appears')
++settings.standins = true
++
++-- ---------------------------------------------------------------- what happens to a stand-in stays here
++sent = {}
++proxies.onProxyDamage({ key = 'Morrowind.esm:1', frac = 0.4 })
++check(#sent == 0, 'hitting it tells the other world nothing')
++proxies.onProxyDied({ key = 'Morrowind.esm:1' })
++check(#sent == 0, 'killing it tells the other world nothing')
++roster(7, { entry(1) })
++check(#created == 1, 'a stand-in we killed does not come back')
++run(65, 5)
++check(px.removed, 'its corpse is cleaned up after a minute')
++
++-- ---------------------------------------------------------------- it goes when its owner stops listing it
++roster(7, { entry(2) })
++check(#created == 2, 'another one appears for the second actor')
++local third = created[2]
++run(12)
++check(third.removed, 'a stand-in nobody lists any more goes away')
++
++-- ---------------------------------------------------------------- the cap
++for i = 10, 20 do actor(i, true) end
++run(310)
++local list = {}
++for i = 10, 20 do list[#list + 1] = entry(i) end
++roster(7, list)
++local alive = 0
++for _, o in ipairs(created) do if not o.removed then alive = alive + 1 end end
++check(alive == 8, 'at most eight stand-ins from other worlds at once (' .. alive .. ')')
++
++-- ---------------------------------------------------------------- what we tell the others
++sent = {}
++local living = actor(30, false, v(500, 0, 0))
++local near = actor(31, false, v(50, 0, 0))
++run(1.2)
++local pub
++for _, m in ipairs(sent) do if m.t == 'pubactors' then pub = m end end
++check(pub and pub.cell == '', 'the public roster is sent about once a second')
++check(pub and #pub.list == 2 and pub.list[1].n == 'Morrowind.esm:31' and pub.list[2].n == 'Morrowind.esm:30', 'with the living characters around us, nearest first (not the dead)')
++local before = publicRosters()
++settings.connected = false
++run(3)
++check(publicRosters() == before, 'nothing is sent when we are not connected')
++settings.connected, settings.standins = true, false
++run(3)
++check(publicRosters() == before, 'nor when the setting is off')
++
++if failures == 0 then print('stand-in tests: all passed') else print(failures .. ' failed') os.exit(1) end

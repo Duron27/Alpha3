@@ -1,0 +1,60 @@
+From c38dfb2ae98f2c0f8ba2df32519812bb5d47a2c1 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Thu, 15 Oct 2026 14:42:24 -0400
+Subject: [PATCH] Landing after a jump is one landing: no catch-up step right
+ after it; floating needs 1.8 s off the ground
+
+- remote.lua: for 0.4 s after the avatar lands it does not start walking to catch up (that cut the landing short and
+  looked like a second, smaller landing). Not when the player is still moving, or when the avatar is more than 70 units off
+- player.lua: fly (the avatar levitates and follows the height) needs 1.8 s off the ground instead of 0.8 s, because a
+  long jump stays up longer than 0.8 s
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ multiplayer/mod/scripts/mp/player.lua | 2 +-
+ multiplayer/mod/scripts/mp/remote.lua | 7 ++++++-
+ 2 files changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/multiplayer/mod/scripts/mp/player.lua b/multiplayer/mod/scripts/mp/player.lua
+index 5e45fe3533..ead1f9da26 100644
+--- a/multiplayer/mod/scripts/mp/player.lua
++++ b/multiplayer/mod/scripts/mp/player.lua
+@@ -677,7 +677,7 @@ return {
+                 groundTime = groundTime + dt
+                 airTime = 0
+             end
+-            inputData.fly = airTime >= 0.8 -- off the ground for good (levitation, flying), not just a jump
++            inputData.fly = airTime >= 1.8 -- off the ground for good (levitation, flying), not even a long jump or a short fall
+             wasAir = air
+             inputData.sneak = self.controls.sneak and true or false
+             pushInput(false)
+diff --git a/multiplayer/mod/scripts/mp/remote.lua b/multiplayer/mod/scripts/mp/remote.lua
+index ecd831aea3..a012740888 100644
+--- a/multiplayer/mod/scripts/mp/remote.lua
++++ b/multiplayer/mod/scripts/mp/remote.lua
+@@ -16,6 +16,8 @@ local Actor = types.Actor
+ -- it hangs there instead of falling and being put back. Whichever of these potions the loaded content has.
+ local LEVITATE_POTIONS = { 'p_levitation_s', 'p_levitation_q', 'p_levitation_e', 'p_levitation_c', 'p_levitation_b' }
+ local floatOn, floatCheck = false, 0
++local landSettle = 0
++local LAND_SETTLE, LAND_SETTLE_DIST, LAND_MOVING = 0.4, 70, 60 -- seconds to stand still after landing / units off that still need a step / speed (units per second) that counts as still moving
+ 
+ local function levitatePotion()
+     for _, id in ipairs(LEVITATE_POTIONS) do
+@@ -349,9 +351,12 @@ return {
+                 core.sendGlobalEvent('MpSnap', { actor = self.object })
+             end
+ 
++            -- just after a jump, let the landing finish: stepping off to catch up cuts it short and looks like a second,
++            -- smaller landing. (Only when it is close and the player has stopped; running on from a jump has to keep up.)
++            if not Actor.isOnGround(self) then landSettle = LAND_SETTLE else landSettle = math.max(0, landSettle - dt) end
+             if walking then
+                 if dist < WALK_STOP then walking = false end
+-            elseif dist > WALK_START then
++            elseif dist > WALK_START and (landSettle <= 0 or dist > LAND_SETTLE_DIST or (target.speed or 0) > LAND_MOVING) then
+                 walking = true
+             end
+ 
+-- 
+2.55.0
+

@@ -1,0 +1,673 @@
+From 5ca23310c23586d9d1d73b263d75dd67d571183d Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Fri, 9 Oct 2026 08:25:14 -0400
+Subject: [PATCH] Player markers on map and minimap (ui.setPlayerMarkers),
+ arrow follows real position, one jump/swing per action, reading pose and head
+ pitch for paused players, network timers on real time
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ apps/openmw/mwbase/windowmanager.hpp          |   4 +
+ apps/openmw/mwgui/mapwindow.cpp               |  34 ++++-
+ apps/openmw/mwgui/mapwindow.hpp               |   5 +
+ apps/openmw/mwgui/windowmanagerimp.cpp        |   5 +
+ apps/openmw/mwgui/windowmanagerimp.hpp        |   1 +
+ apps/openmw/mwlua/globalscripts.hpp           |   3 +-
+ apps/openmw/mwlua/uibindings.cpp              |  20 +++
+ files/lua_api/openmw/ui.lua                   |   7 +
+ multiplayer/debug/autojoin.omwscripts         |   2 -
+ .../debug/scripts/mp_debug/autowalk.lua       |  12 +-
+ multiplayer/mod/scripts/mp/global.lua         |  47 +++++--
+ multiplayer/mod/scripts/mp/player.lua         |  57 +++++----
+ multiplayer/mod/scripts/mp/remote.lua         | 121 ++++++++++++++----
+ 13 files changed, 256 insertions(+), 62 deletions(-)
+
+diff --git a/apps/openmw/mwbase/windowmanager.hpp b/apps/openmw/mwbase/windowmanager.hpp
+index e6d0ecc85f..092e530a64 100644
+--- a/apps/openmw/mwbase/windowmanager.hpp
++++ b/apps/openmw/mwbase/windowmanager.hpp
+@@ -13,6 +13,7 @@
+ 
+ #include "../mwgui/mode.hpp"
+ 
++#include <components/esm3/custommarkerstate.hpp>
+ #include <components/sdlutil/events.hpp>
+ 
+ struct SDL_Window;
+@@ -212,6 +213,9 @@ namespace MWBase
+ 
+         virtual bool toggleFogOfWar() = 0;
+ 
++        // Shows markers for other players on the map and minimap (not saved).
++        virtual void setPlayerMarkers(std::vector<ESM::CustomMarker> markers) = 0;
++
+         virtual bool toggleFullHelp() = 0;
+         ///< show extra info in item tooltips (owner, script)
+ 
+diff --git a/apps/openmw/mwgui/mapwindow.cpp b/apps/openmw/mwgui/mapwindow.cpp
+index e98842dbad..c1bec11489 100644
+--- a/apps/openmw/mwgui/mapwindow.cpp
++++ b/apps/openmw/mwgui/mapwindow.cpp
+@@ -158,6 +158,22 @@ namespace MWGui
+         eventMarkersChanged();
+     }
+ 
++    void CustomMarkerCollection::setTransient(std::vector<ESM::CustomMarker> markers)
++    {
++        mTransient.clear();
++        for (ESM::CustomMarker& marker : markers)
++        {
++            const ESM::RefId cell = marker.mCell;
++            mTransient.emplace(cell, std::move(marker));
++        }
++        eventMarkersChanged();
++    }
++
++    CustomMarkerCollection::RangeType CustomMarkerCollection::getTransientMarkers(const ESM::RefId& cellId) const
++    {
++        return mTransient.equal_range(cellId);
++    }
++
+     CustomMarkerCollection::ContainerType::const_iterator CustomMarkerCollection::begin() const
+     {
+         return mMarkers.begin();
+@@ -339,7 +355,7 @@ namespace MWGui
+         mCustomMarkerWidgets.clear();
+         if (!mActiveCell)
+             return;
+-        auto updateMarkers = [this](CustomMarkerCollection::RangeType markers) {
++        auto updateMarkers = [this](CustomMarkerCollection::RangeType markers, bool transient) {
+             for (auto it = markers.first; it != markers.second; ++it)
+             {
+                 const ESM::CustomMarker& marker = it->second;
+@@ -350,8 +366,10 @@ namespace MWGui
+                 markerWidget->setUserString("ToolTipType", "Layout");
+                 markerWidget->setUserString("ToolTipLayout", "TextToolTipOneLine");
+                 markerWidget->setUserString("Caption_TextOneLine", MyGUI::TextIterator::toTagsString(marker.mNote));
+-                markerWidget->setNormalColour(MyGUI::Colour(0.6f, 0.6f, 0.6f));
+-                markerWidget->setHoverColour(MyGUI::Colour(1.0f, 1.0f, 1.0f));
++                markerWidget->setNormalColour(transient ? MyGUI::Colour(0.2f, 1.0f, 0.2f) : MyGUI::Colour(0.6f, 0.6f, 0.6f));
++                markerWidget->setHoverColour(transient ? MyGUI::Colour(0.6f, 1.0f, 0.6f) : MyGUI::Colour(1.0f, 1.0f, 1.0f));
++                if (transient)
++                    markerWidget->setUserString("Transient", "1");
+                 markerWidget->setUserData(marker);
+                 markerWidget->setNeedMouseFocus(true);
+                 customMarkerCreated(markerWidget);
+@@ -365,12 +383,16 @@ namespace MWGui
+                 for (int y = mGrid.top; y <= mGrid.bottom; ++y)
+                 {
+                     ESM::RefId cellRefId = getCellIdInWorldSpace(*mActiveCell, x, y);
+-                    updateMarkers(mCustomMarkers.getMarkers(cellRefId));
++                    updateMarkers(mCustomMarkers.getMarkers(cellRefId), false);
++                    updateMarkers(mCustomMarkers.getTransientMarkers(cellRefId), true);
+                 }
+             }
+         }
+         else
+-            updateMarkers(mCustomMarkers.getMarkers(mActiveCell->getId()));
++        {
++            updateMarkers(mCustomMarkers.getMarkers(mActiveCell->getId()), false);
++            updateMarkers(mCustomMarkers.getTransientMarkers(mActiveCell->getId()), true);
++        }
+ 
+         redraw();
+     }
+@@ -913,6 +935,8 @@ namespace MWGui
+ 
+     void MapWindow::onCustomMarkerDoubleClicked(MyGUI::Widget* sender)
+     {
++        if (!sender->getUserString("Transient").empty())
++            return; // another player: not a note
+         mEditingMarker = *sender->getUserData<ESM::CustomMarker>();
+         mEditNoteDialog.setText(mEditingMarker.mNote);
+         mEditNoteDialog.showDeleteButton(true);
+diff --git a/apps/openmw/mwgui/mapwindow.hpp b/apps/openmw/mwgui/mapwindow.hpp
+index 7f24c2f32e..4fcd5d9c0a 100644
+--- a/apps/openmw/mwgui/mapwindow.hpp
++++ b/apps/openmw/mwgui/mapwindow.hpp
+@@ -65,11 +65,16 @@ namespace MWGui
+ 
+         RangeType getMarkers(const ESM::RefId& cellId) const;
+ 
++        // Markers that are only shown (other players, from scripts): never saved, never editable.
++        void setTransient(std::vector<ESM::CustomMarker> markers);
++        RangeType getTransientMarkers(const ESM::RefId& cellId) const;
++
+         typedef MyGUI::delegates::MultiDelegate<> EventHandle_Void;
+         EventHandle_Void eventMarkersChanged;
+ 
+     private:
+         ContainerType mMarkers;
++        ContainerType mTransient;
+     };
+ 
+     class LocalMapBase
+diff --git a/apps/openmw/mwgui/windowmanagerimp.cpp b/apps/openmw/mwgui/windowmanagerimp.cpp
+index 3194768f33..fc55e27de3 100644
+--- a/apps/openmw/mwgui/windowmanagerimp.cpp
++++ b/apps/openmw/mwgui/windowmanagerimp.cpp
+@@ -1225,6 +1225,11 @@ namespace MWGui
+         mHud->setMinimapVisible(visible);
+     }
+ 
++    void WindowManager::setPlayerMarkers(std::vector<ESM::CustomMarker> markers)
++    {
++        mCustomMarkers.setTransient(std::move(markers));
++    }
++
+     bool WindowManager::toggleFogOfWar()
+     {
+         mMap->toggleFogOfWar();
+diff --git a/apps/openmw/mwgui/windowmanagerimp.hpp b/apps/openmw/mwgui/windowmanagerimp.hpp
+index b16ec67b78..5b23da7e20 100644
+--- a/apps/openmw/mwgui/windowmanagerimp.hpp
++++ b/apps/openmw/mwgui/windowmanagerimp.hpp
+@@ -229,6 +229,7 @@ namespace MWGui
+         float getScalingFactor() const override;
+ 
+         bool toggleFogOfWar() override;
++        void setPlayerMarkers(std::vector<ESM::CustomMarker> markers) override;
+         bool toggleFullHelp() override; ///< show extra info in item tooltips (owner, script)
+         bool getFullHelp() const override;
+ 
+diff --git a/apps/openmw/mwlua/globalscripts.hpp b/apps/openmw/mwlua/globalscripts.hpp
+index 05411f2ec1..573d5108a5 100644
+--- a/apps/openmw/mwlua/globalscripts.hpp
++++ b/apps/openmw/mwlua/globalscripts.hpp
+@@ -27,7 +27,8 @@ namespace MWLua
+             registerEngineHandlers({ &mObjectActiveHandlers, &mActorActiveHandlers, &mItemActiveHandlers,
+                 &mNewGameHandlers, &mPlayerAddedHandlers, &mOnActivateHandlers, &mOnUseItemHandlers,
+                 &mOnNewExteriorHandlers, &mOnDroppedHandlers, &mOnPlacedHandlers, &mOnProjectileHit,
+-                &mNetConnectedHandlers, &mNetDisconnectedHandlers, &mNetMessageHandlers });
++                &mNetConnectedHandlers, &mNetDisconnectedHandlers, &mNetMessageHandlers,
++                &mNetClientConnectedHandlers, &mNetClientDisconnectedHandlers, &mNetClientMessageHandlers });
+         }
+ 
+         void newGameStarted() { callEngineHandlers(mNewGameHandlers); }
+diff --git a/apps/openmw/mwlua/uibindings.cpp b/apps/openmw/mwlua/uibindings.cpp
+index 3ba1b9620d..f57aab631f 100644
+--- a/apps/openmw/mwlua/uibindings.cpp
++++ b/apps/openmw/mwlua/uibindings.cpp
+@@ -396,6 +396,26 @@ namespace MWLua
+         api.function(
+             "_isHudVisible", []() -> bool { return MWBase::Environment::get().getWindowManager()->isHudVisible(); });
+         api.function("_getDefaultFontSize", []() -> int { return Settings::gui().mFontSize; });
++        // Markers for other players on the map and minimap. Each entry: { cell = '' for the exterior or an
++        // interior cell name, x, y (world position), name }. Replaces the previous list; not saved.
++        api.function("setPlayerMarkers", [](const Lua::TableView& list) {
++            std::vector<ESM::CustomMarker> markers;
++            list.forEach([&](const Lua::ValueView&, const Lua::ValueView& value) {
++                const Lua::TableView entry = value.asTable();
++                ESM::CustomMarker marker;
++                marker.mWorldX = entry.getOptional<float>("x").value_or(0.f);
++                marker.mWorldY = entry.getOptional<float>("y").value_or(0.f);
++                marker.mNote = entry.getOptional<std::string>("name").value_or(std::string());
++                const std::string cell = entry.getOptional<std::string>("cell").value_or(std::string());
++                if (cell.empty())
++                    marker.mCell = ESM::RefId::esm3ExteriorCell(static_cast<int>(std::floor(marker.mWorldX / 8192.f)),
++                        static_cast<int>(std::floor(marker.mWorldY / 8192.f)));
++                else
++                    marker.mCell = ESM::RefId::stringRefId(cell);
++                markers.push_back(std::move(marker));
++            });
++            MWBase::Environment::get().getWindowManager()->setPlayerMarkers(std::move(markers));
++        });
+         api.function("showMessage",
+             [luaManager = context.mLuaManager](std::string_view message, std::optional<Lua::TableView> options) {
+                 MWGui::ShowInDialogueMode mode = MWGui::ShowInDialogueMode_IfPossible;
+diff --git a/files/lua_api/openmw/ui.lua b/files/lua_api/openmw/ui.lua
+index bf195ca8a2..1b5633535f 100644
+--- a/files/lua_api/openmw/ui.lua
++++ b/files/lua_api/openmw/ui.lua
+@@ -75,6 +75,13 @@
+ -- @field Flex Aligns widgets in a row or column
+ -- @field Container Automatically wraps around its contents
+ 
++---
++-- Shows markers for other players on the map window and the minimap, replacing the previous markers.
++-- They are not saved and can not be edited. Pass an empty list to remove them.
++-- @function [parent=#ui] setPlayerMarkers
++-- @param #list<#table> markers Each entry is a table `{ cell = "", x = 0, y = 0, name = "" }`: `cell` is empty for the exterior or
++-- the name of an interior cell, `x` and `y` are world coordinates, `name` is shown as the tooltip.
++
+ ---
+ -- Shows given message at the bottom of the screen.
+ -- @function [parent=#ui] showMessage
+diff --git a/multiplayer/debug/autojoin.omwscripts b/multiplayer/debug/autojoin.omwscripts
+index 7d28411c78..025e815761 100644
+--- a/multiplayer/debug/autojoin.omwscripts
++++ b/multiplayer/debug/autojoin.omwscripts
+@@ -1,3 +1 @@
+ GLOBAL: scripts/mp_debug/autojoin.lua
+-PLAYER: scripts/mp_debug/autowalk.lua
+-GLOBAL: scripts/mp_debug/give.lua
+diff --git a/multiplayer/debug/scripts/mp_debug/autowalk.lua b/multiplayer/debug/scripts/mp_debug/autowalk.lua
+index 565108bf68..1812100b31 100644
+--- a/multiplayer/debug/scripts/mp_debug/autowalk.lua
++++ b/multiplayer/debug/scripts/mp_debug/autowalk.lua
+@@ -3,7 +3,9 @@
+ local self = require('openmw.self')
+ local I = require('openmw.interfaces')
+ local types = require('openmw.types')
++local camera = require('openmw.camera')
+ local t = 0
++local uiOpen = false
+ local armed = false
+ local nextAttack = 45
+ local kinds = { 'chop', 'slash', 'thrust' }
+@@ -32,7 +34,15 @@ return {
+                 n = n + 1
+                 self:sendEvent('MpDebugAttack', { kind = kinds[n % 3 + 1] })
+             end
+-            if t < 40 then return end -- wait for the connection
++            if t < 40 then return end
++            camera.setPitch(0.7 * math.sin(t * 0.8)) -- look up and down
++            if t > 70 and t < 80 and not uiOpen then
++                uiOpen = true
++                I.UI.setMode('Interface', { windows = {} }) -- like opening the inventory: pauses the game
++            elseif t >= 80 and uiOpen then
++                uiOpen = false
++                I.UI.setMode()
++            end -- wait for the connection
+             I.Controls.overrideMovementControls(true)
+             local x = (t - 40) % total
+             for _, s in ipairs(plan) do
+diff --git a/multiplayer/mod/scripts/mp/global.lua b/multiplayer/mod/scripts/mp/global.lua
+index 9697dea6c6..f01c8dd964 100644
+--- a/multiplayer/mod/scripts/mp/global.lua
++++ b/multiplayer/mod/scripts/mp/global.lua
+@@ -44,6 +44,7 @@ local sendTimer, equipTimer, retry = 0, 0, 0
+ local hostErrorShown = false
+ local players = {} -- latest list from the relay: { id, name, ping, host }
+ local worldTimer = 0
++local lastReal
+ local savedTimeScale -- our game time scale while we wait for the host's clock to catch up
+ local WORLD_INTERVAL = 5
+ local lastEquipJson
+@@ -227,7 +228,7 @@ local function sendEquipment(force)
+     end
+ end
+ 
+-local myInput = { sneak = false, air = false, seq = 0 } -- from player.lua (MpInput)
++local myInput = { sneak = false, seq = 0, jseq = 0, reading = false, pitch = 0 } -- from player.lua (MpInput)
+ local lastSent -- { pos, time, cell } of the previous state message, for the velocity estimate
+ 
+ local function sendState()
+@@ -251,7 +252,8 @@ local function sendState()
+         yaw = p.rotation:getYaw(),
+         stance = types.Actor.getStance(p),
+         rs = types.Actor.getRunSpeed(p),
+-        sneak = myInput.sneak, air = myInput.air, atk = myInput.atk, seq = myInput.seq,
++        sneak = myInput.sneak, atk = myInput.atk, seq = myInput.seq, jseq = myInput.jseq,
++        reading = myInput.reading, pitch = myInput.pitch,
+     }))
+ end
+ 
+@@ -437,8 +439,12 @@ local function updateRemote(r, dt)
+     r.obj:sendEvent('MpTarget', {
+         pos = predictedPosition(r), yaw = r.state.yaw, stance = r.state.stance,
+         speed = type(v) == 'table' and math.sqrt(v[1] * v[1] + v[2] * v[2]) or 0,
+-        sneak = r.state.sneak, air = r.state.air, rs = r.state.rs,
++        sneak = r.state.sneak, rs = r.state.rs, pitch = r.state.pitch, reading = r.state.reading,
+     })
++    -- one jump per take-off (not for as long as the player is in the air)
++    local jseq = r.state.jseq
++    if jseq and r.lastJSeq and jseq ~= r.lastJSeq then r.obj:sendEvent('MpJump', {}) end
++    r.lastJSeq = jseq or r.lastJSeq
+     -- play each new attack once (the first state we ever see only sets the baseline)
+     local seq = r.state.seq
+     if seq and r.lastSeq and seq ~= r.lastSeq and r.state.atk then
+@@ -694,15 +700,34 @@ return {
+                 if obj:isValid() then pcall(function() obj:remove() end) end
+             end
+         end,
+-        onUpdate = function(dt)
++        onUpdate = function(gameDt)
++            -- network timers run on real time: while this player has a menu open the game is paused (dt = 0),
++            -- but the others must still hear from us
++            local realNow = core.getRealTime()
++            local dt = math.min(0.5, realNow - (lastReal or realNow))
++            lastReal = realNow
+             clock = clock + dt
+             relay.update(dt)
+             if hosting() and net.isConnected() then
+                 worldTimer = worldTimer + dt
+                 if worldTimer >= WORLD_INTERVAL then worldTimer = 0; sendWorld() end
+             end
+-            proxies.onUpdate(dt)
+-            for _, r in pairs(remotes) do updateRemote(r, dt) end
++            -- arrows over the other players: their real position, sent every frame so the overlay does not lag or jump
++            do
++                local p = player()
++                local list = {}
++                if p then
++                    local here = cellKey(p.cell)
++                    for id, r in pairs(remotes) do
++                        if r.state and r.profile and r.state.cell == here then
++                            list[#list + 1] = { pos = predictedPosition(r), name = nameOf(id) }
++                        end
++                    end
++                end
++                toUi('MpAvatars', { list = list })
++            end
++            proxies.onUpdate(gameDt)
++            for _, r in pairs(remotes) do updateRemote(r, gameDt) end
+             if net.isConnected() then
+                 sendTimer = sendTimer + dt
+                 equipTimer = equipTimer + dt
+@@ -726,11 +751,15 @@ return {
+             uiTimer = uiTimer + dt
+             if uiTimer >= UI_INTERVAL then
+                 uiTimer = 0
+-                local list = {}
++                -- every online player on the map, wherever they are
++                local markers = {}
+                 for id, r in pairs(remotes) do
+-                    if r.obj and r.obj:isValid() and r.obj.enabled then list[#list + 1] = { obj = r.obj, name = nameOf(id) } end
++                    if r.state and r.profile then
++                        markers[#markers + 1] = { cell = r.state.cell, x = r.state.pos[1], y = r.state.pos[2], name = nameOf(id) }
++                    end
+                 end
+-                toUi('MpAvatars', { list = list })
++                toUi('MpMarkers', { list = markers })
++
+                 for id, exp in pairs(invitesIn) do if exp <= clock then invitesIn[id] = nil end end
+                 for id, exp in pairs(invitesOut) do if exp <= clock then invitesOut[id] = nil end end
+                 pushUi()
+diff --git a/multiplayer/mod/scripts/mp/player.lua b/multiplayer/mod/scripts/mp/player.lua
+index b2b24f06c9..36f31e3ac3 100644
+--- a/multiplayer/mod/scripts/mp/player.lua
++++ b/multiplayer/mod/scripts/mp/player.lua
+@@ -45,7 +45,22 @@ local avatarList = {}
+ local playerList, myPlayerId = {}, nil
+ local self = require('openmw.self')
+ local types = require('openmw.types')
+-local inputTimer, wasUsing, attackSeq, lastAttack, lastInputSig = 0, false, 0, nil, ''
++local wasUsing, wasAir, attackSeq, jumpSeq, lastAttack, lastInputSig = false, false, 0, 0, nil, ''
++local inputData = { sneak = false, reading = false, pitch = 0 }
++local inputSentAt = -10
++
++-- Sends our animation-relevant input to the global script when it changed (and once a second regardless).
++local function pushInput(force)
++    inputData.atk, inputData.seq, inputData.jseq = lastAttack, attackSeq, jumpSeq
++    local sig = table.concat({ tostring(inputData.sneak), tostring(inputData.reading), attackSeq, jumpSeq,
++        math.floor(inputData.pitch * 20 + 0.5) }, '|')
++    local t = core.getRealTime()
++    if force or sig ~= lastInputSig or t - inputSentAt > 1 then
++        lastInputSig, inputSentAt = sig, t
++        core.sendGlobalEvent('MpInput', { sneak = inputData.sneak, reading = inputData.reading, pitch = inputData.pitch,
++            atk = lastAttack, seq = attackSeq, jseq = jumpSeq })
++    end
++end
+ local tab = 'global'
+ local logs = { global = {}, party = {} }
+ local unread = { global = 0, party = 0 }
+@@ -181,10 +196,10 @@ function updateMarkers()
+     local camPos = camera.getPosition()
+     local forward = camera.viewportToWorldVector(V2(scr.x / 2, scr.y / 2))
+     for _, a in ipairs(avatarList) do
+-        local ok, pos = pcall(function() return a.obj.position end)
+-        if ok and a.obj:isValid() then
++        do
++            local pos = a.pos
+             local v = camera.worldToViewportVector(pos + util.vector3(0, 0, HEAD_HEIGHT))
+-            local key = a.obj.id
++            local key = a.name
+             if (pos - camPos):dot(forward) > 0 and v.x > -50 and v.x < scr.x + 50 and v.y > -50 and v.y < scr.y + 50 then
+                 seen[key] = true
+                 local m = markers[key]
+@@ -446,38 +461,35 @@ end
+ 
+ return {
+     engineHandlers = {
+-        -- What the other players need to animate our avatar: sneaking, being airborne, attacking and casting.
+-        -- Attacks are sent as an event with a counter; the receiving side only plays an animation.
++        -- What the other players need to animate our avatar: sneaking, jumping, attacking and casting, whether we
++        -- have a menu open, and where we are looking. Attacks and jumps carry a counter so each is shown exactly once.
+         onUpdate = function(dt)
+-            inputTimer = inputTimer - dt
+             local using = I.UI.getMode() == nil and input.isActionPressed(input.ACTION.Use)
+-            local attack
+             if using and not wasUsing then
+                 local stance = types.Actor.getStance(self)
+                 if stance == types.Actor.STANCE.Weapon then
+                     local fwd = input.isActionPressed(input.ACTION.MoveForward) or input.isActionPressed(input.ACTION.MoveBackward)
+                     local side = input.isActionPressed(input.ACTION.MoveLeft) or input.isActionPressed(input.ACTION.MoveRight)
+-                    attack = fwd and 'thrust' or side and 'slash' or 'chop'
++                    attackSeq = attackSeq + 1
++                    lastAttack = fwd and 'thrust' or side and 'slash' or 'chop'
+                 elseif stance == types.Actor.STANCE.Spell then
+-                    attack = 'cast'
++                    attackSeq = attackSeq + 1
++                    lastAttack = 'cast'
+                 end
+             end
+             wasUsing = using
+-            local data = {
+-                sneak = self.controls.sneak and true or false,
+-                air = not types.Actor.isOnGround(self) and not types.Actor.isSwimming(self),
+-            }
+-            if attack then attackSeq = attackSeq + 1 end
+-            data.atk, data.seq = lastAttack, attackSeq
+-            if attack then data.atk = attack; lastAttack = attack end
+-            local sig = tostring(data.sneak) .. tostring(data.air) .. attackSeq
+-            if sig ~= lastInputSig or inputTimer <= 0 then
+-                lastInputSig, inputTimer = sig, 1
+-                core.sendGlobalEvent('MpInput', data)
+-            end
++            local air = not types.Actor.isOnGround(self) and not types.Actor.isSwimming(self)
++            if air and not wasAir then jumpSeq = jumpSeq + 1 end
++            wasAir = air
++            inputData.sneak = self.controls.sneak and true or false
++            pushInput(false)
+         end,
+         onFrame = function()
+             updateMarkers()
++            -- onFrame also runs while the game is paused, which is exactly when a menu is open
++            inputData.reading = I.UI.getMode() ~= nil and not chatOpen
++            inputData.pitch = camera.getPitch() + camera.getExtraPitch()
++            pushInput(false)
+             if not synced then
+                 synced = true
+                 core.sendGlobalEvent('MpCmd', { cmd = 'sync' })
+@@ -526,6 +538,7 @@ return {
+         end,
+         MpDebugAttack = function(d) attackSeq = attackSeq + 1; lastAttack = d.kind end, -- test macro
+         MpAvatars = function(d) avatarList = d.list or {} end,
++        MpMarkers = function(d) pcall(ui.setPlayerMarkers, d.list or {}) end,
+         MpPlayers = function(d)
+             playerList, myPlayerId = d.list, d.me
+             -- shown on the Multiplayer settings page (renderer in menu.lua)
+diff --git a/multiplayer/mod/scripts/mp/remote.lua b/multiplayer/mod/scripts/mp/remote.lua
+index f31e751dbd..469b5efdb8 100644
+--- a/multiplayer/mod/scripts/mp/remote.lua
++++ b/multiplayer/mod/scripts/mp/remote.lua
+@@ -19,10 +19,15 @@ local TURN_RATE = 14 -- rad/s
+ local DAMAGE_REPORT_INTERVAL = 0.2
+ 
+ local playAttack
+-local ATTACK_TIME = 0.9 -- a swing is cut off after this long, so a queued animation can never freeze the avatar
+-local attackLeft
++local setReading
++local ATTACK_TIME = 1.0 -- a swing is cut off after this long, whatever the animation does
++local attackLeft, attackGroup
++local SWING_SPEED = 1.3
+ local speedTimer
+-local checkGroup, checkTimer, beat, dbgT, dbgPos
++local jumpLeft
++local curPitch = 0
++local reading = false
++local dbgT, dbgPos
+ local isProxy, key
+ local target -- { pos, yaw, stance, sneak, hp }
+ local walking = false
+@@ -95,6 +100,42 @@ local function trackHealth(dt)
+     end
+ end
+ 
++local PITCH_RATE = 3 -- rad/s
++
++-- A player with a menu open (inventory, Esc menu...) has their game paused: show them reading a book.
++local READ_GROUP = 'idle2'
++local bookModel
++local function findBook()
++    if bookModel == nil then
++        bookModel = false
++        pcall(function()
++            for _, rec in ipairs(types.Book.records) do
++                if rec.model and rec.model ~= '' and not rec.isScroll then bookModel = rec.model break end
++            end
++        end)
++    end
++    return bookModel or nil
++end
++
++setReading = function(on)
++    if on == reading then return end
++    reading = on
++    if on then
++        local model = findBook()
++        if model then pcall(anim.addVfx, self, model, { boneName = 'Bip01 L Hand', vfxId = 'mp_book', loop = true,
++            useAmbientLight = false }) end
++        pcall(function()
++            if anim.hasGroup(self, READ_GROUP) then
++                anim.playBlended(self, READ_GROUP, { loops = 100000, priority = anim.PRIORITY.Scripted,
++                    blendMask = anim.BLEND_MASK.UpperBody, forceLoop = true })
++            end
++        end)
++    else
++        pcall(anim.removeVfx, self, 'mp_book')
++        pcall(anim.cancel, self, READ_GROUP)
++    end
++end
++
+ local Weapon = types.Weapon
+ local ONE_HAND = { [Weapon.TYPE.ShortBladeOneHand] = true, [Weapon.TYPE.LongBladeOneHand] = true,
+     [Weapon.TYPE.BluntOneHand] = true, [Weapon.TYPE.AxeOneHand] = true }
+@@ -117,20 +158,50 @@ local function attackAnimation(kind)
+     return group, kind .. ' start', kind .. ' small follow stop'
+ end
+ 
++local function hasKey(group, key)
++    local ok, t = pcall(anim.getTextKeyTime, self, group .. ': ' .. key)
++    return ok and type(t) == 'number' and t >= 0
++end
++
++-- first key that exists in this group (an unknown stop key makes the animation run to its very end,
++-- which looks like several punches in a row)
++local function firstKey(group, keys)
++    for _, k in ipairs(keys) do if hasKey(group, k) then return k end end
++    return nil
++end
++
+ playAttack = function(kind)
+-    if Actor.isDead(self) then return end
++    if Actor.isDead(self) or attackGroup then return end -- one swing at a time
+     local group, from, to = attackAnimation(kind)
++    if group ~= 'spellcast' and group ~= 'bowandarrow' and group ~= 'crossbow' and group ~= 'throwweapon' then
++        to = firstKey(group, { kind .. ' small follow stop', kind .. ' medium follow stop', kind .. ' large follow stop',
++            kind .. ' follow stop', kind .. ' hit', kind .. ' stop' }) or to
++    end
+     local ok = pcall(function()
+         if not anim.hasGroup(self, group) then error('no group') end
+         -- Blended on the upper body only, so walking, strafing and jumping carry on underneath. (A queued animation
+         -- takes over the whole actor and left it stuck.)
+         anim.playBlended(self, group, {
+             startKey = from, stopKey = to, priority = anim.PRIORITY.Weapon, blendMask = anim.BLEND_MASK.UpperBody,
+-            autoDisable = true, speed = 1.3,
++            autoDisable = true, speed = SWING_SPEED,
+         })
+     end)
+-    if ok then print('[mp-anim] playing ' .. group .. ' ' .. from .. ' weapon=' .. tostring((Actor.getEquipment(self)[Actor.EQUIPMENT_SLOT.CarriedRight] or {}).recordId)); checkGroup, checkTimer = group, 0.15 end
+-    if not ok then print('[mp-anim] could not play ' .. tostring(group) .. ' ' .. tostring(kind)) end
++    if ok then
++        -- how long the swing really is: from its start key to its stop key (at the speed we play it)
++        local function keyTime(k)
++            for _, name in ipairs({ group .. ': ' .. k, k }) do
++                local okT, t = pcall(anim.getTextKeyTime, self, name)
++                if okT and type(t) == 'number' and t >= 0 then return t end
++            end
++        end
++        local t0, t1 = keyTime(from), keyTime(to)
++        local length = (t0 and t1 and t1 > t0) and (t1 - t0) / SWING_SPEED or nil
++        print('[mp-anim] key times ' .. tostring(t0) .. ' -> ' .. tostring(t1) .. ' length ' .. tostring(length))
++        attackGroup, attackLeft = group, math.min(ATTACK_TIME, (length or 0.6) + 0.1)
++        print('[mp-anim] ' .. group .. ' ' .. from .. ' -> ' .. tostring(to))
++    else
++        print('[mp-anim] could not play ' .. tostring(group) .. ' ' .. tostring(kind))
++    end
+ end
+ 
+ return {
+@@ -142,20 +213,14 @@ return {
+         onUpdate = function(dt)
+             if not aiOff and not aggro then self:enableAI(false); aiOff = true end
+             local c = self.controls
+-            if attackLeft then
++            if attackGroup then
+                 attackLeft = attackLeft - dt
+-                if attackLeft <= 0 then
+-                    attackLeft = nil
+-                    pcall(anim.clearAnimationQueue, self, false)
+-                end
+-            end
+-            beat = (beat or 0) + dt
+-            if checkGroup and beat > 0.2 then beat = 0 print('[mp-anim] tick, queued ' .. tostring(anim.isPlaying(self, checkGroup))) end
+-            if checkGroup then
+-                checkTimer = checkTimer - dt
+-                if checkTimer <= 0 then
+-                    print('[mp-anim] ' .. checkGroup .. ' still playing: ' .. tostring(anim.isPlaying(self, checkGroup)))
+-                    checkGroup = nil
++                if attackLeft <= 0 or not anim.isPlaying(self, attackGroup) then
++                    if anim.isPlaying(self, attackGroup) then
++                        print('[mp-anim] swing cut off after ' .. ATTACK_TIME .. 's')
++                        pcall(anim.cancel, self, attackGroup)
++                    end
++                    attackGroup, attackLeft = nil, nil
+                 end
+             end
+ 
+@@ -170,6 +235,13 @@ return {
+             end
+ 
+             if not target or aggro or Actor.isDead(self) then return end
++            setReading(target.reading and true or false)
++
++            -- look where the player looks (the engine turns head and spine with the actor's pitch)
++            local wantPitch = math.max(-1.2, math.min(1.2, target.pitch or 0))
++            local step = math.max(-PITCH_RATE * dt, math.min(PITCH_RATE * dt, wantPitch - curPitch))
++            c.pitchChange = step
++            curPitch = curPitch + step
+             snapTimer = snapTimer - dt
+ 
+             local delta = target.pos - self.position
+@@ -201,7 +273,11 @@ return {
+             -- run when the player runs, or when we are far behind and need to catch up
+             c.run = walking and ((target.speed or 0) > RUN_SPEED or dist > 120)
+             c.sneak = target.sneak or false
+-            c.jump = (target.air or delta.z > 40) and Actor.isOnGround(self)
++            if jumpLeft then
++                jumpLeft = jumpLeft - dt
++                if jumpLeft <= 0 then jumpLeft = nil end
++            end
++            c.jump = jumpLeft ~= nil and Actor.isOnGround(self)
+             -- make the avatar as fast as the player it mirrors, so it does not fall behind (or overshoot)
+             speedTimer = (speedTimer or 0) + dt
+             if speedTimer >= 0.4 and target.rs and target.rs > 0 then
+@@ -225,11 +301,12 @@ return {
+     },
+     eventHandlers = {
+         MpTarget = function(d)
+-            target = { pos = d.pos, yaw = d.yaw, sneak = d.sneak, hp = d.hp, speed = d.speed, air = d.air, rs = d.rs }
++            target = { pos = d.pos, yaw = d.yaw, sneak = d.sneak, hp = d.hp, speed = d.speed, rs = d.rs, pitch = d.pitch, reading = d.reading }
+             if d.stance and Actor.getStance(self) ~= d.stance then Actor.setStance(self, d.stance) end
+         end,
+         -- Another player attacked or cast: show the animation only. (The avatar has no AI and never deals damage.)
+         MpAttack = function(d) playAttack(d.kind) end,
++        MpJump = function() jumpLeft = 0.15 end,
+         MpEquip = function(d)
+             desiredEquip = d.slots
+             equipTimer = 0
+-- 
+2.55.0
+

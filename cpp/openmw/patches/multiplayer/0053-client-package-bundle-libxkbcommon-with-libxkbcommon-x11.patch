@@ -1,0 +1,30 @@
+From c837dfef749c9708f15a80565aabfca7065f283e Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Thu, 15 Oct 2026 08:42:01 -0400
+Subject: [PATCH] Client package: bundle libxkbcommon together with
+ libxkbcommon-x11
+
+A bundled libxkbcommon-x11 running against a newer system libxkbcommon crashed the Qt xcb plugin
+(signal 11 in xkb_x11_state_new_from_device) on an X11 session.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ multiplayer/package-client.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/multiplayer/package-client.py b/multiplayer/package-client.py
+index b4d08629fc..c39d108293 100755
+--- a/multiplayer/package-client.py
++++ b/multiplayer/package-client.py
+@@ -27,7 +27,7 @@ STRAY = ['vfs/shaders/badMB2.omwfx', 'vfs/shaders/bluetest.omwfx']
+ # drm; the Vulkan loader is bundled, the programs link it whether or not a machine can use it), X11 / xcb / Wayland and xkbcommon, input and audio services, udev, dbus. Never bundled: they must match the machine.
+ EXCLUDE = re.compile(r'^(ld-linux|libc\.|libm\.|libdl\.|libpthread|librt\.|libresolv|libutil\.|libnsl|libanl|libBrokenLocale|'
+     r'libthread_db|libGL\.|libGLX|libGLdispatch|libOpenGL|libEGL|libGLESv|libdrm|libgbm|libX11\.|libX11-xcb|libXau|libXdmcp|libXext\.|libxcb\.|libwayland|'
+-    r'libxkbcommon\.|libpulse|libpipewire|libsystemd|libudev|libdbus-1|libaudit|libcap\.|libnvidia|'
++    r'libpulse|libpipewire|libsystemd|libudev|libdbus-1|libaudit|libcap\.|libnvidia|'
+     r'libjack|libdecor|libinput|libmtdev|libgtk-|libgdk-|libatk|libsmartcols|libepoxy|libz\.|'
+     r'libstdc|libgcc_s)')
+ # ...but the portable package DOES carry the C++ runtime (libstdc++, libgcc_s): the programs and libraries need a very recent one, the
+-- 
+2.55.0
+

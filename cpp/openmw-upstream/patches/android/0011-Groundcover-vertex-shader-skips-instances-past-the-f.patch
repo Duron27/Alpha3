@@ -1,0 +1,53 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Alpha3 <noreply@alpha3.invalid>
+Date: Sat, 24 Oct 2026 20:07:39 -0400
+Subject: [PATCH 11/17] Groundcover vertex shader skips instances past the fade
+ distance and distant wind
+
+Instances beyond the fade end were fully shaded (wind, lighting, shadow
+coordinates) and then collapsed to a point. Return before doing any work, and
+skip the wind and stomp displacement for instances far from the camera, where
+it is sub-pixel.
+---
+ files/shaders/compatibility/groundcover.vert | 17 ++++++++++++-----
+ 1 file changed, 12 insertions(+), 5 deletions(-)
+
+diff --git a/files/shaders/compatibility/groundcover.vert b/files/shaders/compatibility/groundcover.vert
+index c28af78027..328521a52b 100644
+--- a/files/shaders/compatibility/groundcover.vert
++++ b/files/shaders/compatibility/groundcover.vert
+@@ -131,22 +131,29 @@ void main(void)
+     vec3 position = aOffset.xyz;
+     float scale = aOffset.w;
+ 
++    // Instances past the fade distance collapse to a point; skip all other work for them.
++    float instanceDistance = length(gl_ModelViewMatrix * vec4(position, 1.0));
++    if (instanceDistance > @groundcoverFadeEnd)
++    {
++        gl_Position = vec4(0.0, 0.0, 0.0, 1.0);
++        return;
++    }
++
+     mat4 rotation = rotation(aRotation);
+     vec4 displacedVertex = rotation * scale * gl_Vertex;
+ 
+     displacedVertex = vec4(displacedVertex.xyz + position, 1.0);
+ 
+     vec4 worldPos = osg_ViewMatrixInverse * gl_ModelViewMatrix * displacedVertex;
+-    worldPos.xy += groundcoverDisplacement(worldPos.xyz, gl_Vertex.z);
++    // Wind and stomping are sub-pixel far away.
++    if (instanceDistance < 2500.0)
++        worldPos.xy += groundcoverDisplacement(worldPos.xyz, gl_Vertex.z);
+     vec4 viewPos = osg_ViewMatrix * worldPos;
+     passViewPos = viewPos.xyz;
+     gl_ClipVertex = viewPos;
+     euclideanDepth = length(viewPos.xyz);
+ 
+-    if (length(gl_ModelViewMatrix * vec4(position, 1.0)) > @groundcoverFadeEnd)
+-        gl_Position = vec4(0.0, 0.0, 0.0, 1.0);
+-    else
+-        gl_Position = viewToClip(viewPos);
++    gl_Position = viewToClip(viewPos);
+ 
+     linearDepth = getLinearDepth(gl_Position.z, viewPos.z);
+ 

@@ -1,0 +1,411 @@
+--- a/components/sdlutil/sdlgraphicswindow.cpp
++++ b/components/sdlutil/sdlgraphicswindow.cpp
+@@ -6,10 +6,246 @@
+ 
+ #include <components/debug/debuglog.hpp>
+ 
++#ifdef ANDROID
++#include <android/native_window.h>
++#include <SDL_syswm.h>
++#include <dlfcn.h>
++#include <sys/system_properties.h>
++#include <algorithm>
++#include <chrono>
++#include <cstdlib>
++#include <cstring>
++#endif
++
+ #ifdef OPENMW_GL4ES_MANUAL_INIT
+ #include "gl4esinit.h"
+ #endif
+ 
++
++namespace SDLUtil
++{
++#ifdef ANDROID
++    namespace
++    {
++        constexpr int OSMESA_FORMAT = 0x22;
++        constexpr int OSMESA_RGBA = 0x1908;
++        constexpr int OSMESA_DEPTH_BITS = 0x30;
++        constexpr int OSMESA_STENCIL_BITS = 0x31;
++        constexpr int OSMESA_PROFILE = 0x33;
++        constexpr int OSMESA_COMPAT_PROFILE = 0x35;
++        constexpr int OSMESA_CONTEXT_MAJOR_VERSION = 0x36;
++        constexpr int OSMESA_CONTEXT_MINOR_VERSION = 0x37;
++        constexpr int OSMESA_Y_UP = 0x11;
++        constexpr unsigned GL_UNSIGNED_BYTE_ENUM = 0x1401;
++
++        struct OSMesaApi
++        {
++            void* (*createContextAttribs)(const int*, void*) = nullptr;
++            int (*makeCurrent)(void*, void*, unsigned, int, int) = nullptr;
++            void (*destroyContext)(void*) = nullptr;
++            void (*pixelStore)(int, int) = nullptr;
++            void* (*getProcAddress)(const char*) = nullptr;
++
++            bool load()
++            {
++                if (getProcAddress)
++                    return true;
++                void* lib = dlopen("libOSMesa_8.so", RTLD_NOW);
++                if (!lib)
++                {
++                    Log(Debug::Error) << "Zink: cannot load libOSMesa_8.so: " << dlerror();
++                    return false;
++                }
++                createContextAttribs = reinterpret_cast<decltype(createContextAttribs)>(dlsym(lib, "OSMesaCreateContextAttribs"));
++                makeCurrent = reinterpret_cast<decltype(makeCurrent)>(dlsym(lib, "OSMesaMakeCurrent"));
++                destroyContext = reinterpret_cast<decltype(destroyContext)>(dlsym(lib, "OSMesaDestroyContext"));
++                pixelStore = reinterpret_cast<decltype(pixelStore)>(dlsym(lib, "OSMesaPixelStore"));
++                getProcAddress = reinterpret_cast<decltype(getProcAddress)>(dlsym(lib, "OSMesaGetProcAddress"));
++                return createContextAttribs && makeCurrent && destroyContext && pixelStore && getProcAddress;
++            }
++        };
++
++        OSMesaApi& osmesa()
++        {
++            static OSMesaApi api;
++            return api;
++        }
++    }
++#endif
++
++    void GraphicsWindowSDL2::initZink()
++    {
++#ifdef ANDROID
++        auto& api = osmesa();
++        if (!api.load())
++            return;
++
++        // Dev hook: adb shell setprop debug.alpha3.zinkenv "ZINK_DESCRIPTORS=db;ZINK_DEBUG=nogpl" (Mesa cannot read these
++        // from Android properties inside an app, so apply them as environment variables before Zink starts).
++        {
++            char envList[PROP_VALUE_MAX] = "";
++            if (__system_property_get("debug.alpha3.zinkenv", envList) > 0)
++            {
++                std::string list(envList);
++                std::size_t start = 0;
++                while (start < list.size())
++                {
++                    std::size_t end = list.find(';', start);
++                    if (end == std::string::npos)
++                        end = list.size();
++                    const std::string item = list.substr(start, end - start);
++                    const std::size_t eq = item.find('=');
++                    if (eq != std::string::npos && eq > 0)
++                    {
++                        setenv(item.substr(0, eq).c_str(), item.c_str() + eq + 1, 1);
++                        Log(Debug::Info) << "Zink env: " << item;
++                    }
++                    start = end + 1;
++                }
++            }
++        }
++
++        SDL_SysWMinfo info;
++        SDL_VERSION(&info.version);
++        if (!SDL_GetWindowWMInfo(mWindow, &info) || info.subsystem != SDL_SYSWM_ANDROID)
++        {
++            Log(Debug::Error) << "Zink: no Android native window: " << SDL_GetError();
++            return;
++        }
++        mZinkNativeWindow = info.info.android.window;
++
++        SDL_GL_GetDrawableSize(mWindow, &mZinkWidth, &mZinkHeight);
++        ANativeWindow_setBuffersGeometry(
++            static_cast<ANativeWindow*>(mZinkNativeWindow), mZinkWidth, mZinkHeight, WINDOW_FORMAT_RGBA_8888);
++
++        // Dev probe: adb shell setprop debug.alpha3.zink_stencil 0 asks for a depth buffer without stencil
++        char stencilProp[PROP_VALUE_MAX] = "";
++        const int stencilBits = (__system_property_get("debug.alpha3.zink_stencil", stencilProp) > 0 && stencilProp[0] == '0') ? 0 : 8;
++        const int attribs[] = { OSMESA_FORMAT, OSMESA_RGBA, OSMESA_DEPTH_BITS, 24, OSMESA_STENCIL_BITS, stencilBits,
++            OSMESA_PROFILE, OSMESA_COMPAT_PROFILE, OSMESA_CONTEXT_MAJOR_VERSION, 4, OSMESA_CONTEXT_MINOR_VERSION, 5,
++            0 };
++        mZinkContext = api.createContextAttribs(attribs, nullptr);
++        if (!mZinkContext)
++        {
++            Log(Debug::Error) << "Zink: OSMesaCreateContextAttribs failed";
++            return;
++        }
++        mZinkBuffer = static_cast<unsigned char*>(std::calloc(static_cast<size_t>(mZinkWidth) * mZinkHeight, 4));
++        if (!makeCurrentZink())
++        {
++            Log(Debug::Error) << "Zink: OSMesaMakeCurrent failed";
++            return;
++        }
++
++        const int version = gladLoadGLES2(reinterpret_cast<GLADloadfunc>(api.getProcAddress));
++        if (!version)
++            Log(Debug::Error) << "Failed to initialize GLAD";
++        Log(Debug::Info) << "Zink: OSMesa context " << mZinkWidth << "x" << mZinkHeight;
++
++        api.makeCurrent(nullptr, nullptr, 0, 0, 0);
++
++        _traits->red = 8;
++        _traits->green = 8;
++        _traits->blue = 8;
++        _traits->alpha = 8;
++        _traits->depth = 24;
++        _traits->stencil = stencilBits;
++        _traits->doubleBuffer = true;
++        _traits->sampleBuffers = 0;
++        _traits->samples = 0;
++
++        mValid = true;
++        getEventQueue()->syncWindowRectangleWithGraphicsContext();
++#endif
++    }
++
++    bool GraphicsWindowSDL2::makeCurrentZink()
++    {
++#ifdef ANDROID
++        auto& api = osmesa();
++        if (!api.makeCurrent(mZinkContext, mZinkBuffer, GL_UNSIGNED_BYTE_ENUM, mZinkWidth, mZinkHeight))
++            return false;
++        api.pixelStore(OSMESA_Y_UP, 0); // rows top to bottom, like the ANativeWindow
++        return true;
++#else
++        return false;
++#endif
++    }
++
++    void GraphicsWindowSDL2::swapBuffersZink()
++    {
++#ifdef ANDROID
++        // Dev probes: adb shell setprop debug.alpha3.zink_stats 1 logs frame timing every 120 frames, and
++        // debug.alpha3.zink <finish|nocopy|nofinish> changes the sync/copy of the present path to see what they cost.
++        using Clock = std::chrono::steady_clock;
++        static Clock::time_point windowStart = Clock::now();
++        static int frames = 0;
++        static double finishMs = 0.0, copyMs = 0.0, betweenMs = 0.0;
++        static Clock::time_point lastSwapEnd = Clock::now();
++        static char mode[PROP_VALUE_MAX] = "";
++        static bool statsOn = false;
++        if (frames == 0)
++        {
++            __system_property_get("debug.alpha3.zink", mode);
++            char stats[PROP_VALUE_MAX] = "";
++            statsOn = __system_property_get("debug.alpha3.zink_stats", stats) > 0 && stats[0] == '1';
++        }
++
++        const auto t0 = Clock::now();
++        betweenMs += std::chrono::duration<double, std::milli>(t0 - lastSwapEnd).count();
++        // glFlush hands the frame to OSMesa's pipelined read-back: mZinkBuffer then holds the previous frame, and the GPU
++        // keeps drawing this one while the CPU moves on. glFinish would wait for the GPU every frame.
++        if (std::strcmp(mode, "finish") == 0)
++            glFinish();
++        else if (std::strcmp(mode, "nofinish") != 0)
++            glFlush();
++        const auto t1 = Clock::now();
++
++        auto* window = static_cast<ANativeWindow*>(mZinkNativeWindow);
++        ANativeWindow_Buffer out;
++        if (std::strcmp(mode, "nocopy") != 0 && ANativeWindow_lock(window, &out, nullptr) == 0)
++        {
++            const int rows = std::min<int>(mZinkHeight, out.height);
++            const size_t rowBytes = static_cast<size_t>(std::min<int>(mZinkWidth, out.width)) * 4;
++            for (int y = 0; y < rows; ++y)
++                std::memcpy(static_cast<unsigned char*>(out.bits) + static_cast<size_t>(y) * out.stride * 4,
++                    mZinkBuffer + static_cast<size_t>(y) * mZinkWidth * 4, rowBytes);
++            ANativeWindow_unlockAndPost(window);
++        }
++        const auto t2 = Clock::now();
++        finishMs += std::chrono::duration<double, std::milli>(t1 - t0).count();
++        copyMs += std::chrono::duration<double, std::milli>(t2 - t1).count();
++        lastSwapEnd = t2;
++        if (++frames >= 120)
++        {
++            const double secs = std::chrono::duration<double>(t2 - windowStart).count();
++            if (statsOn)
++                Log(Debug::Info) << "Zink present[" << mode << "]: " << frames / secs << " fps, per frame: scene+queue "
++                                 << betweenMs / frames << " ms, finish " << finishMs / frames << " ms, copy "
++                                 << copyMs / frames << " ms";
++            frames = 0;
++            finishMs = copyMs = betweenMs = 0.0;
++            windowStart = Clock::now();
++            __system_property_get("debug.alpha3.zink", mode);
++            char stats[PROP_VALUE_MAX] = "";
++            statsOn = __system_property_get("debug.alpha3.zink_stats", stats) > 0 && stats[0] == '1';
++        }
++
++        int w = 0, h = 0;
++        SDL_GL_GetDrawableSize(mWindow, &w, &h);
++        if (w > 0 && h > 0 && (w != mZinkWidth || h != mZinkHeight))
++        {
++            mZinkWidth = w;
++            mZinkHeight = h;
++            std::free(mZinkBuffer);
++            mZinkBuffer = static_cast<unsigned char*>(std::calloc(static_cast<size_t>(w) * h, 4));
++            ANativeWindow_setBuffersGeometry(window, w, h, WINDOW_FORMAT_RGBA_8888);
++            makeCurrentZink();
++        }
++#endif
++    }
++}
++
+ namespace SDLUtil
+ {
+ 
+@@ -102,6 +338,15 @@
+             return;
+         }
+ 
++#ifdef ANDROID
++        mUseZink = std::getenv("OSG_USE_ZINK") != nullptr;
++        if (mUseZink)
++        {
++            initZink();
++            return;
++        }
++#endif
++
+         // SDL will change the current context when it creates a new one, so we
+         // have to get the current one to be able to restore it afterward.
+         SDL_Window* oldWin = SDL_GL_GetCurrentWindow();
+@@ -224,6 +469,9 @@
+             return false;
+         }
+ 
++        if (mUseZink)
++            return makeCurrentZink();
++
+         return SDL_GL_MakeCurrent(mWindow, mContext) == 0;
+     }
+ 
+@@ -235,11 +483,23 @@
+             return false;
+         }
+ 
++#ifdef ANDROID
++        if (mUseZink)
++            return osmesa().makeCurrent(nullptr, nullptr, 0, 0, 0) != 0;
++#endif
++
+         return SDL_GL_MakeCurrent(nullptr, nullptr) == 0;
+     }
+ 
+     void GraphicsWindowSDL2::closeImplementation()
+     {
++#ifdef ANDROID
++        if (mZinkContext)
++            osmesa().destroyContext(mZinkContext);
++        mZinkContext = nullptr;
++        std::free(mZinkBuffer);
++        mZinkBuffer = nullptr;
++#endif
+         if (mContext)
+             SDL_GL_DeleteContext(mContext);
+         mContext = nullptr;
+@@ -257,6 +517,12 @@
+         if (!mRealized)
+             return;
+ 
++        if (mUseZink)
++        {
++            swapBuffersZink();
++            return;
++        }
++
+         SDL_GL_SwapWindow(mWindow);
+     }
+ 
+@@ -268,6 +534,9 @@
+ 
+     void GraphicsWindowSDL2::setSyncToVBlank(VSyncMode mode)
+     {
++        if (mUseZink)
++            return;
++
+         SDL_Window* oldWin = SDL_GL_GetCurrentWindow();
+         SDL_GLContext oldCtx = SDL_GL_GetCurrentContext();
+ 
+--- a/components/sdlutil/sdlgraphicswindow.hpp
++++ b/components/sdlutil/sdlgraphicswindow.hpp
+@@ -15,6 +15,19 @@
+         SDL_Window* mWindow;
+         SDL_GLContext mContext;
+ 
++        // Android renderer = opengl: desktop GL through Mesa Zink (libOSMesa_8.so) instead of an SDL/EGL context.
++        // The frame is rendered into mZinkBuffer and copied to the window's ANativeWindow on swap.
++        bool mUseZink = false;
++        void* mZinkContext = nullptr;
++        unsigned char* mZinkBuffer = nullptr;
++        void* mZinkNativeWindow = nullptr;
++        int mZinkWidth = 0;
++        int mZinkHeight = 0;
++
++        void initZink();
++        bool makeCurrentZink();
++        void swapBuffersZink();
++
+         bool mValid;
+         bool mRealized;
+         bool mOwnsWindow;
+--- a/apps/openmw/engine.cpp
++++ b/apps/openmw/engine.cpp
+@@ -1,5 +1,32 @@
+ #include "engine.hpp"
+ 
++#ifdef ANDROID
++#include <dlfcn.h>
++#include <glad/gles2.h>
++
++namespace
++{
++    // OSG calls GL through glad's function pointers (the osg glad patch). The Vulkan renderer has no GL context and never
++    // loads glad, so the pointers would be NULL: load the core ones from the system GLES library, where calls without a
++    // context are harmless (what OSG did before it went through glad).
++    GLADapiproc loadSystemGles(const char* name)
++    {
++        static void* lib = dlopen("libGLESv3.so", RTLD_NOW);
++        return lib != nullptr ? reinterpret_cast<GLADapiproc>(dlsym(lib, name)) : nullptr;
++    }
++
++    void loadGladWithoutContext()
++    {
++        static bool done = false;
++        if (!done)
++        {
++            done = true;
++            gladLoadGLES2(loadSystemGles);
++        }
++    }
++}
++#endif
++
+ #include <cerrno>
+ #include <chrono>
+ #include <future>
+@@ -719,7 +746,20 @@
+     Settings::writeRendererStatus(statusPath, mRendererStatus);
+     if (mRendererRequest.mHeadless)
+         Log(Debug::Warning) << "No Vulkan entry started, so the session opens a window";
+-    flags |= SDL_WINDOW_OPENGL;
++#ifdef ANDROID
++    // renderer = opengl on Android is desktop GL through Mesa Zink (libOSMesa_8.so) on the Vulkan driver, so the window
++    // gets no SDL/EGL context. OSG_USE_ANGLE or OPENMW_SYSTEM_GLES go back to a GLES library through SDL.
++    if (!getenv("OSG_USE_ANGLE") && !getenv("OPENMW_SYSTEM_GLES"))
++    {
++        setenv("OSG_USE_ZINK", "1", 0);
++        setenv("GALLIUM_DRIVER", "zink", 0);
++        // SDL adds SDL_WINDOW_OPENGL to every non-Vulkan window on Android, which connects an EGL surface to the
++        // window and keeps the CPU copy in GraphicsWindowSDL2::swapBuffersZink from locking it.
++        SDL_SetHint(SDL_HINT_VIDEO_EXTERNAL_CONTEXT, "1");
++    }
++    if (!getenv("OSG_USE_ZINK"))
++#endif
++        flags |= SDL_WINDOW_OPENGL;
+     mViewer->setThreadingModel(mOpenGLThreadingModel);
+ 
+     checkSDLError(SDL_GL_SetAttribute(SDL_GL_RED_SIZE, 8));
+@@ -900,6 +940,9 @@
+ bool OMW::Engine::createVulkanWindow(std::uint32_t flags, int posX, int posY, Settings::RendererEntry entry)
+ {
+ #ifdef OPENMW_USE_VULKAN
++#ifdef ANDROID
++    loadGladWithoutContext();
++#endif
+     const int width = Settings::video().mResolutionX;
+     const int height = Settings::video().mResolutionY;
+     const bool ownsWindow = mWindow == nullptr;

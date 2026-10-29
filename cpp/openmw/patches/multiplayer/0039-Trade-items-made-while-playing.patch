@@ -1,0 +1,485 @@
+From: Duron27 <duron27@gmail.com>
+Subject: [PATCH] Trade items made while playing (enchanted gear, potions, scrolls)
+
+- items.lua describes a generated item as plain data, gives it a key both sides compute, and rebuilds it (validated and
+  clamped; unknown effects, missing models and unknown kinds are refused; no scripts)
+- the trade window offers generated items by key and sends their descriptions; MpTradeExec finds ours by key and
+  rebuilds theirs
+- items_test.lua covers key stability over JSON, rebuilding and refusal of bad data
+
+---
+diff --git a/multiplayer/README.md b/multiplayer/README.md
+index 802a349..912f40b 100644
+--- a/multiplayer/README.md
++++ b/multiplayer/README.md
+@@ -16,9 +16,11 @@ mod/scripts/mp/
+   remote.lua             runs on avatars/stand-ins: movement, attacks, head tilt, death pose, reading pose
+   shots.lua              arrows, thrown weapons and spell bolts of other players (visuals only)
+   proxies.lua            stand-ins for party members' actors, shared kills, no duplicate NPCs
++  items.lua              describes, keys and rebuilds items made while playing (enchanted gear, potions, scrolls)
+   trade.lua, damage.lua  trade window, damage/kill delivery to real actors
+ server/                  old standalone Python relay (no password/admin/ping list), bots for it
+ test/relay_test.lua      runs the relay logic without the game:  luajit multiplayer/test/relay_test.lua
++test/items_test.lua      the same for item descriptions:  luajit multiplayer/test/items_test.lua
+ run-two.sh               two real instances on one machine (host + joiner)
+ ```
+ 
+@@ -64,7 +66,8 @@ puts a fake player next to you that accepts invites, chats, trades and shows vit
+ automated runs (auto-host, auto-join with a walking character, auto-bot, kill test).
+ 
+ ## Not done
+-Container contents, stand-ins for actors that are alive but unloaded in your world, trade of enchanted/generated
+-items. Shared fights are approximate: damage to an actor alive in several worlds is synced as "lowest health wins"
++Container contents, stand-ins for actors that are alive but unloaded in your world. Trades of items made while playing
++(enchanted weapons/armor/clothing, your own potions and scrolls) rebuild them from a description; traded items always arrive
++with full condition and charge. Shared fights are approximate: damage to an actor alive in several worlds is synced as "lowest health wins"
+ (setting *Damage to actors is shared*), so simultaneous hits by two players are not added up. Projectiles do not collide with
+ anything in your world and spell effects other than cast/hit visuals are not shown.
+diff --git a/multiplayer/mod/scripts/mp/global.lua b/multiplayer/mod/scripts/mp/global.lua
+index fea53d9..a786406 100644
+--- a/multiplayer/mod/scripts/mp/global.lua
++++ b/multiplayer/mod/scripts/mp/global.lua
+@@ -13,6 +13,7 @@ local markup = require('openmw.markup')
+ local I = require('openmw.interfaces')
+ local proxies = require('scripts/mp/proxies')
+ local shots = require('scripts/mp/shots')
++local items = require('scripts/mp/items')
+ local relay = require('scripts/mp/relay')
+ local bot = require('scripts/mp/bot')
+ 
+@@ -1100,21 +1101,55 @@ return {
+             local function fail(err) toUi('MpTradeResult', { ok = false, err = err }) end
+             if not p then return fail('no player') end
+             local inv = types.Actor.inventory(p)
++            -- items we made while playing are found by the key of their description
++            local ownGen = {} -- key -> list of objects
++            for _, obj in ipairs(inv:getAll()) do
++                if obj.recordId:lower():find('^generated:') then
++                    local desc = items.describe(obj)
++                    if desc then
++                        local key = items.key(desc)
++                        ownGen[key] = ownGen[key] or {}
++                        table.insert(ownGen[key], obj)
++                    end
++                end
++            end
++            local function have(rid)
++                if not items.isKey(rid) then return inv:countOf(rid) end
++                local n = 0
++                for _, obj in ipairs(ownGen[rid] or {}) do n = n + obj.count end
++                return n
++            end
+             for rid, count in pairs(d.give or {}) do
+-                if inv:countOf(rid) < count then return fail('You no longer have ' .. count .. ' x ' .. rid) end
++                if have(rid) < count then return fail('You no longer have ' .. count .. ' x ' .. tostring(rid)) end
+             end
+             local created = {}
+             for rid, count in pairs(d.get or {}) do
+-                local ok, obj = pcall(world.createObject, rid, count)
++                local recordId = rid
++                if items.isKey(rid) then
++                    local desc = d.gens and d.gens[rid]
++                    if not desc or items.key(desc) ~= rid then
++                        for _, o in ipairs(created) do pcall(function() o:remove() end) end
++                        return fail('Unknown item ' .. tostring(rid))
++                    end
++                    local why
++                    recordId, why = items.rebuild(desc)
++                    if not recordId then
++                        for _, o in ipairs(created) do pcall(function() o:remove() end) end
++                        log('cannot rebuild traded item ' .. items.name(desc) .. ': ' .. tostring(why))
++                        return fail('Cannot create ' .. items.name(desc))
++                    end
++                end
++                local ok, obj = pcall(world.createObject, recordId, count)
+                 if not ok or count < 1 then
+                     for _, o in ipairs(created) do pcall(function() o:remove() end) end
+-                    return fail('Unknown item ' .. rid)
++                    return fail('Unknown item ' .. tostring(rid))
+                 end
+                 created[#created + 1] = obj
+             end
+             for rid, count in pairs(d.give or {}) do
+                 local left = count
+-                for _, obj in ipairs(inv:findAll(rid)) do
++                local objs = items.isKey(rid) and (ownGen[rid] or {}) or inv:findAll(rid)
++                for _, obj in ipairs(objs) do
+                     if left <= 0 then break end
+                     local n = math.min(left, obj.count)
+                     obj:remove(n)
+diff --git a/multiplayer/mod/scripts/mp/items.lua b/multiplayer/mod/scripts/mp/items.lua
+new file mode 100644
+index 0000000..00558c7
+--- /dev/null
++++ b/multiplayer/mod/scripts/mp/items.lua
+@@ -0,0 +1,204 @@
++-- Items made while playing (enchanting, alchemy, scrolls...) have record ids that exist only on one machine. This
++-- module describes such an item as plain data, gives it a key both sides can compute (so a trade can name it), and
++-- rebuilds it from the description on the other side (global scripts only). Everything that arrives from another
++-- player is validated and clamped: unknown effects or missing models are refused, numbers are kept in sane ranges.
++local core = require('openmw.core')
++local types = require('openmw.types')
++
++local world, vfs
++pcall(function() world = require('openmw.world') end) -- not available in player scripts
++pcall(function() vfs = require('openmw.vfs') end)
++
++local M = {}
++
++M.PREFIX = 'gen:'
++
++local KINDS = { 'Weapon', 'Armor', 'Clothing', 'Book', 'Potion' }
++-- fields copied into the description; every kind also gets the common ones
++local COMMON = { 'name', 'model', 'icon', 'weight', 'value' }
++local FIELDS = {
++    Weapon = { 'type', 'health', 'speed', 'reach', 'enchantCapacity', 'chopMinDamage', 'chopMaxDamage', 'slashMinDamage',
++        'slashMaxDamage', 'thrustMinDamage', 'thrustMaxDamage' },
++    Armor = { 'type', 'health', 'baseArmor', 'enchantCapacity' },
++    Clothing = { 'type', 'enchantCapacity' },
++    Book = { 'skill', 'isScroll', 'enchantCapacity', 'text' },
++    Potion = { 'isAutocalc' },
++}
++local MAX_TEXT = 8000
++local MAX_NAME = 80
++local MAX_NUMBER = 1000000
++local MAX_EFFECTS = 8
++
++local function effectsOf(list)
++    local out = {}
++    for _, e in ipairs(list or {}) do
++        if #out >= MAX_EFFECTS then break end
++        out[#out + 1] = { id = e.id, range = e.range, area = e.area, dur = e.duration, min = e.magnitudeMin,
++            max = e.magnitudeMax, skill = e.affectedSkill, attr = e.affectedAttribute }
++    end
++    return out
++end
++
++-- Description of a generated item (a table of plain values), or nil if this kind of item cannot be described.
++function M.describe(obj)
++    for _, kind in ipairs(KINDS) do
++        if obj.type == types[kind] then
++            local ok, desc = pcall(function()
++                local rec = types[kind].record(obj)
++                local d = { k = kind, f = {} }
++                for _, group in ipairs({ COMMON, FIELDS[kind] }) do
++                    for _, field in ipairs(group) do
++                        if rec[field] ~= nil then d.f[field] = rec[field] end
++                    end
++                end
++                if kind == 'Potion' then d.fx = effectsOf(rec.effects) end
++                if rec.enchant and rec.enchant ~= '' then
++                    local ench = core.magic.enchantments.records[rec.enchant]
++                    if ench then
++                        d.e = { type = ench.type, cost = ench.cost, charge = ench.charge, auto = ench.isAutocalc,
++                            fx = effectsOf(ench.effects) }
++                    end
++                end
++                return d
++            end)
++            if ok then return desc end
++            return nil
++        end
++    end
++    return nil
++end
++
++local function canon(v)
++    local t = type(v)
++    if t == 'number' then return string.format('%.6g', v) end
++    if t ~= 'table' then return tostring(v) end
++    if v[1] ~= nil then
++        local parts = {}
++        for i, x in ipairs(v) do parts[i] = canon(x) end
++        return '[' .. table.concat(parts, ',') .. ']'
++    end
++    local keys = {}
++    for k in pairs(v) do keys[#keys + 1] = k end
++    table.sort(keys)
++    local parts = {}
++    for _, k in ipairs(keys) do parts[#parts + 1] = k .. '=' .. canon(v[k]) end
++    return '{' .. table.concat(parts, ',') .. '}'
++end
++
++-- The same description gives the same key on every machine.
++function M.key(desc)
++    local s = canon(desc)
++    local a, b = 5381, 0
++    for i = 1, #s do
++        local c = s:byte(i)
++        a = (a * 33 + c) % 4294967296
++        b = (b * 131 + c + i) % 4294967291
++    end
++    return string.format('%s%08x%08x', M.PREFIX, a, b)
++end
++
++function M.isKey(id) return type(id) == 'string' and id:sub(1, #M.PREFIX) == M.PREFIX end
++
++function M.name(desc) return desc and desc.f and desc.f.name or '?' end
++
++------------------------------------------------------------------ validation and rebuilding (global scripts)
++
++local function num(x, lo, hi)
++    x = tonumber(x)
++    if not x or x ~= x then return nil end
++    return math.max(lo or 0, math.min(hi or MAX_NUMBER, x))
++end
++
++local function fileExists(path)
++    if type(path) ~= 'string' or path == '' then return false end
++    if not vfs then return true end
++    local ok, exists = pcall(vfs.fileExists, path)
++    return ok and exists
++end
++
++-- Effects must be known ones, with values in range.
++local function cleanEffects(list)
++    if type(list) ~= 'table' or #list == 0 or #list > MAX_EFFECTS then return nil end
++    local out = {}
++    for _, e in ipairs(list) do
++        if type(e) ~= 'table' or not core.magic.effects.records[e.id] then return nil end
++        out[#out + 1] = {
++            id = e.id, range = num(e.range, 0, 2) or 0, area = num(e.area, 0, 1000) or 0,
++            duration = num(e.dur, 0, 100000) or 0, magnitudeMin = num(e.min, 0, 10000) or 0,
++            magnitudeMax = num(e.max, 0, 10000) or 0,
++            affectedSkill = type(e.skill) == 'string' and e.skill or nil,
++            affectedAttribute = type(e.attr) == 'string' and e.attr or nil,
++        }
++    end
++    return out
++end
++
++local built = {} -- key -> record id (or false)
++
++-- Creates (once) the local record for a description and returns its id, or nil with the reason.
++function M.rebuild(desc)
++    if not world then return nil, 'not a global script' end
++    if type(desc) ~= 'table' or type(desc.f) ~= 'table' or not FIELDS[desc.k] then return nil, 'unknown kind' end
++    local key = M.key(desc)
++    if built[key] ~= nil then
++        if built[key] then return built[key] end
++        return nil, 'previously failed'
++    end
++    built[key] = false
++    local kind = desc.k
++    local T = types[kind]
++    local f = desc.f
++    if type(f.name) ~= 'string' or f.name == '' or not fileExists(f.model) then return nil, 'bad name or model' end
++    local fields = { name = f.name:sub(1, MAX_NAME), model = f.model, mwscript = '' }
++    if fileExists(f.icon) then fields.icon = f.icon end
++    for _, group in ipairs({ { 'weight', 'value' }, FIELDS[kind] }) do
++        for _, field in ipairs(group) do
++            local v = f[field]
++            if field == 'text' then
++                if type(v) == 'string' then fields.text = v:sub(1, MAX_TEXT) end
++            elseif field == 'skill' then
++                if type(v) == 'string' then fields.skill = v end
++            elseif field == 'isScroll' or field == 'isAutocalc' then
++                if type(v) == 'boolean' then fields[field] = v end
++            elseif v ~= nil then
++                local n = num(v)
++                if n == nil then return nil, 'bad ' .. field end
++                fields[field] = n
++            end
++        end
++    end
++    if kind == 'Potion' then
++        fields.effects = cleanEffects(desc.fx)
++        if not fields.effects then return nil, 'bad potion effects' end
++    end
++    if desc.e then
++        local fx = cleanEffects(desc.e.fx)
++        if not fx then return nil, 'bad enchantment' end
++        local ok, record = pcall(function()
++            return world.createRecord(core.magic.enchantments.createRecordDraft({
++                type = num(desc.e.type, 0, 5) or 0, cost = num(desc.e.cost, 0, 100000) or 0,
++                charge = num(desc.e.charge, 0, 100000) or 0, isAutocalc = desc.e.auto and true or false, effects = fx,
++            }))
++        end)
++        if not ok then return nil, 'cannot create enchantment: ' .. tostring(record) end
++        fields.enchant = record.id
++    end
++    -- gear needs a template with the same model, so its body parts show correctly
++    if kind == 'Weapon' or kind == 'Armor' or kind == 'Clothing' then
++        for _, rec in ipairs(T.records) do
++            if rec.model == f.model and not rec.id:lower():find('^generated:') then fields.template = rec break end
++        end
++    end
++    local ok, record = pcall(function() return world.createRecord(T.createRecordDraft(fields)) end)
++    if not ok and fields.mwscript == '' then
++        fields.mwscript = nil
++        ok, record = pcall(function() return world.createRecord(T.createRecordDraft(fields)) end)
++    end
++    if not ok then return nil, 'cannot create record: ' .. tostring(record) end
++    built[key] = record.id
++    return record.id
++end
++
++function M.reset() built = {} end
++
++return M
+diff --git a/multiplayer/mod/scripts/mp/trade.lua b/multiplayer/mod/scripts/mp/trade.lua
+index 487fe00..87ccc23 100644
+--- a/multiplayer/mod/scripts/mp/trade.lua
++++ b/multiplayer/mod/scripts/mp/trade.lua
+@@ -9,6 +9,7 @@ local self = require('openmw.self')
+ local types = require('openmw.types')
+ local async = require('openmw.async')
+ local I = require('openmw.interfaces')
++local items = require('scripts/mp/items')
+ 
+ local V2, rgb = util.vector2, util.color.rgb
+ local WHITE = ui.texture { path = 'white' }
+@@ -43,6 +44,11 @@ local function now() return core.getRealTime() end
+ local function itemName(rid)
+     if nameCache[rid] then return nameCache[rid] end
+     local name = rid
++    if items.isKey(rid) then
++        -- items made while playing: named by their description
++        local desc = (session and ((session.myGens and session.myGens[rid]) or (session.theirGens and session.theirGens[rid])))
++        return desc and items.name(desc) or rid
++    end
+     for _, T in ipairs(ITEM_TYPES) do
+         local ok, rec = pcall(function() return T.records[rid] end)
+         if ok and rec and rec.name and rec.name ~= '' then name = rec.name break end
+@@ -51,13 +57,28 @@ local function itemName(rid)
+     return name
+ end
+ 
++local MAX_GENERATED = 60 -- distinct made-up items offered in one trade
++
++-- What we can offer: record id -> count, plus (for items made while playing) key -> count and key -> description.
+ local function snapshot()
+-    local items = {}
++    local list, gens, nGens = {}, {}, 0
+     for _, obj in ipairs(types.Actor.inventory(self):getAll()) do
+         local rid = obj.recordId
+-        if not rid:lower():find('^generated:') then items[rid] = (items[rid] or 0) + obj.count end
++        if rid:lower():find('^generated:') then
++            local desc = items.describe(obj)
++            if desc then
++                local key = items.key(desc)
++                if gens[key] or nGens < MAX_GENERATED then
++                    if not gens[key] then nGens = nGens + 1 end
++                    gens[key] = desc
++                    list[key] = (list[key] or 0) + obj.count
++                end
++            end
++        else
++            list[rid] = (list[rid] or 0) + obj.count
++        end
+     end
+-    return items
++    return list, gens
+ end
+ 
+ local function sorted(map)
+@@ -106,7 +127,7 @@ end
+ local function execute()
+     if session.executed then return end
+     session.executed = true
+-    core.sendGlobalEvent('MpTradeExec', { give = session.a, get = session.b })
++    core.sendGlobalEvent('MpTradeExec', { give = session.a, get = session.b, gens = session.theirGens })
+ end
+ 
+ local function text(props, events)
+@@ -192,15 +213,16 @@ end
+ ------------------------------------------------------------------ session control
+ 
+ local function start(partner, name)
++    local inv, gens = snapshot()
+     session = {
+         phase = 'active', partner = partner, name = name, rev = 0, a = {}, b = {},
+-        myInv = snapshot(), theirInv = {}, meOk = false, themOk = false,
++        myInv = inv, myGens = gens, theirInv = {}, theirGens = {}, meOk = false, themOk = false,
+         scrollMine = 0, scrollTheirs = 0,
+     }
+     outgoing = nil
+     pendingIn[partner] = nil
+     ctx.setMode()
+-    send({ t = 'trade_inv', items = session.myInv })
++    send({ t = 'trade_inv', items = session.myInv, gens = next(gens) and gens or nil })
+     render()
+ end
+ 
+@@ -255,6 +277,11 @@ function M.onMessage(msg)
+     elseif session and session.partner == from then
+         if t == 'trade_inv' then
+             session.theirInv = msg.items or {}
++            session.theirGens = type(msg.gens) == 'table' and msg.gens or {}
++            -- only keys that match their description can be offered (the other side checks again)
++            for key, desc in pairs(session.theirGens) do
++                if items.key(desc) ~= key then session.theirGens[key] = nil; session.theirInv[key] = nil end
++            end
+             -- drop deal entries the partner can no longer cover
+             render()
+         elseif t == 'trade_deal' and msg.rev >= session.rev then
+diff --git a/multiplayer/test/items_test.lua b/multiplayer/test/items_test.lua
+new file mode 100644
+index 0000000..f4a1709
+--- /dev/null
++++ b/multiplayer/test/items_test.lua
+@@ -0,0 +1,64 @@
++-- Runs the generated-item logic without the game:  luajit multiplayer/test/items_test.lua
++local json = dofile('multiplayer/test/jsonlite.lua')
++
++local created = {}
++local weaponType = {}
++local enchantments = { ['generated:e1'] = { type = 1, cost = 12, charge = 300, isAutocalc = false,
++    effects = { { id = 'firedamage', range = 1, area = 0, duration = 5, magnitudeMin = 10, magnitudeMax = 20 } } } }
++local weaponRecords = { ['generated:w1'] = { id = 'generated:w1', name = 'Burning Sword', model = 'meshes/w/sword.nif',
++    icon = 'icons/sword.dds', weight = 12.5, value = 800, type = 1, health = 500, speed = 1.1, reach = 1,
++    enchantCapacity = 30, chopMinDamage = 2, chopMaxDamage = 20, slashMinDamage = 2, slashMaxDamage = 20,
++    thrustMinDamage = 1, thrustMaxDamage = 15, enchant = 'generated:e1' } }
++local contentSword = { id = 'iron longsword', model = 'meshes/w/sword.nif' }
++
++package.loaded['openmw.core'] = { magic = {
++    effects = { records = { firedamage = true } },
++    enchantments = { records = enchantments, createRecordDraft = function(t) t.draftOf = 'ench' return t end },
++} }
++package.loaded['openmw.types'] = {
++    Weapon = { type = weaponType, record = function(obj) return weaponRecords[obj.recordId] end,
++        records = { contentSword }, createRecordDraft = function(t) t.draftOf = 'weapon' return t end },
++    Armor = {}, Clothing = {}, Book = {}, Potion = {},
++}
++package.loaded['openmw.world'] = { createRecord = function(draft)
++    local n = #created + 1
++    draft.id = 'generated:new' .. n
++    created[n] = draft
++    return draft
++end }
++package.loaded['openmw.vfs'] = { fileExists = function(path) return path:find('missing') == nil end }
++package.path = 'multiplayer/mod/?.lua;' .. package.path
++local items = require('scripts/mp/items')
++
++local failures = 0
++local function check(cond, what) if not cond then failures = failures + 1 print('FAIL: ' .. what) end end
++
++local desc = items.describe({ type = package.loaded['openmw.types'].Weapon, recordId = 'generated:w1' })
++check(desc and desc.k == 'Weapon' and desc.f.name == 'Burning Sword' and desc.e and #desc.e.fx == 1, 'a made-up weapon is described with its enchantment')
++local key = items.key(desc)
++check(items.isKey(key), 'its key is recognisable')
++local wire = json.decode(json.encode(desc))
++check(items.key(wire) == key, 'the key survives the trip over the network')
++check(items.key(desc) == key, 'the key is stable')
++
++local other = json.decode(json.encode(desc))
++other.f.value = 801
++check(items.key(other) ~= key, 'a different item has a different key')
++
++local id = items.rebuild(wire)
++check(id == 'generated:new2' and #created == 2, 'rebuild creates the enchantment and the item')
++check(created[2].enchant == 'generated:new1' and created[2].template == contentSword, 'the item uses the new enchantment and a template')
++check(created[2].mwscript == '', 'a rebuilt item has no script')
++check(items.rebuild(wire) == id and #created == 2, 'rebuilding twice makes one record')
++
++local bad = json.decode(json.encode(desc)); bad.e.fx[1].id = 'nosucheffect'
++local rid, why = items.rebuild(bad)
++check(rid == nil and why, 'an unknown effect is refused')
++local noModel = json.decode(json.encode(desc)); noModel.f.model = 'meshes/missing.nif'
++check(items.rebuild(noModel) == nil, 'a missing model is refused')
++local huge = json.decode(json.encode(desc)); huge.f.value = 1e12; huge.f.name = 'Huge'
++local hid = items.rebuild(huge)
++check(hid and created[#created].value == 1000000, 'absurd numbers are clamped')
++check(items.rebuild({ k = 'Evil', f = {} }) == nil, 'an unknown kind is refused')
++
++if failures == 0 then print('items tests: all passed') else print(failures .. ' failed') os.exit(1) end

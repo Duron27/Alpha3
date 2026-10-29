@@ -1,0 +1,272 @@
+From: Duron27 <duron27@gmail.com>
+Subject: [PATCH] Party panel shows poison, diseases and other harmful effects; helpful spells cast at a member apply to them
+
+- vitals carry up to 4 harmful effects (poison first, then diseases, then the rest); the panel shows them coloured
+- a spell that only helps (heal, cure poison/disease...) cast at a party member's avatar is sent as "aid" and takes effect
+  on the real player; harmful spells are never accepted. Touch spells need to be within 300 units.
+
+---
+diff --git a/multiplayer/README.md b/multiplayer/README.md
+index aac813a..802a349 100644
+--- a/multiplayer/README.md
++++ b/multiplayer/README.md
+@@ -45,7 +45,8 @@ Every player keeps their **own** world; nothing a group member does changes your
+   Attacks are animation only: an avatar never damages anything in your world. Arrows, thrown weapons and spell bolts
+   fly as visuals (the shooter's game works out where the shot ends), spells show their cast effect on the avatar's hand and,
+   on the caster, their own effect; hit effects play where a shot ends.
+-- **Parties (max 3):** shared party chat, vitals panel, and stand-ins for actors that are alive in a member's world but dead
++- **Parties (max 3):** shared party chat, vitals panel (with their poison, diseases and other harmful effects, so a healer
++  knows what to cure; cast a helpful spell such as a heal or cure at a member's avatar and it takes effect on them), and stand-ins for actors that are alive in a member's world but dead
+   or missing in yours (one per actor, never next to a living twin). **Kills are shared** (setting, on by default): if a member
+   kills an NPC or creature it dies for everybody in the group (essential NPCs excepted).
+ - **Time and weather:** the host's clock and the weather in the host's region.
+diff --git a/multiplayer/mod/scripts/mp/bot.lua b/multiplayer/mod/scripts/mp/bot.lua
+index 50f7064..13e9e9c 100644
+--- a/multiplayer/mod/scripts/mp/bot.lua
++++ b/multiplayer/mod/scripts/mp/bot.lua
+@@ -81,7 +81,8 @@ function M.update(dt)
+         if vitalsTimer >= 0.5 then
+             vitalsTimer = 0
+             send({ t = 'vitals', h = 80, hm = 80, m = 30 + math.floor(20 * (1 + math.sin(t / 4))), mm = 70,
+-                f = 70 + math.floor(25 * (1 + math.sin(t / 6))), fm = 120 })
++                f = 70 + math.floor(25 * (1 + math.sin(t / 6))), fm = 120,
++                bad = math.sin(t / 8) > 0 and { { n = 'Poison', c = 'p' }, { n = 'Ataxia', c = 'd' } } or {} })
+         end
+     end
+ end
+diff --git a/multiplayer/mod/scripts/mp/global.lua b/multiplayer/mod/scripts/mp/global.lua
+index f80f169..fea53d9 100644
+--- a/multiplayer/mod/scripts/mp/global.lua
++++ b/multiplayer/mod/scripts/mp/global.lua
+@@ -158,6 +158,8 @@ end
+ 
+ local clearRemotes
+ local onShot
++local onAid
++local spellHelps
+ local onAvatarActivated
+ 
+ settings:subscribe(async:callback(function()
+@@ -506,6 +508,31 @@ end
+ 
+ ------------------------------------------------------------------ party / ui plumbing
+ 
++-- Harmful effects on us, for the party panel: { { n = name, c = 'p' poison | 'd' disease | 'x' other } }, at most
++-- MAX_AILMENTS, most important first (so a healer sees what to cure).
++local MAX_AILMENTS = 4
++local function readAilments(p)
++    local found, seen = {}, {}
++    pcall(function()
++        for _, spell in types.Actor.activeSpells(p) do
++            local rec = core.magic.spells.records[spell.id]
++            local disease = rec and (rec.type == core.magic.SPELL_TYPE.Disease or rec.type == core.magic.SPELL_TYPE.Blight)
++            for _, fx in ipairs(spell.effects) do
++                local mgef = core.magic.effects.records[fx.id]
++                if mgef and mgef.harmful and not seen[fx.name] then
++                    seen[fx.name] = true
++                    local c = fx.id == core.magic.EFFECT_TYPE.Poison and 'p' or disease and 'd' or 'x'
++                    found[#found + 1] = { n = fx.name, c = c }
++                end
++            end
++        end
++    end)
++    local rank = { p = 1, d = 2, x = 3 }
++    table.sort(found, function(a, b) return rank[a.c] < rank[b.c] end)
++    while #found > MAX_AILMENTS do found[#found] = nil end
++    return found
++end
++
+ local function readVitals()
+     local p = player()
+     if not p then return nil end
+@@ -518,6 +545,7 @@ local function readVitals()
+             h = r(h.current), hm = r(h.base + h.modifier),
+             m = r(m.current), mm = r(m.base + m.modifier),
+             f = r(f.current), fm = r(f.base + f.modifier),
++            bad = readAilments(p),
+         }
+     end)
+     return ok and v or nil
+@@ -530,7 +558,7 @@ local function pushUi()
+             local v = vitals[id] or {}
+             members[#members + 1] = {
+                 id = id, name = nameOf(id), leader = party.leader == id,
+-                h = v.h, hm = v.hm, m = v.m, mm = v.mm, f = v.f, fm = v.fm,
++                h = v.h, hm = v.hm, m = v.m, mm = v.mm, f = v.f, fm = v.fm, bad = v.bad,
+             }
+         end
+     end
+@@ -798,6 +826,7 @@ local function onMessage(msg)
+     end
+     if t == 'vitals' then vitals[msg.id] = msg return end
+     if t == 'shot' then onShot(msg) return end
++    if t == 'aid' then onAid(msg) return end
+     if proxies.onMessage(msg) then return end
+     local id = msg.id
+     if not id then return end
+@@ -828,6 +857,40 @@ local function onMessage(msg)
+     elseif t == 'state' and type(msg.pos) == 'table' then r.state = msg; r.stateAt = core.getRealTime() end
+ end
+ 
++-- True if every effect of the spell is beneficial (nothing that could be used to hurt a group member).
++spellHelps = function(id)
++    local ok, helps = pcall(function()
++        local rec = core.magic.spells.records[id]
++        if not rec or #rec.effects == 0 then return false end
++        for _, fx in ipairs(rec.effects) do
++            if fx.effect.harmful then return false end
++        end
++        return true
++    end)
++    return ok and helps
++end
++
++local lastAid = {} -- sender id -> real time of the last spell we accepted from them
++local AID_INTERVAL = 0.4
++
++-- A group member cast a helpful spell at our avatar in their world: it takes effect on us.
++onAid = function(msg)
++    local p = player()
++    if not p or not isMember(msg.id) or type(msg.spell) ~= 'string' or not spellHelps(msg.spell) then return end
++    local now = core.getRealTime()
++    if lastAid[msg.id] and now - lastAid[msg.id] < AID_INTERVAL then return end
++    lastAid[msg.id] = now
++    local rec = core.magic.spells.records[msg.spell]
++    local indices = {}
++    for i = 0, #rec.effects - 1 do indices[#indices + 1] = i end
++    local ok, err = pcall(function() types.Actor.activeSpells(p):add({ id = msg.spell, effects = indices }) end)
++    if ok then
++        notice(nameOf(msg.id) .. ' cast ' .. tostring(rec.name) .. ' on you.', 'restoration hit')
++    else
++        dlog('aid', 'could not apply', msg.spell, tostring(err))
++    end
++end
++
+ -- Another player shot or cast something: show it if they are in our cell (cosmetic only).
+ -- k = 'bolt' / 'arrow' fly from msg.from to msg.to (shots.lua); every spell also shows its cast effect on their
+ -- avatar, and a spell on themselves (k = 'cast') its hit effect too.
+@@ -1003,6 +1066,17 @@ return {
+         MpShot = function(d)
+             local p = player()
+             if not p or not net.isConnected() then return end
++            local target = d.target
++            d.target = nil -- an object cannot go on the wire
++            -- cast at a group member's avatar: if the spell only helps, it takes effect on the real player
++            if d.aid and target and avatarIds[target.id] then
++                local to = avatarIds[target.id]
++                local touchOk = not d.touch or (target.position - p.position):length() < 300
++                if touchOk and isMember(to) and spellHelps(d.aid) then
++                    net.send(net.encodeJson({ t = 'aid', to = to, spell = d.aid }))
++                end
++            end
++            d.aid, d.touch = nil, nil
+             d.t = 'shot'
+             net.send(net.encodeJson(d))
+         end,
+diff --git a/multiplayer/mod/scripts/mp/player.lua b/multiplayer/mod/scripts/mp/player.lua
+index cff5210..2e91e7c 100644
+--- a/multiplayer/mod/scripts/mp/player.lua
++++ b/multiplayer/mod/scripts/mp/player.lua
+@@ -34,7 +34,7 @@ local TEXT_SIZE = 15
+ local WRAP = 68
+ local FADE_AFTER = 14 -- seconds a new message stays visible while chat is closed
+ local MAX_HISTORY = 80
+-local PARTY_W, BAR_W, BAR_H, BLOCK_H = 200, 100, 8, 64
++local PARTY_W, BAR_W, BAR_H, BLOCK_H = 200, 100, 8, 78
+ 
+ local COLORS = {
+     global = rgb(0.92, 0.92, 0.92), party = rgb(0.45, 0.95, 0.5), system = rgb(1, 0.85, 0.35), whisper = rgb(0.9, 0.6, 1), emote = rgb(0.95, 0.75, 0.55),
+@@ -414,12 +414,22 @@ local function renderParty()
+         content[#content + 1] = text {
+             position = V2(8, y), text = (m.leader and '* ' or '') .. m.name, textColor = COLORS.party,
+         }
++        -- ailments (poison, disease, curses...) so the healer knows what to cure
++        local AILMENT_COLORS = { p = rgb(0.45, 0.9, 0.3), d = rgb(0.75, 0.55, 0.3), x = rgb(0.95, 0.4, 0.4) }
+         local rows = { { m.h, m.hm, COLORS.health }, { m.m, m.mm, COLORS.magicka }, { m.f, m.fm, COLORS.fatigue } }
+         for r, row in ipairs(rows) do
+             for _, w in ipairs(bar(10, y + 24 + (r - 1) * 12, row[1], row[2], row[3])) do
+                 content[#content + 1] = w
+             end
+         end
++        local x = 10
++        for _, bad in ipairs(m.bad or {}) do
++            content[#content + 1] = text {
++                position = V2(x, y + 62), textSize = 11, text = bad.n, textColor = AILMENT_COLORS[bad.c] or AILMENT_COLORS.x,
++            }
++            x = x + 7 * #bad.n + 14
++            if x > PARTY_W then break end
++        end
+     end
+     local layout = {
+         layer = 'HUD', type = ui.TYPE.Widget,
+@@ -548,7 +558,7 @@ local function aimShot()
+         local dir = (aimPoint - from):normalize()
+         local stop = nearby.castRay(from, from + dir * SHOT_MAX_RANGE, { ignore = self })
+         local to = stop.hit and stop.hitPos or (from + dir * SHOT_MAX_RANGE)
+-        return { from = vtab(from), to = vtab(to), hitpos = stop.hit and true or false }
++        return { from = vtab(from), to = vtab(to), hitpos = stop.hit and true or false, target = aim.hitObject }
+     end)
+     return ok and res or nil
+ end
+@@ -563,13 +573,21 @@ local function reportCast()
+         local magicka = types.Actor.stats.dynamic.magicka(self).current
+         if not spell.isAutocalc and spell.cost and spell.cost > magicka then return end -- not cast: no mana
+         local msg = { k = 'cast', cast = mgef.castStatic, hit = mgef.hitStatic }
+-        if fx.range == core.magic.RANGE.Target and mgef.bolt and mgef.bolt ~= '' then
++        local target
++        if fx.range ~= core.magic.RANGE.Self then
+             local aim = aimShot()
+             if aim then
+-                msg = { k = 'bolt', cast = mgef.castStatic, rec = mgef.bolt, hit = mgef.hitStatic, from = aim.from,
+-                    to = aim.to, hitpos = aim.hitpos, spd = (mgef.speed and mgef.speed > 0) and (mgef.speed > 20 and mgef.speed or mgef.speed * BOLT_SPEED) or BOLT_SPEED }
++                target = aim.target
++                if fx.range == core.magic.RANGE.Target and mgef.bolt and mgef.bolt ~= '' then
++                    msg = { k = 'bolt', cast = mgef.castStatic, rec = mgef.bolt, hit = mgef.hitStatic, from = aim.from,
++                        to = aim.to, hitpos = aim.hitpos, spd = (mgef.speed and mgef.speed > 0) and (mgef.speed > 20 and mgef.speed or mgef.speed * BOLT_SPEED) or BOLT_SPEED }
++                end
+             end
+         end
++        -- a spell cast at another player's avatar: global.lua passes it on if it only helps (heal, cure...)
++        msg.aid = spell.id
++        msg.touch = fx.range == core.magic.RANGE.Touch or nil
++        msg.target = target
+         core.sendGlobalEvent('MpShot', msg)
+     end)
+ end
+@@ -701,6 +719,7 @@ return {
+                 for _, m in ipairs(s.members) do
+                     parts[#parts + 1] = table.concat({ m.id, m.name, tostring(m.leader), tostring(m.h), tostring(m.hm),
+                         tostring(m.m), tostring(m.mm), tostring(m.f), tostring(m.fm) }, ',')
++                    for _, b in ipairs(m.bad or {}) do parts[#parts] = parts[#parts] .. ',' .. b.c .. b.n end
+                 end
+                 for _, i in ipairs(s.invites) do parts[#parts + 1] = i.id .. ':' .. i.left end
+                 return table.concat(parts, '|')
+diff --git a/multiplayer/mod/scripts/mp/relay.lua b/multiplayer/mod/scripts/mp/relay.lua
+index 73be6c6..ce813ce 100644
+--- a/multiplayer/mod/scripts/mp/relay.lua
++++ b/multiplayer/mod/scripts/mp/relay.lua
+@@ -11,7 +11,7 @@ local INVITE_TTL = 60
+ local CHAT_MAX = 240
+ local GLOBAL_TYPES = { profile = true, equip = true, state = true }
+ local SHOT_TYPES = { shot = true } -- shown to everyone, never cached (a late joiner must not see old shots)
+-local PARTY_TYPES = { actors = true, vitals = true, dmg = true }
++local PARTY_TYPES = { actors = true, vitals = true, dmg = true, aid = true }
+ local CACHED = { profile = true, equip = true, state = true, actors = true, vitals = true }
+ local GLOBAL_ORDER = { 'profile', 'equip', 'state' }
+ 
+diff --git a/multiplayer/test/relay_test.lua b/multiplayer/test/relay_test.lua
+index e7efcfd..d5ac87e 100644
+--- a/multiplayer/test/relay_test.lua
++++ b/multiplayer/test/relay_test.lua
+@@ -122,6 +122,11 @@ check(count(1, 'shot') == shotsBefore + 1, 'a malformed shot is dropped')
+ join(8, 'Dave', 'secret')
+ check(not last(8, 'shot'), 'shots are not replayed to late joiners')
+ 
++-- helpful spells only travel inside a party
++local aidBefore = count(1, 'aid')
++say(4, { t = 'aid', to = 1, spell = 'restore health' })
++check(count(1, 'aid') == aidBefore, 'a spell aimed at someone outside the party goes nowhere')
++
+ -- ---------------------------------------------------------------- silence and flooding
+ for i = 1, 600 do say(4, { t = 'state', cell = '', pos = { i, 0, 0 } }) end
+ check(last(1, 'state') and last(1, 'state').pos[1] <= 400, 'a flood of messages is cut off')

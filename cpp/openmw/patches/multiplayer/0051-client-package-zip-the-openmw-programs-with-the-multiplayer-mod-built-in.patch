@@ -1,0 +1,434 @@
+From: Duron27 <duron27@gmail.com>
+Subject: [PATCH] client-package: zip the OpenMW programs of a build, with the multiplayer mod built in, to share
+
+cmake --build . --target client-package makes two zips in the build folder:
+- openmw-multiplayer-client-<system>-<cpu>-portable.zip: every program that was built (game, launcher, wizard, OpenMW-CS, the
+  tools), their resources with the multiplayer scripts added to the built-in lists, the config files, the libraries they need
+  (found with ldd, minus what any desktop provides), the OpenSceneGraph and Qt plugins, start scripts and a README
+- ...-light.zip: the same without the libraries; its README lists the packages to install (Fedora: with the Copr and RPM Fusion
+  they come from)
+
+The script (multiplayer/package-client.py) lives in the repo, not in a build folder, and can be run by hand: it finds the source
+folder from the build's CMakeCache, packages whatever was built, and says clearly what is missing. Linux only for now; the
+programs need a C library as new as the builder's, which the README in the zips says.
+
+
+---
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 3f9e151f4a..0798f9cffe 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -795,6 +795,9 @@ if (BUILD_OPENMW_TESTS)
+     add_subdirectory(apps/openmw_tests)
+ endif()
+ 
++# The target client-package: zips of the programs of this build to share (see multiplayer/package.cmake)
++include(multiplayer/package.cmake)
++
+ if (WIN32)
+     if (MSVC)
+ 
+diff --git a/multiplayer/README.md b/multiplayer/README.md
+index 3455dd8c74..37546f9e28 100644
+--- a/multiplayer/README.md
++++ b/multiplayer/README.md
+@@ -43,6 +43,18 @@ test/items_test.lua      the same for item descriptions:  luajit multiplayer/tes
+ run-two.sh               two real instances on one machine (host + joiner)
+ ```
+ 
++## Sharing a build with testers
++`cmake --build . --target client-package` (after the build) makes two zips in the build folder, with every OpenMW program that was
++built (the game, launcher, wizard, OpenMW-CS and the tools), their resources with this mod built in, a README and start scripts:
++- `openmw-multiplayer-client-<system>-<cpu>-portable.zip`: the libraries they need are included (about 150 MB). Nothing else to
++  install.
++- `...-light.zip`: without the libraries (about 40 MB); its README lists the packages to install.
++
++Linux only for now. The programs need a C library as new as the one that built them, whatever is bundled (the README in the
++zips gives the version), so they only run on a similarly recent distribution. The script behind it is `multiplayer/package-client.py`
++(`python3 multiplayer/package-client.py --build-dir <build>` does the same by hand). A dedicated server is a separate zip:
++`--target mpserver-bundle`.
++
+ ## Hosting and joining
+ Main menu → **Multiplayer**: choose **Join a server** (address, port, password) or **Host a game** (port, optional
+ password), then start or load a character. Hosting starts with your game: the relay runs inside it and you play through a
+diff --git a/multiplayer/package-client.py b/multiplayer/package-client.py
+new file mode 100755
+index 0000000000..5a641dabc5
+--- /dev/null
++++ b/multiplayer/package-client.py
+@@ -0,0 +1,331 @@
++#!/usr/bin/env python3
++"""Packages the OpenMW programs of a finished build, with the multiplayer mod built in, into zips you can share.
++
++    cmake --build . --target client-package          (from the build folder; see multiplayer/package.cmake)
++    python3 multiplayer/package-client.py --build-dir <build> [--source-dir <source>] [--out <folder>] [--only portable|light]
++
++Makes two zips in --out (default: the build folder):
++  openmw-multiplayer-client-<system>-<cpu>-portable.zip  the programs, their files and the libraries they need
++  openmw-multiplayer-client-<system>-<cpu>-light.zip     the same without the libraries (they come from the system)
++
++Whatever programs were built are packaged (openmw is required). Nothing in the build folder is changed. The multiplayer scripts
++come from <build>/multiplayer (the copy CMake makes; the source folder's copy if there is none) and are added to the built-in
++scripts, whatever OPENMW_BUILTIN_MULTIPLAYER is set to in the build. Linux only for now: the portable zip needs ldd, and the
++programs need as new a C library as the machine that built them (the README in each zip says which).
++"""
++import argparse, glob, os, platform, re, shutil, subprocess, sys, tempfile
++
++PROGRAMS = ['openmw', 'openmw-launcher', 'openmw-wizard', 'openmw-cs', 'bsatool', 'esmtool', 'niftest',
++            'openmw-iniimporter', 'openmw-essimporter', 'openmw-navmeshtool', 'openmw-bulletobjecttool']
++QT_PROGRAMS = ['openmw-launcher', 'openmw-wizard', 'openmw-cs']
++# files next to the programs that they read at run time (the first two are needed by every package)
++ROOT_FILES = ['openmw.cfg', 'defaults.bin', 'defaults-cs.bin', 'gamecontrollerdb.txt']
++# files in resources/ that exist only because somebody put them in a build folder (experiments), not the product
++STRAY = ['vfs/shaders/badMB2.omwfx', 'vfs/shaders/bluetest.omwfx']
++# what any desktop Linux provides itself: the C library, graphics stack, windowing, audio and system services, zlib, glib and
++# the C++ runtime. Never bundled (two copies of these in one process cause crashes).
++EXCLUDE = re.compile(r'^(ld-linux|libc\.|libm\.|libdl\.|libpthread|librt\.|libresolv|libutil\.|libnsl|libanl|libBrokenLocale|'
++    r'libthread_db|libGL\.|libGLX|libGLdispatch|libOpenGL|libEGL|libGLESv|libvulkan|libdrm|libgbm|libX|libxcb|libwayland|'
++    r'libxkbcommon|libasound|libpulse|libpipewire|libsystemd|libudev|libdbus-1|libfontconfig|libfreetype|libselinux|libcap\.|'
++    r'libaudit|libnvidia|libva|libvdpau|libsndio|libjack|libdecor|libSM\.|libICE\.|libgtk|libgdk|libatk|libcairo|libpango|'
++    r'libgdk_pixbuf|libglib|libgobject|libgio|libgmodule|libgthread|libffi|libmount|libblkid|libuuid|libpcre2|libz\.|'
++    r'libsmartcols|libthai|libharfbuzz|libgraphite|libfribidi|libpixman|libepoxy|libstdc|libgcc_s)')
++OSG_PLUGINS = ['bmp', 'dae', 'dds', 'freetype', 'jpeg', 'osg', 'png', 'serializers_osg', 'tga']  # CMakeLists.txt USED_OSG_PLUGINS
++# what the Qt programs (launcher, wizard, OpenMW-CS) need to show a window: the platform back ends, SVG, OpenGL for X11/Wayland
++QT_PLUGINS = {'platforms': ['libqxcb.so', 'libqwayland-egl.so', 'libqwayland-generic.so', 'libqoffscreen.so'],
++              'imageformats': ['libqsvg.so', 'libqjpeg.so', 'libqico.so', 'libqgif.so'],
++              'iconengines': ['libqsvgicon.so'],
++              'xcbglintegrations': ['libqxcb-glx-integration.so', 'libqxcb-egl-integration.so'],
++              'wayland-decoration-client': None, 'wayland-graphics-integration-client': None,
++              'wayland-shell-integration': ['libxdg-shell.so', 'libwl-shell-plugin.so']}  # (not the KDE layer-shell)
++
++
++def sh(*args, **kw):
++    try:
++        return subprocess.run(args, capture_output=True, text=True, **kw)
++    except FileNotFoundError:  # a tool that is not installed (rpm on a Debian system...)
++        return subprocess.CompletedProcess(args, 127, '', 'not found')
++
++
++def library_deps(path):
++    found = {}
++    for line in sh('ldd', path).stdout.splitlines():
++        m = re.match(r'\s*(\S+) => (/\S+)', line)
++        if m:
++            found[m.group(1)] = os.path.realpath(m.group(2))
++    return found
++
++
++def copy_tree(src, dst, skip=()):
++    for root, dirs, files in os.walk(src):
++        rel = os.path.relpath(root, src)
++        os.makedirs(os.path.join(dst, rel), exist_ok=True)
++        for f in files:
++            if os.path.normpath(os.path.join(rel, f)) in skip:
++                continue
++            shutil.copy2(os.path.join(root, f), os.path.join(dst, rel, f))
++
++
++def cache_value(build, name):
++    try:
++        for line in open(os.path.join(build, 'CMakeCache.txt'), errors='replace'):
++            if line.startswith(name + ':'):
++                return line.split('=', 1)[1].strip()
++    except OSError:
++        pass
++    return None
++
++
++def find_plugin_dirs(libs):
++    """OpenSceneGraph's plugin folder and Qt's, found next to the libraries the programs actually use."""
++    osg = None
++    for n, real in libs.items():
++        if n.startswith('libosgDB.so'):
++            found = glob.glob(os.path.join(os.path.dirname(real), 'osgPlugins-*'))
++            osg = found[0] if found else None
++    qt = None
++    for n, real in libs.items():
++        if n.startswith('libQt6Core.so'):
++            lib = os.path.dirname(real)
++            for cand in (os.path.join(lib, 'qt6', 'plugins'), os.path.join(lib, 'qt', 'plugins'),
++                         os.path.join(lib, '..', 'qt6', 'plugins')):
++                if os.path.isdir(cand):
++                    qt = os.path.normpath(cand)
++                    break
++    return osg, qt
++
++
++def main():
++    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
++    ap.add_argument('--build-dir', default='.', help='the finished build (default: the current folder)')
++    ap.add_argument('--source-dir', help='the source tree (default: the one the build was made from)')
++    ap.add_argument('--out', help='where the zips go (default: the build folder)')
++    ap.add_argument('--only', choices=['portable', 'light'])
++    ap.add_argument('--strip', default=None, help='the strip tool (default: the build\'s, else "strip")')
++    a = ap.parse_args()
++    if platform.system() != 'Linux':
++        sys.exit('package-client.py only knows Linux so far (the libraries to bundle are found with ldd)')
++    build = os.path.abspath(a.build_dir)
++    out = os.path.abspath(a.out or build)
++    source = a.source_dir or cache_value(build, 'CMAKE_HOME_DIRECTORY') or os.path.dirname(build)
++    source = os.path.abspath(source)
++    strip = a.strip or cache_value(build, 'CMAKE_STRIP') or 'strip'
++    system = '%s-%s' % (platform.system(), platform.machine())
++
++    present = [p for p in PROGRAMS if os.path.isfile(os.path.join(build, p))]
++    if 'openmw' not in present:
++        sys.exit('%s has no openmw program: build it first (cmake --build .)' % build)
++    for p in PROGRAMS:
++        if p not in present:
++            print('not built, left out: %s' % p)
++    root_files = [f for f in ROOT_FILES if os.path.isfile(os.path.join(build, f))]
++    for need in ('openmw.cfg', 'defaults.bin'):
++        if need not in root_files:
++            sys.exit('missing in the build folder: %s' % need)
++    if not os.path.isdir(os.path.join(build, 'resources')):
++        sys.exit('missing in the build folder: resources')
++    mod = os.path.join(build, 'multiplayer', 'mod')
++    if not os.path.isfile(os.path.join(mod, 'mp.omwscripts')):
++        mod = os.path.join(source, 'multiplayer', 'mod')
++    if not os.path.isfile(os.path.join(mod, 'mp.omwscripts')):
++        sys.exit('cannot find the multiplayer mod (multiplayer/mod/mp.omwscripts) in the build or the source folder')
++    builtin_base = os.path.join(source, 'files', 'data', 'builtin.omwscripts')
++    builtin_mw = os.path.join(source, 'files', 'data-mw', 'builtin.omwscripts.in')
++    for f in (builtin_base, builtin_mw):
++        if not os.path.isfile(f):
++            sys.exit('missing in the source folder: %s (is --source-dir right?)' % f)
++
++    work = tempfile.mkdtemp(prefix='openmw-client-')
++    try:
++        stage = os.path.join(work, 'shared')  # what both packages hold; the folder inside each zip is made from it
++        os.makedirs(stage)
++
++        print('programs (stripped)')
++        for p in present:
++            dst = os.path.join(stage, p)
++            r = sh(strip, '--strip-all', '-o', dst, os.path.join(build, p))
++            if r.returncode:  # no strip tool: ship them as they are (much bigger)
++                print('  could not strip %s (%s), copied as is' % (p, r.stderr.strip()[:60]))
++                shutil.copy2(os.path.join(build, p), dst)
++            os.chmod(dst, 0o755)
++
++        print('resources, with the multiplayer scripts built in')
++        res = os.path.join(stage, 'resources')
++        copy_tree(os.path.join(build, 'resources'), res, skip=[os.path.normpath(s) for s in STRAY])
++        for sub in ('scripts/mp', 'l10n', 'textures'):  # what files/data/CMakeLists.txt copies into resources/vfs
++            if os.path.isdir(os.path.join(mod, sub)):
++                copy_tree(os.path.join(mod, sub), os.path.join(res, 'vfs', sub))
++        mp = open(os.path.join(mod, 'mp.omwscripts')).read()
++        builtin = open(builtin_base).read() + '\n# Multiplayer (multiplayer/mod)\n' + mp + '\n'
++        open(os.path.join(res, 'vfs', 'builtin.omwscripts'), 'w').write(builtin)
++        # vfs-mw/builtin.omwscripts is files/data-mw/builtin.omwscripts.in with the base list put in
++        os.makedirs(os.path.join(res, 'vfs-mw'), exist_ok=True)
++        open(os.path.join(res, 'vfs-mw', 'builtin.omwscripts'), 'w').write(
++            open(builtin_mw).read().replace('@BUILTIN_SCRIPTS@', builtin))
++        for f in root_files:
++            shutil.copy2(os.path.join(build, f), os.path.join(stage, f))
++
++        # --- libraries
++        libs = {}
++        for p in present:
++            libs.update(library_deps(os.path.join(build, p)))
++        if not libs:
++            sys.exit('ldd found no libraries: cannot make the portable package here')
++        osgdir, qtroot = find_plugin_dirs(libs)
++        plugin_files = []
++        if osgdir:
++            plugin_files = [os.path.join(osgdir, 'osgdb_%s.so' % n) for n in OSG_PLUGINS
++                            if os.path.isfile(os.path.join(osgdir, 'osgdb_%s.so' % n))]
++            if len(plugin_files) != len(OSG_PLUGINS):
++                print('warning: OpenSceneGraph plugins missing in %s' % osgdir)
++        else:
++            print('warning: no OpenSceneGraph plugin folder found: the portable package will not read textures')
++        for f in plugin_files:
++            libs.update(library_deps(f))
++        qtfiles = []
++        if qtroot and any(p in present for p in QT_PROGRAMS):
++            for d, names in QT_PLUGINS.items():
++                for f in sorted(glob.glob(os.path.join(qtroot, d, '*.so'))):
++                    if names is None or os.path.basename(f) in names:
++                        qtfiles.append((d, f))
++                        libs.update(library_deps(f))
++        bundle = {n: r for n, r in libs.items() if not EXCLUDE.match(n)}
++
++        # --- scripts and notes
++        osgname = os.path.basename(osgdir) if osgdir else 'osgPlugins'
++        env = ('export LD_LIBRARY_PATH="$HERE/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"\n'
++               'export OSG_LIBRARY_PATH="$HERE/lib/%s"\n'
++               'export QT_PLUGIN_PATH="$HERE/lib/qt6/plugins"\n' % osgname)
++        header = '#!/bin/sh\n# %s\nHERE="$(cd "$(dirname "$0")" && pwd)"\ncd "$HERE" || exit 1\n'
++        scripts = {
++            'start-game.sh': ('Starts OpenMW (the game). Options are passed on: ./start-game.sh --help', 'openmw'),
++            'start-launcher.sh': ('Starts the launcher: choose your Morrowind data and settings here first.', 'openmw-launcher'),
++            'start-cs.sh': ('Starts OpenMW-CS, the construction set.', 'openmw-cs'),
++            'start-wizard.sh': ('Starts the installation wizard (finds or installs Morrowind).', 'openmw-wizard'),
++        }
++        bodies = {}
++        for name, (what, prog) in scripts.items():
++            if prog in present:
++                bodies[name] = lambda portable, what=what, prog=prog: (header % what) + (env if portable else '') + 'exec ./%s "$@"\n' % prog
++        bodies['run.sh'] = lambda portable: (header % 'Runs any program of this folder: ./run.sh bsatool --help') + (env if portable else '') + \
++            'program="$1"; shift\nexec "./$program" "$@"\n'
++
++        commit = sh('git', '-C', source, 'rev-parse', '--short', 'HEAD').stdout.strip() or 'unknown'
++        dirty = ' plus uncommitted changes' if sh('git', '-C', source, 'status', '--porcelain', '--untracked-files=no').stdout.strip() else ''
++        direct = set()
++        for p in present:
++            for line in sh('readelf', '-d', os.path.join(build, p)).stdout.splitlines():
++                m = re.search(r'NEEDED.*\[(.*)\]', line)
++                if m and not EXCLUDE.match(m.group(1)):
++                    direct.add(m.group(1))
++        packages = set()  # (rpm systems only) the packages the libraries come from
++        for path in [bundle[n] for n in direct if n in bundle] + plugin_files + [f for _, f in qtfiles]:
++            r = sh('rpm', '-qf', '--qf', '%{NAME}\\n', path)
++            if r.returncode == 0:
++                packages.update(r.stdout.split())
++        glibc = (sh('ldd', '--version').stdout.splitlines() or ['', ''])[0].split()[-1]
++        # where each package comes from: the distribution itself, a Copr project, RPM Fusion (FFmpeg)
++        origin = {'copr': {}, 'rpmfusion': []}
++        for pkg in sorted(packages):
++            vendor = sh('rpm', '-q', '--qf', '%{VENDOR}', pkg).stdout
++            if 'Copr' in vendor:
++                user = vendor.split()[-1]
++                project = '?'
++                for repo in glob.glob('/etc/yum.repos.d/_copr:copr.fedorainfracloud.org:%s:*.repo' % user):
++                    project = os.path.basename(repo)[:-5].split(':')[-1]
++                origin['copr'].setdefault('%s/%s' % (user, project), []).append(pkg)
++            elif 'RPM Fusion' in vendor:
++                origin['rpmfusion'].append(pkg)
++
++        def readme(portable):
++            title = 'OpenMW with the multiplayer mod built in (%s, built from %s%s)' % (system, commit, dirty)
++            text = title + '\n' + '=' * len(title) + '\n'
++            text += """
++What is in this folder
++  openmw                the game
++  openmw-launcher       the launcher: tell it where Morrowind is, change settings
++  openmw-wizard         finds or installs Morrowind
++  openmw-cs             the construction set (editor)
++  bsatool esmtool niftest openmw-iniimporter openmw-essimporter openmw-navmeshtool openmw-bulletobjecttool
++                        the command-line tools
++  resources/            what they read (scripts, shaders, translations...), including the multiplayer mod
++  openmw.cfg ...        their configuration; do not edit (your own goes in ~/.config/openmw/openmw.cfg)
++  start-game.sh start-launcher.sh start-cs.sh start-wizard.sh run.sh
++                        start the programs: ./run.sh <program> [options]
++  (programs that were not built are not in the folder)
++
++You need
++  * Morrowind (the game's data files; OpenMW does not include them)
++  * a Linux system with glibc %s or newer (Fedora 44, current Arch or openSUSE Tumbleweed...): the programs were built on
++    one and will not start on an older system, whatever else is installed
++  * OpenGL drivers (Mesa or the vendor's) and X11 or Wayland
++""" % glibc
++            if portable:
++                text += ("  * nothing else: the libraries are in lib/ and the start scripts use them. Start the programs through the\n"
++                         "    scripts (start-game.sh, run.sh), not directly.\n")
++            else:
++                text += ("  * these libraries from your system (this is the light package: they are not included). OpenMW needs its own\n"
++                         "    patched OpenSceneGraph (github.com/OpenMW/osg): the ordinary OSG will not do.\n")
++                if packages:
++                    text += "    On Fedora:\n"
++                    for project, pkgs in sorted(origin['copr'].items()):
++                        text += "      sudo dnf copr enable %s      # for: %s\n" % (project, ' '.join(pkgs))
++                    if origin['rpmfusion']:
++                        text += ("      # FFmpeg (%s) is from RPM Fusion (rpmfusion.org/Configuration); Fedora's own\n"
++                                 "      # libavcodec-free works as well\n" % ' '.join(origin['rpmfusion']))
++                    text += "      sudo dnf install %s\n" % ' '.join(sorted(packages))
++                text += ("    Other distributions: the same libraries under their names (OpenMW's OpenSceneGraph 3.6 with its plugins,\n"
++                         "    MyGUI 3.4, Bullet, SDL2, OpenAL, FFmpeg, Boost, yaml-cpp, lz4, SQLite, ICU, unshield, Qt 6 with SVG\n"
++                         "    support). If one is missing, ldd ./openmw | grep 'not found' shows which.\n"
++                         "    The portable package has all of them included.\n")
++            text += """
++Starting
++  1. ./start-launcher.sh   pick your Morrowind "Data Files" folder and the game files, press Play.
++     Without the launcher: put  data="/path/to/Morrowind/Data Files"  and  content=Morrowind.esm  in ~/.config/openmw/openmw.cfg
++     and run ./start-game.sh  (or ./start-game.sh --data "/path/to/Data Files" --content Morrowind.esm).
++  2. Multiplayer: Multiplayer on the main menu -> Host a game, or Join a server (address, port, password), then start or load
++     a character. The mod is part of this package: do NOT also add it to openmw.cfg (data=...multiplayer/mod and
++     content=mp.omwscripts), it would load twice. A dedicated server is the separate openmw-mp-server zip.
++
++Your own settings, data paths and saves live in ~/.config/openmw and ~/.local/share/openmw, not in this folder.
++"""
++            return text
++
++        def finish(variant, portable):
++            target = os.path.join(work, 'openmw-multiplayer-client')
++            shutil.copytree(stage, target, symlinks=True)
++            for name, body in bodies.items():
++                path = os.path.join(target, name)
++                open(path, 'w').write(body(portable))
++                os.chmod(path, 0o755)
++            if portable:
++                lib = os.path.join(target, 'lib')
++                os.makedirs(os.path.join(lib, osgname))
++                for n, real in bundle.items():
++                    shutil.copy2(real, os.path.join(lib, n))
++                for f in plugin_files:
++                    shutil.copy2(f, os.path.join(lib, osgname, os.path.basename(f)))
++                for d, f in qtfiles:
++                    os.makedirs(os.path.join(lib, 'qt6', 'plugins', d), exist_ok=True)
++                    shutil.copy2(f, os.path.join(lib, 'qt6', 'plugins', d, os.path.basename(f)))
++            open(os.path.join(target, 'README.txt'), 'w').write(readme(portable))
++            final = os.path.join(out, 'openmw-multiplayer-client-%s-%s.zip' % (system, variant))
++            if os.path.exists(final):
++                os.remove(final)
++            os.makedirs(out, exist_ok=True)
++            r = sh('cmake', '-E', 'tar', 'cf', final, '--format=zip', 'openmw-multiplayer-client', cwd=work)
++            shutil.rmtree(target)
++            if r.returncode:
++                sys.exit('could not make the zip: ' + r.stderr)
++            print('%-82s %5.0f MB' % (final, os.path.getsize(final) / 1e6))
++
++        for variant, portable in (('portable', True), ('light', False)):
++            if a.only and a.only != variant:
++                continue
++            finish(variant, portable)
++    finally:
++        shutil.rmtree(work, ignore_errors=True)
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/multiplayer/package.cmake b/multiplayer/package.cmake
+new file mode 100644
+index 0000000000..8e1e02ba8a
+--- /dev/null
++++ b/multiplayer/package.cmake
+@@ -0,0 +1,38 @@
++# The target client-package: zips of the OpenMW programs of this build, with the multiplayer mod built in, to share.
++#   cmake --build . --target client-package
++# Makes <build>/openmw-multiplayer-client-<system>-<cpu>-portable.zip (the libraries are included) and ...-light.zip (they are
++# not). Whatever programs were built are in it (openmw is required). The work is done by multiplayer/package-client.py, which
++# can also be run by hand:  python3 multiplayer/package-client.py --build-dir <build>. Linux only for now.
++if (NOT (UNIX AND NOT APPLE))
++    return()
++endif ()
++
++find_package(Python3 QUIET COMPONENTS Interpreter)
++if (Python3_Interpreter_FOUND)
++    set(MP_PACKAGE_PYTHON "${Python3_EXECUTABLE}")
++else ()
++    find_program(MP_PACKAGE_PYTHON NAMES python3 python)
++endif ()
++if (NOT MP_PACKAGE_PYTHON)
++    message(STATUS "client-package: no Python found, the target is not made (run multiplayer/package-client.py by hand)")
++    return()
++endif ()
++
++set(MP_PACKAGE_DEPENDS)
++foreach (program openmw openmw-launcher openmw-wizard openmw-cs bsatool esmtool niftest openmw-iniimporter openmw-essimporter
++        openmw-navmeshtool openmw-bulletobjecttool qm-files)
++    if (TARGET ${program})
++        list(APPEND MP_PACKAGE_DEPENDS ${program})
++    endif ()
++endforeach ()
++set(MP_PACKAGE_STRIP)
++if (CMAKE_STRIP)
++    set(MP_PACKAGE_STRIP --strip "${CMAKE_STRIP}")
++endif ()
++
++add_custom_target(client-package
++    COMMAND "${MP_PACKAGE_PYTHON}" "${CMAKE_CURRENT_LIST_DIR}/package-client.py"
++        --build-dir "${CMAKE_BINARY_DIR}" --source-dir "${CMAKE_SOURCE_DIR}" ${MP_PACKAGE_STRIP}
++    DEPENDS ${MP_PACKAGE_DEPENDS}
++    COMMENT "Packaging the OpenMW programs for sharing"
++    VERBATIM)

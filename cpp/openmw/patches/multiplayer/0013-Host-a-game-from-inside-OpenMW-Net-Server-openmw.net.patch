@@ -1,0 +1,1233 @@
+From 6b24d372933d92e345de163890f2c847e5f70f35 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Fri, 9 Oct 2026 07:26:16 -0400
+Subject: [PATCH] Host a game from inside OpenMW: Net::Server + openmw.net
+ listen API, Lua relay, host/join menu
+
+- components/net: Server (multi-client line TCP) with unit tests
+- openmw.net: listen/stopListening/isListening/sendTo/kick and onNetClient* handlers
+- relay.lua: port of relay.py; host plays via loopback, so host and joiner share one client path
+- menu/global: mode is either host or join, one connection at a time
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ apps/components_tests/CMakeLists.txt          |   1 +
+ apps/components_tests/net/server.cpp          |  91 ++++++
+ apps/openmw/mwlua/globalscripts.hpp           |   9 +
+ apps/openmw/mwlua/luabindings.cpp             |   2 +-
+ apps/openmw/mwlua/luamanagerimp.cpp           |  16 ++
+ apps/openmw/mwlua/luamanagerimp.hpp           |   3 +
+ apps/openmw/mwlua/netbindings.cpp             |  17 +-
+ apps/openmw/mwlua/netbindings.hpp             |   2 +-
+ components/CMakeLists.txt                     |   1 +
+ components/net/server.cpp                     | 270 ++++++++++++++++++
+ components/net/server.hpp                     |  59 ++++
+ .../lua-scripting/engine_handlers.rst         |   6 +
+ files/lua_api/openmw/net.lua                  |  31 +-
+ multiplayer/README.md                         |   7 +
+ multiplayer/mod/scripts/mp/global.lua         |  39 ++-
+ multiplayer/mod/scripts/mp/menu.lua           |  53 +++-
+ multiplayer/mod/scripts/mp/player.lua         |   5 +-
+ multiplayer/mod/scripts/mp/relay.lua          | 260 +++++++++++++++++
+ 18 files changed, 850 insertions(+), 22 deletions(-)
+ create mode 100644 apps/components_tests/net/server.cpp
+ create mode 100644 components/net/server.cpp
+ create mode 100644 components/net/server.hpp
+ create mode 100644 multiplayer/mod/scripts/mp/relay.lua
+
+diff --git a/apps/components_tests/CMakeLists.txt b/apps/components_tests/CMakeLists.txt
+index d0ccff0ed1..886ba0432d 100644
+--- a/apps/components_tests/CMakeLists.txt
++++ b/apps/components_tests/CMakeLists.txt
+@@ -98,6 +98,7 @@ file(GLOB UNITTEST_SRC_FILES
+     shader/sunpenumbra.cpp
+ 
+     net/client.cpp
++    net/server.cpp
+ 
+     sqlite3/db.cpp
+     sqlite3/request.cpp
+diff --git a/apps/components_tests/net/server.cpp b/apps/components_tests/net/server.cpp
+new file mode 100644
+index 0000000000..e0ff107286
+--- /dev/null
++++ b/apps/components_tests/net/server.cpp
+@@ -0,0 +1,91 @@
++#include <components/net/server.hpp>
++
++#include <chrono>
++#include <thread>
++
++#include <boost/asio.hpp>
++#include <gtest/gtest.h>
++
++namespace
++{
++    using namespace testing;
++    namespace asio = boost::asio;
++    using asio::ip::tcp;
++
++    std::vector<Net::ServerEvent> waitForEvents(Net::Server& server, std::size_t count)
++    {
++        std::vector<Net::ServerEvent> result;
++        for (int i = 0; i < 500 && result.size() < count; ++i)
++        {
++            for (Net::ServerEvent& e : server.poll())
++                result.push_back(std::move(e));
++            std::this_thread::sleep_for(std::chrono::milliseconds(10));
++        }
++        return result;
++    }
++
++    // Port 0 is not usable through Server::listen, so look for a free one.
++    std::uint16_t listenOnFreePort(Net::Server& server)
++    {
++        for (std::uint16_t port = 47200; port < 47400; ++port)
++            if (server.listen(port).empty())
++                return port;
++        return 0;
++    }
++
++    TEST(NetServerTest, shouldExchangeLinesWithSeveralClients)
++    {
++        Net::Server server;
++        const std::uint16_t port = listenOnFreePort(server);
++        ASSERT_NE(port, 0);
++        EXPECT_TRUE(server.isListening());
++
++        asio::io_context io;
++        tcp::socket a(io), b(io);
++        a.connect(tcp::endpoint(asio::ip::make_address("127.0.0.1"), port));
++        b.connect(tcp::endpoint(asio::ip::make_address("127.0.0.1"), port));
++        auto events = waitForEvents(server, 2);
++        ASSERT_EQ(events.size(), 2u);
++        EXPECT_EQ(events[0].mType, Net::ServerEvent::Type::ClientConnected);
++        EXPECT_EQ(events[0].mClient, 1u);
++        EXPECT_EQ(events[1].mClient, 2u);
++
++        asio::write(b, asio::buffer(std::string("hi\r\n")));
++        events = waitForEvents(server, 1);
++        ASSERT_EQ(events.size(), 1u);
++        EXPECT_EQ(events[0].mType, Net::ServerEvent::Type::Message);
++        EXPECT_EQ(events[0].mClient, 2u);
++        EXPECT_EQ(events[0].mData, "hi");
++
++        EXPECT_TRUE(server.send(1, "to-a"));
++        EXPECT_FALSE(server.send(1, "bad\nline"));
++        asio::streambuf buf;
++        asio::read_until(a, buf, '\n');
++        std::istream in(&buf);
++        std::string line;
++        std::getline(in, line);
++        EXPECT_EQ(line, "to-a");
++
++        b.close();
++        events = waitForEvents(server, 1);
++        ASSERT_EQ(events.size(), 1u);
++        EXPECT_EQ(events[0].mType, Net::ServerEvent::Type::ClientDisconnected);
++        EXPECT_EQ(events[0].mClient, 2u);
++
++        server.kick(1);
++        boost::system::error_code ec;
++        asio::read(a, buf, ec);
++        EXPECT_TRUE(ec); // closed by the server
++        server.stop();
++        EXPECT_FALSE(server.isListening());
++    }
++
++    TEST(NetServerTest, shouldReportListenFailure)
++    {
++        Net::Server first, second;
++        const std::uint16_t port = listenOnFreePort(first);
++        ASSERT_NE(port, 0);
++        EXPECT_FALSE(second.listen(port).empty());
++        EXPECT_FALSE(second.isListening());
++    }
++}
+diff --git a/apps/openmw/mwlua/globalscripts.hpp b/apps/openmw/mwlua/globalscripts.hpp
+index 6eeed28a1c..05411f2ec1 100644
+--- a/apps/openmw/mwlua/globalscripts.hpp
++++ b/apps/openmw/mwlua/globalscripts.hpp
+@@ -50,6 +50,12 @@ namespace MWLua
+         void onNetConnected() { callEngineHandlers(mNetConnectedHandlers); }
+         void onNetDisconnected(const std::string& reason) { callEngineHandlers(mNetDisconnectedHandlers, reason); }
+         void onNetMessage(const std::string& message) { callEngineHandlers(mNetMessageHandlers, message); }
++        void onNetClientConnected(std::uint32_t id) { callEngineHandlers(mNetClientConnectedHandlers, id); }
++        void onNetClientDisconnected(std::uint32_t id) { callEngineHandlers(mNetClientDisconnectedHandlers, id); }
++        void onNetClientMessage(std::uint32_t id, const std::string& message)
++        {
++            callEngineHandlers(mNetClientMessageHandlers, id, message);
++        }
+ 
+     private:
+         EngineHandlerList mObjectActiveHandlers{ "onObjectActive" };
+@@ -66,6 +72,9 @@ namespace MWLua
+         EngineHandlerList mNetConnectedHandlers{ "onNetConnected" };
+         EngineHandlerList mNetDisconnectedHandlers{ "onNetDisconnected" };
+         EngineHandlerList mNetMessageHandlers{ "onNetMessage" };
++        EngineHandlerList mNetClientConnectedHandlers{ "onNetClientConnected" };
++        EngineHandlerList mNetClientDisconnectedHandlers{ "onNetClientDisconnected" };
++        EngineHandlerList mNetClientMessageHandlers{ "onNetClientMessage" };
+     };
+ 
+ }
+diff --git a/apps/openmw/mwlua/luabindings.cpp b/apps/openmw/mwlua/luabindings.cpp
+index 42abc57300..fbabdabc4b 100644
+--- a/apps/openmw/mwlua/luabindings.cpp
++++ b/apps/openmw/mwlua/luabindings.cpp
+@@ -58,7 +58,7 @@ namespace MWLua
+         initObjectBindingsForGlobalScripts(context);
+         initCellBindingsForGlobalScripts(context);
+         return {
+-            { "openmw.net", initNetPackage(context, context.mLuaManager->netClient()) },
++            { "openmw.net", initNetPackage(context, context.mLuaManager->netClient(), context.mLuaManager->netServer()) },
+             { "openmw.types", initTypesPackage(context) },
+             { "openmw.core", initCorePackage(context) },
+             { "openmw.world", initWorldPackage(context) },
+diff --git a/apps/openmw/mwlua/luamanagerimp.cpp b/apps/openmw/mwlua/luamanagerimp.cpp
+index c363bef013..610b43b4b9 100644
+--- a/apps/openmw/mwlua/luamanagerimp.cpp
++++ b/apps/openmw/mwlua/luamanagerimp.cpp
+@@ -482,6 +482,21 @@ namespace MWLua
+                         break;
+                 }
+             }
++            for (const Net::ServerEvent& event : mNetServer.poll())
++            {
++                switch (event.mType)
++                {
++                    case Net::ServerEvent::Type::ClientConnected:
++                        mGlobalScripts.onNetClientConnected(event.mClient);
++                        break;
++                    case Net::ServerEvent::Type::ClientDisconnected:
++                        mGlobalScripts.onNetClientDisconnected(event.mClient);
++                        break;
++                    case Net::ServerEvent::Type::Message:
++                        mGlobalScripts.onNetClientMessage(event.mClient, event.mData);
++                        break;
++                }
++            }
+             bool isPaused = timeManager.isPaused();
+ 
+             {
+@@ -752,6 +767,7 @@ namespace MWLua
+         mLuaEvents.clear();
+         mEngineEvents.clear();
+         mNetClient.disconnect();
++        mNetServer.stop();
+         mInputEvents.clear();
+         mMenuInputEvents.clear();
+         mObjectLists.clear();
+diff --git a/apps/openmw/mwlua/luamanagerimp.hpp b/apps/openmw/mwlua/luamanagerimp.hpp
+index 5d8d638f0c..f1e11561d6 100644
+--- a/apps/openmw/mwlua/luamanagerimp.hpp
++++ b/apps/openmw/mwlua/luamanagerimp.hpp
+@@ -16,6 +16,7 @@
+ #include <components/lua/storage.hpp>
+ #include <components/lua_ui/resources.hpp>
+ #include <components/net/client.hpp>
++#include <components/net/server.hpp>
+ #include <components/misc/color.hpp>
+ 
+ #include "../mwbase/luamanager.hpp"
+@@ -83,6 +84,7 @@ namespace MWLua
+         void initPostLoad();
+ 
+         Net::Client& netClient() { return mNetClient; }
++        Net::Server& netServer() { return mNetServer; }
+ 
+         void loadPermanentStorage(const std::filesystem::path& userConfigPath);
+         void savePermanentStorage(const std::filesystem::path& userConfigPath) override;
+@@ -371,6 +373,7 @@ namespace MWLua
+         LuaEvents mLuaEvents{ mGlobalScripts, mMenuScripts, mLua };
+         EngineEvents mEngineEvents{ mGlobalScripts };
+         Net::Client mNetClient;
++        Net::Server mNetServer;
+         std::vector<MWBase::LuaManager::InputEvent> mInputEvents;
+         std::vector<MWBase::LuaManager::InputEvent> mMenuInputEvents;
+ 
+diff --git a/apps/openmw/mwlua/netbindings.cpp b/apps/openmw/mwlua/netbindings.cpp
+index 8a620532d8..85c0e8ca21 100644
+--- a/apps/openmw/mwlua/netbindings.cpp
++++ b/apps/openmw/mwlua/netbindings.cpp
+@@ -7,6 +7,7 @@
+ 
+ #include <components/lua/luastate.hpp>
+ #include <components/net/client.hpp>
++#include <components/net/server.hpp>
+ 
+ #include "context.hpp"
+ 
+@@ -135,7 +136,7 @@ namespace MWLua
+         }
+     }
+ 
+-    sol::table initNetPackage(const Context& context, Net::Client& client)
++    sol::table initNetPackage(const Context& context, Net::Client& client, Net::Server& server)
+     {
+         sol::state_view lua = context.sol();
+         sol::table api(lua, sol::create);
+@@ -150,6 +151,20 @@ namespace MWLua
+         api["disconnect"] = [&client]() { client.disconnect(); };
+         api["isConnected"] = [&client]() { return client.isConnected(); };
+         api["send"] = [&client](std::string_view message) { return client.send(message); };
++        // Hosting: a listening server whose clients are addressed by numeric id. Events arrive in global
++        // scripts as onNetClientConnected(id), onNetClientDisconnected(id) and onNetClientMessage(id, line).
++        api["listen"] = [&server](int port) -> sol::optional<std::string> {
++            if (port < 1 || port > std::numeric_limits<std::uint16_t>::max())
++                throw std::invalid_argument("net.listen: port out of range");
++            std::string error = server.listen(static_cast<std::uint16_t>(port));
++            if (error.empty())
++                return sol::nullopt;
++            return error;
++        };
++        api["stopListening"] = [&server]() { server.stop(); };
++        api["isListening"] = [&server]() { return server.isListening(); };
++        api["sendTo"] = [&server](std::uint32_t id, std::string_view message) { return server.send(id, message); };
++        api["kick"] = [&server](std::uint32_t id) { server.kick(id); };
+         api["encodeJson"] = [](const sol::object& value) {
+             std::string out;
+             appendJson(out, value, 0);
+diff --git a/apps/openmw/mwlua/netbindings.hpp b/apps/openmw/mwlua/netbindings.hpp
+index 9ecb28cb83..731413c6f8 100644
+--- a/apps/openmw/mwlua/netbindings.hpp
++++ b/apps/openmw/mwlua/netbindings.hpp
+@@ -12,7 +12,7 @@ namespace MWLua
+ {
+     struct Context;
+ 
+-    sol::table initNetPackage(const Context& context, Net::Client& client);
++    sol::table initNetPackage(const Context& context, Net::Client& client, Net::Server& server);
+ }
+ 
+ #endif // MWLUA_NETBINDINGS_H
+diff --git a/components/CMakeLists.txt b/components/CMakeLists.txt
+index 0accb411c8..1a5684d35f 100644
+--- a/components/CMakeLists.txt
++++ b/components/CMakeLists.txt
+@@ -505,6 +505,7 @@ add_component_dir(serialization
+ 
+ add_component_dir(net
+     client
++    server
+     )
+ 
+ add_component_dir(sqlite3
+diff --git a/components/net/server.cpp b/components/net/server.cpp
+new file mode 100644
+index 0000000000..40ecc50c7a
+--- /dev/null
++++ b/components/net/server.cpp
+@@ -0,0 +1,270 @@
++#include "server.hpp"
++
++#include <deque>
++#include <map>
++#include <mutex>
++#include <optional>
++#include <thread>
++
++#include <boost/asio.hpp>
++
++namespace Net
++{
++    namespace asio = boost::asio;
++    using asio::ip::tcp;
++
++    namespace
++    {
++        struct EventQueue
++        {
++            std::mutex mMutex;
++            std::vector<ServerEvent> mEvents;
++
++            void push(ServerEvent::Type type, std::uint32_t client, std::string data = {})
++            {
++                const std::lock_guard lock(mMutex);
++                mEvents.push_back({ type, client, std::move(data) });
++            }
++        };
++
++        // Lives on the io thread.
++        class Connection : public std::enable_shared_from_this<Connection>
++        {
++        public:
++            Connection(tcp::socket socket, std::uint32_t id, std::shared_ptr<EventQueue> queue)
++                : mSocket(std::move(socket))
++                , mId(id)
++                , mQueue(std::move(queue))
++            {
++            }
++
++            void start()
++            {
++                boost::system::error_code ignored;
++                mSocket.set_option(tcp::no_delay(true), ignored);
++                mQueue->push(ServerEvent::Type::ClientConnected, mId);
++                read();
++            }
++
++            void write(std::string line)
++            {
++                if (mClosed)
++                    return;
++                line.push_back('\n');
++                mPending += line.size();
++                if (mPending > Server::sMaxPendingOutput)
++                    return fail(); // the client is not keeping up
++                const bool idle = mOut.empty();
++                mOut.push_back(std::move(line));
++                if (idle)
++                    doWrite();
++            }
++
++            // Closes without reporting a disconnect.
++            void close()
++            {
++                mClosed = true;
++                boost::system::error_code ignored;
++                mSocket.close(ignored);
++            }
++
++        private:
++            void read()
++            {
++                asio::async_read_until(mSocket, asio::dynamic_buffer(mIn, Server::sMaxLineSize), '\n',
++                    [self = shared_from_this()](const boost::system::error_code& ec, std::size_t n) {
++                        if (ec)
++                            return self->fail();
++                        std::size_t len = n - 1;
++                        if (len > 0 && self->mIn[len - 1] == '\r')
++                            --len;
++                        self->mQueue->push(ServerEvent::Type::Message, self->mId, self->mIn.substr(0, len));
++                        self->mIn.erase(0, n);
++                        self->read();
++                    });
++            }
++
++            void doWrite()
++            {
++                asio::async_write(mSocket, asio::buffer(mOut.front()),
++                    [self = shared_from_this()](const boost::system::error_code& ec, std::size_t n) {
++                        if (ec)
++                            return self->fail();
++                        self->mPending -= n;
++                        self->mOut.pop_front();
++                        if (!self->mOut.empty())
++                            self->doWrite();
++                    });
++            }
++
++            void fail()
++            {
++                if (mClosed)
++                    return;
++                close();
++                mQueue->push(ServerEvent::Type::ClientDisconnected, mId);
++            }
++
++            tcp::socket mSocket;
++            std::uint32_t mId;
++            std::shared_ptr<EventQueue> mQueue;
++            std::string mIn;
++            std::deque<std::string> mOut;
++            std::size_t mPending = 0;
++            bool mClosed = false;
++        };
++    }
++
++    class Server::Impl
++    {
++    public:
++        ~Impl() { stop(); }
++
++        std::string listen(std::uint16_t port)
++        {
++            stop();
++            boost::system::error_code ec;
++            tcp::acceptor acceptor(mIo);
++            const tcp::endpoint endpoint(tcp::v4(), port);
++            acceptor.open(endpoint.protocol(), ec);
++            if (!ec)
++                acceptor.set_option(tcp::acceptor::reuse_address(true), ec);
++            if (!ec)
++                acceptor.bind(endpoint, ec);
++            if (!ec)
++                acceptor.listen(asio::socket_base::max_listen_connections, ec);
++            if (ec)
++                return ec.message();
++            mQueue = std::make_shared<EventQueue>();
++            mAcceptor.emplace(std::move(acceptor));
++            mNextId = 1;
++            mWork.emplace(asio::make_work_guard(mIo));
++            mThread = std::thread([this] { mIo.run(); });
++            asio::post(mIo, [this] { accept(); });
++            return {};
++        }
++
++        void stop()
++        {
++            if (!mThread.joinable())
++                return;
++            asio::post(mIo, [this] {
++                boost::system::error_code ignored;
++                mAcceptor->close(ignored);
++                for (auto& [id, c] : mConnections)
++                    c->close();
++                mConnections.clear();
++            });
++            mWork.reset();
++            mThread.join();
++            mIo.restart();
++            mAcceptor.reset();
++            mQueue.reset();
++        }
++
++        bool isListening() const { return mThread.joinable(); }
++
++        bool send(std::uint32_t client, std::string_view line)
++        {
++            if (!isListening() || line.size() > Server::sMaxLineSize
++                || line.find_first_of("\r\n") != std::string_view::npos)
++                return false;
++            asio::post(mIo, [this, client, l = std::string(line)]() mutable {
++                const auto it = mConnections.find(client);
++                if (it != mConnections.end())
++                    it->second->write(std::move(l));
++            });
++            return true;
++        }
++
++        void kick(std::uint32_t client)
++        {
++            if (!isListening())
++                return;
++            asio::post(mIo, [this, client] {
++                const auto it = mConnections.find(client);
++                if (it != mConnections.end())
++                {
++                    it->second->close();
++                    mConnections.erase(it);
++                }
++            });
++        }
++
++        std::vector<ServerEvent> poll()
++        {
++            std::vector<ServerEvent> result;
++            if (mQueue)
++            {
++                {
++                    const std::lock_guard lock(mQueue->mMutex);
++                    result.swap(mQueue->mEvents);
++                }
++                // Forget connections the io thread has already closed, so ids are not leaked.
++                for (const ServerEvent& e : result)
++                    if (e.mType == ServerEvent::Type::ClientDisconnected)
++                        asio::post(mIo, [this, id = e.mClient] { mConnections.erase(id); });
++            }
++            return result;
++        }
++
++    private:
++        void accept()
++        {
++            mAcceptor->async_accept([this](const boost::system::error_code& ec, tcp::socket socket) {
++                if (ec)
++                    return; // acceptor closed
++                const std::uint32_t id = mNextId++;
++                auto connection = std::make_shared<Connection>(std::move(socket), id, mQueue);
++                mConnections.emplace(id, connection);
++                connection->start();
++                accept();
++            });
++        }
++
++        asio::io_context mIo;
++        std::optional<asio::executor_work_guard<asio::io_context::executor_type>> mWork;
++        std::thread mThread;
++        std::optional<tcp::acceptor> mAcceptor;
++        std::shared_ptr<EventQueue> mQueue;
++        std::map<std::uint32_t, std::shared_ptr<Connection>> mConnections; // io thread only
++        std::uint32_t mNextId = 1;
++    };
++
++    Server::Server()
++        : mImpl(std::make_unique<Impl>())
++    {
++    }
++
++    Server::~Server() = default;
++
++    std::string Server::listen(std::uint16_t port)
++    {
++        return mImpl->listen(port);
++    }
++
++    void Server::stop()
++    {
++        mImpl->stop();
++    }
++
++    bool Server::isListening() const
++    {
++        return mImpl->isListening();
++    }
++
++    bool Server::send(std::uint32_t client, std::string_view line)
++    {
++        return mImpl->send(client, line);
++    }
++
++    void Server::kick(std::uint32_t client)
++    {
++        mImpl->kick(client);
++    }
++
++    std::vector<ServerEvent> Server::poll()
++    {
++        return mImpl->poll();
++    }
++}
+diff --git a/components/net/server.hpp b/components/net/server.hpp
+new file mode 100644
+index 0000000000..b27ae81165
+--- /dev/null
++++ b/components/net/server.hpp
+@@ -0,0 +1,59 @@
++#ifndef OPENMW_COMPONENTS_NET_SERVER_H
++#define OPENMW_COMPONENTS_NET_SERVER_H
++
++#include <cstdint>
++#include <memory>
++#include <string>
++#include <string_view>
++#include <vector>
++
++namespace Net
++{
++    struct ServerEvent
++    {
++        enum class Type
++        {
++            ClientConnected,
++            ClientDisconnected, // not emitted for kick() or stop()
++            Message, // mData holds one received line, without the line terminator.
++        };
++        Type mType;
++        std::uint32_t mClient;
++        std::string mData;
++    };
++
++    // Line-oriented TCP server. Sockets live on a background thread; the owner drives it with
++    // non-blocking calls and collects results with poll(). Not thread-safe: use from a single thread.
++    class Server
++    {
++    public:
++        static constexpr std::size_t sMaxLineSize = 1024 * 1024;
++        static constexpr std::size_t sMaxPendingOutput = 8 * 1024 * 1024;
++
++        Server();
++        ~Server();
++        Server(const Server&) = delete;
++        Server& operator=(const Server&) = delete;
++
++        // Starts listening on all interfaces. Returns an error message, or an empty string on success.
++        // Stops any previous listening first.
++        std::string listen(std::uint16_t port);
++
++        // Closes the listening socket and every client, and discards pending events.
++        void stop();
++
++        bool isListening() const;
++
++        // Client ids start at 1 and are never reused while listening.
++        bool send(std::uint32_t client, std::string_view line);
++        void kick(std::uint32_t client);
++
++        std::vector<ServerEvent> poll();
++
++    private:
++        class Impl;
++        std::unique_ptr<Impl> mImpl;
++    };
++}
++
++#endif
+diff --git a/docs/source/reference/lua-scripting/engine_handlers.rst b/docs/source/reference/lua-scripting/engine_handlers.rst
+index 9d48f8b968..c8ad1cf539 100644
+--- a/docs/source/reference/lua-scripting/engine_handlers.rst
++++ b/docs/source/reference/lua-scripting/engine_handlers.rst
+@@ -60,6 +60,12 @@ Engine handler is a function defined by a script, that can be called by the engi
+       | Not called after ``openmw.net.disconnect``.
+   * - onNetMessage(message)
+     - A line was received from the server. ``message`` is a string without the line terminator.
++  * - onNetClientConnected(id)
++    - A client connected to the server started with ``openmw.net.listen``. ``id`` is a number.
++  * - onNetClientDisconnected(id)
++    - | A client of the server went away. Not called after ``openmw.net.kick``.
++  * - onNetClientMessage(id, message)
++    - A line was received from a client of the server.
+   * - onObjectActive(object)
+     - Object becomes active.
+   * - onActorActive(actor)
+diff --git a/files/lua_api/openmw/net.lua b/files/lua_api/openmw/net.lua
+index f5c002eb76..ea9c346248 100644
+--- a/files/lua_api/openmw/net.lua
++++ b/files/lua_api/openmw/net.lua
+@@ -6,7 +6,9 @@
+ -- up to the script (see @{#net.encodeJson} and @{openmw.markup#markup.decodeYaml}, which also parses JSON).
+ -- Connection progress and incoming data are delivered through the engine handlers
+ -- `onNetConnected()`, `onNetDisconnected(reason)` and `onNetMessage(message)`.
+--- The connection is dropped when a game is unloaded.
++-- A script can also host: @{#net.listen} accepts any number of clients, addressed by numeric id, and reports them through
++-- `onNetClientConnected(id)`, `onNetClientDisconnected(id)` and `onNetClientMessage(id, message)`.
++-- The connection and the server are closed when a game is unloaded.
+ -- @context global
+ -- @module net
+ -- @usage local net = require('openmw.net')
+@@ -35,6 +37,33 @@
+ -- @param #string message Must not contain line breaks (`\r` or `\n`) and must be at most 1 MiB.
+ -- @return #boolean `false` if not connected or the message was rejected.
+ 
++---
++-- Start accepting clients on all interfaces, replacing any previous server. Does not block.
++-- @function [parent=#net] listen
++-- @param #number port TCP port, 1-65535.
++-- @return #string An error message if the port could not be opened, otherwise `nil`.
++
++---
++-- Close the server and all of its clients. `onNetClientDisconnected` is not called for them.
++-- @function [parent=#net] stopListening
++
++---
++-- Whether @{#net.listen} succeeded and the server has not been stopped.
++-- @function [parent=#net] isListening
++-- @return #boolean
++
++---
++-- Send a message to a client of the server. A line break is appended.
++-- @function [parent=#net] sendTo
++-- @param #number id Client id from `onNetClientConnected`.
++-- @param #string message Same restrictions as for @{#net.send}.
++-- @return #boolean `false` if not listening or the message was rejected. A client that has already gone is silently ignored.
++
++---
++-- Disconnect a client of the server. `onNetClientDisconnected` is not called for it.
++-- @function [parent=#net] kick
++-- @param #number id Client id.
++
+ ---
+ -- Convert a Lua value to a JSON string, which contains no line breaks and can be passed to @{#net.send}.
+ -- Supports nil, booleans, numbers, strings and tables; a table with keys 1..n is
+diff --git a/multiplayer/README.md b/multiplayer/README.md
+index f6cde39d80..fe1da2f9e8 100644
+--- a/multiplayer/README.md
++++ b/multiplayer/README.md
+@@ -8,6 +8,13 @@
+ Run: `multiplayer/run-test.sh [path/to/openmw]`, then load a save. Watch `openmw.log` for `[mp]` lines.
+ Protocol: one JSON object per line, `{"t":"state","name","cell","pos":[x,y,z],"yaw"}`; the server adds `id`.
+ 
++## Hosting and joining
++From the main menu's Multiplayer screen choose **Join a server** (address + port) or **Host a game** (port), then start or
++load a character. Hosting runs the relay inside your game (`mod/scripts/mp/relay.lua`, on top of `net.listen`) and you play
++through a loopback connection to it, so any number of players can join you. You are connected to exactly one host at a
++time, and while hosting you cannot join another server; to switch, return to the main menu and load again.
++`server/relay.py` is still there for a dedicated server.
++
+ ## How it works
+ Every player keeps their **own** world; nothing a group member does changes yours.
+ - **Presence:** everyone online appears as a stand-in NPC (look + gear) when you share a cell. Activate one for a menu:
+diff --git a/multiplayer/mod/scripts/mp/global.lua b/multiplayer/mod/scripts/mp/global.lua
+index 5f947f1fd2..2590801206 100644
+--- a/multiplayer/mod/scripts/mp/global.lua
++++ b/multiplayer/mod/scripts/mp/global.lua
+@@ -12,6 +12,7 @@ local storage = require('openmw.storage')
+ local markup = require('openmw.markup')
+ local I = require('openmw.interfaces')
+ local proxies = require('scripts/mp/proxies')
++local relay = require('scripts/mp/relay')
+ 
+ local SETTINGS = 'SettingsGlobalMultiplayer'
+ local SEND_INTERVAL = 0.1
+@@ -30,6 +31,8 @@ I.Settings.registerGroup {
+     permanentStorage = true,
+     settings = {
+         { key = 'Enabled', renderer = 'checkbox', name = 'Enabled', default = true },
++        { key = 'Mode', renderer = 'select', name = 'Mode', default = 'join',
++          argument = { l10n = 'Multiplayer', items = { 'join', 'host' } } },
+         { key = 'Host', renderer = 'textLine', name = 'Server host', default = '127.0.0.1' },
+         { key = 'Port', renderer = 'number', name = 'Server port', default = 25565,
+           argument = { integer = true, min = 1, max = 65535 } },
+@@ -38,6 +41,7 @@ I.Settings.registerGroup {
+ local settings = storage.globalSection(SETTINGS)
+ 
+ local sendTimer, equipTimer, retry = 0, 0, 0
++local hostErrorShown = false
+ local lastEquipJson
+ local myId
+ local remotes = {} -- id -> { profile, state, equip, obj, equipSent }  (group members' avatars)
+@@ -83,10 +87,34 @@ proxies.init({
+ 
+ ------------------------------------------------------------------ connection / group
+ 
++-- Two modes, never both: 'join' connects to someone else's server; 'host' runs the server in this game
++-- (relay.lua) and plays through a loopback connection to it. Either way there is exactly one connection.
++local function hosting() return settings:get('Mode') == 'host' end
++
+ local function connect()
+     if not settings:get('Enabled') then return end
+-    log('connecting to ' .. settings:get('Host') .. ':' .. tostring(settings:get('Port')))
+-    net.connect(settings:get('Host'), settings:get('Port'))
++    local port = settings:get('Port')
++    if hosting() then
++        if not relay.isRunning() then
++            local err = relay.start(port)
++            if err then
++                log('could not host on port ' .. tostring(port) .. ': ' .. tostring(err))
++                if not hostErrorShown then
++                    hostErrorShown = true
++                    notice('Could not host on port ' .. tostring(port) .. ': ' .. tostring(err))
++                end
++                return
++            end
++            hostErrorShown = false
++            log('hosting on port ' .. tostring(port))
++            notice('Hosting on port ' .. tostring(port) .. '. Others can join with your address.')
++        end
++        net.connect('127.0.0.1', port)
++    else
++        if relay.isRunning() then relay.stop() end
++        log('connecting to ' .. settings:get('Host') .. ':' .. tostring(port))
++        net.connect(settings:get('Host'), port)
++    end
+ end
+ 
+ local clearRemotes
+@@ -95,6 +123,8 @@ local onAvatarActivated
+ settings:subscribe(async:callback(function()
+     clearRemotes()
+     net.disconnect()
++    relay.stop() -- reconnecting starts it again if still hosting
++    hostErrorShown = false
+     retry = RETRY_INTERVAL
+ end))
+ 
+@@ -394,6 +424,7 @@ local function onCommand(d)
+     elseif cmd == 'sync' then
+         pushUi()
+     elseif cmd == 'configure' then
++        if d.mode and d.mode ~= settings:get('Mode') then settings:set('Mode', d.mode) end
+         if d.host and d.host ~= settings:get('Host') then settings:set('Host', d.host) end
+         if d.port and d.port ~= settings:get('Port') then settings:set('Port', d.port) end
+     elseif cmd == 'trade_send' then
+@@ -523,6 +554,7 @@ return {
+         end,
+         onUpdate = function(dt)
+             clock = clock + dt
++            relay.update(dt)
+             proxies.onUpdate(dt)
+             for _, r in pairs(remotes) do updateRemote(r) end
+             if net.isConnected() then
+@@ -560,6 +592,9 @@ return {
+             notice('Disconnected from the server.')
+             pushUi()
+         end,
++        onNetClientConnected = relay.onClientConnected,
++        onNetClientDisconnected = relay.onClientDisconnected,
++        onNetClientMessage = relay.onClientMessage,
+         onNetMessage = function(line)
+             local ok, msg = pcall(markup.decodeYaml, line)
+             if ok and type(msg) == 'table' then onMessage(msg) end
+diff --git a/multiplayer/mod/scripts/mp/menu.lua b/multiplayer/mod/scripts/mp/menu.lua
+index 160ffe2846..20cc5199ce 100644
+--- a/multiplayer/mod/scripts/mp/menu.lua
++++ b/multiplayer/mod/scripts/mp/menu.lua
+@@ -13,7 +13,7 @@ local V2, rgb = util.vector2, util.color.rgb
+ local WHITE = ui.texture { path = 'white' }
+ local section = storage.playerSection('MpConnect')
+ 
+-local W, H = 640, 470
++local W, H = 640, 500
+ local TEXT_SIZE = 18
+ local C = {
+     text = rgb(0.92, 0.92, 0.92), head = rgb(1, 0.85, 0.35), dim = rgb(0.65, 0.65, 0.65),
+@@ -24,6 +24,7 @@ local C = {
+ local el
+ local view = 'main' -- 'main' | 'load'
+ local hostBuf, portBuf = nil, nil
++local mode = 'join' -- 'join' someone else's server | 'host' one from this game
+ local message, messageColor = nil, C.dim
+ 
+ local function text(props, events)
+@@ -41,11 +42,12 @@ local render
+ local function apply()
+     local host = (hostBuf or ''):gsub('^%s+', ''):gsub('%s+$', '')
+     local port = tonumber(portBuf)
+-    if host == '' then message, messageColor = 'Enter the server address.', C.err render() return false end
++    if mode == 'join' and host == '' then message, messageColor = 'Enter the server address.', C.err render() return false end
+     if not port or port < 1 or port > 65535 or port ~= math.floor(port) then
+         message, messageColor = 'The port must be a number from 1 to 65535.', C.err render() return false
+     end
+-    section:set('Host', host)
++    section:set('Mode', mode)
++    if mode == 'join' then section:set('Host', host) end
+     section:set('Port', port)
+     return true
+ end
+@@ -90,29 +92,51 @@ render = function()
+     }
+     local running = menu.getState() == menu.STATE.Running
+     if view == 'main' then
+-        content[#content + 1] = text({ position = V2(24, 70), text = 'Server', textColor = C.text })
+-        content[#content + 1] = field(140, 66, 300, hostBuf, function(t) hostBuf = t end)
+-        content[#content + 1] = text({ position = V2(24, 112), text = 'Port', textColor = C.text })
+-        content[#content + 1] = field(140, 108, 120, portBuf, function(t) portBuf = t end)
++        content[#content + 1] = text({ position = V2(24, 70), text = 'Mode', textColor = C.text })
++        local function modeButton(x, label, value)
++            local selected = mode == value
++            content[#content + 1] = button(x, 66, label, function()
++                if running then
++                    message, messageColor = 'Return to the main menu to switch between hosting and joining.', C.err
++                    render()
++                elseif mode ~= value then
++                    mode, message = value, nil
++                    render()
++                end
++            end, selected and C.ok or C.dim)
++        end
++        modeButton(140, 'Join a server', 'join')
++        modeButton(340, 'Host a game', 'host')
++        if mode == 'join' then
++            content[#content + 1] = text({ position = V2(24, 118), text = 'Server', textColor = C.text })
++            content[#content + 1] = field(140, 114, 300, hostBuf, function(t) hostBuf = t end)
++        end
++        content[#content + 1] = text({ position = V2(24, 160), text = 'Port', textColor = C.text })
++        content[#content + 1] = field(140, 156, 120, portBuf, function(t) portBuf = t end)
+         local info = {
+             "Your character's name, look and gear are shared with other players automatically.",
+             'Everyone keeps their own world; you only share a world state inside a party.',
+-            'To host, run multiplayer/server/relay.py on a machine the others can reach',
+-            '(default port 25565) and give them its address.',
+         }
++        if mode == 'host' then
++            info[#info + 1] = 'Hosting starts when your game does, and others can then join you at your'
++            info[#info + 1] = 'address and this port (forward it on your router if they are not on your network).'
++            info[#info + 1] = 'While hosting you cannot join another server.'
++        else
++            info[#info + 1] = 'You can be connected to one host at a time.'
++        end
+         for i, line in ipairs(info) do
+-            content[#content + 1] = text({ position = V2(24, 160 + (i - 1) * 22), text = line, textColor = C.dim, textSize = 15 })
++            content[#content + 1] = text({ position = V2(24, 206 + (i - 1) * 22), text = line, textColor = C.dim, textSize = 15 })
+         end
+-        if message then content[#content + 1] = text({ position = V2(24, 250), text = message, textColor = messageColor }) end
++        if message then content[#content + 1] = text({ position = V2(24, 290), text = message, textColor = messageColor }) end
+         if running then
+-            content[#content + 1] = button(24, 300, 'Apply and reconnect', function()
++            content[#content + 1] = button(24, 330, 'Apply and reconnect', function()
+                 if apply() then message, messageColor = 'Saved. Reconnecting in the game.', C.ok render() end
+             end)
+         else
+-            content[#content + 1] = button(24, 300, 'New character', function()
++            content[#content + 1] = button(24, 330, 'New character', function()
+                 if apply() then close() menu.newGame() end
+             end)
+-            content[#content + 1] = button(24, 340, 'Load character', function()
++            content[#content + 1] = button(24, 370, 'Load character', function()
+                 if apply() then view = 'load' render() end
+             end)
+         end
+@@ -148,6 +172,7 @@ render = function()
+ end
+ 
+ local function open()
++    mode = section:get('Mode') or mode
+     hostBuf = hostBuf or section:get('Host') or '127.0.0.1'
+     portBuf = portBuf or tostring(section:get('Port') or 25565)
+     view, message = 'main', nil
+diff --git a/multiplayer/mod/scripts/mp/player.lua b/multiplayer/mod/scripts/mp/player.lua
+index 33204f6ef5..54d6da52dc 100644
+--- a/multiplayer/mod/scripts/mp/player.lua
++++ b/multiplayer/mod/scripts/mp/player.lua
+@@ -382,8 +382,9 @@ return {
+                 core.sendGlobalEvent('MpCmd', { cmd = 'sync' })
+                 -- server chosen on the main menu screen (menu.lua) -> global script
+                 local conn = storage.playerSection('MpConnect')
+-                if conn:get('Host') then
+-                    core.sendGlobalEvent('MpCmd', { cmd = 'configure', host = conn:get('Host'), port = conn:get('Port') })
++                if conn:get('Mode') then
++                    core.sendGlobalEvent('MpCmd', {
++                        cmd = 'configure', mode = conn:get('Mode'), host = conn:get('Host'), port = conn:get('Port') })
+                 end
+             end
+             local shouldShow = chatOpen or (now() - lastMsgTime < FADE_AFTER)
+diff --git a/multiplayer/mod/scripts/mp/relay.lua b/multiplayer/mod/scripts/mp/relay.lua
+new file mode 100644
+index 0000000000..5c427288a6
+--- /dev/null
++++ b/multiplayer/mod/scripts/mp/relay.lua
+@@ -0,0 +1,260 @@
++-- In-game relay: lets the host's game act as the multiplayer server (same protocol as server/relay.py).
++-- Everyone connected shares a global channel (presence and global chat). Parties (max 3) are formed
++-- with invites and additionally share party chat, vitals, and actor rosters/damage. Every player keeps
++-- their own world; the relay only routes messages. The host plays through an ordinary loopback client.
++local net = require('openmw.net')
++local markup = require('openmw.markup')
++
++local MAX_PARTY = 3
++local INVITE_TTL = 60
++local CHAT_MAX = 240
++local GLOBAL_TYPES = { profile = true, equip = true, state = true }
++local PARTY_TYPES = { actors = true, vitals = true, dmg = true }
++local CACHED = { profile = true, equip = true, state = true, actors = true, vitals = true }
++local GLOBAL_ORDER = { 'profile', 'equip', 'state' }
++
++local clients = {} -- id -> { party = id|nil, last = { [type] = encoded json }, tokens, tokenTime }
++local parties = {} -- party id -> { members = {ids}, leader = id }
++local invites = {} -- 'from:to' -> { from, to, exp }
++local nextParty = 1
++local clock = 0
++local running = false
++
++local M = {}
++
++local function enc(t) return net.encodeJson(t) end
++local function sendRaw(id, json) if clients[id] then net.sendTo(id, json) end end
++local function sendTo(id, msg) sendRaw(id, enc(msg)) end
++local function remove(list, v)
++    for i, x in ipairs(list) do if x == v then table.remove(list, i) return end end
++end
++
++local function partyMembers(id)
++    local c = clients[id]
++    local p = c and c.party and parties[c.party]
++    return p and { table.unpack(p.members) } or {}
++end
++
++local function toParty(id, json)
++    for _, m in ipairs(partyMembers(id)) do
++        if m ~= id then sendRaw(m, json) end
++    end
++end
++
++local function announceParty(pid)
++    local p = parties[pid]
++    if not p then return end
++    local json = enc({ t = 'party', members = p.members, leader = p.leader })
++    for _, m in ipairs(p.members) do sendRaw(m, json) end
++end
++
++local noParty = enc({ t = 'party', members = {}, leader = false })
++
++local function removeFromParty(id)
++    local c = clients[id]
++    local pid = c and c.party
++    if not pid then return end
++    local p = parties[pid]
++    remove(p.members, id)
++    c.party = nil
++    sendRaw(id, noParty)
++    if #p.members <= 1 then -- a party of one is no party
++        for _, m in ipairs(p.members) do
++            clients[m].party = nil
++            sendRaw(m, noParty)
++        end
++        parties[pid] = nil
++    else
++        if p.leader == id then p.leader = p.members[1] end
++        announceParty(pid)
++    end
++end
++
++local function purgeInvites()
++    for k, inv in pairs(invites) do
++        if inv.exp <= clock then invites[k] = nil end
++    end
++end
++
++local function pendingTo(id)
++    local out = {}
++    for _, inv in pairs(invites) do
++        if inv.from == id then out[inv.to] = true end
++    end
++    return out
++end
++
++local function handleInvite(id, msg)
++    purgeInvites()
++    local to = msg.to
++    local function fail(reason) sendTo(id, { t = 'invite_result', ok = false, to = to, reason = reason }) end
++    if type(to) ~= 'number' or not clients[to] or to == id then return fail('unknown') end
++    if clients[to].party then return fail('busy') end
++    local members = partyMembers(id)
++    local waiting = pendingTo(id)
++    for _, m in ipairs(members) do for t in pairs(pendingTo(m)) do waiting[t] = true end end
++    waiting[to] = nil
++    local count = 0
++    for _ in pairs(waiting) do count = count + 1 end
++    if math.max(#members, 1) + count >= MAX_PARTY then return fail('full') end
++    invites[id .. ':' .. to] = { from = id, to = to, exp = clock + INVITE_TTL }
++    sendTo(to, { t = 'invite', from = id })
++    sendTo(id, { t = 'invite_result', ok = true, to = to })
++end
++
++local function handleAccept(id, msg)
++    purgeInvites()
++    local frm = msg.from
++    local key = tostring(frm) .. ':' .. id
++    if not invites[key] or not clients[frm] then
++        return sendTo(id, { t = 'invite_result', ok = false, to = frm, reason = 'expired' })
++    end
++    invites[key] = nil
++    if clients[id].party then
++        return sendTo(id, { t = 'invite_result', ok = false, to = frm, reason = 'busy' })
++    end
++    local members = partyMembers(frm)
++    if #members >= MAX_PARTY then
++        return sendTo(id, { t = 'invite_result', ok = false, to = frm, reason = 'full' })
++    end
++    if #members == 0 then
++        local pid = nextParty
++        nextParty = nextParty + 1
++        parties[pid] = { members = { frm }, leader = frm }
++        clients[frm].party = pid
++    end
++    local pid = clients[frm].party
++    table.insert(parties[pid].members, id)
++    clients[id].party = pid
++    for k, inv in pairs(invites) do if inv.to == id then invites[k] = nil end end
++    announceParty(pid)
++    -- bring everyone up to date on each other's actors/vitals
++    for _, m in ipairs(parties[pid].members) do
++        for _, t in ipairs({ 'actors', 'vitals' }) do
++            local json = clients[m].last[t]
++            if json then
++                for _, o in ipairs(parties[pid].members) do
++                    if o ~= m then sendRaw(o, json) end
++                end
++            end
++        end
++    end
++end
++
++local function handleDecline(id, msg)
++    local key = tostring(msg.from) .. ':' .. id
++    if invites[key] then
++        invites[key] = nil
++        sendTo(msg.from, { t = 'declined', id = id })
++    end
++end
++
++local function allowChat(c)
++    local tokens = math.min(5.0, c.tokens + (clock - c.tokenTime) * 1.5)
++    c.tokenTime = clock
++    if tokens < 1 then c.tokens = tokens return false end
++    c.tokens = tokens - 1
++    return true
++end
++
++local function broadcastOthers(id, json)
++    for o in pairs(clients) do
++        if o ~= id then sendRaw(o, json) end
++    end
++end
++
++------------------------------------------------------------------ engine events
++
++function M.onClientConnected(id)
++    if not running then return end
++    clients[id] = { last = {}, tokens = 5.0, tokenTime = clock }
++    print('[mp-relay]', '+ client', id)
++    sendTo(id, { t = 'hello', id = id })
++    for other, oc in pairs(clients) do -- replay global presence
++        if other ~= id then
++            for _, t in ipairs(GLOBAL_ORDER) do
++                if oc.last[t] then sendRaw(id, oc.last[t]) end
++            end
++        end
++    end
++end
++
++function M.onClientDisconnected(id)
++    if not clients[id] then return end
++    removeFromParty(id)
++    for k, inv in pairs(invites) do
++        if inv.from == id or inv.to == id then invites[k] = nil end
++    end
++    clients[id] = nil
++    print('[mp-relay]', '- client', id)
++    local json = enc({ t = 'leave', id = id })
++    for o in pairs(clients) do sendRaw(o, json) end
++end
++
++function M.onClientMessage(id, line)
++    local c = clients[id]
++    if not c then return end
++    local ok, msg = pcall(markup.decodeYaml, line)
++    if not ok or type(msg) ~= 'table' then return end
++    local t = msg.t
++    if t == 'invite' then return handleInvite(id, msg) end
++    if t == 'accept' then return handleAccept(id, msg) end
++    if t == 'decline' then return handleDecline(id, msg) end
++    if t == 'leave_party' then return removeFromParty(id) end
++    msg.id = id
++    if type(t) ~= 'string' then return end
++    if t:sub(1, 6) == 'trade_' then -- trades are between two players, party or not
++        local target = msg.to
++        if type(target) == 'number' and clients[target] and target ~= id then sendTo(target, msg) end
++        return
++    end
++    if t == 'chat' then
++        local text = tostring(msg.text or ''):sub(1, CHAT_MAX):match('^%s*(.-)%s*$')
++        if text == '' or not allowChat(c) then return end
++        local json = enc({ t = 'chat', id = id, text = text, scope = msg.scope == 'party' and 'party' or 'global' })
++        if msg.scope == 'party' then toParty(id, json) else broadcastOthers(id, json) end
++        return
++    end
++    if CACHED[t] then c.last[t] = enc(msg) end
++    if GLOBAL_TYPES[t] then
++        broadcastOthers(id, c.last[t])
++    elseif PARTY_TYPES[t] then
++        local target = msg.to
++        if target ~= nil then
++            if type(target) == 'number' and target ~= id then
++                for _, m in ipairs(partyMembers(id)) do
++                    if m == target then sendTo(target, msg) break end
++                end
++            end
++        else
++            toParty(id, enc(msg))
++        end
++    end
++end
++
++------------------------------------------------------------------ control
++
++-- Returns an error message, or nil on success.
++function M.start(port)
++    M.stop()
++    local err = net.listen(port)
++    if err then return err end
++    running = true
++    return nil
++end
++
++function M.stop()
++    if running or net.isListening() then net.stopListening() end
++    running = false
++    clients, parties, invites = {}, {}, {}
++end
++
++function M.isRunning() return running end
++function M.clientCount()
++    local n = 0
++    for _ in pairs(clients) do n = n + 1 end
++    return n
++end
++function M.update(dt) clock = clock + dt end
++
++return M
+-- 
+2.55.0
+

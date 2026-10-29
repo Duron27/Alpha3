@@ -1,0 +1,33 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Tue, 27 Oct 2026 07:42:13 -0400
+Subject: [PATCH 13/17] Textures: KTX files stand in for DDS files of the same
+ name
+
+The support library lists each .ktx under the .dds name as one more archive (the last, so it wins) and reads KTX data
+through the DDS reader of the image manager; the engine only asks for the archive before the index is built.
+---
+ components/vfs/registerarchives.cpp | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/components/vfs/registerarchives.cpp b/components/vfs/registerarchives.cpp
+index ea3e976246..7d7d8b3788 100644
+--- a/components/vfs/registerarchives.cpp
++++ b/components/vfs/registerarchives.cpp
+@@ -16,6 +16,8 @@
+ #include <components/vfs/filesystemarchive.hpp>
+ #include <components/vfs/manager.hpp>
+ 
++#include <alpha3/upstream.hpp>
++
+ namespace VFS
+ {
+ 
+@@ -122,6 +124,7 @@ namespace VFS
+             }
+         }
+ 
++        Alpha3::addKtxTextures(*vfs);
+         vfs->buildIndex();
+     }
+ 

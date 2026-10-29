@@ -1,0 +1,174 @@
+From: Duron27 <duron27@gmail.com>
+Subject: [PATCH] A server takes 128 players and tells the rest it is full
+
+- relay: hard cap of 128 players whatever --max-players says (a hosting game counts as one of them); parties stay at 3
+- components/net: more sockets than players (192), so connections beyond the cap get a join_result 'full' instead of being
+  cut off
+- mpserver --help: at most 128
+- capacity_test.py starts the real server and joins 135 players; relay tests for the clamp and the party limit
+
+---
+diff --git a/multiplayer/README.md b/multiplayer/README.md
+index 5789873..162695f 100644
+--- a/multiplayer/README.md
++++ b/multiplayer/README.md
+@@ -61,7 +61,7 @@ The host's relay checks what it passes on: messages have to fit their type (fini
+ rate limited per type (positions, shots, rosters...), and a trade is only forwarded between two players who agreed to it
+ (request, accept, then deals) - an outsider or a stray message cannot inject into one.
+ 
+-Safety (hosted games and servers): protocol version check (both sides must run the same mod), optional password, player limit (default 64), unique
++Safety (hosted games and servers): protocol version check (both sides must run the same mod), optional password, player limit (default 64, at most 128; a game hosted from inside OpenMW counts the host as one of them; parties hold 3), unique
+ names (a second "Alice" becomes "Alice (2)"), a message of the day, and a 10 second limit to say who you are.
+ 
+ ## Dedicated server
+diff --git a/multiplayer/mod/scripts/mp/relay.lua b/multiplayer/mod/scripts/mp/relay.lua
+index 87bf7af..fc07bca 100644
+--- a/multiplayer/mod/scripts/mp/relay.lua
++++ b/multiplayer/mod/scripts/mp/relay.lua
+@@ -7,6 +7,7 @@ local markup = require('openmw.markup')
+ local core = require('openmw.core')
+ 
+ local MAX_PARTY = 3
++local MAX_PLAYERS = 128 -- the most a server takes, whatever it is told (a hosting game counts as one of them)
+ local INVITE_TTL = 60
+ local CHAT_MAX = 240
+ local GLOBAL_TYPES = { profile = true, equip = true, state = true }
+@@ -803,7 +804,7 @@ end
+ -- Returns an error message, or nil on success.
+ function M.start(port, opts)
+     M.stop()
+-    options = { password = tostring(opts and opts.password or ''), maxPlayers = tonumber(opts and opts.maxPlayers) or 64,
++    options = { password = tostring(opts and opts.password or ''), maxPlayers = math.max(1, math.min(MAX_PLAYERS, tonumber(opts and opts.maxPlayers) or 64)),
+         motd = tostring(opts and opts.motd or ''), adminPassword = tostring(opts and opts.adminPassword or '') }
+     dedicated = opts and opts.dedicated and true or false
+     if dedicated then
+diff --git a/multiplayer/test/capacity_test.py b/multiplayer/test/capacity_test.py
+new file mode 100644
+index 0000000..d78700d
+--- /dev/null
++++ b/multiplayer/test/capacity_test.py
+@@ -0,0 +1,70 @@
++#!/usr/bin/env python3
++"""A server takes 128 players and tells the rest it is full:  capacity_test.py <path to openmw-mp-server> <mod dir>"""
++import asyncio, json, subprocess, sys, time
++
++binary, mod = sys.argv[1], sys.argv[2]
++failures = 0
++
++def check(cond, what):
++    global failures
++    if not cond:
++        failures += 1
++        print('FAIL:', what)
++
++async def player(port, i, result, hold):
++    try:
++        r, w = await asyncio.open_connection('127.0.0.1', port)
++    except Exception:
++        result['refused'] += 1
++        return
++    w.write((json.dumps({'t': 'join', 'proto': 2, 'name': f'P{i}'}) + '\n').encode())
++    verdict, end = None, time.time() + 8
++    while time.time() < end and verdict is None:
++        try:
++            line = await asyncio.wait_for(r.readline(), 1.0)
++        except asyncio.TimeoutError:
++            continue
++        if not line:
++            verdict = 'dropped'
++            break
++        m = json.loads(line)
++        if m.get('t') == 'join_result':
++            verdict = 'joined' if m.get('ok') else ('full' if m.get('reason') == 'full' else 'other')
++        elif m.get('t') == 'ping':
++            w.write((json.dumps({'t': 'pong', 'n': m['n']}) + '\n').encode())
++    result[verdict or 'dropped'] += 1
++    # stay connected (answering pings) while the others are still joining
++    end = time.time() + hold
++    while time.time() < end:
++        try:
++            line = await asyncio.wait_for(r.readline(), 0.5)
++        except asyncio.TimeoutError:
++            continue
++        if not line:
++            break
++        m = json.loads(line)
++        if m.get('t') == 'ping':
++            w.write((json.dumps({'t': 'pong', 'n': m['n']}) + '\n').encode())
++    w.close()
++
++def run(port, max_players, attempts):
++    proc = subprocess.Popen([binary, '--cli-only', '--mod', mod, '--port', str(port), '--max-players', str(max_players)],
++                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
++    time.sleep(1.2)
++    result = {'joined': 0, 'full': 0, 'dropped': 0, 'other': 0, 'refused': 0}
++    async def main():
++        await asyncio.gather(*[player(port, i, result, 4) for i in range(attempts)])
++    try:
++        asyncio.run(main())
++    finally:
++        proc.kill()
++    return result
++
++r = run(26301, 500, 135)  # asked for 500: a server still stops at 128
++check(r['joined'] == 128, 'a server takes 128 players (--max-players 500 is capped): %s' % r)
++check(r['full'] == 7 and r['dropped'] == 0, 'the rest are told the server is full, not just cut off: %s' % r)
++r = run(26302, 40, 45)
++check(r['joined'] == 40 and r['full'] == 5, 'a lower limit is kept: %s' % r)
++
++print('capacity tests: all passed' if failures == 0 else '%d failed' % failures)
++sys.exit(1 if failures else 0)
+diff --git a/multiplayer/test/relay_test.lua b/multiplayer/test/relay_test.lua
+index 3096d91..0d29a11 100644
+--- a/multiplayer/test/relay_test.lua
++++ b/multiplayer/test/relay_test.lua
+@@ -307,4 +307,22 @@ check(count(54, 'pubactors') - pubBefore <= 2, 'the public roster is rate limite
+ join(56, 'Late')
+ check(not last(56, 'pubactors') and not last(56, 'loot'), 'neither is replayed to a late joiner')
+ 
++-- ---------------------------------------------------------------- limits: 128 players, parties of 3
++sent, kicked = {}, {}
++check(relay.start(25569, { dedicated = true, maxPlayers = 500 }) == nil, 'start with a huge limit')
++check(relay.snapshot().maxPlayers == 128, 'a server never takes more than 128 players')
++check(relay.start(25570, { dedicated = true }) == nil and relay.snapshot().maxPlayers == 64, 'the default limit is 64')
++check(relay.start(25571, { dedicated = true, maxPlayers = 0 }) == nil and relay.snapshot().maxPlayers == 1, 'a limit of 0 becomes 1')
++sent, kicked = {}, {}
++check(relay.start(25572, { maxPlayers = 8 }) == nil, 'start for parties')
++join(61, 'Host'); join(62, 'Ann'); join(63, 'Ben'); join(64, 'Cy'); join(65, 'Dee')
++say(62, { t = 'invite', to = 63 }); tick(1.1); say(63, { t = 'accept', from = 62 }); tick(1.1)
++say(62, { t = 'invite', to = 64 }); tick(1.1); say(64, { t = 'accept', from = 62 }); tick(1.1)
++check(last(62, 'party') and #last(62, 'party').members == 3, 'a party of three forms')
++say(62, { t = 'invite', to = 65 })
++check(last(62, 'invite_result') and last(62, 'invite_result').reason == 'full', 'a fourth cannot be invited: parties hold three')
++tick(1.1)
++say(63, { t = 'invite', to = 65 })
++check(last(63, 'invite_result') and last(63, 'invite_result').reason == 'full', 'nor by another member')
++
+ if failures == 0 then print('relay tests: all passed') else print(failures .. ' failed') os.exit(1) end
+diff --git a/apps/mpserver/main.cpp b/apps/mpserver/main.cpp
+index f9b3af3..fbe3bca 100644
+--- a/apps/mpserver/main.cpp
++++ b/apps/mpserver/main.cpp
+@@ -75,7 +75,7 @@ namespace
+             "  --port <n>               TCP port to listen on (default 25565)\n"
+             "  --password <text>        password to join (or set MP_PASSWORD)\n"
+             "  --admin-password <text>  password for /login (or set MP_ADMIN_PASSWORD)\n"
+-            "  --max-players <n>        most players at once (default 64, at most 127)\n"
++            "  --max-players <n>        most players at once (default 64, at most 128)\n"
+             "  --motd <text>            message shown to players who join\n"
+             "  --weather <id|cycle>     a fixed weather id, or cycle (default) to let it change by itself\n"
+             "  --weather-minutes <n>    about how often the weather changes (default 15)\n"
+diff --git a/components/net/sockets.hpp b/components/net/sockets.hpp
+index 4746567..d09010c 100644
+--- a/components/net/sockets.hpp
++++ b/components/net/sockets.hpp
+@@ -33,7 +33,8 @@ namespace Net
+     public:
+         static constexpr std::size_t sMaxLineSize = 1024 * 1024;
+         static constexpr std::size_t sMaxPendingOutput = 8 * 1024 * 1024;
+-        static constexpr std::size_t sMaxSockets = 128;
++        // (More than the 128 players a multiplayer server takes: connections beyond that still get to hear "full")
++        static constexpr std::size_t sMaxSockets = 192;
+ 
+         Sockets();
+         ~Sockets();

@@ -1,0 +1,104 @@
+diff --git a/include/osg/GLESFixedFunctionShims b/include/osg/GLESFixedFunctionShims
+new file mode 100644
+index 0000000..a19ffdf
+--- /dev/null
++++ b/include/osg/GLESFixedFunctionShims
+@@ -0,0 +1,71 @@
++/* -*-c++-*- OpenSceneGraph - Copyright (C) 1998-2006 Robert Osfield
++ *
++ * This library is open source and may be redistributed and/or modified under
++ * the terms of the OpenSceneGraph Public License (OSGPL) version 0.0 or
++ * (at your option) any later version.  The full license is in LICENSE file
++ * included with this distribution, and on the openscenegraph.org website.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * OpenSceneGraph Public License for more details.
++*/
++
++#ifndef OSG_GLESFIXEDFUNCTIONSHIMS
++#define OSG_GLESFIXEDFUNCTIONSHIMS 1
++
++// Alpha3: the client vertex array calls of fixed function OpenGL for code that draws with them directly (OpenMW's
++// MyGUI renderer), built with OSG for OpenGL ES 3. Included by <osg/GL> when OSG_GLES_FIXED_FUNCTION_SHIMS is defined
++// by the code that wants them. The arrays go to the generic attributes OSG's compact vertex attribute aliasing binds
++// gl_Vertex, gl_Color and gl_MultiTexCoord0 to (0, 2 and 3), for texture unit 0 only.
++
++#if defined(OSG_GLES2_AVAILABLE) || defined(OSG_GLES3_AVAILABLE)
++
++#ifndef GL_VERTEX_ARRAY
++    #define GL_VERTEX_ARRAY        0x8074
++#endif
++#ifndef GL_COLOR_ARRAY
++    #define GL_COLOR_ARRAY         0x8076
++#endif
++#ifndef GL_TEXTURE_COORD_ARRAY
++    #define GL_TEXTURE_COORD_ARRAY 0x8078
++#endif
++#ifndef GL_CLIP_PLANE0
++    #define GL_CLIP_PLANE0         0x3000
++#endif
++
++namespace osg_gles_shims
++{
++    inline GLuint attributeOfArray(GLenum array)
++    {
++        switch (array)
++        {
++            case GL_COLOR_ARRAY: return 2;
++            case GL_TEXTURE_COORD_ARRAY: return 3;
++            default: return 0;
++        }
++    }
++}
++
++inline void glEnableClientState(GLenum array) { glEnableVertexAttribArray(osg_gles_shims::attributeOfArray(array)); }
++inline void glDisableClientState(GLenum array) { glDisableVertexAttribArray(osg_gles_shims::attributeOfArray(array)); }
++
++inline void glVertexPointer(GLint size, GLenum type, GLsizei stride, const void* pointer)
++{
++    glVertexAttribPointer(0, size, type, GL_FALSE, stride, pointer);
++}
++
++inline void glColorPointer(GLint size, GLenum type, GLsizei stride, const void* pointer)
++{
++    // colours in bytes are normalised, as the fixed function colour array takes them
++    glVertexAttribPointer(2, size, type, type == GL_UNSIGNED_BYTE || type == GL_BYTE ? GL_TRUE : GL_FALSE, stride, pointer);
++}
++
++inline void glTexCoordPointer(GLint size, GLenum type, GLsizei stride, const void* pointer)
++{
++    glVertexAttribPointer(3, size, type, GL_FALSE, stride, pointer);
++}
++
++#endif
++
++#endif
+diff --git a/src/osg/CMakeLists.txt b/src/osg/CMakeLists.txt
+index d93e953..c7c8081 100644
+--- a/src/osg/CMakeLists.txt
++++ b/src/osg/CMakeLists.txt
+@@ -87,6 +87,7 @@ SET(TARGET_H
+     ${HEADER_PATH}/GL2Extensions
+     ${HEADER_PATH}/GLDefines
+     ${HEADER_PATH}/GLExtensions
++    ${HEADER_PATH}/GLESFixedFunctionShims
+     ${HEADER_PATH}/GLObjects
+     ${HEADER_PATH}/GLU
+     ${HEADER_PATH}/GraphicsCostEstimator
+diff --git a/src/osg/GL.in b/src/osg/GL.in
+index e6c2203..3f74211 100644
+--- a/src/osg/GL.in
++++ b/src/osg/GL.in
+@@ -190,5 +190,10 @@
+     #define GL_LUMINANCE_ALPHA                0x190A
+ #endif
+ 
++// Alpha3: fixed function client array calls on OpenGL ES, for code that asks for them
++#if defined(OSG_GLES_FIXED_FUNCTION_SHIMS)
++    #include <osg/GLESFixedFunctionShims>
++#endif
++
+ 
+ #endif

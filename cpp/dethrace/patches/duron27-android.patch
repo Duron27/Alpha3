@@ -1,0 +1,633 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 8cc5822..c962c77 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -6,6 +6,10 @@ endif()
+ 
+ project(dethrace C)
+ 
++if(ANDROID)
++    find_package(Threads REQUIRED)
++endif()
++
+ list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake/")
+ 
+ if(MSVC)
+diff --git a/src/DETHRACE/CMakeLists.txt b/src/DETHRACE/CMakeLists.txt
+index f786d05..96b799c 100644
+--- a/src/DETHRACE/CMakeLists.txt
++++ b/src/DETHRACE/CMakeLists.txt
+@@ -17,11 +17,16 @@ if(MSVC_42_FOR_RECCMP)
+     reccmp_add_target(dethrace ID CARM95)
+     reccmp_configure()
+ else()
+-    add_executable(dethrace
+-        WIN32
+-        ${CMAKE_SOURCE_DIR}/packaging/macos/dethrace.icns
+-        ${CMAKE_SOURCE_DIR}/packaging/windows/dethrace.rc
+-    )
++    if(ANDROID)
++        # For Android, build as shared library
++        add_library(dethrace SHARED)
++    else()
++        add_executable(dethrace
++            WIN32
++            ${CMAKE_SOURCE_DIR}/packaging/macos/dethrace.icns
++            ${CMAKE_SOURCE_DIR}/packaging/windows/dethrace.rc
++        )
++    endif()
+     get_property(build_rpaths GLOBAL PROPERTY DETHRACE_BUILD_RPATHS)
+     set_property(TARGET dethrace APPEND PROPERTY BUILD_RPATH "${build_rpaths}")
+ 
+@@ -44,7 +49,11 @@ if(DETHRACE_ASAN)
+     target_link_options(dethrace PUBLIC -fsanitize=address)
+ endif()
+ 
+-target_link_libraries(dethrace PRIVATE smackw32 harness BRender::Full BRender::DDI s3 compile_with_werror)
++if(ANDROID)
++    target_link_libraries(dethrace PRIVATE smackw32 harness BRender::Full BRender::DDI s3 SDL2::SDL2 compile_with_werror)
++else()
++    target_link_libraries(dethrace PRIVATE smackw32 harness BRender::Full BRender::DDI s3 compile_with_werror)
++endif()
+ 
+ if(MSVC_42_FOR_RECCMP)
+ # do nothing
+diff --git a/src/DETHRACE/main.c b/src/DETHRACE/main.c
+index d3b4b20..c1537e3 100644
+--- a/src/DETHRACE/main.c
++++ b/src/DETHRACE/main.c
+@@ -7,6 +7,10 @@
+ #include <windows.h>
+ #endif
+ 
++#if defined(ANDROID) || defined(__ANDROID__)
++#include <SDL_main.h>
++#endif
++
+ #include "brender.h"
+ 
+ extern int Harness_Init(int* argc, char* argv[]);
+@@ -30,7 +34,12 @@ void BR_CALLBACK _BrBeginHook(void) {
+ void BR_CALLBACK _BrEndHook(void) {
+ }
+ 
+-int main(int argc, char* argv[]) {
++#ifdef ANDROID
++int SDL_main(int argc, char** argv)
++#else
++int main(int argc, char** argv)
++#endif
++{
+     int result;
+ 
+ #ifdef _WIN32
+diff --git a/src/S3/CMakeLists.txt b/src/S3/CMakeLists.txt
+index 03cd583..2073019 100644
+--- a/src/S3/CMakeLists.txt
++++ b/src/S3/CMakeLists.txt
+@@ -8,7 +8,7 @@ target_include_directories(s3
+ target_link_libraries(s3 PRIVATE brender harness compile_with_werror)
+ 
+ if(NOT MSVC)
+-    target_link_libraries(s3 PUBLIC pthread m)
++    target_link_libraries(s3 PUBLIC Threads::Threads m)
+     add_compile_flags_if_supported(s3
+         -Wstrict-prototypes
+     )
+diff --git a/src/harness/CMakeLists.txt b/src/harness/CMakeLists.txt
+index 47a9a1a..eb95059 100644
+--- a/src/harness/CMakeLists.txt
++++ b/src/harness/CMakeLists.txt
+@@ -69,6 +69,8 @@ elseif(WIN32)
+     target_link_libraries(harness PRIVATE dbghelp ws2_32 iphlpapi)
+ elseif(APPLE)
+     target_sources(harness PRIVATE os/macos.c)
++elseif(ANDROID)
++    target_sources(harness PRIVATE os/android.c)
+ elseif(UNIX)
+     target_sources(harness PRIVATE os/linux.c)
+ else()
+diff --git a/src/harness/os/android.c b/src/harness/os/android.c
+new file mode 100644
+index 0000000..f4d79a5
+--- /dev/null
++++ b/src/harness/os/android.c
+@@ -0,0 +1,518 @@
++// Based on https://gist.github.com/jvranish/4441299
++
++#define _GNU_SOURCE
++#include "harness/config.h"
++#include "harness/os.h"
++#include <arpa/inet.h>
++#include <assert.h>
++#include <ctype.h>
++#include <dirent.h>
++#include <err.h>
++#include <errno.h>
++#include <fcntl.h>
++#include <ifaddrs.h>
++#include <libgen.h>
++#include <limits.h>
++#include <link.h>
++#include <signal.h>
++#include <stdbool.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/socket.h>
++#include <sys/stat.h>
++#include <sys/types.h>
++#include <termios.h>
++#include <time.h>
++#include <unistd.h>
++#include <unwind.h>
++#include <dlfcn.h>
++#include <sys/system_properties.h>
++
++#define ARRAY_SIZE(A) (sizeof(A) / sizeof(A[0]))
++#define MAX_STACK_FRAMES 64
++#define TRACER_PID_STRING "TracerPid:"
++
++static int stack_nbr = 0;
++static char _program_name[1024];
++static void* signal_alternative_stack = NULL;
++
++static void* stack_traces[MAX_STACK_FRAMES];
++static char name_buf[4096];
++static DIR* directory_iterator;
++
++typedef struct {
++    void **current;
++    void **end;
++} backtrace_state_t;
++
++struct dl_iterate_callback_data {
++    int initialized;
++    intptr_t start;
++} dethrace_dl_data;
++
++static _Unwind_Reason_Code unwind_callback(struct _Unwind_Context *context, void *arg) {
++    backtrace_state_t *state = (backtrace_state_t *)arg;
++    uintptr_t pc = _Unwind_GetIP(context);
++
++    if (pc == 0) {
++        return _URC_END_OF_STACK;
++    }
++
++    if (state->current == state->end) {
++        return _URC_END_OF_STACK;
++    }
++
++    *state->current++ = (void *)pc;
++    return _URC_NO_REASON;
++}
++
++static int android_backtrace(void **buffer, int size) {
++    backtrace_state_t state = {buffer, buffer + size};
++    _Unwind_Backtrace(unwind_callback, &state);
++    return state.current - buffer;
++}
++
++static char** android_backtrace_symbols(void *const *buffer, int size) {
++    char **symbols = malloc(size * sizeof(char*));
++    if (!symbols) return NULL;
++
++    for (int i = 0; i < size; i++) {
++        Dl_info info;
++        if (dladdr(buffer[i], &info) && info.dli_sname) {
++            symbols[i] = malloc(512);
++            if (symbols[i]) {
++                snprintf(symbols[i], 512, "%s(%s+0x%lx) [%p]",
++                         info.dli_fname ? info.dli_fname : "??",
++                         info.dli_sname,
++                         (unsigned long)((char*)buffer[i] - (char*)info.dli_saddr),
++                         buffer[i]);
++            }
++        } else {
++            symbols[i] = malloc(128);
++            if (symbols[i]) {
++                snprintf(symbols[i], 128, "[%p]", buffer[i]);
++            }
++        }
++    }
++    return symbols;
++}
++
++static int dl_iterate_callback(struct dl_phdr_info* info, size_t size, void* data) {
++    struct dl_iterate_callback_data* callback_data = data;
++
++    if (strcmp(info->dlpi_name, "") == 0) {
++        callback_data->start = info->dlpi_addr;
++    }
++    return 0;
++}
++
++static intptr_t get_dethrace_offset(void) {
++    if (!dethrace_dl_data.initialized) {
++        dethrace_dl_data.initialized = 1;
++        dl_iterate_phdr(dl_iterate_callback, &dethrace_dl_data);
++    }
++    return dethrace_dl_data.start;
++}
++
++// Resolve symbol name and source location given the path to the executable and an address
++int addr2line(char const* const program_name, void const* const addr) {
++    char addr2line_cmd[512];
++
++    /* have addr2line map the address to the related line in the code */
++    sprintf(addr2line_cmd, "addr2line -f -p -e %.480s %p", program_name, addr - get_dethrace_offset());
++
++    fprintf(stderr, "%d: ", stack_nbr++);
++    return system(addr2line_cmd);
++}
++
++static void print_stack_trace(void) {
++    int i, trace_size = 0;
++    char** messages = (char**)NULL;
++
++    fputs("\nStack trace:\n", stderr);
++
++    trace_size = android_backtrace(stack_traces, MAX_STACK_FRAMES);
++    messages = android_backtrace_symbols(stack_traces, trace_size);
++
++    if (messages == NULL) {
++        fputs("  Failed to get stack trace symbols\n", stderr);
++        return;
++    }
++
++    /* skip the first couple stack frames (as they are this function and
++     *    our handler) and also skip the last frame as it's (always?) junk. */
++    for (i = 3; i < (trace_size - 1); ++i) {
++        if (addr2line(_program_name, stack_traces[i]) != 0) {
++            printf("  error determining line # for: %s\n", messages[i]);
++        }
++    }
++
++    // Free the symbols array
++    if (messages) {
++        for (i = 0; i < trace_size; i++) {
++            if (messages[i]) free(messages[i]);
++        }
++        free(messages);
++    }
++}
++
++static void signal_handler(int sig, siginfo_t* siginfo, void* context) {
++    (void)context;
++    fputs("\n******************\n", stderr);
++
++    switch (sig) {
++        case SIGSEGV:
++            fputs("Caught SIGSEGV\n", stderr);
++            break;
++        case SIGINT:
++            fputs("Caught SIGINT\n", stderr);
++            break;
++        case SIGFPE:
++            switch (siginfo->si_code) {
++                case FPE_INTDIV:
++                    fputs("Caught SIGFPE: FPE_INTDIV\n", stderr);
++                    break;
++                case FPE_INTOVF:
++                    fputs("Caught SIGFPE: FPE_INTOVF\n", stderr);
++                    break;
++                case FPE_FLTDIV:
++                    fputs("Caught SIGFPE: FPE_FLTDIV\n", stderr);
++                    break;
++                case FPE_FLTOVF:
++                    fputs("Caught SIGFPE: FPE_FLTOVF\n", stderr);
++                    break;
++                case FPE_FLTUND:
++                    fputs("Caught SIGFPE: FPE_FLTUND\n", stderr);
++                    break;
++                case FPE_FLTRES:
++                    fputs("Caught SIGFPE: FPE_FLTRES\n", stderr);
++                    break;
++                case FPE_FLTINV:
++                    fputs("Caught SIGFPE: FPE_FLTINV\n", stderr);
++                    break;
++                case FPE_FLTSUB:
++                    fputs("Caught SIGFPE: FPE_FLTSUB\n", stderr);
++                    break;
++                default:
++                    fputs("Caught SIGFPE: Arithmetic Exception\n", stderr);
++                    break;
++            }
++            break;
++                case SIGILL:
++                    switch (siginfo->si_code) {
++                        case ILL_ILLOPC:
++                            fputs("Caught SIGILL: ILL_ILLOPC\n", stderr);
++                            break;
++                        case ILL_ILLOPN:
++                            fputs("Caught SIGILL: ILL_ILLOPN\n", stderr);
++                            break;
++                        case ILL_ILLADR:
++                            fputs("Caught SIGILL: ILL_ILLADR\n", stderr);
++                            break;
++                        case ILL_ILLTRP:
++                            fputs("Caught SIGILL: ILL_ILLTRP\n", stderr);
++                            break;
++                        case ILL_PRVOPC:
++                            fputs("Caught SIGILL: ILL_PRVOPC\n", stderr);
++                            break;
++                        case ILL_PRVREG:
++                            fputs("Caught SIGILL: ILL_PRVREG\n", stderr);
++                            break;
++                        case ILL_COPROC:
++                            fputs("Caught SIGILL: ILL_COPROC\n", stderr);
++                            break;
++                        case ILL_BADSTK:
++                            fputs("Caught SIGILL: ILL_BADSTK\n", stderr);
++                            break;
++                        default:
++                            fputs("Caught SIGILL: Illegal Instruction\n", stderr);
++                            break;
++                    }
++                    break;
++                        case SIGTERM:
++                            fputs("Caught SIGTERM\n", stderr);
++                            break;
++                        case SIGABRT:
++                            fputs("Caught SIGABRT\n", stderr);
++                            break;
++                        default:
++                            break;
++    }
++    fputs("******************\n", stderr);
++    print_stack_trace();
++    exit(1);
++}
++
++void resolve_full_path(char* path, size_t path_size, const char* argv0) {
++    if (argv0[0] == '/') { // run with absolute path
++        strncpy(path, argv0, path_size - 1);
++        path[path_size - 1] = '\0';
++    } else { // run with relative path
++        if (NULL == getcwd(path, path_size)) {
++            perror("getcwd error");
++            return;
++        }
++
++        // Check if we have enough space for "/" + argv0
++        size_t current_len = strlen(path);
++        size_t needed = current_len + 1 + strlen(argv0) + 1;
++
++        if (needed > path_size) {
++            // Truncate or handle error
++            fprintf(stderr, "Warning: Path too long, truncating\n");
++            return;
++        }
++
++        strcat(path, "/");
++        strcat(path, argv0);
++    }
++}
++
++void OS_InstallSignalHandler(char* program_name) {
++    resolve_full_path(_program_name, sizeof(_program_name), program_name);
++
++    /* setup alternate stack */
++    {
++        stack_t ss = {};
++        signal_alternative_stack = malloc(2 * MINSIGSTKSZ);
++        ss.ss_sp = signal_alternative_stack;
++        if (ss.ss_sp == NULL) {
++            err(1, "malloc");
++        }
++        ss.ss_size = 2 * MINSIGSTKSZ;
++        ss.ss_flags = 0;
++
++        if (sigaltstack(&ss, NULL) != 0) {
++            err(1, "sigaltstack");
++        }
++    }
++
++    /* register our signal handlers */
++    {
++        struct sigaction sig_action = {};
++        sig_action.sa_sigaction = signal_handler;
++        sigemptyset(&sig_action.sa_mask);
++
++        sig_action.sa_flags = SA_SIGINFO | SA_ONSTACK;
++
++        if (sigaction(SIGSEGV, &sig_action, NULL) != 0) {
++            err(1, "sigaction");
++        }
++        if (sigaction(SIGFPE, &sig_action, NULL) != 0) {
++            err(1, "sigaction");
++        }
++        if (sigaction(SIGINT, &sig_action, NULL) != 0) {
++            err(1, "sigaction");
++        }
++        if (sigaction(SIGILL, &sig_action, NULL) != 0) {
++            err(1, "sigaction");
++        }
++        if (sigaction(SIGTERM, &sig_action, NULL) != 0) {
++            err(1, "sigaction");
++        }
++        if (sigaction(SIGABRT, &sig_action, NULL) != 0) {
++            err(1, "sigaction");
++        }
++    }
++}
++
++void OS_RemoveSignalHandler(void) {
++    struct sigaction sig_action = {};
++    sig_action.sa_handler = SIG_DFL;
++    sigemptyset(&sig_action.sa_mask);
++
++    /* Unregister our signal handlers */
++    if (sigaction(SIGSEGV, &sig_action, NULL) != 0
++        || sigaction(SIGFPE, &sig_action, NULL) != 0
++        || sigaction(SIGINT, &sig_action, NULL) != 0
++        || sigaction(SIGILL, &sig_action, NULL) != 0
++        || sigaction(SIGTERM, &sig_action, NULL) != 0
++        || sigaction(SIGABRT, &sig_action, NULL) != 0) {
++        err(1, "sigaction");
++    }
++
++    /* remove alternate stack */
++    {
++        stack_t ss = {};
++        ss.ss_flags = SS_DISABLE;
++
++        if (sigaltstack(&ss, NULL) != 0) {
++            err(1, "sigaltstack");
++        }
++        free(signal_alternative_stack);
++        signal_alternative_stack = NULL;
++    }
++}
++
++char* OS_GetFirstFileInDirectory(char* path) {
++    directory_iterator = opendir(path);
++    if (directory_iterator == NULL) {
++        return NULL;
++    }
++    return OS_GetNextFileInDirectory();
++}
++
++char* OS_GetNextFileInDirectory(void) {
++    struct dirent* entry;
++
++    if (directory_iterator == NULL) {
++        return NULL;
++    }
++    while ((entry = readdir(directory_iterator)) != NULL) {
++        if (entry->d_type == DT_REG) {
++            return entry->d_name;
++        }
++    }
++    closedir(directory_iterator);
++    directory_iterator = NULL;
++    return NULL;
++}
++
++FILE* OS_fopen(const char* pathname, const char* mode) {
++    FILE* f = fopen(pathname, mode);
++    if (f != NULL) {
++        return f;
++    }
++    char buffer[512];
++    char buffer2[512];
++    strcpy(buffer, pathname);
++    strcpy(buffer2, pathname);
++    char* pDirName = dirname(buffer);
++    char* pBaseName = basename(buffer2);
++    DIR* pDir = opendir(pDirName);
++    if (pDir == NULL) {
++        return NULL;
++    }
++    for (struct dirent* pDirent = readdir(pDir); pDirent != NULL; pDirent = readdir(pDir)) {
++        if (strcasecmp(pBaseName, pDirent->d_name) == 0) {
++            strcat(pDirName, "/");
++            strcat(pDirName, pDirent->d_name);
++            f = fopen(pDirName, mode);
++            break;
++        }
++    }
++    closedir(pDir);
++    if (harness_game_config.verbose) {
++        if (f == NULL) {
++            fprintf(stderr, "Failed to open \"%s\" (%s)\n", pathname, strerror(errno));
++        }
++    }
++    return f;
++}
++
++size_t OS_ConsoleReadPassword(char* pBuffer, size_t pBufferLen) {
++    struct termios old, new;
++    char c;
++    size_t len;
++
++    tcgetattr(STDIN_FILENO, &old);
++    new = old;
++    new.c_lflag &= ~(ICANON | ECHO);
++    tcsetattr(STDIN_FILENO, TCSAFLUSH, &new);
++
++    len = 0;
++    pBuffer[len] = '\0';
++    while (1) {
++        if (read(STDIN_FILENO, &c, 1) == 1) {
++            if (c == 0x7f) {
++                if (len > 0) {
++                    len--;
++                    pBuffer[len] = '\0';
++                    printf("\033[1D \033[1D");
++                    fflush(stdout);
++                    continue;
++                }
++            } else if (c == '\r' || c == '\n') {
++                printf("\n");
++                fflush(stdout);
++                break;
++            } else if (len < pBufferLen - 1) {
++                if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
++                    pBuffer[len] = c;
++                    printf("*");
++                    fflush(stdout);
++                    len++;
++                    pBuffer[len] = '\0';
++                }
++            }
++        }
++    }
++
++    tcsetattr(STDIN_FILENO, TCSANOW, &old);
++    return len;
++}
++
++char* OS_Dirname(const char* path) {
++    strcpy(name_buf, path);
++    return dirname(name_buf);
++}
++
++char* OS_Basename(const char* path) {
++    strcpy(name_buf, path);
++    return basename(name_buf);
++}
++
++char* OS_GetWorkingDirectory(char* argv0) {
++    return OS_Dirname(argv0);
++}
++
++int OS_GetPrefPath(char* dest, char* app) {
++    // There is no per-user data directory a native library can find on its own: the app starts the game in its game
++    // directory (DETHRACE_ROOT_DIR), and the ini file and the rest are kept there.
++    (void)app;
++    dest[0] = '\0';
++    return -1;
++}
++
++int OS_GetAdapterAddress(char* name, void* pSockaddr_in) {
++    struct ifaddrs *ifaddr, *ifa;
++    int found = 0;
++
++    // Get the list of network interfaces
++    if (getifaddrs(&ifaddr) == -1) {
++        perror("getifaddrs");
++        return 0;
++    }
++
++    // Loop through all interfaces
++    for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
++        if (ifa->ifa_addr == NULL)
++            continue;
++
++        if (strlen(name) == 0 || strcmp(name, ifa->ifa_name) == 0) {
++            if (ifa->ifa_addr->sa_family == AF_INET) {
++                *((struct sockaddr_in*)pSockaddr_in) = *(struct sockaddr_in*)ifa->ifa_addr;
++                found = 1;
++                break;
++            }
++        }
++    }
++
++    // Free the memory allocated by getifaddrs
++    freeifaddrs(ifaddr);
++    return found;
++}
++
++int OS_InitSockets(void) {
++    return 0;
++}
++
++int OS_GetLastSocketError(void) {
++    return errno;
++}
++
++void OS_CleanupSockets(void) {
++    // no-op
++}
++
++int OS_SetSocketNonBlocking(int socket) {
++    int flags = fcntl(socket, F_GETFL);
++    flags |= O_NONBLOCK;
++    return fcntl(socket, F_SETFL, flags);
++}
++
++int OS_CloseSocket(int socket) {
++    return close(socket);
++}

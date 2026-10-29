@@ -1,0 +1,221 @@
+From ba81404cf244dce043a3ef6fd2e4e15426303479 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Thu, 15 Oct 2026 14:30:26 -0400
+Subject: [PATCH 63/63] A normal quit is told to the server: net.setFarewell, a
+ bye message, no 90 s hold
+
+- Net::Sockets::setFarewell / net.setFarewell(id, line): a line sent on the connection, best effort and without
+  blocking, when the Sockets are destroyed (the game quits). Not sent for close(), closeAll() or an unloaded game
+- netlib registers {"t":"bye"} on every connection; the relay marks the player as leaving and, when the socket closes,
+  removes them at once (out of party, others told) instead of keeping their place for the grace period
+- TODO.md: item done
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ apps/openmw/mwlua/netbindings.cpp     |  3 ++
+ components/net/sockets.cpp            | 43 ++++++++++++++++++++++++---
+ components/net/sockets.hpp            |  4 +++
+ files/lua_api/openmw/net.lua          |  8 +++++
+ multiplayer/TODO.md                   |  1 -
+ multiplayer/mod/scripts/mp/netlib.lua |  2 ++
+ multiplayer/mod/scripts/mp/relay.lua  |  3 +-
+ 7 files changed, 58 insertions(+), 6 deletions(-)
+
+diff --git a/apps/openmw/mwlua/netbindings.cpp b/apps/openmw/mwlua/netbindings.cpp
+index 6b67df02c1..43d3271d1c 100644
+--- a/apps/openmw/mwlua/netbindings.cpp
++++ b/apps/openmw/mwlua/netbindings.cpp
+@@ -53,6 +53,9 @@ namespace MWLua
+             return sockets.send(socketId(id), data, raw.value_or(false));
+         });
+         api.function("close", [&sockets](double id) { sockets.close(socketId(id)); });
++        // A line sent on the connection as the game quits, so the other end knows it was deliberate
++        api.function("setFarewell",
++            [&sockets](double id, std::string_view data) { sockets.setFarewell(socketId(id), data); });
+         api.function("localAddress", [&sockets](double id) -> std::optional<std::string> {
+             std::string address = sockets.localAddress(socketId(id));
+             if (address.empty())
+diff --git a/components/net/sockets.cpp b/components/net/sockets.cpp
+index 2b0252c07a..edb829764d 100644
+--- a/components/net/sockets.cpp
++++ b/components/net/sockets.cpp
+@@ -83,6 +83,19 @@ namespace Net
+                     doWrite();
+             }
+ 
++            void setFarewell(std::string data) { mFarewell = std::move(data); }
++
++            // Best effort, never blocks: one non-blocking write of the farewell line, only if nothing else is in flight.
++            void sendFarewell()
++            {
++                if (mClosed || mFarewell.empty() || !mOut.empty() || !mSocket.is_open())
++                    return;
++                boost::system::error_code ec;
++                mSocket.non_blocking(true, ec);
++                if (!ec)
++                    mSocket.write_some(asio::buffer(mFarewell), ec);
++            }
++
+             // Closes without reporting.
+             void close()
+             {
+@@ -161,6 +174,7 @@ namespace Net
+             std::shared_ptr<Shared> mShared;
+             std::string mIn;
+             std::deque<std::string> mOut;
++            std::string mFarewell; // (with its line terminator)
+             std::size_t mPending = 0;
+             bool mClosed = false;
+         };
+@@ -183,7 +197,7 @@ namespace Net
+         {
+         }
+ 
+-        ~Impl() { stopThread(); }
++        ~Impl() { stopThread(true); }
+ 
+         std::uint32_t connect(const std::string& host, std::uint16_t port)
+         {
+@@ -271,9 +285,21 @@ namespace Net
+             });
+         }
+ 
++        void setFarewell(std::uint32_t id, std::string_view data)
++        {
++            if (!mLive.count(id) || data.find('\n') != std::string_view::npos || data.size() > 4096)
++                return;
++            std::string line(data);
++            line += '\n';
++            asio::post(mIo, [this, id, line = std::move(line)]() mutable {
++                if (const auto it = mConnections.find(id); it != mConnections.end())
++                    it->second->setFarewell(std::move(line));
++            });
++        }
++
+         void closeAll()
+         {
+-            stopThread();
++            stopThread(false);
+             mLive.clear();
+             mIgnored.clear();
+             const std::lock_guard lock(mShared->mMutex);
+@@ -331,18 +357,22 @@ namespace Net
+             mThread = std::thread([this] { mIo.run(); });
+         }
+ 
+-        void stopThread()
++        void stopThread(bool farewell)
+         {
+             if (!mThread.joinable())
+                 return;
+-            asio::post(mIo, [this] {
++            asio::post(mIo, [this, farewell] {
+                 for (auto& [id, l] : mListeners)
+                 {
+                     boost::system::error_code ignored;
+                     l->mAcceptor.close(ignored);
+                 }
+                 for (auto& [id, c] : mConnections)
++                {
++                    if (farewell)
++                        c->sendFarewell();
+                     c->close();
++                }
+                 mListeners.clear();
+                 mConnections.clear();
+             });
+@@ -410,6 +440,11 @@ namespace Net
+         mImpl->close(id);
+     }
+ 
++    void Sockets::setFarewell(std::uint32_t id, std::string_view data)
++    {
++        mImpl->setFarewell(id, data);
++    }
++
+     void Sockets::closeAll()
+     {
+         mImpl->closeAll();
+diff --git a/components/net/sockets.hpp b/components/net/sockets.hpp
+index d09010c57d..ae764c6749 100644
+--- a/components/net/sockets.hpp
++++ b/components/net/sockets.hpp
+@@ -55,6 +55,10 @@ namespace Net
+         // No further events are delivered for it.
+         void close(std::uint32_t id);
+ 
++        // A line to send on this connection, as a last act, when the Sockets are destroyed (the game quits). It lets the
++        // other end tell a deliberate exit from a lost connection. Not sent for close() or closeAll().
++        void setFarewell(std::uint32_t id, std::string_view data);
++
+         void closeAll();
+ 
+         // Our address on this connection, or an empty string if it is not connected.
+diff --git a/files/lua_api/openmw/net.lua b/files/lua_api/openmw/net.lua
+index b999d93195..3835ea654d 100644
+--- a/files/lua_api/openmw/net.lua
++++ b/files/lua_api/openmw/net.lua
+@@ -46,6 +46,14 @@
+ -- @function [parent=#net] close
+ -- @param #number id
+ 
++---
++-- A line (without line breaks, at most 4096 bytes) to send on the connection as a last act when the game quits, so the
++-- other end can tell a deliberate exit from a lost connection. Best effort. It is not sent when the connection or the
++-- game is closed by a script or when a game is unloaded.
++-- @function [parent=#net] setFarewell
++-- @param #number id
++-- @param #string data
++
+ ---
+ -- Our address on a connected connection, i.e. the address of this machine on the network it uses to reach the other end.
+ -- @function [parent=#net] localAddress
+diff --git a/multiplayer/TODO.md b/multiplayer/TODO.md
+index ce5e7fe2e4..85963f5252 100644
+--- a/multiplayer/TODO.md
++++ b/multiplayer/TODO.md
+@@ -36,7 +36,6 @@ one must clean them up first; adding a directory to the VFS and reloading in one
+ - Shared loot ignores containers that have no stable id (made at runtime) and the edges of exterior cells (only the cell the
+   player stands in is watched).
+ - NAT traversal for hosted games: UPnP port mapping and/or a public relay.
+-- A normal quit looks like a lost connection (place held for 90 s); needs an engine hook to say "I am leaving".
+ - State is broadcast to everyone, so cost grows with the square of the player count (127 players max, ~30 comfortable on a
+   small VPS): skip positions of players in other cells.
+ - The server forgets bans and settings on restart; passwords cross the network in plain text.
+diff --git a/multiplayer/mod/scripts/mp/netlib.lua b/multiplayer/mod/scripts/mp/netlib.lua
+index c25a25150a..1fde9c6648 100644
+--- a/multiplayer/mod/scripts/mp/netlib.lua
++++ b/multiplayer/mod/scripts/mp/netlib.lua
+@@ -86,6 +86,8 @@ end
+ function M.connect(host, port)
+     M.disconnect()
+     clientId = net.connect(host, port)
++    -- told to the server if the game is closed normally: it is not a lost connection, nothing to hold for us
++    if clientId then net.setFarewell(clientId, M.encodeJson({ t = 'bye' })) end
+ end
+ 
+ function M.isConnected() return clientUp end
+diff --git a/multiplayer/mod/scripts/mp/relay.lua b/multiplayer/mod/scripts/mp/relay.lua
+index fc07bca5f4..6a6d3b1934 100644
+--- a/multiplayer/mod/scripts/mp/relay.lua
++++ b/multiplayer/mod/scripts/mp/relay.lua
+@@ -534,7 +534,7 @@ function M.onClientDisconnected(sock)
+     local c = clients[id]
+     if not c or c.sock ~= sock then return end
+     pendingKicks[id] = nil
+-    if c.authed and not c.virtual and not c.refused and id ~= hostId and c.token then
++    if c.authed and not c.virtual and not c.refused and not c.leaving and id ~= hostId and c.token then
+         -- connection lost: keep their name, party and place for a while so they can come back
+         c.sock, c.awayUntil, c.pings = nil, clock + GRACE, {}
+         log(who(id) .. ' lost connection; their place is kept for ' .. GRACE .. ' s')
+@@ -712,6 +712,7 @@ process = function(id, msg)
+     if t == 'invite' then return handleInvite(id, msg) end
+     if t == 'accept' then return handleAccept(id, msg) end
+     if t == 'decline' then return handleDecline(id, msg) end
++    if t == 'bye' then c.leaving = true return end -- the game was closed on purpose: the socket closing now is a goodbye
+     if t == 'leave_party' then return removeFromParty(id) end
+     if t == 'party_kick' then -- the leader sends a member away
+         local pid = c.party
+-- 
+2.55.0
+

@@ -1,0 +1,101 @@
+diff --git a/include/osg/State b/include/osg/State
+index 3ecc564..f9df616 100644
+--- a/include/osg/State
++++ b/include/osg/State
+@@ -251,8 +251,8 @@ class OSG_EXPORT State : public Referenced
+ 
+         osg::Uniform* getModelViewMatrixUniform() { return _modelViewMatrixUniform.get(); }
+         osg::Uniform* getProjectionMatrixUniform() { return _projectionMatrixUniform.get(); }
+-        osg::Uniform* getModelViewProjectionMatrixUniform() { return _modelViewProjectionMatrixUniform.get(); }
+-        osg::Uniform* getNormalMatrixUniform() { return _normalMatrixUniform.get(); }
++        osg::Uniform* getModelViewProjectionMatrixUniform() { computeDerivedMatrixUniforms(true, true); return _modelViewProjectionMatrixUniform.get(); }
++        osg::Uniform* getNormalMatrixUniform() { computeDerivedMatrixUniforms(true, true); return _normalMatrixUniform.get(); }
+ 
+ 
+         Polytope getViewFrustum() const;
+@@ -1121,6 +1121,11 @@ class OSG_EXPORT State : public Referenced
+         ref_ptr<Uniform>            _modelViewProjectionMatrixUniform;
+         ref_ptr<Uniform>            _normalMatrixUniform;
+         ref_ptr<Uniform>            _clipPlaneUniforms[MaxUniformClipPlanes];
++        /** The model view projection and normal matrices are worked out when a program that reads them is drawn with, not
++          * on every change of the model view matrix: most programs read only one of them, some neither. */
++        bool                        _modelViewProjectionMatrixDirty = true;
++        bool                        _normalMatrixDirty = true;
++        void computeDerivedMatrixUniforms(bool modelViewProjection, bool normal);
+         Vec4                        _clipPlanes[MaxUniformClipPlanes];
+ 
+         Matrix                      _initialInverseViewMatrix;
+diff --git a/src/osg/State.cpp b/src/osg/State.cpp
+index bc086d8..ae51758 100644
+--- a/src/osg/State.cpp
++++ b/src/osg/State.cpp
+@@ -1260,8 +1260,13 @@ void State::applyModelViewAndProjectionUniformsIfRequired()
+ 
+     if (_modelViewMatrixUniform.valid()) _lastAppliedProgramObject->apply(*_modelViewMatrixUniform);
+     if (_projectionMatrixUniform) _lastAppliedProgramObject->apply(*_projectionMatrixUniform);
+-    if (_modelViewProjectionMatrixUniform) _lastAppliedProgramObject->apply(*_modelViewProjectionMatrixUniform);
+-    if (_normalMatrixUniform) _lastAppliedProgramObject->apply(*_normalMatrixUniform);
++    const bool readsModelViewProjection = _modelViewProjectionMatrixUniform.valid()
++        && _lastAppliedProgramObject->getUniformLocation(_modelViewProjectionMatrixUniform->getNameID()) >= 0;
++    const bool readsNormal = _normalMatrixUniform.valid()
++        && _lastAppliedProgramObject->getUniformLocation(_normalMatrixUniform->getNameID()) >= 0;
++    computeDerivedMatrixUniforms(readsModelViewProjection, readsNormal);
++    if (readsModelViewProjection) _lastAppliedProgramObject->apply(*_modelViewProjectionMatrixUniform);
++    if (readsNormal) _lastAppliedProgramObject->apply(*_normalMatrixUniform);
+ 
+     for (unsigned int i = 0; i < MaxUniformClipPlanes; ++i)
+     {
+@@ -1562,20 +1567,40 @@ void State::applyModelViewMatrix(const osg::Matrix& matrix)
+ 
+ void State::updateModelViewAndProjectionMatrixUniforms()
+ {
+-    if (_modelViewProjectionMatrixUniform.valid()) _modelViewProjectionMatrixUniform->set((*_modelView) * (*_projection));
+-    if (_normalMatrixUniform.valid())
+-    {
+-        Matrix mv(*_modelView);
+-        mv.setTrans(0.0, 0.0, 0.0);
+-
+-        Matrix matrix;
+-        matrix.invert(mv);
+-
+-        Matrix3 normalMatrix(matrix(0,0), matrix(1,0), matrix(2,0),
+-                             matrix(0,1), matrix(1,1), matrix(2,1),
+-                             matrix(0,2), matrix(1,2), matrix(2,2));
++    _modelViewProjectionMatrixDirty = true;
++    _normalMatrixDirty = true;
++}
+ 
+-        _normalMatrixUniform->set(normalMatrix);
++void State::computeDerivedMatrixUniforms(bool modelViewProjection, bool normal)
++{
++    if (modelViewProjection && _modelViewProjectionMatrixDirty && _modelViewProjectionMatrixUniform.valid())
++    {
++        _modelViewProjectionMatrixUniform->set((*_modelView) * (*_projection));
++        _modelViewProjectionMatrixDirty = false;
++    }
++    if (normal && _normalMatrixDirty && _normalMatrixUniform.valid())
++    {
++        // The transpose of the inverse of the upper 3x3 of the model view matrix is its cofactor matrix over its
++        // determinant: no 4x4 inverse
++        const Matrix& m = *_modelView;
++        const double c00 = m(1,1)*m(2,2) - m(1,2)*m(2,1);
++        const double c01 = m(1,2)*m(2,0) - m(1,0)*m(2,2);
++        const double c02 = m(1,0)*m(2,1) - m(1,1)*m(2,0);
++        const double det = m(0,0)*c00 + m(0,1)*c01 + m(0,2)*c02;
++        if (det != 0.0)
++        {
++            const double r = 1.0 / det;
++            const double c10 = m(0,2)*m(2,1) - m(0,1)*m(2,2);
++            const double c11 = m(0,0)*m(2,2) - m(0,2)*m(2,0);
++            const double c12 = m(0,1)*m(2,0) - m(0,0)*m(2,1);
++            const double c20 = m(0,1)*m(1,2) - m(0,2)*m(1,1);
++            const double c21 = m(0,2)*m(1,0) - m(0,0)*m(1,2);
++            const double c22 = m(0,0)*m(1,1) - m(0,1)*m(1,0);
++            _normalMatrixUniform->set(Matrix3(c00*r, c01*r, c02*r,
++                                              c10*r, c11*r, c12*r,
++                                              c20*r, c21*r, c22*r));
++        }
++        _normalMatrixDirty = false;
+     }
+ }
+ 

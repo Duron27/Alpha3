@@ -1,0 +1,32 @@
+--- a/files/shaders/lib/core/profile.glsl
++++ b/files/shaders/lib/core/profile.glsl
+@@ -2,11 +2,19 @@
+ #define OPENMW_PROFILE_GLSL
+ // clockwork profile begin
+ #if __VERSION__ < 450
++#ifdef OPENMW_FRAGMENT_STAGE
++// Android (OSG built for GLES3, so matrix uniforms): fragment shaders declare the matrices they use here, with no
++// built-in names in the text for OSG to rewrite. Keep OSG's search keywords out of comments: it looks for the
++// extension directive anywhere in the source to decide where its own declarations go.
++uniform mat4 osg_ModelViewMatrix;
++uniform mat3 osg_NormalMatrix;
++#else
+ #define osg_ModelViewMatrix gl_ModelViewMatrix
++#define osg_NormalMatrix gl_NormalMatrix
++#endif
+ #define osg_ProjectionMatrix gl_ProjectionMatrix
+ #define osg_ModelViewProjectionMatrix gl_ModelViewProjectionMatrix
+ #define osg_ModelViewMatrixInverse gl_ModelViewMatrixInverse
+-#define osg_NormalMatrix gl_NormalMatrix
+ #define osg_ParamsBegin(name, s, b)
+ #define osg_Param(type, name) uniform type name;
+ #define osg_ParamInit(type, name, value) uniform type name = value;
+--- a/files/shaders/lib/core/profile_fragment.glsl
++++ b/files/shaders/lib/core/profile_fragment.glsl
+@@ -1,5 +1,6 @@
+ #ifndef OPENMW_PROFILE_FRAGMENT_GLSL
+ #define OPENMW_PROFILE_FRAGMENT_GLSL
++#define OPENMW_FRAGMENT_STAGE 1
+ #include "lib/core/profile.glsl"
+ #include "lib/core/profile_varyings.glsl"
+ // clockwork profile begin

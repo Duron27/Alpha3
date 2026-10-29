@@ -1,0 +1,49 @@
+From f33811a2f0c337d2411e8d9c5b67c0294ed2b30b Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Thu, 15 Oct 2026 15:35:54 -0400
+Subject: [PATCH] The server bundle has no empty clientmods folder; the server
+ only mentions extra client mods when that folder exists
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ apps/mpserver/bundle.cmake | 6 ------
+ apps/mpserver/main.cpp     | 6 +++++-
+ 2 files changed, 5 insertions(+), 7 deletions(-)
+
+diff --git a/apps/mpserver/bundle.cmake b/apps/mpserver/bundle.cmake
+index 72ed96dbb4..2e1e59acef 100644
+--- a/apps/mpserver/bundle.cmake
++++ b/apps/mpserver/bundle.cmake
+@@ -39,12 +39,6 @@ endforeach ()
+ if (EXISTS "${MULTIPLAYER_DIR}/clientmods")
+     file(COPY "${MULTIPLAYER_DIR}/clientmods" DESTINATION "${dir}/multiplayer")
+ endif ()
+-# ...and an empty folder for the operator's own: clientmods/<name>/<name>.omwscripts, scripts/...
+-file(MAKE_DIRECTORY "${dir}/clientmods")
+-file(WRITE "${dir}/clientmods/README.txt"
+-    "Client mods this server hands out go here, one folder each:  clientmods/<name>/<name>.omwscripts, scripts/..., textures/...\n"
+-    "Players are asked before anything is installed, and only the files that differ are downloaded. The multiplayer mod's own\n"
+-    "client scripts are handed out automatically from multiplayer/mod. See multiplayer/README.md (Client mods kept on the server).\n")
+ 
+ file(COPY "${FILES_DIR}/start-server.sh" DESTINATION "${dir}" FILE_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE
+     GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
+diff --git a/apps/mpserver/main.cpp b/apps/mpserver/main.cpp
+index 6c2338f9bf..a72581f7e4 100644
+--- a/apps/mpserver/main.cpp
++++ b/apps/mpserver/main.cpp
+@@ -279,7 +279,11 @@ int main(int argc, char** argv)
+             const std::filesystem::path inSource = (options.mMod / ".." / "clientmods").lexically_normal();
+             options.mClientMods = std::filesystem::is_directory(inSource, mec) ? inSource : exeDir / "clientmods";
+         }
+-        std::printf("[server] client mods are handed out from %s\n", options.mClientMods.string().c_str());
++        {
++            std::error_code cec;
++            if (std::filesystem::is_directory(options.mClientMods, cec))
++                std::printf("[server] extra client mods are handed out from %s\n", options.mClientMods.string().c_str());
++        }
+         if (options.mScript.empty())
+             options.mScript = options.mMod / ".." / "server" / "server.lua";
+         std::error_code ec;
+-- 
+2.55.0
+

@@ -1,0 +1,90 @@
+diff --git a/src/osg/Geometry.cpp b/src/osg/Geometry.cpp
+index ebdb8ba..40c6f19 100644
+--- a/src/osg/Geometry.cpp
++++ b/src/osg/Geometry.cpp
+@@ -890,6 +890,30 @@ void Geometry::drawImplementation(RenderInfo& renderInfo) const
+     osg::VertexArrayState* vas = state.getCurrentVertexArrayState();
+     vas->setVertexBufferObjectSupported(usingVertexBufferObjects);
+ 
++    // Alpha3: drawn by code that calls drawImplementation itself (OpenMW's terrain composite maps) instead of through
++    // Drawable::draw, the current vertex array state is the global one, which has no VAO, while the VAO the last geometry
++    // drew with is still bound and would take this geometry's arrays (client arrays, which OpenGL ES does not allow on a
++    // VAO, when it has no VBOs) and element buffer. Draw on VAO 0, as without VAOs; Drawable::draw has bound it already.
++    if (vas->getVertexArrayObject() == 0)
++    {
++        state.bindVertexArrayObject(vas);
++        usingVertexArrayObjects = false;
++        if (state.useVertexArrayObject(false)) // OSG_VERTEX_BUFFER_HINT=VAO
++        {
++            // With VAOs on, what VAO 0 holds is not what this state set last: other states draw on it too (MyGUI's
++            // leaves its colour array on, which the composite maps would take for their overall white and come out
++            // black), and the array buffer binding is the context's, which the VAO geometries change. So everything
++            // is turned off and set again, and drawVertexArraysImplementation, which with VAOs on sets the arrays only
++            // when the state asks for it, is asked to.
++            GLExtensions* ext = state.get<GLExtensions>();
++            ext->glBindBuffer(GL_ARRAY_BUFFER_ARB, 0);
++            ext->glBindBuffer(GL_ELEMENT_ARRAY_BUFFER_ARB, 0);
++            vas->resetBufferObjectPointers();
++            state.disableAllVertexArrays();
++            vas->setRequiresSetArrays(true);
++        }
++    }
++
+     bool checkForGLErrors = state.getCheckForGLErrors()==osg::State::ONCE_PER_ATTRIBUTE;
+     if (checkForGLErrors) state.checkGLErrors("start of Geometry::drawImplementation()");
+ 
+diff --git a/src/osg/State.cpp b/src/osg/State.cpp
+index 0b816f8..bc086d8 100644
+--- a/src/osg/State.cpp
++++ b/src/osg/State.cpp
+@@ -1136,6 +1136,11 @@ void State::resetVertexAttributeAlias(bool compactAliasing, unsigned int numText
+ 
+ void State::disableAllVertexArrays()
+ {
++    // Alpha3: the arrays are those of the current vertex array state. With VAOs on, the VAO a geometry drew with stays
++    // bound after it, and code drawing by itself with the global state (OpenMW's MyGUI renderer, which starts here) would
++    // change that geometry's VAO, or set client arrays on it, which OpenGL ES does not allow. The global state's VAO is 0.
++    if (_vas) bindVertexArrayObject(_vas);
++
+     disableVertexPointer();
+     disableColorPointer();
+     disableFogCoordPointer();
+diff --git a/src/osg/VertexArrayState.cpp b/src/osg/VertexArrayState.cpp
+index e8f67c3..14b791e 100644
+--- a/src/osg/VertexArrayState.cpp
++++ b/src/osg/VertexArrayState.cpp
+@@ -738,12 +738,34 @@ void VertexArrayState::setArray(ArrayDispatch* vad, osg::State& state, const osg
+ {
+     if (new_array)
+     {
++        // a single value for every vertex (custom drawing code sets these, Geometry applies them itself) is the
++        // attribute's current value: a vertex array object takes no client pointer, and a buffer would be read past
++        if (_vertexArrayObject && new_array->getBinding()==osg::Array::BIND_OVERALL && vad->isVertexAttribDispatch()
++            && new_array->getDataType()==GL_FLOAT && new_array->getNumElements()>0)
++        {
++            if (vad->active) disable(vad, state);
++            GLfloat value[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
++            const GLfloat* data = static_cast<const GLfloat*>(new_array->getDataPointer());
++            for (unsigned int i = 0; i < new_array->getDataSize() && i < 4; ++i) value[i] = data[i];
++            _ext->glVertexAttrib4fv(static_cast<VertexAttribArrayDispatch*>(vad)->unit, value);
++            return;
++        }
++
+         if (!vad->active)
+         {
+             vad->active = true;
+             _activeDispatchers.push_back(vad);
+         }
+ 
++        // OpenGL ES 3 forbids client array pointers while a vertex array object is bound, so an array that custom drawing
++        // code sets without a buffer of its own is given one
++        if (_vertexArrayObject && isVertexBufferObjectSupported() && !new_array->getBufferObject())
++        {
++            osg::VertexBufferObject* buffer = new osg::VertexBufferObject;
++            buffer->setUsage(GL_DYNAMIC_DRAW);
++            const_cast<osg::Array*>(new_array)->setVertexBufferObject(buffer);
++        }
++
+         if (vad->array==0)
+         {
+             GLBufferObject* vbo = isVertexBufferObjectSupported() ? new_array->getOrCreateGLBufferObject(state.getContextID()) : 0;

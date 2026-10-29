@@ -1,0 +1,48 @@
+From afd69f3fd1488a01f879d4be4f2498a4cf657b85 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Thu, 15 Oct 2026 08:48:53 -0400
+Subject: [PATCH] Client package: Qt Wayland plugins, no LD_LIBRARY_PATH in the
+ start scripts
+
+qt6-wayland in the build container so Wayland-only sessions get a platform plugin. The scripts no
+longer export LD_LIBRARY_PATH: the programs find lib/ by RPATH, and the variable made tools they
+start (grep, gdb for the crash log) load the bundled libraries.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ multiplayer/container/Dockerfile | 2 +-
+ multiplayer/package-client.py    | 5 +++--
+ 2 files changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/multiplayer/container/Dockerfile b/multiplayer/container/Dockerfile
+index bc20abfd99..a9cc41ee85 100644
+--- a/multiplayer/container/Dockerfile
++++ b/multiplayer/container/Dockerfile
+@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
+     libboost-filesystem-dev \
+     libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev \
+     libsdl2-dev libqt6opengl6-dev qt6-tools-dev qt6-tools-dev-tools \
+-    qt6-l10n-tools libqt6svg6 libqt6svg6-dev qt6-qpa-plugins \
++    qt6-l10n-tools libqt6svg6 libqt6svg6-dev qt6-qpa-plugins qt6-wayland \
+     libopenal-dev libunshield-dev libtinyxml-dev liblz4-dev libpng-dev \
+     libjpeg-dev libicu-dev libyaml-cpp-dev librecast-dev libsqlite3-dev \
+     libcollada-dom-dev libfreetype6-dev libgl-dev libvulkan-dev \
+diff --git a/multiplayer/package-client.py b/multiplayer/package-client.py
+index c39d108293..3b163b5d1d 100755
+--- a/multiplayer/package-client.py
++++ b/multiplayer/package-client.py
+@@ -234,8 +234,9 @@ def main():
+ 
+         # --- scripts and notes
+         osgname = os.path.basename(osgdir) if osgdir else 'osgPlugins'
+-        env = ('export LD_LIBRARY_PATH="$HERE/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"\n'
+-               'export OSG_LIBRARY_PATH="$HERE/lib/%s"\n'
++        # no LD_LIBRARY_PATH: the programs and bundled libraries find lib/ by their own RPATH, and a variable would also
++        # reach tools they start (grep, gdb for the crash log) and make those load the bundled libraries instead of their own
++        env = ('export OSG_LIBRARY_PATH="$HERE/lib/%s"\n'
+                'export QT_PLUGIN_PATH="$HERE/plugins"\n' % osgname)
+         header = '#!/bin/sh\n# %s\nHERE="$(cd "$(dirname "$0")" && pwd)"\ncd "$HERE" || exit 1\n'
+         what = {
+-- 
+2.55.0
+

@@ -1,0 +1,646 @@
+--- a/components/sdlutil/sdlgraphicswindow.cpp
++++ b/components/sdlutil/sdlgraphicswindow.cpp
+@@ -23,7 +23,9 @@
+ #include <cstdlib>
+ #include <cstring>
+ #include <iomanip>
++#include <sstream>
+ #include <memory>
++#include <thread>
+ #include <vector>
+ #include <cstdio>
+ #include <cstdio>
+@@ -544,7 +546,111 @@
+     oColor = vec4(dot(texture(uColor, vUV).rgb, vec3(0.299, 0.587, 0.114)), 0.0, 0.0, 1.0);
+ })";
+ 
+-        // The vectors are in pixels of the luma image, from the earlier frame to the later one.
++        // The software motion estimator, ported from the "badMB2" OpenMW post processing shader (block matching of a
++        // downscaled frame against the one before, in 13x13 searched sections, softened and refined to sub-section accuracy).
++        const char* const sSwHeader = "#version 300 es\nprecision highp float;\nprecision highp sampler2D;\n"
++                                      "in vec2 vUV;\nout vec4 oColor;\n"
++                                      "const float SECTIONS = 13.0;\nconst float LIMIT = 0.5;\n";
++
++        const char* const sSwDownBody = R"(
++uniform sampler2D uColor;
++void main() { oColor = vec4(textureLod(uColor, vUV, 1.5).rgb, 1.0); })";
++
++        const char* const sSwCrossBody = R"(
++uniform sampler2D uNext;
++uniform sampler2D uOld;
++uniform float uNoHistory;
++void main()
++{
++    float n = SECTIONS;
++    float q = (SECTIONS - 1.0) / 2.0;
++    vec2 uv = vUV * n;
++    vec2 uvd = (floor(uv) - q) / q;
++    uvd *= abs(uvd);
++    uvd *= LIMIT;
++    uv = fract(uv);
++    vec2 uv2 = uv + uvd * 0.5;
++    vec2 ts1 = vec2(1024.0);
++    vec2 ts2 = vec2(textureSize(uNext, 0));
++    vec2 tsr = ts1 / ts2 / ts2;
++    vec3 a = textureGrad(uNext, uv, vec2(tsr.x, 0.0), vec2(0.0, tsr.y)).rgb;
++    vec3 b = textureGrad(uOld, uv2, vec2(tsr.x, 0.0), vec2(0.0, tsr.y)).rgb;
++    vec3 e = abs(a - b);
++    if (uv2.x < 0.0 || uv2.x > 1.0 || uv2.y < 0.0 || uv2.y > 1.0)
++        e = max(vec3(0.1), e);
++    float vx = vUV.x * 2.0 - 1.0;
++    float vy = vUV.y * 2.0 - 1.0;
++    e += vec3(vx * vx + vy * vy) * 0.04;
++    if (uNoHistory > 0.5)
++        e = vec3(0.0);
++    oColor = vec4(e, 1.0);
++})";
++
++        const char* const sSwBlurBody = R"(
++uniform sampler2D uSource;
++uniform vec2 uDir;
++uniform int uSoften;
++void main()
++{
++    if (uSoften == 0) { oColor = vec4(texture(uSource, vUV).rgb, 1.0); return; }
++    float n = float(uSoften) - 0.5;
++    vec3 total = vec3(0.0);
++    float norm = 0.0;
++    vec2 rankX = floor(vUV * SECTIONS);
++    vec2 r = 1.0 / vec2(textureSize(uSource, 0));
++    for (float t = -n; t <= n; t += 1.0)
++    {
++        vec2 uv = vUV + uDir * t * r;
++        if (floor(uv * SECTIONS) == rankX)
++        {
++            total += texture(uSource, uv).rgb;
++            norm += 1.0;
++        }
++    }
++    oColor = vec4(total / max(1.0, norm), 1.0);
++})";
++
++        const char* const sSwMotionBody = R"(
++uniform sampler2D uEnergy;
++float energy(vec2 uv) { return dot(texture(uEnergy, uv).rgb, vec3(1.0 / 3.0)); }
++void main()
++{
++    float n = SECTIONS;
++    vec2 uvq = vUV / n;
++    float c = (n - 1.0) / 2.0;
++    float best = energy(uvq + vec2(c, c) / n);
++    vec2 bestXY = vec2(c, c) / n;
++    for (float y = 0.0; y < n; y += 1.0)
++        for (float x = 0.0; x < n; x += 1.0)
++        {
++            float v = energy(uvq + vec2(x, y) / n);
++            if (v < best) { bestXY = vec2(x, y) / n; best = v; }
++        }
++    float xa = 0.0, ya = 0.0;
++    if (bestXY.x > 0.0 && bestXY.x + 0.0001 < (n - 1.0) / n)
++    {
++        float l = energy(uvq + bestXY - vec2(1.0, 0.0) / n);
++        float r = energy(uvq + bestXY + vec2(1.0, 0.0) / n);
++        xa = (l - r) * 0.5 / (l + r - 2.0 * best + 0.001);
++        if (best - ((r - l) * (r - l)) * (1.0 / 8.0) / (r + l - 2.0 * best) < 0.0) xa = 0.0;
++    }
++    if (bestXY.y > 0.0 && bestXY.y + 0.0001 < (n - 1.0) / n)
++    {
++        float t = energy(uvq + bestXY - vec2(0.0, 1.0) / n);
++        float b = energy(uvq + bestXY + vec2(0.0, 1.0) / n);
++        ya = (t - b) * 0.5 / (t + b - 2.0 * best + 0.001);
++        if (best - ((t - b) * (t - b)) * (1.0 / 8.0) / (t + b - 2.0 * best) < 0.0) ya = 0.0;
++    }
++    bestXY += vec2(xa, ya) / n;
++    vec2 mv = (bestXY - 0.5 + (0.5 / n)) * 2.0;
++    mv *= abs(mv);
++    mv = pow(abs(mv), vec2(0.5)) * sign(mv);
++    oColor = vec4(mv, 0.0, 1.0);
++})";
++
++        // One warp for both estimators. The vectors are the content's displacement over one real frame; the camera's own
++        // motion (the average of the field, which is what a pan, turn or walk mostly is) is the baseline, and a local vector
++        // is only trusted where it stays near it, so a noisy block cannot tear a piece of the picture off.
+         const char* const sWarpFragment = R"(#version 300 es
+ precision highp float;
+ uniform sampler2D uColor;
+@@ -552,16 +658,48 @@
+ uniform vec2 uLumaSize;
+ uniform float uTime;
+ uniform float uTint;
++uniform float uSoftware;
++uniform float uLod;
++uniform float uSign;
++uniform float uBaseline;
++uniform float uTolerance;
++uniform sampler2D uColor2;
++uniform float uInterp;
+ in vec2 vUV;
+ out vec4 oColor;
++vec2 decode(vec2 raw)
++{
++    if (any(isnan(raw)) || any(isinf(raw)))
++        return vec2(0.0);
++    if (uSoftware > 0.5)
++    {
++        vec2 mv = -raw;
++        mv = pow(abs(mv), vec2(2.0)) * sign(mv);
++        return mv * 0.5 * 0.5 * uSign;
++    }
++    vec2 d = raw / uLumaSize;
++    return length(d) > 0.25 ? vec2(0.0) : d;
++}
+ void main()
+ {
+-    vec2 move = texture(uMotion, vUV).rg;
+-    // Blocks the estimator could not match come back as noise: no motion there
+-    if (any(isnan(move)) || any(isinf(move)) || length(move) > 32.0)
+-        move = vec2(0.0);
+-    move /= uLumaSize;
+-    vec3 colour = texture(uColor, clamp(vUV - move * uTime, vec2(0.0), vec2(1.0))).rgb;
++    vec2 d = decode(textureLod(uMotion, vUV, uLod).rg);
++    if (uBaseline > 0.5)
++    {
++        vec2 g = decode(textureLod(uMotion, vec2(0.5), 20.0).rg);
++        vec2 resid = d - g;
++        float keep = 1.0 - smoothstep(0.5 * uTolerance, uTolerance, length(resid));
++        d = g + resid * keep;
++    }
++    vec3 colour;
++    if (uInterp > 0.5)
++    {
++        // Between the two real frames: the content is half way along its motion, so each frame is read half a vector away
++        vec3 before = texture(uColor, clamp(vUV - d * 0.5, vec2(0.0), vec2(1.0))).rgb;
++        vec3 after = texture(uColor2, clamp(vUV + d * 0.5, vec2(0.0), vec2(1.0))).rgb;
++        colour = 0.5 * (before + after);
++    }
++    else
++        colour = texture(uColor, clamp(vUV - d * uTime, vec2(0.0), vec2(1.0))).rgb;
+     oColor = vec4(colour + vec3(0.25, 0.0, 0.0) * uTint, 1.0);
+ })";
+ 
+@@ -575,9 +713,26 @@
+     oColor = vec4(texture(uColor, vUV).rgb, 1.0);
+ })";
+ 
++        // Zink is desktop OpenGL: the shaders are written for OpenGL ES 3.00 and become 3.30 core (no precision lines).
++        bool sDesktopShaders = false;
++
++        std::string toDesktop(const char* source)
++        {
++            std::string text = source;
++            const std::size_t version = text.find("#version 300 es");
++            if (version != std::string::npos)
++                text.replace(version, 15, "#version 330 core");
++            std::size_t precision;
++            while ((precision = text.find("precision ")) != std::string::npos)
++                text.erase(precision, text.find('\n', precision) - precision + 1);
++            return text;
++        }
++
+         GLuint compileProgram(const char* vertexSource, const char* fragmentSource)
+         {
+-            const auto compile = [](GLenum type, const char* source) {
++            const auto compile = [](GLenum type, const char* original) {
++                const std::string converted = sDesktopShaders ? toDesktop(original) : std::string();
++                const char* source = sDesktopShaders ? converted.c_str() : original;
+                 GLuint shader = glCreateShader(type);
+                 glShaderSource(shader, 1, &source, nullptr);
+                 glCompileShader(shader);
+@@ -617,8 +772,9 @@
+         {
+         public:
+             /// Null when the driver has neither extension (or the one asked for). request: 1/auto, motion or extrapolate.
+-            static FrameGen* create(const std::string& request)
++            static FrameGen* create(const std::string& request, bool desktop = false)
+             {
++                sDesktopShaders = desktop;
+                 const char* extensions = reinterpret_cast<const char*>(glGetString(GL_EXTENSIONS));
+                 const std::string list = extensions != nullptr ? extensions : "";
+                 const bool hasMotion = list.find("GL_QCOM_motion_estimation") != std::string::npos;
+@@ -630,12 +786,15 @@
+                     if (frames->mExtrapolate != nullptr)
+                         frames->mMode = Mode::Extrapolate;
+                 }
+-                if (frames->mMode == Mode::Off && hasMotion && request != "extrapolate")
++                if (frames->mMode == Mode::Off && hasMotion && request != "extrapolate" && request != "software")
+                 {
+                     frames->mEstimate = reinterpret_cast<EstimateMotionFn>(eglGetProcAddress("glTexEstimateMotionQCOM"));
+                     if (frames->mEstimate != nullptr)
+                         frames->mMode = Mode::Motion;
+                 }
++                // Without the Qualcomm extensions (and on Zink, which never has them) the software estimator is used
++                if (frames->mMode == Mode::Off && (request == "software" || desktop))
++                    frames->mMode = Mode::Software;
+                 if (frames->mMode == Mode::Off)
+                 {
+                     Log(Debug::Info) << "Frame generation: this GPU has neither GL_QCOM_frame_extrapolation nor "
+@@ -649,6 +808,24 @@
+                 frames->mBlockY = std::max(frames->mBlockY, 1);
+                 frames->mLumaProgram = compileProgram(sFullscreenVertex, sLumaFragment);
+                 frames->mWarpProgram = compileProgram(sFullscreenVertex, sWarpFragment);
++                if (frames->mMode == Mode::Software)
++                {
++                    const auto build = [](const char* body) {
++                        return compileProgram(sFullscreenVertex, (std::string(sSwHeader) + body).c_str());
++                    };
++                    frames->mSw[0] = build(sSwDownBody);
++                    frames->mSw[1] = build(sSwCrossBody);
++                    frames->mSw[2] = build(sSwBlurBody);
++                    frames->mSw[3] = build(sSwMotionBody);
++                    for (GLuint program : frames->mSw)
++                        if (program == 0)
++                            return nullptr;
++                }
++                frames->mBaseline = std::getenv("OPENMW_FRAMEGEN_NOBASELINE") == nullptr;
++                if (const char* ratio = std::getenv("OPENMW_FRAMEGEN_RATIO"))
++                    frames->mRatio = std::max(1, std::atoi(ratio));
++                if (const char* sign = std::getenv("OPENMW_FRAMEGEN_SIGN"))
++                    frames->mSign = static_cast<float>(std::atof(sign));
+                 frames->mCopyProgram = compileProgram(sFullscreenVertex, sCopyFragment);
+                 if (frames->mLumaProgram == 0 || frames->mWarpProgram == 0 || frames->mCopyProgram == 0)
+                     return nullptr;
+@@ -656,7 +833,8 @@
+                 glGenFramebuffers(1, &frames->mFbo);
+                 Log(Debug::Info) << "Frame generation: "
+                                  << (frames->mMode == Mode::Extrapolate ? "GL_QCOM_frame_extrapolation"
+-                                                                        : "GL_QCOM_motion_estimation, search block ")
++                                        : frames->mMode == Mode::Software ? "software motion estimation (block matching)"
++                                                                          : "GL_QCOM_motion_estimation, search block ")
+                                  << (frames->mMode == Mode::Motion ? std::to_string(frames->mBlockX) + "x"
+                                             + std::to_string(frames->mBlockY)
+                                                                   : std::string());
+@@ -668,6 +846,13 @@
+             /// After a real frame is drawn, before it is shown: remember it.
+             void capture(int width, int height)
+             {
++                const auto now = std::chrono::steady_clock::now();
++                if (mLastCapture != std::chrono::steady_clock::time_point())
++                {
++                    const double ms = std::chrono::duration<double, std::milli>(now - mLastCapture).count();
++                    mInterval = mInterval == 0.0 ? ms : mInterval * 0.8 + ms * 0.2;
++                }
++                mLastCapture = now;
+                 if (!prepare(width, height))
+                     return;
+                 Saved saved = begin();
+@@ -675,6 +860,8 @@
+                 glBindFramebuffer(GL_FRAMEBUFFER, 0);
+                 glBindTexture(GL_TEXTURE_2D, mColor[mCurrent]);
+                 glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, width, height);
++                if (mMode == Mode::Software)
++                    glGenerateMipmap(GL_TEXTURE_2D);
+                 if (mMode == Mode::Motion)
+                 {
+                     glBindFramebuffer(GL_FRAMEBUFFER, mFbo);
+@@ -685,15 +872,19 @@
+                     glDrawArrays(GL_TRIANGLES, 0, 3);
+                     glBindFramebuffer(GL_FRAMEBUFFER, 0);
+                 }
+-                mHistory = std::min(mHistory + 1, 2);
++                mHistory = std::min(mHistory + 1, 3);
++                ++mReal;
+                 end(saved);
+             }
+ 
+             /// Draws the extra frame into the back buffer; false when there is nothing to show yet.
+-            bool generate()
++            bool generate(bool interpolate = false)
+             {
+                 if (mHistory < 2 || mWidth == 0)
+                     return false;
++                // One generated frame after every mRatio real ones (default 2: two rendered, one generated)
++                if (mReal % mRatio != 0)
++                    return false;
+                 const int previous = 1 - mCurrent;
+                 Saved saved = begin();
+                 glBindFramebuffer(GL_FRAMEBUFFER, 0);
+@@ -708,20 +899,39 @@
+                 }
+                 else
+                 {
+-                    mEstimate(mLuma[previous], mLuma[mCurrent], mMotion);
+-                    if (const GLenum error = glGetError(); error != GL_NO_ERROR && mErrors++ < 3)
+-                        Log(Debug::Warning) << "Frame generation: motion estimation error 0x" << std::hex << error;
++                    if (mMode == Mode::Software)
++                        estimateSoftware(saved);
++                    else
++                    {
++                        mEstimate(mLuma[previous], mLuma[mCurrent], mMotion);
++                        if (const GLenum error = glGetError(); error != GL_NO_ERROR && mErrors++ < 3)
++                            Log(Debug::Warning) << "Frame generation: motion estimation error 0x" << std::hex << error;
++                        glBindTexture(GL_TEXTURE_2D, mMotion);
++                        glGenerateMipmap(GL_TEXTURE_2D);
++                    }
++                    glBindFramebuffer(GL_FRAMEBUFFER, 0);
++                    glViewport(0, 0, mWidth, mHeight);
++                    const bool software = mMode == Mode::Software;
+                     glUseProgram(mWarpProgram);
+                     glUniform1i(glGetUniformLocation(mWarpProgram, "uColor"), 0);
+                     glUniform1i(glGetUniformLocation(mWarpProgram, "uMotion"), 1);
+                     glUniform2f(glGetUniformLocation(mWarpProgram, "uLumaSize"), static_cast<float>(mLumaWidth),
+                         static_cast<float>(mLumaHeight));
+-                    glUniform1f(glGetUniformLocation(mWarpProgram, "uTime"), 0.5f);
++                    glUniform1f(glGetUniformLocation(mWarpProgram, "uTime"), mTime);
+                     glUniform1f(glGetUniformLocation(mWarpProgram, "uTint"), mTint ? 1.0f : 0.0f);
++                    glUniform1f(glGetUniformLocation(mWarpProgram, "uSoftware"), software ? 1.0f : 0.0f);
++                    glUniform1f(glGetUniformLocation(mWarpProgram, "uLod"), software ? 2.0f : 0.0f);
++                    glUniform1f(glGetUniformLocation(mWarpProgram, "uSign"), mSign);
++                    glUniform1f(glGetUniformLocation(mWarpProgram, "uBaseline"), mBaseline ? 1.0f : 0.0f);
++                    glUniform1f(glGetUniformLocation(mWarpProgram, "uTolerance"), software ? 0.04f : 0.02f);
++                    glUniform1i(glGetUniformLocation(mWarpProgram, "uColor2"), 2);
++                    glUniform1f(glGetUniformLocation(mWarpProgram, "uInterp"), interpolate ? 1.0f : 0.0f);
++                    glActiveTexture(GL_TEXTURE2);
++                    glBindTexture(GL_TEXTURE_2D, mColor[mCurrent]);
+                     glActiveTexture(GL_TEXTURE1);
+-                    glBindTexture(GL_TEXTURE_2D, mMotion);
++                    glBindTexture(GL_TEXTURE_2D, software ? mMV : mMotion);
+                     glActiveTexture(GL_TEXTURE0);
+-                    glBindTexture(GL_TEXTURE_2D, mColor[mCurrent]);
++                    glBindTexture(GL_TEXTURE_2D, interpolate ? mColor[previous] : mColor[mCurrent]);
+                 }
+                 glDrawArrays(GL_TRIANGLES, 0, 3);
+                 logUse();
+@@ -729,12 +939,42 @@
+                 return true;
+             }
+ 
++            /// The motion modes can show a frame between the previous real frame and the one just rendered (the extra frame
++            /// comes first, the real one half a frame later). Extrapolation has nothing to look back on.
++            void setDefaultRatio(int ratio)
++            {
++                if (std::getenv("OPENMW_FRAMEGEN_RATIO") == nullptr)
++                    mRatio = ratio;
++            }
++
++            bool due() const { return mHistory >= 2 && mWidth != 0 && mReal % mRatio == 0; }
++
++            bool interpolates() const { return mInterpolate && (mMode == Mode::Motion || mMode == Mode::Software); }
++
++            /// Puts the frame that was just rendered back into the back buffer after the extra one went out.
++            void showCurrent()
++            {
++                Saved saved = begin();
++                glBindFramebuffer(GL_FRAMEBUFFER, 0);
++                glViewport(0, 0, mWidth, mHeight);
++                glUseProgram(mCopyProgram);
++                glUniform1i(glGetUniformLocation(mCopyProgram, "uColor"), 0);
++                glActiveTexture(GL_TEXTURE0);
++                glBindTexture(GL_TEXTURE_2D, mColor[mCurrent]);
++                glDrawArrays(GL_TRIANGLES, 0, 3);
++                end(saved);
++            }
++
++            /// Time between the last two real frames, smoothed (what the next one is predicted to take).
++            double interval() const { return mInterval; }
++
+         private:
+             enum class Mode
+             {
+                 Off,
+                 Motion,
+-                Extrapolate
++                Extrapolate,
++                Software
+             };
+ 
+             /// Every few seconds: proof in the log that generated frames are shown, and how many.
+@@ -747,16 +987,27 @@
+                 const double seconds = std::chrono::duration<double>(now - mLogStart).count();
+                 if (seconds < 5.0)
+                     return;
++                const int real = mReal - mRealLogged;
+                 Log(Debug::Info) << "Frame generation active ("
+-                                 << (mMode == Mode::Extrapolate ? "frame extrapolation" : "motion estimation")
+-                                 << "): " << mGenerated << " generated frames in " << std::fixed << std::setprecision(1)
+-                                 << seconds << " s, " << mGenerated / seconds << " rendered and " << mGenerated / seconds
+-                                 << " generated frames per second, " << 2.0 * mGenerated / seconds << " shown";
++                                 << (mMode == Mode::Extrapolate ? "frame extrapolation"
++                                         : mMode == Mode::Software ? "software motion estimation"
++                                                                   : "motion estimation")
++                                 << ", one generated frame after every " << mRatio << " rendered): " << std::fixed
++                                 << std::setprecision(1) << real / seconds << " rendered + " << mGenerated / seconds
++                                 << " generated = " << (real + mGenerated) / seconds << " shown frames per second";
++                mRealLogged = mReal;
+                 mGenerated = 0;
+                 mLogStart = now;
+             }
+ 
+             int mGenerated = 0;
++            int mReal = 0;
++            int mRatio = 2;
++            bool mInterpolate = std::getenv("OPENMW_FRAMEGEN_EXTRAPOLATE") == nullptr;
++            double mInterval = 0.0;
++            std::chrono::steady_clock::time_point mLastCapture;
++            const float mTime = 0.5f;
++            int mRealLogged = 0;
+             int mErrors = 0;
+             std::chrono::steady_clock::time_point mLogStart;
+ 
+@@ -835,14 +1086,60 @@
+                 }
+             }
+ 
+-            GLuint makeTexture(GLenum internalFormat, int width, int height, GLenum filter)
++            /// The ported estimator: current frame down to 512x256, cross energy against the previous one, softening, the
++            /// search for the best section, softening of the vectors, then the frame becomes the previous one.
++            void estimateSoftware(const Saved&)
++            {
++                const auto draw = [&](GLuint program, GLuint target, int width, int height,
++                                      std::initializer_list<std::pair<const char*, GLuint>> inputs) {
++                    glBindFramebuffer(GL_FRAMEBUFFER, mFbo);
++                    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, target, 0);
++                    glViewport(0, 0, width, height);
++                    glUseProgram(program);
++                    int unit = 0;
++                    for (const auto& [name, texture] : inputs)
++                    {
++                        glActiveTexture(GL_TEXTURE0 + unit);
++                        glBindTexture(GL_TEXTURE_2D, texture);
++                        glUniform1i(glGetUniformLocation(program, name), unit++);
++                    }
++                    glDrawArrays(GL_TRIANGLES, 0, 3);
++                };
++                const auto mips = [&](GLuint texture) {
++                    glActiveTexture(GL_TEXTURE0);
++                    glBindTexture(GL_TEXTURE_2D, texture);
++                    glGenerateMipmap(GL_TEXTURE_2D);
++                };
++                const auto blur = [&](GLuint source, GLuint target, int size, float x, float y) {
++                    glUseProgram(mSw[2]);
++                    glUniform2f(glGetUniformLocation(mSw[2], "uDir"), x, y);
++                    glUniform1i(glGetUniformLocation(mSw[2], "uSoften"), 4);
++                    draw(mSw[2], target, size == 0 ? 512 : 1024, size == 0 ? 256 : 1024, { { "uSource", source } });
++                };
++                draw(mSw[0], mNext, 512, 256, { { "uColor", mColor[mCurrent] } });
++                mips(mNext);
++                glUseProgram(mSw[1]);
++                glUniform1f(glGetUniformLocation(mSw[1], "uNoHistory"), mHistory < 3 ? 1.0f : 0.0f);
++                draw(mSw[1], mCE[0], 1024, 1024, { { "uNext", mNext }, { "uOld", mOld } });
++                blur(mCE[0], mCE[1], 1, 0.0f, 1.0f);
++                blur(mCE[1], mCE[0], 1, 1.0f, 0.0f);
++                draw(mSw[3], mMV, 512, 256, { { "uEnergy", mCE[0] } });
++                blur(mMV, mMV2, 0, 0.0f, 1.0f);
++                blur(mMV2, mMV, 0, 1.0f, 0.0f);
++                mips(mMV);
++                draw(mCopyProgram, mOld, 512, 256, { { "uColor", mNext } });
++                mips(mOld);
++                glActiveTexture(GL_TEXTURE0);
++            }
++
++            GLuint makeTexture(GLenum internalFormat, int width, int height, GLenum filter, int levels = 1)
+             {
+                 GLuint texture = 0;
+                 glGenTextures(1, &texture);
+                 glBindTexture(GL_TEXTURE_2D, texture);
+-                glTexStorage2D(GL_TEXTURE_2D, 1, internalFormat, width, height);
++                glTexStorage2D(GL_TEXTURE_2D, levels, internalFormat, width, height);
+                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, static_cast<GLint>(filter));
+-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, static_cast<GLint>(filter));
++                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                 return texture;
+@@ -857,10 +1154,31 @@
+                 mWidth = width;
+                 mHeight = height;
+                 mHistory = 0;
++                const auto levelsFor = [](int w, int h) {
++                    int levels = 1;
++                    for (int size = std::max(w, h); size > 1; size >>= 1)
++                        ++levels;
++                    return levels;
++                };
+                 for (int i = 0; i < 2; ++i)
+-                    mColor[i] = makeTexture(GL_RGB8, width, height, GL_LINEAR);
++                    mColor[i] = mMode == Mode::Software
++                        ? makeTexture(GL_RGB8, width, height, GL_LINEAR_MIPMAP_LINEAR, levelsFor(width, height))
++                        : makeTexture(GL_RGB8, width, height, GL_LINEAR);
+                 if (mMode == Mode::Extrapolate)
+                     mOutput = makeTexture(GL_RGB8, width, height, GL_LINEAR);
++                else if (mMode == Mode::Software)
++                {
++                    const int levels = levelsFor(512, 256);
++                    mNext = makeTexture(GL_RGBA16F, 512, 256, GL_LINEAR_MIPMAP_LINEAR, levels);
++                    mOld = makeTexture(GL_RGBA16F, 512, 256, GL_LINEAR_MIPMAP_LINEAR, levels);
++                    mMV = makeTexture(GL_RGBA16F, 512, 256, GL_LINEAR_MIPMAP_LINEAR, levels);
++                    mMV2 = makeTexture(GL_RGBA16F, 512, 256, GL_LINEAR);
++                    mCE[0] = makeTexture(GL_RGBA16F, 1024, 1024, GL_LINEAR);
++                    mCE[1] = makeTexture(GL_RGBA16F, 1024, 1024, GL_LINEAR);
++                    mLumaWidth = 512;
++                    mLumaHeight = 256;
++                    Log(Debug::Info) << "Frame generation: " << width << "x" << height << ", software motion estimation on 512x256";
++                }
+                 else
+                 {
+                     // Block matching on a quarter size luma image, each side a multiple of the search block
+@@ -868,7 +1186,8 @@
+                     mLumaHeight = std::max(mBlockY, (height / 4) / mBlockY * mBlockY);
+                     for (int i = 0; i < 2; ++i)
+                         mLuma[i] = makeTexture(GL_R8, mLumaWidth, mLumaHeight, GL_LINEAR);
+-                    mMotion = makeTexture(GL_RGBA16F, mLumaWidth / mBlockX, mLumaHeight / mBlockY, GL_LINEAR);
++                    mMotion = makeTexture(GL_RGBA16F, mLumaWidth / mBlockX, mLumaHeight / mBlockY, GL_LINEAR_MIPMAP_LINEAR,
++                        levelsFor(mLumaWidth / mBlockX, mLumaHeight / mBlockY));
+                     Log(Debug::Info) << "Frame generation: " << width << "x" << height << ", motion on " << mLumaWidth
+                                      << "x" << mLumaHeight << " luma, " << mLumaWidth / mBlockX << "x"
+                                      << mLumaHeight / mBlockY << " vectors";
+@@ -879,7 +1198,8 @@
+ 
+             void destroyTextures()
+             {
+-                for (GLuint* texture : { &mColor[0], &mColor[1], &mLuma[0], &mLuma[1], &mMotion, &mOutput })
++                for (GLuint* texture : { &mColor[0], &mColor[1], &mLuma[0], &mLuma[1], &mMotion, &mOutput, &mNext, &mOld, &mMV,
++                         &mMV2, &mCE[0], &mCE[1] })
+                     if (*texture != 0)
+                     {
+                         glDeleteTextures(1, texture);
+@@ -894,10 +1214,11 @@
+                     glDeleteVertexArrays(1, &mVao);
+                 if (mFbo != 0)
+                     glDeleteFramebuffers(1, &mFbo);
+-                for (GLuint program : { mLumaProgram, mWarpProgram, mCopyProgram })
++                for (GLuint program : { mLumaProgram, mWarpProgram, mCopyProgram, mSw[0], mSw[1], mSw[2], mSw[3] })
+                     if (program != 0)
+                         glDeleteProgram(program);
+                 mVao = mFbo = mLumaProgram = mWarpProgram = mCopyProgram = 0;
++                mSw[0] = mSw[1] = mSw[2] = mSw[3] = 0;
+             }
+ 
+             Mode mMode = Mode::Off;
+@@ -906,6 +1227,11 @@
+             GLint mBlockX = 1;
+             GLint mBlockY = 1;
+             bool mTint = std::getenv("OPENMW_FRAMEGEN_TINT") != nullptr;
++            GLuint mSw[4] = { 0, 0, 0, 0 };
++            GLuint mNext = 0, mOld = 0, mMV = 0, mMV2 = 0;
++            GLuint mCE[2] = { 0, 0 };
++            bool mBaseline = true;
++            float mSign = 1.0f;
+             GLuint mLumaProgram = 0;
+             GLuint mWarpProgram = 0;
+             GLuint mCopyProgram = 0;
+@@ -1026,15 +1352,63 @@
+                 SDL_GL_GetDrawableSize(mWindow, &width, &height);
+                 frames->capture(width, height);
+             }
+-            SwappyGL_swap(eglGetCurrentDisplay(), eglGetCurrentSurface(EGL_DRAW));
+-            if (frames != nullptr && frames->generate())
++            if (frames != nullptr && frames->interpolates())
++            {
++                // The extra frame (between the previous real frame and this one) goes out first, then half the predicted
++                // frame time later the real one.
++                if (frames->due() && frames->generate(true))
++                {
++                    SwappyGL_swap(eglGetCurrentDisplay(), eglGetCurrentSurface(EGL_DRAW));
++                    const auto shown = std::chrono::steady_clock::now();
++                    frames->showCurrent();
++                    const auto until = shown + std::chrono::microseconds(static_cast<long>(frames->interval() * 500.0));
++                    std::this_thread::sleep_until(until);
++                }
+                 SwappyGL_swap(eglGetCurrentDisplay(), eglGetCurrentSurface(EGL_DRAW));
++            }
++            else
++            {
++                SwappyGL_swap(eglGetCurrentDisplay(), eglGetCurrentSurface(EGL_DRAW));
++                if (frames != nullptr && frames->generate())
++                    SwappyGL_swap(eglGetCurrentDisplay(), eglGetCurrentSurface(EGL_DRAW));
++            }
+             return;
+         }
+ #endif
+ 
+         if (mUseZink)
+         {
++#ifdef ANDROID
++            // Frame generation on Zink: the same scheme as on OpenGL ES (the generated frame goes out first, the real one half
++            // a frame later), made with the software estimator, in front of Zink's copy to the window.
++            if (!mFrameGenTried)
++            {
++                mFrameGenTried = true;
++                const char* request = std::getenv("OPENMW_FRAMEGEN");
++                if (request != nullptr && *request != '\0' && std::strcmp(request, "0") != 0)
++                {
++                    FrameGen* created = FrameGen::create(request, true);
++                    // On Zink: one generated frame for every real one
++                    if (created != nullptr)
++                        created->setDefaultRatio(1);
++                    mFrameGen = created;
++                }
++            }
++            if (FrameGen* frames = static_cast<FrameGen*>(mFrameGen))
++            {
++                int width = 0, height = 0;
++                SDL_GL_GetDrawableSize(mWindow, &width, &height);
++                frames->capture(width, height);
++                if (frames->due() && frames->generate(true))
++                {
++                    swapBuffersZink();
++                    const auto shown = std::chrono::steady_clock::now();
++                    frames->showCurrent();
++                    std::this_thread::sleep_until(
++                        shown + std::chrono::microseconds(static_cast<long>(frames->interval() * 500.0)));
++                }
++            }
++#endif
+             swapBuffersZink();
+             return;
+         }

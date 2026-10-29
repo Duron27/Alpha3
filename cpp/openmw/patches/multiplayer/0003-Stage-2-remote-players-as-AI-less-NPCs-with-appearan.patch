@@ -1,0 +1,461 @@
+From 237adffd3d07b3e83f03248a6b69aa07142b1f7e Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Wed, 7 Oct 2026 01:35:58 -0400
+Subject: [PATCH] Stage 2: remote players as AI-less NPCs with appearance,
+ equipment, walking, cell visibility
+
+- global.lua: profile/equip/state sync, per-cell visibility, cleanup of saved remote actors
+- remote.lua (CUSTOM): disables AI and steers actor toward remote position for real animations
+- relay: replay last profile/equip/state to late joiners; mirror echoes all three
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ multiplayer/mod/mp.omwscripts         |   1 +
+ multiplayer/mod/scripts/mp/global.lua | 214 +++++++++++++++++++++-----
+ multiplayer/mod/scripts/mp/remote.lua |  88 +++++++++++
+ multiplayer/server/bot.py             |   4 +-
+ multiplayer/server/relay.py           |  15 +-
+ 5 files changed, 277 insertions(+), 45 deletions(-)
+ create mode 100644 multiplayer/mod/scripts/mp/remote.lua
+
+diff --git a/multiplayer/mod/mp.omwscripts b/multiplayer/mod/mp.omwscripts
+index 8c437c83ef..31262948e1 100644
+--- a/multiplayer/mod/mp.omwscripts
++++ b/multiplayer/mod/mp.omwscripts
+@@ -1 +1,2 @@
+ GLOBAL: scripts/mp/global.lua
++CUSTOM: scripts/mp/remote.lua
+diff --git a/multiplayer/mod/scripts/mp/global.lua b/multiplayer/mod/scripts/mp/global.lua
+index c388d20a4b..670f525613 100644
+--- a/multiplayer/mod/scripts/mp/global.lua
++++ b/multiplayer/mod/scripts/mp/global.lua
+@@ -1,83 +1,209 @@
+--- Multiplayer test client: streams the local player's state to a relay server
+--- and shows every remote player as a placeholder object.
++-- Multiplayer test client (stage 2): streams the local player's state to a relay
++-- server and represents every remote player as an AI-less NPC with their look and gear.
+ local net = require('openmw.net')
+ local world = require('openmw.world')
+ local util = require('openmw.util')
++local types = require('openmw.types')
+ local markup = require('openmw.markup')
+ 
+ local HOST = '127.0.0.1'
+ local PORT = 25565
+-local SEND_INTERVAL = 0.2 -- seconds
+-local MARKER = 'com_chest_01' -- placeholder record for remote players
++local SEND_INTERVAL = 0.1
++local EQUIP_INTERVAL = 1
+ local RETRY_INTERVAL = 3
++local REMOTE_SCRIPT = 'scripts/mp/remote.lua'
+ 
+-local timer = 0
+-local retry = 0
+-local wantConnect = true
++local sendTimer, equipTimer, retry = 0, 0, 0
++local lastEquipJson
+ local myId
+-local remotes = {} -- id -> { obj = GameObject }
++local remotes = {} -- id -> { profile, state, equip, obj, equipSent }
+ 
+ local function log(...) print('[mp]', ...) end
+ 
+-local function connect()
+-    log('connecting to ' .. HOST .. ':' .. PORT)
+-    net.connect(HOST, PORT)
++local function player() return world.players[1] end
++
++local function cellKey(cell) return cell.isExterior and '' or cell.name end
++
++------------------------------------------------------------------ outbound
++
++local function sendProfile()
++    local p = player()
++    if not p then return end
++    local rec = types.NPC.record(p)
++    net.send(net.encodeJson({
++        t = 'profile', name = rec.name, race = rec.race, class = rec.class,
++        head = rec.head, hair = rec.hair, isMale = rec.isMale,
++    }))
++end
++
++local function sendEquipment(force)
++    local p = player()
++    if not p then return end
++    local slots = {}
++    for slot, obj in pairs(types.Actor.getEquipment(p)) do slots[tostring(slot)] = obj.recordId end
++    local json = net.encodeJson({ t = 'equip', slots = slots })
++    if force or json ~= lastEquipJson then
++        lastEquipJson = json
++        net.send(json)
++    end
+ end
+ 
+ local function sendState()
+-    local p = world.players[1]
++    local p = player()
+     if not p then return end
+     local pos = p.position
+     net.send(net.encodeJson({
+         t = 'state',
+-        name = p.recordId,
+-        cell = p.cell.isExterior and '' or p.cell.name,
++        cell = cellKey(p.cell),
+         pos = { pos.x, pos.y, pos.z },
+         yaw = p.rotation:getYaw(),
++        stance = types.Actor.getStance(p),
+     }))
+ end
+ 
+-local function applyState(msg)
+-    if type(msg.pos) ~= 'table' then return end
+-    local r = remotes[msg.id]
+-    if not r then
+-        r = { obj = world.createObject(MARKER, 1) }
+-        remotes[msg.id] = r
+-        log('remote player ' .. tostring(msg.id) .. ' appeared')
++------------------------------------------------------------------ remote actors
++
++local function stateVectors(r)
++    local s = r.state
++    return util.vector3(s.pos[1], s.pos[2], s.pos[3]), util.transform.rotateZ(s.yaw or 0)
++end
++
++local function placeRemote(r)
++    local pos, rot = stateVectors(r)
++    r.obj:teleport(r.state.cell, pos, { rotation = rot })
++end
++
++local function stockEquipment(r)
++    local inv = types.Actor.inventory(r.obj)
++    local slots = {}
++    for slotStr, recordId in pairs(r.equip or {}) do
++        if inv:countOf(recordId) == 0 then
++            local ok, item = pcall(world.createObject, recordId, 1)
++            if ok then item:moveInto(inv) else log('cannot create item ' .. recordId) end
++        end
++        slots[tonumber(slotStr)] = recordId
+     end
+-    local pos = util.vector3(msg.pos[1], msg.pos[2], msg.pos[3])
+-    r.obj:teleport(msg.cell or '', pos, { rotation = util.transform.rotateZ(msg.yaw or 0) })
++    r.obj:sendEvent('MpEquip', { slots = slots })
++    r.equipSent = true
++    log('equipped remote actor with ' .. tostring(next(slots) and 'gear' or 'nothing'))
++end
++
++local function spawnRemote(r)
++    local template = types.NPC.record(player())
++    local draft = types.NPC.createRecordDraft({
++        template = template,
++        name = r.profile.name,
++        race = r.profile.race,
++        class = r.profile.class,
++        head = r.profile.head,
++        hair = r.profile.hair,
++        isMale = r.profile.isMale,
++        isEssential = true,
++    })
++    local record = world.createRecord(draft)
++    r.obj = world.createObject(record.id, 1)
++    r.obj:addScript(REMOTE_SCRIPT)
++    log('spawned actor for ' .. tostring(r.profile.name) .. ' (' .. record.id .. ')')
++    placeRemote(r)
++    r.equipSent = false
+ end
+ 
+ local function removeRemote(id)
+     local r = remotes[id]
+-    if r then
+-        r.obj:remove()
+-        remotes[id] = nil
+-        log('remote player ' .. tostring(id) .. ' left')
+-    end
++    if not r then return end
++    if r.obj and r.obj:isValid() then pcall(function() r.obj:remove() end) end
++    remotes[id] = nil
++    log('remote player ' .. tostring(id) .. ' left')
+ end
+ 
+ local function clearRemotes()
+-    for id in pairs(remotes) do removeRemote(id) end
++    local ids = {}
++    for id in pairs(remotes) do ids[#ids + 1] = id end
++    for _, id in ipairs(ids) do removeRemote(id) end
++end
++
++-- Keep each remote's actor in sync with what we know: visible only in our own cell.
++local function updateRemote(r)
++    local p = player()
++    if not (p and r.profile and r.state) then return end
++    local sameCell = r.state.cell == cellKey(p.cell)
++    if not sameCell then
++        if r.obj and r.obj.enabled then r.obj.enabled = false end
++        return
++    end
++    if not r.obj or not r.obj:isValid() then
++        spawnRemote(r)
++        return
++    end
++    if not r.obj.enabled then
++        placeRemote(r)
++        r.obj.enabled = true
++        return
++    end
++    if not r.equipSent and r.equip then stockEquipment(r) end
++    local pos = stateVectors(r)
++    r.obj:sendEvent('MpTarget', {
++        pos = pos, yaw = r.state.yaw, stance = r.state.stance,
++    })
++end
++
++------------------------------------------------------------------ messages
++
++local function onMessage(msg)
++    if msg.t == 'hello' then
++        myId = msg.id
++        log('my id is ' .. tostring(myId))
++        sendProfile()
++        sendEquipment(true)
++        return
++    end
++    local id = msg.id
++    if msg.t == 'leave' then removeRemote(id) return end
++    if not id then return end
++    local r = remotes[id]
++    if not r then
++        r = {}
++        remotes[id] = r
++        log('remote player ' .. tostring(id) .. ' appeared')
++    end
++    if msg.t == 'profile' then r.profile = msg
++    elseif msg.t == 'equip' then r.equip = msg.slots; r.equipSent = false
++    elseif msg.t == 'state' and type(msg.pos) == 'table' then r.state = msg end
+ end
+ 
++------------------------------------------------------------------ handlers
++
+ return {
+     engineHandlers = {
+-        onPlayerAdded = function() connect() end,
+-        onLoad = function() remotes = {}; wantConnect = true end,
++        onPlayerAdded = function()
++            log('connecting to ' .. HOST .. ':' .. PORT)
++            net.connect(HOST, PORT)
++        end,
++        onSave = function()
++            -- remote actors are saved with the world; remember them so they can be cleaned up on load
++            local objs = {}
++            for _, r in pairs(remotes) do if r.obj then objs[#objs + 1] = r.obj end end
++            return { objs = objs }
++        end,
++        onLoad = function(saved)
++            remotes = {}
++            lastEquipJson = nil
++            for _, obj in ipairs(saved and saved.objs or {}) do
++                if obj:isValid() then pcall(function() obj:remove() end) end
++            end
++        end,
+         onUpdate = function(dt)
++            for _, r in pairs(remotes) do updateRemote(r) end
+             if net.isConnected() then
+-                timer = timer + dt
+-                if timer >= SEND_INTERVAL then
+-                    timer = 0
+-                    sendState()
+-                end
+-            elseif wantConnect and world.players[1] then
++                sendTimer = sendTimer + dt
++                equipTimer = equipTimer + dt
++                if sendTimer >= SEND_INTERVAL then sendTimer = 0; sendState() end
++                if equipTimer >= EQUIP_INTERVAL then equipTimer = 0; sendEquipment(false) end
++            elseif player() then
+                 retry = retry + dt
+                 if retry >= RETRY_INTERVAL then
+                     retry = 0
+-                    connect()
++                    net.connect(HOST, PORT)
+                 end
+             end
+         end,
+@@ -88,10 +214,14 @@ return {
+         end,
+         onNetMessage = function(line)
+             local ok, msg = pcall(markup.decodeYaml, line)
+-            if not ok or type(msg) ~= 'table' then return end
+-            if msg.t == 'hello' then myId = msg.id; log('my id is ' .. tostring(myId))
+-            elseif msg.t == 'state' then applyState(msg)
+-            elseif msg.t == 'leave' then removeRemote(msg.id) end
++            if ok and type(msg) == 'table' then onMessage(msg) end
++        end,
++    },
++    eventHandlers = {
++        MpSnap = function(d)
++            for _, r in pairs(remotes) do
++                if r.obj == d.actor and r.state then placeRemote(r) end
++            end
+         end,
+     },
+ }
+diff --git a/multiplayer/mod/scripts/mp/remote.lua b/multiplayer/mod/scripts/mp/remote.lua
+new file mode 100644
+index 0000000000..34fd4dcce9
+--- /dev/null
++++ b/multiplayer/mod/scripts/mp/remote.lua
+@@ -0,0 +1,88 @@
++-- Local script attached to the NPC that stands in for a remote player.
++-- Disables AI and steers the actor toward the last known remote position so it
++-- plays real walk/run animations; the global script teleports it if it gets too far off.
++local self = require('openmw.self')
++local core = require('openmw.core')
++local types = require('openmw.types')
++local util = require('openmw.util')
++
++local Actor = types.Actor
++
++local WALK_START, WALK_STOP = 70, 30 -- distance hysteresis (game units)
++local RUN_DIST = 250
++local SNAP_DIST = 700
++local TURN_RATE = 8 -- rad/s
++
++local target -- { pos, yaw, stance }
++local walking = false
++local desiredEquip
++local equipTimer = 0
++local snapTimer = 0
++local aiOff = false
++
++local function wrap(a)
++    while a > math.pi do a = a - 2 * math.pi end
++    while a < -math.pi do a = a + 2 * math.pi end
++    return a
++end
++
++local function equipMatches()
++    local cur = Actor.getEquipment(self)
++    for slot, id in pairs(desiredEquip) do
++        local o = cur[slot]
++        if not o or o.recordId ~= id then return false end
++    end
++    return true
++end
++
++return {
++    engineHandlers = {
++        onActive = function() self:enableAI(false); aiOff = true end,
++        onUpdate = function(dt)
++            if not aiOff then self:enableAI(false); aiOff = true end
++            local c = self.controls
++
++            if desiredEquip then
++                equipTimer = equipTimer - dt
++                if equipTimer <= 0 then
++                    equipTimer = 1
++                    if equipMatches() then desiredEquip = nil else Actor.setEquipment(self, desiredEquip) end
++                end
++            end
++
++            if not target then return end
++            snapTimer = snapTimer - dt
++
++            local delta = target.pos - self.position
++            local dist = math.sqrt(delta.x * delta.x + delta.y * delta.y)
++            if dist > SNAP_DIST and snapTimer <= 0 then
++                snapTimer = 1
++                core.sendGlobalEvent('MpSnap', { actor = self.object })
++            end
++
++            if walking then
++                if dist < WALK_STOP then walking = false end
++            elseif dist > WALK_START then
++                walking = true
++            end
++
++            local wantYaw = walking and math.atan2(delta.x, delta.y) or target.yaw
++            local err = wrap(wantYaw - self.rotation:getYaw())
++            local maxTurn = TURN_RATE * dt
++            c.yawChange = math.max(-maxTurn, math.min(maxTurn, err))
++            c.movement = walking and 1 or 0
++            c.run = walking and dist > RUN_DIST
++            c.sneak = target.sneak or false
++        end,
++    },
++    eventHandlers = {
++        MpTarget = function(d)
++            target = { pos = d.pos, yaw = d.yaw, sneak = d.sneak }
++            if d.stance and Actor.getStance(self) ~= d.stance then Actor.setStance(self, d.stance) end
++        end,
++        MpEquip = function(d)
++            desiredEquip = d.slots
++            equipTimer = 0
++        end,
++    },
++}
+diff --git a/multiplayer/server/bot.py b/multiplayer/server/bot.py
+index 64414ab92c..837c7ce01e 100644
+--- a/multiplayer/server/bot.py
++++ b/multiplayer/server/bot.py
+@@ -16,9 +16,11 @@ cx, cy, z = (float(v) for v in sys.argv[3:6]) if len(sys.argv) >= 6 else (0.0, 0
+ cell = sys.argv[6] if len(sys.argv) > 6 else ""
+ 
+ s = socket.create_connection((host, port))
++s.sendall((json.dumps({"t": "profile", "name": "Bot", "race": "dark elf", "class": "acrobat",
++                      "head": "b_n_dark elf_m_head_01", "hair": "b_n_dark elf_m_hair_01", "isMale": True}) + "\n").encode())
+ t = 0.0
+ while True:
+-    msg = {"t": "state", "name": "bot", "cell": cell,
++    msg = {"t": "state", "cell": cell,
+            "pos": [cx + 300 * math.cos(t), cy + 300 * math.sin(t), z],
+            "yaw": t + math.pi / 2}
+     s.sendall((json.dumps(msg) + "\n").encode())
+diff --git a/multiplayer/server/relay.py b/multiplayer/server/relay.py
+index 4fa65a5506..c4cf82d88d 100644
+--- a/multiplayer/server/relay.py
++++ b/multiplayer/server/relay.py
+@@ -12,6 +12,7 @@ import sys
+ MIRROR = "--mirror" in sys.argv
+ sys.argv = [a for a in sys.argv if a != "--mirror"]
+ clients = {}  # id -> StreamWriter
++last = {}  # id -> {type: last message}, replayed to late joiners
+ next_id = 1
+ 
+ 
+@@ -26,8 +27,13 @@ async def handle(reader, writer):
+     global next_id
+     cid, next_id = next_id, next_id + 1
+     clients[cid] = writer
++    last[cid] = {}
+     print(f"+ client {cid} from {writer.get_extra_info('peername')}", flush=True)
+     writer.write((json.dumps({"t": "hello", "id": cid}) + "\n").encode())
++    for other, msgs in last.items():
++        if other != cid:
++            for m in msgs.values():
++                writer.write((json.dumps(m, separators=(",", ":")) + "\n").encode())
+     try:
+         async for line in reader:
+             try:
+@@ -37,15 +43,20 @@ async def handle(reader, writer):
+             if not isinstance(msg, dict):
+                 continue
+             msg["id"] = cid
++            if msg.get("t") in ("profile", "equip", "state"):
++                last[cid][msg["t"]] = msg
+             await broadcast(msg, exclude=cid)
+-            if MIRROR and msg.get("t") == "state" and isinstance(msg.get("pos"), list) and len(msg["pos"]) == 3:
++            if MIRROR and msg.get("t") in ("profile", "equip", "state"):
+                 # Echo the sender back as a fake second player standing 300 units east of them.
+-                ghost = dict(msg, id=-cid, pos=[msg["pos"][0] + 300, msg["pos"][1], msg["pos"][2]])
++                ghost = dict(msg, id=-cid)
++                if msg["t"] == "state" and isinstance(msg.get("pos"), list) and len(msg["pos"]) == 3:
++                    ghost["pos"] = [msg["pos"][0] + 300, msg["pos"][1], msg["pos"][2]]
+                 writer.write((json.dumps(ghost, separators=(",", ":")) + "\n").encode())
+     except (ConnectionError, asyncio.LimitOverrunError):
+         pass
+     finally:
+         del clients[cid]
++        del last[cid]
+         writer.close()
+         print(f"- client {cid}", flush=True)
+         await broadcast({"t": "leave", "id": cid})
+-- 
+2.55.0
+

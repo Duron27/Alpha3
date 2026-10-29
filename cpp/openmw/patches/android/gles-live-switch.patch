@@ -1,0 +1,656 @@
+diff --git a/apps/openmw/engine.cpp b/apps/openmw/engine.cpp
+index 4fa8cc5506..bbe7ce3070 100644
+--- a/apps/openmw/engine.cpp
++++ b/apps/openmw/engine.cpp
+@@ -116,7 +116,9 @@ namespace
+ #include "mwsound/soundmanagerimp.hpp"
+ 
+ #include "mwworld/class.hpp"
++#include "mwworld/cellstore.hpp"
+ #include "mwworld/datetimemanager.hpp"
++#include "mwworld/scene.hpp"
+ #include "mwworld/worldimp.hpp"
+ 
+ #include "mwrender/capture.hpp"
+@@ -753,6 +755,7 @@ void OMW::Engine::createWindow(bool hidden)
+         Log(Debug::Warning) << "Using OpenGL: " << runtime.mRendererReason;
+     runtime.mFallbackChain.emplace_back(Settings::rendererEntryName(glEntry));
+     mRendererStatus.mActual = Settings::rendererEntryName(glEntry);
++    mRendererEntry = glEntry;
+     runtime.mGles = Settings::isOpenGLES(glEntry);
+     mRendererStatus.mReason = runtime.mRendererReason;
+     Settings::writeRendererStatus(statusPath, mRendererStatus);
+@@ -762,6 +765,17 @@ void OMW::Engine::createWindow(bool hidden)
+     // renderer = opengl on Android is desktop GL through Mesa Zink (libOSMesa_8.so) on the Vulkan driver, so the window
+     // gets no SDL/EGL context. The OpenGL ES entries use an SDL/EGL context: the system driver's, or our ANGLE build's.
+     // OSG_USE_ANGLE or OPENMW_SYSTEM_GLES in the environment also choose a GLES library for the OpenGL entry.
++    // These choose the GL library for the whole process: start from what the user's environment says every time, so a
++    // live switch away from Zink or ANGLE does not leave them behind.
++    static const bool userAngle = getenv("OSG_USE_ANGLE") != nullptr;
++    static const bool userZink = getenv("OSG_USE_ZINK") != nullptr;
++    if (!userAngle)
++        unsetenv("OSG_USE_ANGLE");
++    if (!userZink)
++        unsetenv("OSG_USE_ZINK");
++    unsetenv("OPENMW_GLES_VERSION");
++    SDL_GL_UnloadLibrary();
++    SDL_SetHint(SDL_HINT_VIDEO_EXTERNAL_CONTEXT, "0");
+     if (glEntry == Settings::RendererEntry::OpenGLES32Angle)
+         setenv("OSG_USE_ANGLE", "1", 1);
+     if (Settings::isOpenGLES(glEntry))
+@@ -1147,6 +1161,11 @@ void OMW::Engine::switchRenderer()
+         mWindowManager->rendererReady();
+         return;
+     }
++#ifdef ANDROID
++    // One SDL window only: the old renderer has to be gone before the new window exists.
++    switchRendererSerial(target, recovering);
++    return;
++#endif
+ 
+     MWRender::CaptureManager& capture = mWorld->getRenderingManager()->getCaptureManager();
+     capture.stopTrace();
+@@ -1429,6 +1448,247 @@ void OMW::Engine::switchRenderer()
+         Diagnostics::runtime().mRendererReason = std::move(failure);
+ }
+ 
++#ifdef ANDROID
++// Android has a single SDL window, so unlike the general path above (which creates the new window first and keeps the old
++// one until it works) the old renderer goes first. If the new one cannot start, the old one is created again.
++void OMW::Engine::switchRendererSerial(const RendererSwitch& target, bool recovering)
++{
++    MWRender::RenderingManager* const rendering = mWorld->getRenderingManager();
++    rendering->getCaptureManager().stopTrace();
++    if (mScreenCaptureOperation != nullptr)
++        mScreenCaptureOperation->stop();
++    mViewer->stopThreading();
++#ifdef OPENMW_USE_VULKAN
++    if (mClockwork != nullptr)
++        mClockwork->quiesce();
++#endif
++    mWorkQueue->waitIdle();
++
++    const int oldDevice = Settings::video().mVulkanDevice;
++    const int oldSamples = Settings::video().mAntialiasing;
++    const RendererRequest oldRequest = mRendererRequest;
++    const Settings::RendererStatus oldStatus = Settings::readRendererStatus(mCfgMgr.getLogPath() / "renderer.status");
++    const Settings::RendererEntry oldEntry = mRendererEntry;
++    const double oldReferenceTime = mViewer->getFrameStamp()->getReferenceTime();
++    const int statsLevel = mProfiler == nullptr ? 0 : mProfiler->level();
++    const int statsDetail = mProfiler == nullptr ? 0 : mProfiler->detail();
++    const std::size_t statsPage = mResourceStats == nullptr ? 0 : mResourceStats->page();
++    Log(Debug::Info) << "Switching renderer from " << Settings::rendererEntryName(oldEntry) << " to "
++                     << Settings::rendererEntryName(target.mEntry);
++
++    // The old renderer: its GL objects, its context, its window.
++    auto tearDown = [&]() {
++#ifdef OPENMW_USE_VULKAN
++        if (mClockwork != nullptr)
++        {
++            if (rendering->getGpuScene() != nullptr)
++            {
++                try
++                {
++                    rendering->getGpuScene()->setEnabled(false);
++                }
++                catch (const std::exception& error)
++                {
++                    Log(Debug::Warning) << "Renderer switch: " << error.what();
++                }
++            }
++            rendering->detachClockwork();
++            mClockwork->stop();
++            mClockwork.reset();
++        }
++#endif
++        osg::ref_ptr<osg::GraphicsContext> context = mViewer->getCamera()->getGraphicsContext();
++        if (context != nullptr)
++        {
++            context->makeCurrent();
++            rendering->releaseContext(context->getState());
++            mViewer->getSceneData()->releaseGLObjects(context->getState());
++            osgViewer::Viewer::Cameras cameras;
++            mViewer->getCameras(cameras);
++            for (osg::Camera* camera : cameras)
++                camera->releaseGLObjects(context->getState());
++        }
++        dropStats();
++        if (context != nullptr)
++            osg::flushAllDeletedGLObjects(context->getState()->getContextID());
++        rendering->detachClockwork();
++        if (context != nullptr)
++        {
++            context->releaseContext();
++            SceneUtil::closeContext(*context);
++        }
++        context = nullptr;
++        mViewer->getCamera()->setGraphicsContext(nullptr);
++        if (mWindow != nullptr)
++        {
++            SDL_DestroyWindow(mWindow);
++            mWindow = nullptr;
++        }
++    };
++
++    // Whatever a failed attempt left half-built.
++    auto discard = [&]() {
++#ifdef OPENMW_USE_VULKAN
++        if (mClockwork != nullptr)
++        {
++            mClockwork->stop();
++            mClockwork.reset();
++        }
++#endif
++        osg::ref_ptr<osg::GraphicsContext> context = mViewer->getCamera()->getGraphicsContext();
++        if (context != nullptr)
++            SceneUtil::closeContext(*context);
++        context = nullptr;
++        mViewer->getCamera()->setGraphicsContext(nullptr);
++        if (mWindow != nullptr)
++        {
++            SDL_DestroyWindow(mWindow);
++            mWindow = nullptr;
++        }
++    };
++
++    auto create = [&](Settings::RendererEntry entry, int device) {
++        mWindow = nullptr;
++        mRendererRequest.mEntry = entry;
++        mRendererSwitches.open(RendererSwitch{ entry, device });
++        mRendererStatus = {};
++        Diagnostics::runtime().mRendererReason.clear();
++        Diagnostics::runtime().mFallbackChain.clear();
++        mViewer->setDone(false);
++        try
++        {
++            createWindow(true);
++        }
++        catch (const std::exception& error)
++        {
++            Diagnostics::runtime().mRendererReason = error.what();
++        }
++        mViewer->setReferenceTime(oldReferenceTime);
++        mViewer->stopThreading();
++        if (mRendererStatus.mActual.starts_with("opengl"))
++        {
++            mRendererEntry = Settings::readRendererEntry(mRendererStatus.mActual);
++            Diagnostics::runtime().mRendererEntry = "opengl";
++        }
++        const bool hasOutput = Settings::isOpenGLFamily(entry) ? mWindow != nullptr
++#ifdef OPENMW_USE_VULKAN
++                                                               : mClockwork != nullptr;
++#else
++                                                               : false;
++#endif
++        return hasOutput && mRendererStatus.mActual == Settings::rendererEntryName(entry);
++    };
++
++    tearDown();
++    RendererSwitch active = target;
++    std::string failure;
++    if (!create(target.mEntry, target.mDevice))
++    {
++        failure = Diagnostics::runtime().mRendererReason;
++        Log(Debug::Warning) << "Renderer switch to " << Settings::rendererEntryName(target.mEntry)
++                            << " failed: " << failure << ". Going back to " << Settings::rendererEntryName(oldEntry);
++        discard();
++        Settings::video().mAntialiasing.set(oldSamples);
++        mRendererRequest = oldRequest;
++        active = RendererSwitch{ oldEntry, oldDevice };
++        if (!create(oldEntry, oldDevice))
++        {
++            Log(Debug::Error) << "Renderer switch: the previous renderer cannot be restored either: "
++                              << Diagnostics::runtime().mRendererReason;
++            discard();
++            mStateManager->requestQuit();
++            return;
++        }
++    }
++
++    if (Settings::isOpenGLFamily(active.mEntry))
++    {
++        mRendererEntry = active.mEntry;
++        Diagnostics::runtime().mRendererEntry = "opengl";
++    }
++    osg::ref_ptr<osg::GraphicsContext> newContext
++        = Settings::isOpenGLFamily(active.mEntry) ? mViewer->getCamera()->getGraphicsContext() : nullptr;
++    mViewer->getCamera()->setGraphicsContext(newContext);
++    if (newContext != nullptr)
++        newContext->makeCurrent();
++    else
++        mViewer->setDone(false);
++
++    mWindowManager->setWindow(mWindow);
++    mInputManager->setWindow(mWindow);
++    if (mWindow != nullptr)
++    {
++        Uint32 fullscreen = 0;
++        const Settings::WindowMode windowMode = Settings::video().mWindowMode;
++        if (windowMode == Settings::WindowMode::Fullscreen)
++            fullscreen = SDL_WINDOW_FULLSCREEN;
++        else if (windowMode == Settings::WindowMode::WindowedFullscreen)
++            fullscreen = SDL_WINDOW_FULLSCREEN_DESKTOP;
++        if (SDL_SetWindowFullscreen(mWindow, fullscreen) != 0)
++            Log(Debug::Error) << "Failed to restore fullscreen: " << SDL_GetError();
++        SDL_ShowWindow(mWindow);
++    }
++
++    mResourceSystem->getSceneManager()->getShaderManager().setMaxTextureUnits(mGlMaxTextureImageUnits);
++    resetStats(Settings::isOpenGLFamily(active.mEntry), statsLevel, statsDetail, statsPage);
++    if (newContext != nullptr)
++        newContext->releaseContext();
++#ifdef OPENMW_USE_VULKAN
++    rendering->setClockwork(mClockwork.get());
++    if (mClockwork != nullptr)
++        mClockwork->setStats(mProfiler.get(), mResourceStats.get(), &rendering->getCaptureManager().blackBox());
++#endif
++    if (Settings::isOpenGLFamily(active.mEntry))
++        rendering->refreshRenderer();
++    mViewer->startThreading();
++    mRendererSwitches.restore();
++
++    if (!failure.empty())
++    {
++        Diagnostics::runtime().mRendererReason = failure;
++        Settings::video().mAntialiasing.set(oldSamples);
++        Settings::Manager::resetPendingChanges(
++            { { "Video", "renderer" }, { "Video", "vulkan device" }, { "Video", "antialiasing" } });
++        Settings::writeRendererStatus(mCfgMgr.getLogPath() / "renderer.status", oldStatus);
++        if (!recovering)
++            mWindowManager->rendererReady();
++        else if (!mRendererSwitches.stepDown())
++            mStateManager->requestQuit();
++        return;
++    }
++
++    // What the objects were built for (GL programs, or the Vulkan GPU scene's materials) does not carry over from one
++    // family to the other: build the cells around the player again.
++    if (Settings::isOpenGLFamily(oldEntry) != Settings::isOpenGLFamily(active.mEntry))
++        reloadActiveCells();
++
++    mRendererSwitches.leave(oldEntry);
++    if (std::string reason = mRendererSwitches.present(target); !reason.empty())
++        Diagnostics::runtime().mRendererReason = std::move(reason);
++}
++
++void OMW::Engine::reloadActiveCells()
++{
++    if (mStateManager->getState() != MWState::StateManager::State_Running)
++        return;
++    const MWWorld::Ptr player = mWorld->getPlayerPtr();
++    const MWWorld::CellStore* const cell = player.isEmpty() ? nullptr : player.getCell();
++    if (cell == nullptr)
++        return;
++    Log(Debug::Info) << "Building the active cells again for the new renderer";
++    const ESM::Position position = player.getRefData().getPosition();
++    Loading::Listener* const listener = mWindowManager->getLoadingScreen();
++    listener->loadingOn();
++    MWWorld::Scene& scene = mWorld->getWorldScene();
++    scene.clear();
++    if (cell->isExterior())
++        scene.changeToExteriorCell(cell->getCell()->getId(), position, false, false);
++    else
++        scene.changeToInteriorCell(cell->getCell()->getNameId(), position, false, false);
++    listener->loadingOff();
++}
++#endif
++
+ void OMW::Engine::finishRenderer()
+ {
+     if (!mRendererSwitches.finish())
+diff --git a/apps/openmw/engine.hpp b/apps/openmw/engine.hpp
+index 51f8935ee5..41c2d93e7f 100644
+--- a/apps/openmw/engine.hpp
++++ b/apps/openmw/engine.hpp
+@@ -351,6 +351,8 @@ namespace OMW
+     private:
+         void requestRenderer(Settings::RendererEntry entry, int device);
+         void switchRenderer();
++        void switchRendererSerial(const RendererSwitch& target, bool recovering);
++        void reloadActiveCells();
+         void finishRenderer();
+         void dropStats();
+         void resetStats(bool ownScene, int level, int detail, std::size_t page);
+diff --git a/apps/openmw/mwbase/windowmanager.hpp b/apps/openmw/mwbase/windowmanager.hpp
+index e6d0ecc85f..13d11ee113 100644
+--- a/apps/openmw/mwbase/windowmanager.hpp
++++ b/apps/openmw/mwbase/windowmanager.hpp
+@@ -290,6 +290,9 @@ namespace MWBase
+ 
+         virtual void processChangedSettings(const std::set<std::pair<std::string, std::string>>& changed) = 0;
+ 
++        /// Applies a new [GUI] scaling factor while running. The layout follows at once; TrueType fonts (the console, the
++        /// stats overlay) keep the size they were rasterised at.
++        virtual void setGuiScalingFactor(float factor) = 0;
+         virtual void executeInConsole(const std::filesystem::path& path) = 0;
+ 
+         virtual void enableRest() = 0;
+diff --git a/apps/openmw/mwgui/settingswindow.cpp b/apps/openmw/mwgui/settingswindow.cpp
+index 831b684739..2f24252e35 100644
+--- a/apps/openmw/mwgui/settingswindow.cpp
++++ b/apps/openmw/mwgui/settingswindow.cpp
+@@ -3,6 +3,7 @@
+ #include <algorithm>
+ #include <array>
+ #include <chrono>
++#include <cmath>
+ 
+ #include <unicode/locid.h>
+ 
+@@ -429,18 +430,22 @@ namespace MWGui
+         const int screen = Settings::video().mScreen;
+         std::vector<std::pair<int, int>> resolutions;
+ #ifdef ANDROID
+-        // SDL lists only the native mode on Android. Offer fractions of it: choosing one resizes the surface in place
+-        // (see VideoWrapper::setVideoMode), so this works as a render scale.
++        // SDL lists only the native mode on Android. Offer it and the usual sizes up to it: choosing one resizes the
++        // surface in place (see VideoWrapper::setVideoMode), which works as a render scale, and the UI scale follows
++        // (onResolutionAccept). Every size keeps the screen's aspect ratio.
+         SDL_DisplayMode nativeMode;
+         if (SDL_GetDesktopDisplayMode(screen, &nativeMode) == 0)
+         {
+             const int nativeW = std::max(nativeMode.w, nativeMode.h);
+             const int nativeH = std::min(nativeMode.w, nativeMode.h);
+-            for (const int percent : { 100, 90, 80, 75, 67, 60, 50, 40, 33, 25 })
++            resolutions.emplace_back(nativeW, nativeH);
++            // Every size has the screen's aspect ratio, so the picture fills the screen without stretching or black
++            // borders and the touch coordinates stay exact (the surface follows, see SDLSurface.setRenderHeight).
++            for (const int height : { 2160, 1600, 1440, 1200, 1080, 1050, 900, 800, 768, 720, 540, 480, 360 })
+             {
+-                const int w = (nativeW * percent / 100) / 2 * 2;
+-                const int h = (nativeH * percent / 100) / 2 * 2;
+-                resolutions.emplace_back(w, h);
++                const int w = static_cast<int>(std::lround(static_cast<double>(height) * nativeW / nativeH / 2.0)) * 2;
++                if (height < nativeH && w <= nativeW)
++                    resolutions.emplace_back(w, height);
+             }
+         }
+ #else
+@@ -455,7 +460,26 @@ namespace MWGui
+         std::sort(resolutions.begin(), resolutions.end(), sortResolutions);
+         for (std::pair<int, int>& resolution : resolutions)
+         {
++#ifdef ANDROID
++            // Name the closest familiar ratio instead of a reduced fraction such as 1267:600
++            static constexpr std::pair<int, int> ratios[] = { { 4, 3 }, { 3, 2 }, { 16, 10 }, { 16, 9 }, { 19, 9 },
++                { 19, 10 }, { 20, 9 }, { 21, 9 } };
++            const double actual = static_cast<double>(resolution.first) / resolution.second;
++            std::pair<int, int> ratio = ratios[0];
++            for (const auto& candidate : ratios)
++                if (std::abs(static_cast<double>(candidate.first) / candidate.second - actual)
++                    < std::abs(static_cast<double>(ratio.first) / ratio.second - actual))
++                    ratio = candidate;
++            std::string str = std::to_string(resolution.first) + " x " + std::to_string(resolution.second) + " ("
++                + std::to_string(ratio.first) + ":" + std::to_string(ratio.second);
++            // The familiar name of the height
++            if (resolution.second == 2160 || resolution.second == 1440 || resolution.second == 1080
++                || resolution.second == 720 || resolution.second == 480 || resolution.second == 360)
++                str += ", " + std::to_string(resolution.second) + "p";
++            str += ")";
++#else
+             std::string str = Misc::getResolutionText(resolution.first, resolution.second);
++#endif
+ 
+             if (mResolutionList->findItemIndexWith(str) == MyGUI::ITEM_NONE)
+                 mResolutionList->addItem(str, resolution);
+@@ -592,6 +616,10 @@ namespace MWGui
+             Settings::video().mResolutionY.set(resolution->second);
+ 
+             apply();
++#ifdef ANDROID
++            // The interface scale is capped by the size of the surface (WindowManager::effectiveScalingFactor)
++            MWBase::Environment::get().getWindowManager()->setGuiScalingFactor(Settings::gui().mScalingFactor);
++#endif
+         }
+     }
+ 
+@@ -604,13 +632,18 @@ namespace MWGui
+     {
+         mResolutionList->setIndexSelected(MyGUI::ITEM_NONE);
+ 
+-        const int currentX = Settings::video().mResolutionX;
++        [[maybe_unused]] const int currentX = Settings::video().mResolutionX;
+         const int currentY = Settings::video().mResolutionY;
+ 
+         for (size_t i = 0; i < mResolutionList->getItemCount(); ++i)
+         {
+             auto resolution = mResolutionList->getItemDataAt<std::pair<int, int>>(i);
++#ifdef ANDROID
++            // The surface width always follows the screen's aspect ratio, so the height says which entry is running
++            if (resolution && resolution->second == currentY)
++#else
+             if (resolution && resolution->first == currentX && resolution->second == currentY)
++#endif
+             {
+                 mResolutionList->setIndexSelected(i);
+                 break;
+@@ -648,7 +681,12 @@ namespace MWGui
+         if (mRendererReady || !mRendererPanel->getInheritedVisible())
+             return;
+         const auto requested = Settings::rendererForBuild(Settings::video().mRenderer);
+-        const auto actual = Settings::readRendererEntry(Diagnostics::runtime().mRendererEntry);
++        // The OpenGL family shares one runtime entry; the fallback chain names the exact one that is running
++        // (OpenGL, OpenGL ES 3.2 or ANGLE).
++        const auto& runtime = Diagnostics::runtime();
++        const auto actual = Settings::readRendererEntry(
++            runtime.mRendererEntry == "opengl" && !runtime.mFallbackChain.empty() ? runtime.mFallbackChain.back()
++                                                                                  : runtime.mRendererEntry);
+         const auto& future = Settings::entryProbe(requested, actual);
+         if (future.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+             return;
+diff --git a/apps/openmw/mwgui/windowmanagerimp.cpp b/apps/openmw/mwgui/windowmanagerimp.cpp
+index 6bcade6cf9..82731e8a56 100644
+--- a/apps/openmw/mwgui/windowmanagerimp.cpp
++++ b/apps/openmw/mwgui/windowmanagerimp.cpp
+@@ -133,6 +133,17 @@ namespace MWGui
+ {
+     namespace
+     {
++    // The UI keeps its pixel size from the [GUI] scaling factor, so a lower resolution makes it larger on the screen.
++    // On Android it is capped so the interface still has a view of at least 1024 x 620 units to lay out in.
++    float effectiveScalingFactor(float factor, int pixelWidth, int pixelHeight)
++    {
++#ifdef ANDROID
++        if (pixelWidth > 0 && pixelHeight > 0)
++            factor = std::min({ factor, pixelWidth / 1024.f, pixelHeight / 620.f });
++#endif
++        return factor;
++    }
++
+         void drawableSize(SDL_Window* window, int& width, int& height)
+         {
+ #if SDL_VERSION_ATLEAST(2, 26, 0)
+@@ -241,7 +252,7 @@ namespace MWGui
+             drawableSize(window, dw, dh);
+         }
+ 
+-        mScalingFactor = Settings::gui().mScalingFactor * (w > 0 ? dw / w : 1);
++        mScalingFactor = effectiveScalingFactor(Settings::gui().mScalingFactor, dw, dh) * (w > 0 ? dw / w : 1);
+         constexpr VFS::Path::NormalizedView resourcePath("mygui");
+         mGuiPlatform = std::make_unique<MyGUIPlatform::Platform>(viewer, guiRoot, resourceSystem->getImageManager(),
+             resourceSystem->getVFS(), mScalingFactor, resourcePath, logpath / "MyGUI.log");
+@@ -1793,6 +1804,27 @@ namespace MWGui
+         return mScalingFactor;
+     }
+ 
++    void WindowManager::setGuiScalingFactor(float factor)
++    {
++        // The same relation as at start-up: the setting times the ratio of drawable pixels to window units.
++        int w = Settings::video().mResolutionX;
++        int h = Settings::video().mResolutionY;
++        int dw = w;
++        int dh = h;
++        if (mWindow != nullptr)
++        {
++            SDL_GetWindowSize(mWindow, &w, &h);
++            drawableSize(mWindow, dw, dh);
++        }
++        // the size just chosen, not what the window reports until the surface has been resized
++        mScalingFactor = effectiveScalingFactor(factor, Settings::video().mResolutionX, Settings::video().mResolutionY)
++            * (w > 0 ? dw / w : 1);
++        mGuiPlatform->getRenderManagerPtr()->setUiScalingFactor(mScalingFactor);
++        Log(Debug::Info) << "GUI scaling factor " << factor << " (effective " << mScalingFactor << ")";
++        // lay the windows out again for the new view size
++        windowResized(Settings::video().mResolutionX, Settings::video().mResolutionY);
++    }
++
+     void WindowManager::executeInConsole(const std::filesystem::path& path)
+     {
+         mConsole->executeFile(path);
+diff --git a/apps/openmw/mwgui/windowmanagerimp.hpp b/apps/openmw/mwgui/windowmanagerimp.hpp
+index 4f52cc76bc..a8ef0fbb71 100644
+--- a/apps/openmw/mwgui/windowmanagerimp.hpp
++++ b/apps/openmw/mwgui/windowmanagerimp.hpp
+@@ -316,6 +316,7 @@ namespace MWGui
+         void watchActor(const MWWorld::Ptr& ptr) override;
+         MWWorld::Ptr getWatchedActor() const override;
+ 
++        void setGuiScalingFactor(float factor) override;
+         void executeInConsole(const std::filesystem::path& path) override;
+ 
+         void enableRest() override { mRestAllowed = true; }
+diff --git a/apps/openmw/rendererswitch.cpp b/apps/openmw/rendererswitch.cpp
+index 9cebab869b..0846c1f422 100644
+--- a/apps/openmw/rendererswitch.cpp
++++ b/apps/openmw/rendererswitch.cpp
+@@ -19,6 +19,8 @@ namespace OMW
+             case Entry::Vulkan12:
+                 return RendererSwitch{ Entry::OpenGL, -1 };
+             case Entry::OpenGL:
++            case Entry::OpenGLES32:
++            case Entry::OpenGLES32Angle:
+                 return std::nullopt;
+         }
+         return std::nullopt;
+diff --git a/components/myguiplatform/myguirendermanager.cpp b/components/myguiplatform/myguirendermanager.cpp
+index bc8358e1bc..5f375472fc 100644
+--- a/components/myguiplatform/myguirendermanager.cpp
++++ b/components/myguiplatform/myguirendermanager.cpp
+@@ -496,6 +496,12 @@ namespace MyGUIPlatform
+         mDrawable->collect(out);
+     }
+ 
++    void RenderManager::setUiScalingFactor(float scalingFactor)
++    {
++        mInvScalingFactor = scalingFactor != 0.f ? 1.f / scalingFactor : 1.f;
++        setViewSize(mPixelWidth, mPixelHeight);
++    }
++
+     void RenderManager::setViewSize(int width, int height)
+     {
+         if (width < 1)
+@@ -504,6 +510,8 @@ namespace MyGUIPlatform
+             height = 1;
+ 
+         mGuiRoot->setViewport(0, 0, width, height);
++        mPixelWidth = width;
++        mPixelHeight = height;
+ 
+         mViewSize.set(static_cast<int>(width * mInvScalingFactor), static_cast<int>(height * mInvScalingFactor));
+ 
+diff --git a/components/myguiplatform/myguirendermanager.hpp b/components/myguiplatform/myguirendermanager.hpp
+index d5bab3d082..adb702bf47 100644
+--- a/components/myguiplatform/myguirendermanager.hpp
++++ b/components/myguiplatform/myguirendermanager.hpp
+@@ -57,6 +57,9 @@ namespace MyGUIPlatform
+         osg::ref_ptr<osg::Camera> mGuiRoot;
+ 
+         float mInvScalingFactor;
++        // the last viewport in pixels, so a new scaling factor can recompute the view size
++        int mPixelWidth = 1;
++        int mPixelHeight = 1;
+ 
+         osg::StateSet* mInjectState;
+ 
+@@ -68,6 +71,9 @@ namespace MyGUIPlatform
+         void initialise();
+         void shutdown();
+ 
++        /// Changes the UI scale while running (the view size follows the last viewport).
++        void setUiScalingFactor(float scalingFactor);
++
+         void enableShaders(Shader::ShaderManager& shaderManager);
+ 
+         static RenderManager& getInstance() { return *getInstancePtr(); }
+diff --git a/components/myguiplatform/myguitexture.cpp b/components/myguiplatform/myguitexture.cpp
+index af5bdcfd16..b882e86184 100644
+--- a/components/myguiplatform/myguitexture.cpp
++++ b/components/myguiplatform/myguitexture.cpp
+@@ -144,9 +144,9 @@ namespace MyGUIPlatform
+         newTexture->setWrap(osg::Texture::WRAP_S, mTexture->getWrap(osg::Texture::WRAP_S));
+         newTexture->setWrap(osg::Texture::WRAP_T, mTexture->getWrap(osg::Texture::WRAP_T));
+         newTexture->setImage(mLockedImage.get());
+-        // Tell the texture it can get rid of the image for static textures (since
+-        // they aren't expected to update much at all).
+-        newTexture->setUnRefImageDataAfterApply(mUsage.isValue(MyGUI::TextureUsage::Static) ? true : false);
++        // Static textures (the fonts) used to drop their image after the first upload. The data stays: a live renderer
++        // switch makes a new GL context that has to upload every texture again, and these are small.
++        newTexture->setUnRefImageDataAfterApply(false);
+ 
+         mTexture = newTexture;
+ 
+diff --git a/components/resource/imagemanager.cpp b/components/resource/imagemanager.cpp
+index 2161a2b711..24989978d5 100644
+--- a/components/resource/imagemanager.cpp
++++ b/components/resource/imagemanager.cpp
+@@ -9,7 +9,6 @@
+ #include <osgDB/Registry>
+ 
+ #include <components/debug/debuglog.hpp>
+-#include <components/diagnostics/identity.hpp>
+ #include <components/files/memorystream.hpp>
+ #include <components/misc/pathhelpers.hpp>
+ #include <components/misc/resourcehelpers.hpp>
+@@ -316,8 +315,9 @@ namespace Resource
+                 image->setOrigin(osg::Image::TOP_LEFT);
+             }
+ 
+-            // OpenGL ES has no BGR(A) upload with an RGB(A) internal format: swap the channels once on load
+-            if (Diagnostics::runtime().mGles && !image->isCompressed() && image->getNumMipmapLevels() <= 1 && image->getDataType() == GL_UNSIGNED_BYTE
++            // OpenGL ES has no BGR(A) upload with an RGB(A) internal format: swap the channels once on load. Every renderer
++            // gets the swapped image, so a cached one stays usable after a live renderer switch.
++            if (!image->isCompressed() && image->getNumMipmapLevels() <= 1 && image->getDataType() == GL_UNSIGNED_BYTE
+                 && (image->getPixelFormat() == GL_BGRA || image->getPixelFormat() == GL_BGR))
+             {
+                 const bool alpha = image->getPixelFormat() == GL_BGRA;
+@@ -330,7 +330,7 @@ namespace Resource
+                 }
+                 image->setPixelFormat(alpha ? GL_RGBA : GL_RGB);
+                 image->setInternalTextureFormat(alpha ? GL_RGBA : GL_RGB);
+-                Log(Debug::Verbose) << "Swapped BGR(A) to RGB(A) for OpenGL ES: " << path;
++                Log(Debug::Verbose) << "Swapped BGR(A) to RGB(A): " << path;
+             }
+ 
+             if (mHeadersOnly)
+diff --git a/components/shader/shadermanager.cpp b/components/shader/shadermanager.cpp
+index 6cc988dae0..d62b710994 100644
+--- a/components/shader/shadermanager.cpp
++++ b/components/shader/shadermanager.cpp
+@@ -1917,10 +1917,14 @@ namespace Shader
+             mMergedShaders.clear();
+             for (const auto& [pair, program] : mPrograms)
+             {
++                if (pair.first == nullptr || pair.second == nullptr)
++                    continue;
+                 while (program->getNumShaders() > 0)
+                     program->removeShader(program->getShader(0));
+                 const auto extras = mEsProgramExtras.find(program.get());
+                 static const std::vector<osg::ref_ptr<osg::Shader>> none;
++                if (pair.first == nullptr || pair.second == nullptr)
++                    continue; // a program without both stages (compute) is not merged
+                 program->addShader(getMergedShader(
+                     pair.first, extras != mEsProgramExtras.end() ? extras->second.first : none));
+                 program->addShader(getMergedShader(
+@@ -1930,6 +1934,12 @@ namespace Shader
+         else
+             for (const auto& [pair, program] : mPrograms)
+             {
++                // A program that was merged for OpenGL ES (before a live renderer switch) holds only the merged shaders:
++                // the vertex and fragment shaders themselves go back in.
++                if (pair.first != nullptr)
++                    program->addShader(pair.first);
++                if (pair.second != nullptr)
++                    program->addShader(pair.second);
+                 addLinkedShaders(pair.first, program);
+                 addLinkedShaders(pair.second, program);
+             }

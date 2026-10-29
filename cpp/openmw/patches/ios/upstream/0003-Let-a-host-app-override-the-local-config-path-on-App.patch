@@ -1,0 +1,29 @@
+From bf5eea82dbc473605b37318f9c29da52f5dcbfc9 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Fri, 9 Oct 2026 17:52:11 -0400
+Subject: [PATCH 3/5] Let a host app override the local config path on Apple
+ platforms
+
+OPENMW_LOCAL_CONFIG_DIR replaces the executable-relative Resources lookup, which is meaningless inside an iOS app sandbox.
+---
+ components/files/macospath.cpp | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/components/files/macospath.cpp b/components/files/macospath.cpp
+index 0b27d385d4..245b68d226 100644
+--- a/components/files/macospath.cpp
++++ b/components/files/macospath.cpp
+@@ -97,6 +97,10 @@ namespace Files
+ 
+     std::filesystem::path MacOsPath::getLocalPath() const
+     {
++        // A host app (e.g. an iOS launcher) can point the engine at its bundled config and resources,
++        // since the executable-relative default is meaningless inside an app sandbox.
++        if (const char* localDir = std::getenv("OPENMW_LOCAL_CONFIG_DIR"))
++            return std::filesystem::path(localDir);
+         return getBinaryPath().parent_path().parent_path() / "Resources";
+     }
+ 
+-- 
+2.55.0
+

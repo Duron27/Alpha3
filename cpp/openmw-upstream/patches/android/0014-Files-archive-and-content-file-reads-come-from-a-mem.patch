@@ -1,0 +1,220 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Tue, 27 Oct 2026 09:46:54 -0400
+Subject: [PATCH 14/17] Files: archive and content file reads come from a
+ memory mapping
+
+ConstrainedFileStreamBuf maps its region where the platform can, so reads are copies and seeks move a pointer. It read
+8 KiB at a time and asked the file for its position before every read, which on Android's FUSE storage is two round
+trips to another process per 8 KiB. Content files are read through it too, instead of a 4 KiB std::ifstream.
+---
+ components/esm3/esmreader.cpp                 |  5 +-
+ components/files/constrainedfilestreambuf.cpp | 87 +++++++++++++++----
+ components/files/constrainedfilestreambuf.hpp | 11 +++
+ 3 files changed, 86 insertions(+), 17 deletions(-)
+
+diff --git a/components/esm3/esmreader.cpp b/components/esm3/esmreader.cpp
+index adb0d1c103..98dfbaa92a 100644
+--- a/components/esm3/esmreader.cpp
++++ b/components/esm3/esmreader.cpp
+@@ -4,6 +4,7 @@
+ 
+ #include <components/esm3/cellid.hpp>
+ #include <components/esm3/loadcell.hpp>
++#include <components/files/constrainedfilestream.hpp>
+ #include <components/files/conversion.hpp>
+ #include <components/files/openfile.hpp>
+ #include <components/misc/strings/algorithm.hpp>
+@@ -129,7 +130,7 @@ namespace ESM
+ 
+     void ESMReader::openRaw(const std::filesystem::path& filename)
+     {
+-        openRaw(Files::openBinaryInputFileStream(filename), filename);
++        openRaw(Files::openConstrainedFileStream(filename), filename);
+     }
+ 
+     void ESMReader::open(std::unique_ptr<std::istream>&& stream, const std::filesystem::path& name)
+@@ -146,7 +147,7 @@ namespace ESM
+ 
+     void ESMReader::open(const std::filesystem::path& file)
+     {
+-        open(Files::openBinaryInputFileStream(file), file);
++        open(Files::openConstrainedFileStream(file), file);
+     }
+ 
+     std::string ESMReader::getHNOString(NAME name)
+diff --git a/components/files/constrainedfilestreambuf.cpp b/components/files/constrainedfilestreambuf.cpp
+index c3ac2d6d15..0f6f4cc0f8 100644
+--- a/components/files/constrainedfilestreambuf.cpp
++++ b/components/files/constrainedfilestreambuf.cpp
+@@ -4,6 +4,11 @@
+ #include <filesystem>
+ #include <limits>
+ 
++#ifndef _WIN32
++#include <sys/mman.h>
++#include <unistd.h>
++#endif
++
+ namespace Files
+ {
+     namespace File = Platform::File;
+@@ -15,20 +20,61 @@ namespace Files
+         mFile = File::open(fname);
+         mSize = length != std::numeric_limits<std::size_t>::max() ? length : File::size(mFile) - start;
+ 
++        if (map(start))
++        {
++            // the mapping keeps the file's pages, the descriptor is not needed any more
++            mFile = File::ScopedHandle();
++            setg(mData, mData, mData + mSize);
++            return;
++        }
++
+         if (start != 0)
+             File::seek(mFile, start);
+ 
+         setg(nullptr, nullptr, nullptr);
+     }
+ 
++    ConstrainedFileStreamBuf::~ConstrainedFileStreamBuf()
++    {
++#ifndef _WIN32
++        if (mMapping != nullptr)
++            munmap(mMapping, mMappingSize);
++#endif
++    }
++
++    bool ConstrainedFileStreamBuf::map(std::size_t start)
++    {
++#ifndef _WIN32
++        if (mSize == 0)
++            return false;
++        static const std::size_t page = static_cast<std::size_t>(sysconf(_SC_PAGESIZE));
++        const std::size_t alignedStart = start - start % page;
++        mMappingSize = start - alignedStart + mSize;
++        void* mapping = mmap(nullptr, mMappingSize, PROT_READ, MAP_PRIVATE, static_cast<int>(static_cast<File::Handle>(mFile)),
++            static_cast<off_t>(alignedStart));
++        if (mapping == MAP_FAILED)
++            return false;
++        // most files are read whole, straight away: ask for all of a small one at once
++        if (mSize <= 16 * 1024 * 1024)
++            madvise(mapping, mMappingSize, MADV_WILLNEED);
++        mMapping = mapping;
++        mData = static_cast<char*>(mapping) + (start - alignedStart);
++        return true;
++#else
++        (void)start;
++        return false;
++#endif
++    }
++
+     std::streambuf::int_type ConstrainedFileStreamBuf::underflow()
+     {
+-        if (gptr() == egptr())
++        if (gptr() == egptr() && mData == nullptr)
+         {
+-            const std::size_t toRead = std::min((mOrigin + mSize) - (File::tell(mFile)), sizeof(mBuffer));
++            const std::size_t toRead = std::min(mSize - mBufferEnd, sizeof(mBuffer));
+             // Read in the next chunk of data, and set the read pointers on success
+             // Failure will throw exception.
+-            const std::size_t got = File::read(mFile, mBuffer, toRead);
++            const std::size_t got = toRead == 0 ? 0 : File::read(mFile, mBuffer, toRead);
++            mBufferEnd += got;
+             setg(mBuffer, mBuffer, mBuffer + got);
+         }
+         if (gptr() == egptr())
+@@ -51,7 +97,10 @@ namespace Files
+                 newPos = offset;
+                 break;
+             case std::ios_base::cur:
+-                newPos = (File::tell(mFile) - mOrigin - (egptr() - gptr())) + offset;
++                if (mData != nullptr)
++                    newPos = (gptr() - mData) + offset;
++                else
++                    newPos = (mBufferEnd - (egptr() - gptr())) + offset;
+                 break;
+             case std::ios_base::end:
+                 newPos = mSize + offset;
+@@ -60,15 +109,7 @@ namespace Files
+                 return traits_type::eof();
+         }
+ 
+-        if (newPos > mSize)
+-            return traits_type::eof();
+-
+-        File::seek(mFile, mOrigin + newPos);
+-
+-        // Clear read pointers so underflow() gets called on the next read attempt.
+-        setg(nullptr, nullptr, nullptr);
+-
+-        return newPos;
++        return seekpos(newPos, mode);
+     }
+ 
+     std::streambuf::pos_type ConstrainedFileStreamBuf::seekpos(pos_type pos, std::ios_base::openmode mode)
+@@ -76,10 +117,26 @@ namespace Files
+         if ((mode & std::ios_base::out) || !(mode & std::ios_base::in))
+             return traits_type::eof();
+ 
+-        if (static_cast<std::size_t>(pos) > mSize)
++        const std::size_t newPos = static_cast<std::size_t>(pos);
++        if (newPos > mSize)
+             return traits_type::eof();
+ 
+-        File::seek(mFile, mOrigin + pos);
++        if (mData != nullptr)
++        {
++            setg(mData, mData + newPos, mData + mSize);
++            return pos;
++        }
++
++        // still inside what was read last: no need to read it again
++        const std::size_t bufferStart = mBufferEnd - (egptr() - eback());
++        if (eback() != nullptr && newPos >= bufferStart && newPos <= mBufferEnd)
++        {
++            setg(eback(), eback() + (newPos - bufferStart), egptr());
++            return pos;
++        }
++
++        File::seek(mFile, mOrigin + newPos);
++        mBufferEnd = newPos;
+ 
+         // Clear read pointers so underflow() gets called on the next read attempt.
+         setg(nullptr, nullptr, nullptr);
+diff --git a/components/files/constrainedfilestreambuf.hpp b/components/files/constrainedfilestreambuf.hpp
+index c3301fac65..d10213399f 100644
+--- a/components/files/constrainedfilestreambuf.hpp
++++ b/components/files/constrainedfilestreambuf.hpp
+@@ -9,10 +9,13 @@
+ namespace Files
+ {
+     /// A file streambuf constrained to a specific region in the file, specified by the 'start' and 'length' parameters.
++    /// Where the platform can, the region is memory mapped: reads are copies from the mapping and seeks move a pointer,
++    /// with no system call each (on Android's FUSE storage every read and seek is a round trip to another process).
+     class ConstrainedFileStreamBuf final : public std::streambuf
+     {
+     public:
+         ConstrainedFileStreamBuf(const std::filesystem::path& fname, std::size_t start, std::size_t length);
++        ~ConstrainedFileStreamBuf() override;
+ 
+         int_type underflow() final;
+ 
+@@ -21,9 +24,17 @@ namespace Files
+         pos_type seekpos(pos_type pos, std::ios_base::openmode mode) final;
+ 
+     private:
++        bool map(std::size_t start);
++
+         std::size_t mOrigin;
+         std::size_t mSize;
+         Platform::File::ScopedHandle mFile;
++        // The mapping (page aligned, so it can start before the region); null when reading through mBuffer
++        void* mMapping = nullptr;
++        std::size_t mMappingSize = 0;
++        char* mData = nullptr;
++        // Position of the end of mBuffer's contents in the region, so refills need not ask the file where it is
++        std::size_t mBufferEnd = 0;
+         char mBuffer[8192]{ 0 };
+     };
+ }

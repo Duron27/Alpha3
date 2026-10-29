@@ -1,0 +1,1110 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Sun, 25 Oct 2026 21:35:54 -0400
+Subject: [PATCH] Multiplayer: engine hooks for the support library's
+ multiplayer (cpp/openmw-upstream/support/multiplayer)
+
+Edits to OpenMW's own files only: client mods and the built-in script lists at startup (main.cpp), the main menu's
+Multiplayer button, player markers on the map and minimap, the openmw.net and openmw.modstore packages and the Lua
+handlers they need, animation.setHeadPitch, and text edit additions. The new files (sockets, client mods, the bindings,
+the Lua mod, the server) and their build registration live in support/multiplayer, which copies them into the tree.
+---
+ apps/openmw/main.cpp                    |  45 ++++++
+ apps/openmw/mwbase/luamanager.hpp       |  11 ++
+ apps/openmw/mwbase/windowmanager.hpp    |   6 +
+ apps/openmw/mwgui/mainmenu.cpp          |  53 ++++++-
+ apps/openmw/mwgui/mainmenu.hpp          |   1 +
+ apps/openmw/mwgui/mapwindow.cpp         | 193 ++++++++++++++++++++++--
+ apps/openmw/mwgui/mapwindow.hpp         |  24 +++
+ apps/openmw/mwgui/windowmanagerimp.cpp  |   7 +
+ apps/openmw/mwgui/windowmanagerimp.hpp  |   1 +
+ apps/openmw/mwlua/animationbindings.cpp |   9 ++
+ apps/openmw/mwlua/globalscripts.hpp     |  13 +-
+ apps/openmw/mwlua/luabindings.cpp       |   5 +
+ apps/openmw/mwlua/luamanagerimp.cpp     |  37 +++++
+ apps/openmw/mwlua/luamanagerimp.hpp     |   8 +
+ apps/openmw/mwlua/menuscripts.hpp       |  10 +-
+ apps/openmw/mwlua/uibindings.cpp        |  53 +++++++
+ apps/openmw/mwmechanics/character.cpp   |   6 +
+ apps/openmw/mwrender/animation.cpp      |   5 +-
+ apps/openmw/mwrender/animation.hpp      |   8 +
+ components/lua_ui/textedit.cpp          |  22 ++-
+ components/lua_ui/textedit.hpp          |   5 +
+ 21 files changed, 496 insertions(+), 26 deletions(-)
+
+diff --git a/apps/openmw/main.cpp b/apps/openmw/main.cpp
+index 70e48e0cfc..034b705e69 100644
+--- a/apps/openmw/main.cpp
++++ b/apps/openmw/main.cpp
+@@ -2,6 +2,7 @@
+ #include <components/fallback/fallback.hpp>
+ #include <components/fallback/validate.hpp>
+ #include <components/files/configurationmanager.hpp>
++#include <components/misc/clientmods.hpp>
+ #include <components/misc/osgpluginchecker.hpp>
+ #include <components/misc/rng.hpp>
+ #include <components/platform/platform.hpp>
+@@ -22,6 +23,7 @@
+ extern "C" __declspec(dllexport) DWORD AmdPowerXpressRequestHighPerformance = 0x00000001;
+ #endif
+ 
++#include <algorithm>
+ #include <filesystem>
+ 
+ #if (defined(__APPLE__) || defined(__linux) || defined(__unix) || defined(__posix))
+@@ -90,6 +92,15 @@ bool parseOptions(int argc, char** argv, OMW::Engine& engine, Files::Configurati
+ 
+     cfgMgr.filterOutNonExistingPaths(dataDirs);
+ 
++    // Client mods handed out by servers (multiplayer): installed under the user data folder, loaded like built-in
++    // scripts
++    Misc::ClientMods::setRoot(cfgMgr.getUserDataPath() / "clientmods");
++    std::vector<std::filesystem::path> clientModDirs;
++    std::vector<std::string> clientModScripts;
++    Misc::ClientMods::startupEntries(clientModDirs, clientModScripts);
++    for (const std::filesystem::path& dir : clientModDirs)
++        dataDirs.push_back(dir);
++
+     engine.setResourceDir(variables["resources"]
+                               .as<Files::MaybeQuotedPath>()
+                               .u8string()); // This call to u8string is redundant, but required to build on MSVC 14.26
+@@ -111,6 +122,32 @@ bool parseOptions(int argc, char** argv, OMW::Engine& engine, Files::Configurati
+     }
+     engine.addContentFile("builtin.omwscripts");
+     std::set<std::string> contentDedupe{ "builtin.omwscripts" };
++    // Other built-in script lists (resources/vfs/*.omwscripts, e.g. the multiplayer mod's mp.omwscripts). They are
++    // separate files so that a file of the same name in a client mod folder, which comes later in the data directories,
++    // replaces them.
++    {
++        std::vector<std::string> lists;
++        std::error_code listError;
++        const std::filesystem::path vfsDir = variables["resources"].as<Files::MaybeQuotedPath>();
++        for (std::filesystem::directory_iterator it(vfsDir / "vfs", listError), end; !listError && it != end;
++             it.increment(listError))
++        {
++            const std::string name = it->path().filename().string();
++            if (it->path().extension() == ".omwscripts" && name != "builtin.omwscripts")
++                lists.push_back(name);
++        }
++        std::sort(lists.begin(), lists.end());
++        for (const std::string& list : lists)
++        {
++            engine.addContentFile(list);
++            contentDedupe.insert(list);
++        }
++    }
++    for (const std::string& script : clientModScripts)
++    {
++        if (contentDedupe.insert(script).second)
++            engine.addContentFile(script);
++    }
+     for (const auto& contentFile : content)
+     {
+         if (!contentDedupe.insert(contentFile).second)
+@@ -229,6 +266,14 @@ int runApplication(int argc, char* argv[])
+             return 1;
+ 
+         engine->go();
++
++        if (Misc::ClientMods::restartRequested())
++        {
++            // new client mods were installed: start again so they are loaded
++            engine.reset();
++            Log(Debug::Info) << "Restarting to load the installed client mods";
++            Misc::ClientMods::relaunch(argc, argv);
++        }
+     }
+ 
+     return 0;
+diff --git a/apps/openmw/mwbase/luamanager.hpp b/apps/openmw/mwbase/luamanager.hpp
+index 81606c3fba..e938c4cb57 100644
+--- a/apps/openmw/mwbase/luamanager.hpp
++++ b/apps/openmw/mwbase/luamanager.hpp
+@@ -108,6 +108,17 @@ namespace MWBase
+         virtual void questUpdated(const ESM::RefId& questId, int stage) = 0;
+         // `arg` is either forwarded from MWGui::pushGuiMode or empty
+         virtual void uiModeChanged(const MWWorld::Ptr& arg) = 0;
++        // A main menu button without built-in behaviour was clicked. Returns false if no script handles it.
++        virtual bool mainMenuButton(const std::string& id) = 0;
++        // Extra main menu buttons registered by menu scripts (ui.addMainMenuButton), in registration order.
++        struct MainMenuButton
++        {
++            std::string mId;
++            std::string mNormal, mHighlighted, mPushed; // texture paths
++            std::string mAfter; // id of the button it goes after; empty: before "options"
++        };
++        virtual void addMainMenuButton(MainMenuButton button) = 0;
++        virtual const std::vector<MainMenuButton>& mainMenuButtons() const = 0;
+         virtual void viewportResized(int width, int height) = 0;
+         virtual void savePermanentStorage(const std::filesystem::path& userConfigPath) = 0;
+         virtual void applyMagicEffects(ESM::RefId id, const MWWorld::Ptr& caster, ESM::RefNum item,
+diff --git a/apps/openmw/mwbase/windowmanager.hpp b/apps/openmw/mwbase/windowmanager.hpp
+index 4c1caea94d..82a5ace4bc 100644
+--- a/apps/openmw/mwbase/windowmanager.hpp
++++ b/apps/openmw/mwbase/windowmanager.hpp
+@@ -13,6 +13,9 @@
+ 
+ #include "../mwgui/mode.hpp"
+ 
++#include <components/esm3/custommarkerstate.hpp>
++
++#include "../mwgui/playermarker.hpp"
+ #include <components/sdlutil/events.hpp>
+ 
+ namespace ESM
+@@ -202,6 +205,9 @@ namespace MWBase
+ 
+         virtual bool toggleFogOfWar() = 0;
+ 
++        // Shows markers for other players on the map and minimap (not saved).
++        virtual void setMapMarkers(std::vector<MWGui::PlayerMarker> markers) = 0;
++
+         virtual bool toggleFullHelp() = 0;
+         ///< show extra info in item tooltips (owner, script)
+ 
+diff --git a/apps/openmw/mwgui/mainmenu.cpp b/apps/openmw/mwgui/mainmenu.cpp
+index 010159be00..d09988f108 100644
+--- a/apps/openmw/mwgui/mainmenu.cpp
++++ b/apps/openmw/mwgui/mainmenu.cpp
+@@ -1,5 +1,7 @@
+ #include "mainmenu.hpp"
+ 
++#include <algorithm>
++
+ #include <MyGUI_Gui.h>
+ #include <MyGUI_InputManager.h>
+ #include <MyGUI_RenderManager.h>
+@@ -12,6 +14,7 @@
+ #include <components/widgets/imagebutton.hpp>
+ 
+ #include "../mwbase/environment.hpp"
++#include "../mwbase/luamanager.hpp"
+ #include "../mwbase/statemanager.hpp"
+ #include "../mwbase/windowmanager.hpp"
+ #include "../mwbase/world.hpp"
+@@ -164,14 +167,32 @@ namespace MWGui
+         MWBase::Environment::get().getStateManager()->requestQuit();
+     }
+ 
++    bool MainMenu::isExtraButton(const std::string& id) const
++    {
++        for (const MWBase::LuaManager::MainMenuButton& extra :
++            MWBase::Environment::get().getLuaManager()->mainMenuButtons())
++            if (extra.mId == id)
++                return true;
++        return false;
++    }
++
+     void MainMenu::onButtonClicked(MyGUI::Widget* sender)
+     {
+         MWBase::WindowManager* winMgr = MWBase::Environment::get().getWindowManager();
+ 
+         const std::string& name = *sender->getUserData<std::string>();
+         winMgr->playSound(ESM::RefId::stringRefId("Menu Click"));
++        // Menu scripts hear about every start of a game from the main menu (the multiplayer mod drops its session)
++        if (name == "newgame" || name == "loadgame")
++            MWBase::Environment::get().getLuaManager()->mainMenuButton(name);
+         if (name == "return")
+             winMgr->removeGuiMode(GM_MainMenu);
++        else if (mButtons.find(name) != mButtons.end() && isExtraButton(name))
++        {
++            // A button added by a menu script (ui.addMainMenuButton); without a script to answer it, say so.
++            if (!MWBase::Environment::get().getLuaManager()->mainMenuButton(name))
++                winMgr->messageBox("Nothing handles this button: its script is not running.");
++        }
+         else if (name == "credits")
+             winMgr->playVideo("mw_credits.bik", true);
+         else if (name == "exitgame")
+@@ -333,17 +354,43 @@ namespace MWGui
+ 
+         buttons.emplace_back("exitgame");
+ 
++        // Buttons added by menu scripts go after the one they ask for (before Options by default)
++        const auto& extras = MWBase::Environment::get().getLuaManager()->mainMenuButtons();
++        for (const MWBase::LuaManager::MainMenuButton& extra : extras)
++        {
++            auto at = std::find(buttons.begin(), buttons.end(), extra.mAfter);
++            if (at != buttons.end())
++                ++at;
++            else
++                at = std::find(buttons.begin(), buttons.end(), "options");
++            buttons.insert(at, extra.mId);
++        }
++
+         // Create new buttons if needed
++        std::vector<std::pair<std::string_view, const MWBase::LuaManager::MainMenuButton*>> wanted;
+         for (std::string_view id : { "return", "newgame", "savegame", "loadgame", "options", "credits", "exitgame" })
++            wanted.emplace_back(id, nullptr);
++        for (const MWBase::LuaManager::MainMenuButton& extra : extras)
++            wanted.emplace_back(extra.mId, &extra);
++        for (const auto& [id, extra] : wanted)
+         {
+             if (mButtons.find(id) == mButtons.end())
+             {
+                 Gui::ImageButton* button = mButtonBox->createWidget<Gui::ImageButton>(
+                     "ImageBox", MyGUI::IntCoord(0, curH, 0, 0), MyGUI::Align::Default);
+                 const std::string& buttonId = mButtons.emplace(id, button).first->first;
+-                button->setProperty("ImageHighlighted", "textures\\menu_" + buttonId + "_over.dds");
+-                button->setProperty("ImageNormal", "textures\\menu_" + buttonId + ".dds");
+-                button->setProperty("ImagePushed", "textures\\menu_" + buttonId + "_pressed.dds");
++                if (extra)
++                {
++                    button->setProperty("ImageHighlighted", extra->mHighlighted);
++                    button->setProperty("ImageNormal", extra->mNormal);
++                    button->setProperty("ImagePushed", extra->mPushed);
++                }
++                else
++                {
++                    button->setProperty("ImageHighlighted", "textures\\menu_" + buttonId + "_over.dds");
++                    button->setProperty("ImageNormal", "textures\\menu_" + buttonId + ".dds");
++                    button->setProperty("ImagePushed", "textures\\menu_" + buttonId + "_pressed.dds");
++                }
+                 button->eventMouseButtonClick += MyGUI::newDelegate(this, &MainMenu::onButtonClicked);
+                 button->setUserData(buttonId);
+             }
+diff --git a/apps/openmw/mwgui/mainmenu.hpp b/apps/openmw/mwgui/mainmenu.hpp
+index 29270e42db..fc4ab026eb 100644
+--- a/apps/openmw/mwgui/mainmenu.hpp
++++ b/apps/openmw/mwgui/mainmenu.hpp
+@@ -71,6 +71,7 @@ namespace MWGui
+         std::map<std::string, Gui::ImageButton*, std::less<>> mButtons;
+ 
+         void onButtonClicked(MyGUI::Widget* sender);
++        bool isExtraButton(const std::string& id) const;
+         void onNewGameConfirmed();
+         void onExitConfirmed();
+ 
+diff --git a/apps/openmw/mwgui/mapwindow.cpp b/apps/openmw/mwgui/mapwindow.cpp
+index 81eab4bb48..9bca394b2a 100644
+--- a/apps/openmw/mwgui/mapwindow.cpp
++++ b/apps/openmw/mwgui/mapwindow.cpp
+@@ -157,6 +157,62 @@ namespace MWGui
+         eventMarkersChanged();
+     }
+ 
++    void CustomMarkerCollection::setTransient(std::vector<PlayerMarker> markers)
++    {
++        TransientContainerType next;
++        for (PlayerMarker& marker : markers)
++        {
++            const ESM::RefId cell = marker.mMarker.mCell;
++            next.emplace(cell, std::move(marker));
++        }
++
++        // Who is on the map, in which cell and in which colour. While that is unchanged only positions moved, and
++        // rebuilding every marker widget each time the list is refreshed makes the markers flicker and vanish.
++        auto describe = [](const TransientContainerType& players) {
++            std::map<std::string, std::tuple<ESM::RefId, bool, bool>> result;
++            for (const auto& [cell, player] : players)
++                result.emplace(player.mMarker.mNote, std::make_tuple(cell, player.mGroup, player.mExterior));
++            return result;
++        };
++        const bool sameSet = next.size() == mTransient.size() && describe(next) == describe(mTransient);
++        bool moved = false;
++        if (sameSet)
++        {
++            for (const auto& [cell, player] : next)
++            {
++                const PlayerMarker* before = findTransient(player.mMarker.mNote);
++                if (!before || before->mMarker.mWorldX != player.mMarker.mWorldX
++                    || before->mMarker.mWorldY != player.mMarker.mWorldY || before->mInfo != player.mInfo)
++                {
++                    moved = true;
++                    break;
++                }
++            }
++        }
++
++        mTransient = std::move(next);
++        if (!sameSet)
++            eventMarkersChanged();
++        else if (moved)
++            eventTransientMoved();
++    }
++
++    CustomMarkerCollection::TransientRangeType CustomMarkerCollection::getTransientMarkers(
++        const ESM::RefId& cellId) const
++    {
++        return mTransient.equal_range(cellId);
++    }
++
++    const PlayerMarker* CustomMarkerCollection::findTransient(std::string_view name) const
++    {
++        for (const auto& [cell, player] : mTransient)
++        {
++            if (player.mMarker.mNote == name)
++                return &player;
++        }
++        return nullptr;
++    }
++
+     CustomMarkerCollection::ContainerType::const_iterator CustomMarkerCollection::begin() const
+     {
+         return mMarkers.begin();
+@@ -186,11 +242,13 @@ namespace MWGui
+         , mCustomMarkers(markers)
+     {
+         mCustomMarkers.eventMarkersChanged += MyGUI::newDelegate(this, &LocalMapBase::updateCustomMarkers);
++        mCustomMarkers.eventTransientMoved += MyGUI::newDelegate(this, &LocalMapBase::moveTransientMarkers);
+     }
+ 
+     LocalMapBase::~LocalMapBase()
+     {
+         mCustomMarkers.eventMarkersChanged -= MyGUI::newDelegate(this, &LocalMapBase::updateCustomMarkers);
++        mCustomMarkers.eventTransientMoved -= MyGUI::newDelegate(this, &LocalMapBase::moveTransientMarkers);
+     }
+ 
+     MWGui::LocalMapBase::MapEntry& LocalMapBase::addMapEntry()
+@@ -338,24 +396,45 @@ namespace MWGui
+         mCustomMarkerWidgets.clear();
+         if (!mActiveCell)
+             return;
+-        auto updateMarkers = [this](CustomMarkerCollection::RangeType markers) {
+-            for (auto it = markers.first; it != markers.second; ++it)
++        // A note placed by the player (grey), or another player (orange in our group, green for everybody else).
++        auto addMarker = [this](const ESM::CustomMarker& marker, const PlayerMarker* player) {
++            MarkerUserData markerPos(mLocalMapRender);
++            // (the plain marker skin is what is known to draw; notes keep their own icon)
++            MarkerWidget* markerWidget
++                = mLocalMap->createWidget<MarkerWidget>(player ? "MarkerButton" : "CustomMarkerButton",
++                    getMarkerCoordinates(marker.mWorldX, marker.mWorldY, markerPos, player ? 12 : 16),
++                    MyGUI::Align::Default);
++            markerWidget->setDepth(Local_MarkerAboveFogLayer);
++            markerWidget->setUserString("ToolTipType", "Layout");
++            markerWidget->setUserString("ToolTipLayout", "TextToolTipOneLine");
++            markerWidget->setUserString(
++                "Caption_TextOneLine", MyGUI::TextIterator::toTagsString(player ? player->caption() : marker.mNote));
++            if (player)
++            {
++                markerWidget->setNormalColour(
++                    player->mGroup ? MyGUI::Colour(1.0f, 0.55f, 0.1f) : MyGUI::Colour(0.2f, 1.0f, 0.2f));
++                markerWidget->setHoverColour(
++                    player->mGroup ? MyGUI::Colour(1.0f, 0.75f, 0.4f) : MyGUI::Colour(0.6f, 1.0f, 0.6f));
++                markerWidget->setUserString("Transient", "1");
++                markerWidget->setUserString("PlayerName", marker.mNote);
++            }
++            else
+             {
+-                const ESM::CustomMarker& marker = it->second;
+-                MarkerUserData markerPos(mLocalMapRender);
+-                MarkerWidget* markerWidget = mLocalMap->createWidget<MarkerWidget>("CustomMarkerButton",
+-                    getMarkerCoordinates(marker.mWorldX, marker.mWorldY, markerPos, 16), MyGUI::Align::Default);
+-                markerWidget->setDepth(Local_MarkerAboveFogLayer);
+-                markerWidget->setUserString("ToolTipType", "Layout");
+-                markerWidget->setUserString("ToolTipLayout", "TextToolTipOneLine");
+-                markerWidget->setUserString("Caption_TextOneLine", MyGUI::TextIterator::toTagsString(marker.mNote));
+                 markerWidget->setNormalColour(MyGUI::Colour(0.6f, 0.6f, 0.6f));
+                 markerWidget->setHoverColour(MyGUI::Colour(1.0f, 1.0f, 1.0f));
+-                markerWidget->setUserData(marker);
+-                markerWidget->setNeedMouseFocus(true);
+-                customMarkerCreated(markerWidget);
+-                mCustomMarkerWidgets.push_back(markerWidget);
+             }
++            markerWidget->setUserData(marker);
++            markerWidget->setNeedMouseFocus(true);
++            customMarkerCreated(markerWidget);
++            mCustomMarkerWidgets.push_back(markerWidget);
++        };
++        auto addNotes = [&](CustomMarkerCollection::RangeType markers) {
++            for (auto it = markers.first; it != markers.second; ++it)
++                addMarker(it->second, nullptr);
++        };
++        auto addPlayers = [&](CustomMarkerCollection::TransientRangeType markers) {
++            for (auto it = markers.first; it != markers.second; ++it)
++                addMarker(it->second.mMarker, &it->second);
+         };
+         if (mActiveCell->isExterior())
+         {
+@@ -364,16 +443,39 @@ namespace MWGui
+                 for (int y = mGrid.top; y <= mGrid.bottom; ++y)
+                 {
+                     ESM::RefId cellRefId = getCellIdInWorldSpace(*mActiveCell, x, y);
+-                    updateMarkers(mCustomMarkers.getMarkers(cellRefId));
++                    addNotes(mCustomMarkers.getMarkers(cellRefId));
++                    addPlayers(mCustomMarkers.getTransientMarkers(cellRefId));
+                 }
+             }
+         }
+         else
+-            updateMarkers(mCustomMarkers.getMarkers(mActiveCell->getId()));
++        {
++            addNotes(mCustomMarkers.getMarkers(mActiveCell->getId()));
++            addPlayers(mCustomMarkers.getTransientMarkers(mActiveCell->getId()));
++        }
+ 
+         redraw();
+     }
+ 
++    // The players on the map moved but are the same players in the same cells: move their widgets where they are now.
++    void LocalMapBase::moveTransientMarkers()
++    {
++        if (!mActiveCell)
++            return;
++        MarkerUserData markerPos(mLocalMapRender);
++        for (MyGUI::Widget* widget : mCustomMarkerWidgets)
++        {
++            if (widget->getUserString("Transient").empty())
++                continue;
++            const PlayerMarker* player = mCustomMarkers.findTransient(widget->getUserString("PlayerName"));
++            if (!player)
++                continue;
++            widget->setUserData(player->mMarker);
++            widget->setUserString("Caption_TextOneLine", MyGUI::TextIterator::toTagsString(player->caption()));
++            widget->setCoord(getMarkerCoordinates(player->mMarker.mWorldX, player->mMarker.mWorldY, markerPos, 12));
++        }
++    }
++
+     void LocalMapBase::setActiveCell(const MWWorld::Cell& cell)
+     {
+         if (&cell == mActiveCell)
+@@ -897,6 +999,8 @@ namespace MWGui
+ 
+     void MapWindow::onCustomMarkerDoubleClicked(MyGUI::Widget* sender)
+     {
++        if (!sender->getUserString("Transient").empty())
++            return; // another player: not a note
+         mEditingMarker = *sender->getUserData<ESM::CustomMarker>();
+         mEditNoteDialog.setText(mEditingMarker.mNote);
+         mEditNoteDialog.showDeleteButton(true);
+@@ -1195,6 +1299,7 @@ namespace MWGui
+         int height = static_cast<int>(mGlobalMapRender->getHeight() * mGlobalMapZoom);
+         mGlobalMap->setCanvasSize(width, height);
+         mGlobalMapImage->setSize(width, height);
++        placeGlobalPlayerMarkers(); // (the zoom changed where everything is)
+     }
+ 
+     void MapWindow::worldPosToGlobalMapImageSpace(float x, float y, float& imageX, float& imageY) const
+@@ -1207,12 +1312,64 @@ namespace MWGui
+     void MapWindow::updateCustomMarkers()
+     {
+         LocalMapBase::updateCustomMarkers();
++        rebuildGlobalPlayerMarkers();
+ 
+         for (auto& [widgetPair, ignore] : mGlobalMapMarkers)
+             setGlobalMapMarkerTooltip(widgetPair.widget, static_cast<int>(widgetPair.position.x()),
+                 static_cast<int>(widgetPair.position.y()));
+     }
+ 
++    void MapWindow::moveTransientMarkers()
++    {
++        LocalMapBase::moveTransientMarkers();
++        placeGlobalPlayerMarkers();
++    }
++
++    // Other players who are outside, on the global map (orange in our group, green for everybody else).
++    void MapWindow::rebuildGlobalPlayerMarkers()
++    {
++        for (MyGUI::Widget* widget : mGlobalPlayerMarkers)
++            MyGUI::Gui::getInstance().destroyWidget(widget);
++        mGlobalPlayerMarkers.clear();
++        for (const auto& [cell, player] : mCustomMarkers.transient())
++        {
++            if (!player.mExterior)
++                continue;
++            MarkerWidget* widget = mGlobalMap->createWidget<MarkerWidget>(
++                "MarkerButton", MyGUI::IntCoord(0, 0, 12, 12), MyGUI::Align::Default);
++            widget->setDepth(Global_MarkerLayer);
++            widget->setUserString("ToolTipType", "Layout");
++            widget->setUserString("ToolTipLayout", "TextToolTipOneLine");
++            widget->setUserString("Caption_TextOneLine", MyGUI::TextIterator::toTagsString(player.caption()));
++            widget->setUserString("PlayerName", player.mMarker.mNote);
++            widget->setNormalColour(player.mGroup ? MyGUI::Colour(1.0f, 0.55f, 0.1f) : MyGUI::Colour(0.2f, 1.0f, 0.2f));
++            widget->setHoverColour(player.mGroup ? MyGUI::Colour(1.0f, 0.75f, 0.4f) : MyGUI::Colour(0.6f, 1.0f, 0.6f));
++            widget->setNeedMouseFocus(true);
++            widget->eventMouseDrag += MyGUI::newDelegate(this, &MapWindow::onMouseDrag);
++            widget->eventMouseButtonPressed += MyGUI::newDelegate(this, &MapWindow::onDragStart);
++            if (Settings::map().mAllowZooming)
++                widget->eventMouseWheel += MyGUI::newDelegate(this, &MapWindow::onMapZoomed);
++            mGlobalPlayerMarkers.push_back(widget);
++        }
++        placeGlobalPlayerMarkers();
++    }
++
++    void MapWindow::placeGlobalPlayerMarkers()
++    {
++        if (!mGlobalMapRender)
++            return;
++        for (MyGUI::Widget* widget : mGlobalPlayerMarkers)
++        {
++            const PlayerMarker* player = mCustomMarkers.findTransient(widget->getUserString("PlayerName"));
++            if (!player)
++                continue;
++            widget->setUserString("Caption_TextOneLine", MyGUI::TextIterator::toTagsString(player->caption()));
++            float x, y;
++            worldPosToGlobalMapImageSpace(player->mMarker.mWorldX, player->mMarker.mWorldY, x, y);
++            widget->setPosition(MyGUI::IntPoint(static_cast<int>(x) - 6, static_cast<int>(y) - 6));
++        }
++    }
++
+     void MapWindow::onDragStart(MyGUI::Widget* /*sender*/, int left, int top, MyGUI::MouseButton id)
+     {
+         if (id != MyGUI::MouseButton::Left)
+@@ -1350,6 +1507,10 @@ namespace MWGui
+             MyGUI::Gui::getInstance().destroyWidget(widgetPair.first.widget);
+         mGlobalMapMarkers.clear();
+         mGlobalMapMarkersByName.clear();
++
++        for (MyGUI::Widget* widget : mGlobalPlayerMarkers)
++            MyGUI::Gui::getInstance().destroyWidget(widget);
++        mGlobalPlayerMarkers.clear();
+     }
+ 
+     void MapWindow::write(ESM::ESMWriter& writer, Loading::Listener& progress)
+diff --git a/apps/openmw/mwgui/mapwindow.hpp b/apps/openmw/mwgui/mapwindow.hpp
+index aef8e34fb4..db3fa38d80 100644
+--- a/apps/openmw/mwgui/mapwindow.hpp
++++ b/apps/openmw/mwgui/mapwindow.hpp
+@@ -2,7 +2,10 @@
+ #define MWGUI_MAPWINDOW_H
+ 
+ #include <cstdint>
++#include <map>
+ #include <memory>
++#include <string_view>
++#include <tuple>
+ 
+ #include <osg/Vec2f>
+ 
+@@ -13,6 +16,8 @@
+ #include <components/esm3/custommarkerstate.hpp>
+ #include <components/misc/constants.hpp>
+ 
++#include "playermarker.hpp"
++
+ namespace MWRender
+ {
+     class GlobalMap;
+@@ -65,11 +70,25 @@ namespace MWGui
+ 
+         RangeType getMarkers(const ESM::RefId& cellId) const;
+ 
++        // Other players (from scripts): only shown, never saved, never editable.
++        typedef std::multimap<ESM::RefId, PlayerMarker> TransientContainerType;
++        typedef std::pair<TransientContainerType::const_iterator, TransientContainerType::const_iterator>
++            TransientRangeType;
++
++        // Replaces the list. If it is the same players in the same cells, only their positions changed: that fires
++        // eventTransientMoved (the widgets are moved, not rebuilt), anything else fires eventMarkersChanged.
++        void setTransient(std::vector<PlayerMarker> markers);
++        TransientRangeType getTransientMarkers(const ESM::RefId& cellId) const;
++        const PlayerMarker* findTransient(std::string_view name) const;
++        const TransientContainerType& transient() const { return mTransient; }
++
+         typedef MyGUI::delegates::MultiDelegate<> EventHandle_Void;
+         EventHandle_Void eventMarkersChanged;
++        EventHandle_Void eventTransientMoved;
+ 
+     private:
+         ContainerType mMarkers;
++        TransientContainerType mTransient;
+     };
+ 
+     class LocalMapBase
+@@ -157,6 +176,7 @@ namespace MWGui
+         std::vector<MarkerWidget*>& currentDoorMarkersWidgets();
+ 
+         virtual void updateCustomMarkers();
++        virtual void moveTransientMarkers();
+ 
+         void applyFogOfWar();
+ 
+@@ -257,6 +277,7 @@ namespace MWGui
+         void onFrame(float dt) override;
+ 
+         void updateCustomMarkers() override;
++        void moveTransientMarkers() override;
+ 
+         /// Clear all savegame-specific data
+         void clear() override;
+@@ -302,6 +323,9 @@ namespace MWGui
+         MyGUI::ImageBox* mGlobalMapOverlay;
+         MyGUI::ImageBox* mPlayerArrowLocal;
+         MyGUI::ImageBox* mPlayerArrowGlobal;
++        std::vector<MyGUI::Widget*> mGlobalPlayerMarkers; // other players on the global map
++        void rebuildGlobalPlayerMarkers();
++        void placeGlobalPlayerMarkers();
+         MyGUI::Button* mButton;
+         MyGUI::IntPoint mLastDragPos;
+ 
+diff --git a/apps/openmw/mwgui/windowmanagerimp.cpp b/apps/openmw/mwgui/windowmanagerimp.cpp
+index ab8950d14d..64e82eb53c 100644
+--- a/apps/openmw/mwgui/windowmanagerimp.cpp
++++ b/apps/openmw/mwgui/windowmanagerimp.cpp
+@@ -51,6 +51,7 @@
+ 
+ #include <components/l10n/manager.hpp>
+ 
++#include <components/lua_ui/textedit.hpp>
+ #include <components/lua_ui/util.hpp>
+ #include <components/lua_ui/widget.hpp>
+ 
+@@ -247,6 +248,7 @@ namespace MWGui
+         SpellView::registerComponents();
+         Gui::registerAllWidgets();
+         LuaUi::registerAllWidgets();
++        LuaUi::LuaTextEdit::setKeyFocusHandler([this](MyGUI::Widget* widget) { setKeyFocusWidget(widget); });
+ 
+         MyGUI::FactoryManager::getInstance().registerFactory<MWGui::Controllers::ControllerFollowMouse>("Controller");
+ 
+@@ -1169,6 +1171,11 @@ namespace MWGui
+         mHud->setMinimapVisible(visible);
+     }
+ 
++    void WindowManager::setMapMarkers(std::vector<MWGui::PlayerMarker> markers)
++    {
++        mCustomMarkers.setTransient(std::move(markers));
++    }
++
+     bool WindowManager::toggleFogOfWar()
+     {
+         mMap->toggleFogOfWar();
+diff --git a/apps/openmw/mwgui/windowmanagerimp.hpp b/apps/openmw/mwgui/windowmanagerimp.hpp
+index afd00ca7e7..0ff0d45464 100644
+--- a/apps/openmw/mwgui/windowmanagerimp.hpp
++++ b/apps/openmw/mwgui/windowmanagerimp.hpp
+@@ -218,6 +218,7 @@ namespace MWGui
+         float getScalingFactor() const override;
+ 
+         bool toggleFogOfWar() override;
++        void setMapMarkers(std::vector<MWGui::PlayerMarker> markers) override;
+         bool toggleFullHelp() override; ///< show extra info in item tooltips (owner, script)
+         bool getFullHelp() const override;
+ 
+diff --git a/apps/openmw/mwlua/animationbindings.cpp b/apps/openmw/mwlua/animationbindings.cpp
+index 6740204aad..704cc7945f 100644
+--- a/apps/openmw/mwlua/animationbindings.cpp
++++ b/apps/openmw/mwlua/animationbindings.cpp
+@@ -154,6 +154,15 @@ namespace MWLua
+         api["isLoopingAnimation"] = [](const LObject& object, std::string_view groupname) {
+             return getConstAnimationOrThrow(object)->isLoopingAnimation(groupname);
+         };
++        // Lets a script aim the actor's head up/down (radians, positive looks down), instead of tracking a target.
++        // Pass nil to restore the default behaviour.
++        // The optional second argument tilts the upper body too (radians, same direction), e.g. while attacking.
++        api["setHeadPitch"]
++            = [](const SelfObject& object, sol::optional<float> pitch, sol::optional<float> spinePitch) {
++                  MWRender::Animation* animation = getMutableAnimationOrThrow(object);
++                  animation->setHeadPitchOverride(pitch ? std::optional<float>(*pitch) : std::nullopt);
++                  animation->setSpinePitch(spinePitch.value_or(0.f));
++              };
+         api["cancel"] = [](const SelfObject& object, std::string_view groupname) {
+             return getMutableAnimationOrThrow(object)->disable(groupname);
+         };
+diff --git a/apps/openmw/mwlua/globalscripts.hpp b/apps/openmw/mwlua/globalscripts.hpp
+index e1004bb478..4979fad449 100644
+--- a/apps/openmw/mwlua/globalscripts.hpp
++++ b/apps/openmw/mwlua/globalscripts.hpp
+@@ -18,9 +18,10 @@ namespace MWLua
+         GlobalScripts(LuaUtil::LuaState* lua)
+             : LuaUtil::ScriptsContainer(lua, "Global")
+         {
+-            registerEngineHandlers({ &mObjectActiveHandlers, &mActorActiveHandlers, &mItemActiveHandlers,
+-                &mNewGameHandlers, &mPlayerAddedHandlers, &mOnActivateHandlers, &mOnUseItemHandlers,
+-                &mOnNewExteriorHandlers, &mOnDroppedHandlers, &mOnPlacedHandlers, &mOnProjectileHit });
++            registerEngineHandlers(
++                { &mObjectActiveHandlers, &mActorActiveHandlers, &mItemActiveHandlers, &mNewGameHandlers,
++                    &mPlayerAddedHandlers, &mOnActivateHandlers, &mOnUseItemHandlers, &mOnNewExteriorHandlers,
++                    &mOnDroppedHandlers, &mOnPlacedHandlers, &mOnProjectileHit, &mNetEventHandlers });
+         }
+ 
+         void newGameStarted() { callEngineHandlers(mNewGameHandlers); }
+@@ -52,6 +53,11 @@ namespace MWLua
+             callEngineHandlers(mOnProjectileHit, projectile, hitResult);
+         }
+ 
++        void onNetEvent(std::string_view type, std::uint32_t id, const std::string& data, std::uint32_t listener)
++        {
++            callEngineHandlers(mNetEventHandlers, std::string(type), id, data, listener);
++        }
++
+     private:
+         EngineHandlerList mObjectActiveHandlers{ "onObjectActive" };
+         EngineHandlerList mActorActiveHandlers{ "onActorActive" };
+@@ -64,6 +70,7 @@ namespace MWLua
+         EngineHandlerList mOnUseItemHandlers{ "_onUseItem" };
+         EngineHandlerList mOnNewExteriorHandlers{ "onNewExterior" };
+         EngineHandlerList mOnProjectileHit{ "_onProjectileHit" };
++        EngineHandlerList mNetEventHandlers{ "onNetEvent" };
+     };
+ 
+ }
+diff --git a/apps/openmw/mwlua/luabindings.cpp b/apps/openmw/mwlua/luabindings.cpp
+index dc20205cbe..32b0559061 100644
+--- a/apps/openmw/mwlua/luabindings.cpp
++++ b/apps/openmw/mwlua/luabindings.cpp
+@@ -15,9 +15,12 @@
+ #include "debugbindings.hpp"
+ #include "inputbindings.hpp"
+ #include "localscripts.hpp"
++#include "luamanagerimp.hpp"
+ #include "markupbindings.hpp"
+ #include "menuscripts.hpp"
++#include "modstorebindings.hpp"
+ #include "nearbybindings.hpp"
++#include "netbindings.hpp"
+ #include "objectbindings.hpp"
+ #include "postprocessingbindings.hpp"
+ #include "soundbindings.hpp"
+@@ -47,6 +50,8 @@ namespace MWLua
+         initObjectBindingsForGlobalScripts(context);
+         initCellBindingsForGlobalScripts(context);
+         return {
++            { "openmw.net", initNetPackage(context, context.mLuaManager->sockets()) },
++            { "openmw.modstore", initModstorePackage(context) },
+             { "openmw.core", initCorePackage(context) },
+             { "openmw.types", initTypesPackage(context) },
+             { "openmw.world", initWorldPackage(context) },
+diff --git a/apps/openmw/mwlua/luamanagerimp.cpp b/apps/openmw/mwlua/luamanagerimp.cpp
+index d02bf2e1e2..4f90dd27e2 100644
+--- a/apps/openmw/mwlua/luamanagerimp.cpp
++++ b/apps/openmw/mwlua/luamanagerimp.cpp
+@@ -302,6 +302,28 @@ namespace MWLua
+ 
+             // Run engine handlers
+             mEngineEvents.callEngineHandlers();
++
++            // Sockets (openmw.net): connections made by global scripts, reported to their onNetEvent handlers
++            for (const Net::SocketEvent& event : mSockets.poll())
++            {
++                std::string_view type;
++                switch (event.mType)
++                {
++                    case Net::SocketEvent::Type::Connected:
++                        type = "connected";
++                        break;
++                    case Net::SocketEvent::Type::Accepted:
++                        type = "accepted";
++                        break;
++                    case Net::SocketEvent::Type::Line:
++                        type = "line";
++                        break;
++                    case Net::SocketEvent::Type::Closed:
++                        type = "closed";
++                        break;
++                }
++                mGlobalScripts.onNetEvent(type, event.mId, event.mData, event.mListener);
++            }
+             bool isPaused = timeManager.isPaused();
+ 
+             float frameDuration = MWBase::Environment::get().getFrameDuration();
+@@ -433,6 +455,7 @@ namespace MWLua
+         mActiveLocalScripts.clear();
+         mLuaEvents.clear();
+         mEngineEvents.clear();
++        mSockets.closeAll();
+         mInputEvents.clear();
+         mMenuInputEvents.clear();
+         mObjectLists.clear();
+@@ -502,6 +525,20 @@ namespace MWLua
+         mMenuScripts.stateChanged();
+     }
+ 
++    void LuaManager::addMainMenuButton(MainMenuButton button)
++    {
++        // registering the same id again replaces it (a menu script that is reloaded)
++        for (MainMenuButton& existing : mMainMenuButtons)
++        {
++            if (existing.mId == button.mId)
++            {
++                existing = std::move(button);
++                return;
++            }
++        }
++        mMainMenuButtons.push_back(std::move(button));
++    }
++
+     void LuaManager::noGame()
+     {
+         clear();
+diff --git a/apps/openmw/mwlua/luamanagerimp.hpp b/apps/openmw/mwlua/luamanagerimp.hpp
+index 2fac2a9639..40e268aea5 100644
+--- a/apps/openmw/mwlua/luamanagerimp.hpp
++++ b/apps/openmw/mwlua/luamanagerimp.hpp
+@@ -11,6 +11,7 @@
+ #include <components/lua/storage.hpp>
+ #include <components/lua_ui/resources.hpp>
+ #include <components/misc/color.hpp>
++#include <components/net/sockets.hpp>
+ 
+ #include "../mwbase/luamanager.hpp"
+ #include "../mwbase/windowmanager.hpp"
+@@ -49,6 +50,8 @@ namespace MWLua
+         void contentFilesLoaded() override;
+         void initPostLoad();
+ 
++        Net::Sockets& sockets() { return mSockets; }
++
+         void loadPermanentStorage(const std::filesystem::path& userConfigPath);
+         void savePermanentStorage(const std::filesystem::path& userConfigPath) override;
+ 
+@@ -123,6 +126,9 @@ namespace MWLua
+         void objectTeleported(const MWWorld::Ptr& ptr) override;
+         void questUpdated(const ESM::RefId& questId, int stage) override;
+         void uiModeChanged(const MWWorld::Ptr& arg) override;
++        bool mainMenuButton(const std::string& id) override { return mMenuScripts.mainMenuButton(id); }
++        void addMainMenuButton(MainMenuButton button) override;
++        const std::vector<MainMenuButton>& mainMenuButtons() const override { return mMainMenuButtons; }
+         void viewportResized(int width, int height) override;
+         void actorDied(const MWWorld::Ptr& actor) override;
+         void onDialogueResponse(
+@@ -204,6 +210,7 @@ namespace MWLua
+         bool isSynchronizedUpdateRunning() const { return mRunningSynchronizedUpdates; }
+ 
+     private:
++        std::vector<MainMenuButton> mMainMenuButtons;
+         void initConfiguration(bool reload);
+         LocalScripts* createLocalScripts(const MWWorld::Ptr& ptr,
+             std::optional<LuaUtil::ScriptIdsWithInitializationData> autoStartConf = std::nullopt);
+@@ -236,6 +243,7 @@ namespace MWLua
+ 
+         LuaEvents mLuaEvents{ mGlobalScripts, mMenuScripts };
+         EngineEvents mEngineEvents{ mGlobalScripts };
++        Net::Sockets mSockets;
+         std::vector<MWBase::LuaManager::InputEvent> mInputEvents;
+         std::vector<MWBase::LuaManager::InputEvent> mMenuInputEvents;
+ 
+diff --git a/apps/openmw/mwlua/menuscripts.hpp b/apps/openmw/mwlua/menuscripts.hpp
+index c8a062b192..6d1e7d7b49 100644
+--- a/apps/openmw/mwlua/menuscripts.hpp
++++ b/apps/openmw/mwlua/menuscripts.hpp
+@@ -25,7 +25,7 @@ namespace MWLua
+             , mInputProcessor(this)
+         {
+             registerEngineHandlers({ &mOnFrameHandlers, &mStateChanged, &mConsoleCommandHandlers,
+-                &mViewportResizedHandlers, &mUiModeChanged });
++                &mViewportResizedHandlers, &mUiModeChanged, &mMainMenuButton });
+         }
+ 
+         void processInputEvent(const MWBase::LuaManager::InputEvent& event)
+@@ -47,6 +47,13 @@ namespace MWLua
+ 
+         void uiModeChanged() { callEngineHandlers(mUiModeChanged); }
+ 
++        // Returns whether any script handles main menu buttons that the engine doesn't implement itself.
++        bool mainMenuButton(const std::string& id)
++        {
++            callEngineHandlers(mMainMenuButton, id);
++            return !mMainMenuButton.mList.empty();
++        }
++
+     private:
+         friend class MWLua::InputProcessor<MenuScripts>;
+         MWLua::InputProcessor<MenuScripts> mInputProcessor;
+@@ -55,6 +62,7 @@ namespace MWLua
+         EngineHandlerList mConsoleCommandHandlers{ "onConsoleCommand" };
+         EngineHandlerList mViewportResizedHandlers{ "onViewportResized" };
+         EngineHandlerList mUiModeChanged{ "_onUiModeChanged" };
++        EngineHandlerList mMainMenuButton{ "onMainMenuButton" };
+     };
+ }
+ 
+diff --git a/apps/openmw/mwlua/uibindings.cpp b/apps/openmw/mwlua/uibindings.cpp
+index b9cac05dce..65cec6abe0 100644
+--- a/apps/openmw/mwlua/uibindings.cpp
++++ b/apps/openmw/mwlua/uibindings.cpp
+@@ -21,6 +21,8 @@
+ 
+ #include <cmath>
+ #include <numbers>
++#include <set>
++#include <stdexcept>
+ 
+ #include "context.hpp"
+ #include "luamanagerimp.hpp"
+@@ -119,6 +121,57 @@ namespace MWLua
+         };
+         api["_isHudVisible"] = []() -> bool { return MWBase::Environment::get().getWindowManager()->isHudVisible(); };
+         api["_getDefaultFontSize"] = []() -> int { return Settings::gui().mFontSize; };
++        // Markers for other players on the map and minimap. Each entry: { cell = '' for the exterior or an
++        // interior cell name, x, y (world position), name, group, info }. Replaces the previous list; not saved.
++        api["setMapMarkers"] = [luaManager = context.mLuaManager](const sol::table& list) {
++            std::vector<MWGui::PlayerMarker> markers;
++            for (const auto& [key, value] : list)
++            {
++                if (!value.is<sol::table>())
++                    continue;
++                const sol::table entry = value.as<sol::table>();
++                MWGui::PlayerMarker player;
++                ESM::CustomMarker& marker = player.mMarker;
++                player.mGroup = entry.get_or("group", false);
++                player.mInfo = entry.get_or("info", std::string());
++                marker.mWorldX = entry.get_or("x", 0.f);
++                marker.mWorldY = entry.get_or("y", 0.f);
++                marker.mNote = entry.get_or("name", std::string());
++                const std::string cell = entry.get_or("cell", std::string());
++                if (cell.empty())
++                    marker.mCell = ESM::RefId::esm3ExteriorCell(static_cast<int>(std::floor(marker.mWorldX / 8192.f)),
++                        static_cast<int>(std::floor(marker.mWorldY / 8192.f)));
++                else
++                    marker.mCell = ESM::RefId::stringRefId(cell);
++                player.mExterior = cell.empty();
++                markers.push_back(std::move(player));
++            }
++            // GUI widgets may only be touched from the main thread
++            luaManager->addAction(
++                [markers = std::move(markers)]() mutable {
++                    MWBase::Environment::get().getWindowManager()->setMapMarkers(std::move(markers));
++                },
++                "openmw.ui.setMapMarkers");
++        };
++        if (menu)
++        {
++            // An extra button on the main menu. Clicking it calls onMainMenuButton(id) of the menu scripts.
++            // { id, normal, highlighted, pushed (texture paths), after = id of the button it goes after }
++            api["addMainMenuButton"] = [luaManager = context.mLuaManager](const sol::table& options) {
++                MWBase::LuaManager::MainMenuButton button;
++                button.mId = options.get_or("id", std::string());
++                button.mNormal = options.get_or("normal", std::string());
++                button.mHighlighted = options.get_or("highlighted", button.mNormal);
++                button.mPushed = options.get_or("pushed", button.mNormal);
++                button.mAfter = options.get_or("after", std::string());
++                static const std::set<std::string, std::less<>> builtin
++                    = { "return", "newgame", "savegame", "loadgame", "options", "credits", "exitgame" };
++                if (button.mId.empty() || button.mNormal.empty() || builtin.count(button.mId))
++                    throw std::invalid_argument(
++                        "ui.addMainMenuButton: needs an id (not a built-in button's) and a texture");
++                luaManager->addMainMenuButton(std::move(button));
++            };
++        }
+         api["showMessage"]
+             = [luaManager = context.mLuaManager](std::string_view message, const sol::optional<sol::table>& options) {
+                   MWGui::ShowInDialogueMode mode = MWGui::ShowInDialogueMode_IfPossible;
+diff --git a/apps/openmw/mwmechanics/character.cpp b/apps/openmw/mwmechanics/character.cpp
+index f492284d0c..0b7de7eb90 100644
+--- a/apps/openmw/mwmechanics/character.cpp
++++ b/apps/openmw/mwmechanics/character.cpp
+@@ -3168,6 +3168,12 @@ namespace MWMechanics
+             xAngleRadians = std::asin(direction.z());
+         }
+ 
++        if (const std::optional<float> forced = mAnimation->getHeadPitchOverride())
++        {
++            xAngleRadians = *forced;
++            zAngleRadians = 0.f;
++        }
++
+         const float xLimit = osg::DegreesToRadians(40.f);
+         const float zLimit = osg::DegreesToRadians(30.f);
+         float zLimitOffset = mAnimation->getUpperBodyYawRadians();
+diff --git a/apps/openmw/mwrender/animation.cpp b/apps/openmw/mwrender/animation.cpp
+index 4c522aaa1e..9e55753f3f 100644
+--- a/apps/openmw/mwrender/animation.cpp
++++ b/apps/openmw/mwrender/animation.cpp
+@@ -1424,11 +1424,12 @@ namespace MWRender
+         if (mSpineController)
+         {
+             float yaw = mUpperBodyYawRadians - yawOffset;
+-            bool enable = std::abs(yaw) > epsilon;
++            bool enable = std::abs(yaw) > epsilon || std::abs(mSpinePitchRadians) > epsilon;
+             mSpineController->setEnabled(enable);
+             if (enable)
+             {
+-                mSpineController->setRotate(osg::Quat(yaw, osg::Vec3f(0, 0, 1)));
++                mSpineController->setRotate(
++                    osg::Quat(mSpinePitchRadians, osg::Vec3f(1, 0, 0)) * osg::Quat(yaw, osg::Vec3f(0, 0, 1)));
+                 yawOffset = mUpperBodyYawRadians;
+             }
+         }
+diff --git a/apps/openmw/mwrender/animation.hpp b/apps/openmw/mwrender/animation.hpp
+index 14c6b8f99e..78e1a44297 100644
+--- a/apps/openmw/mwrender/animation.hpp
++++ b/apps/openmw/mwrender/animation.hpp
+@@ -230,6 +230,8 @@ namespace MWRender
+         osg::ref_ptr<RotateController> mRootController;
+         float mHeadYawRadians;
+         float mHeadPitchRadians;
++        std::optional<float> mHeadPitchOverride;
++        float mSpinePitchRadians = 0.f;
+         float mUpperBodyYawRadians;
+         float mLegsYawRadians;
+         float mBodyPitchRadians;
+@@ -485,6 +487,12 @@ namespace MWRender
+         virtual void setHeadPitch(float pitchRadians);
+         virtual void setHeadYaw(float yawRadians);
+         virtual float getHeadPitch() const;
++
++        // A script can take over the head's up/down angle, replacing head tracking (nullopt gives it back).
++        void setHeadPitchOverride(std::optional<float> pitchRadians) { mHeadPitchOverride = pitchRadians; }
++        std::optional<float> getHeadPitchOverride() const { return mHeadPitchOverride; }
++        // Tilts the upper body up/down (used so a scripted actor's attacks follow where it aims).
++        void setSpinePitch(float pitchRadians) { mSpinePitchRadians = pitchRadians; }
+         virtual float getHeadYaw() const;
+ 
+         virtual void setUpperBodyYawRadians(float v) { mUpperBodyYawRadians = v; }
+diff --git a/components/lua_ui/textedit.cpp b/components/lua_ui/textedit.cpp
+index 1e4117e56c..f77874bada 100644
+--- a/components/lua_ui/textedit.cpp
++++ b/components/lua_ui/textedit.cpp
+@@ -4,6 +4,20 @@
+ 
+ namespace LuaUi
+ {
++    namespace
++    {
++        std::function<void(MyGUI::Widget*)>& keyFocusHandler()
++        {
++            static std::function<void(MyGUI::Widget*)> handler;
++            return handler;
++        }
++    }
++
++    void LuaTextEdit::setKeyFocusHandler(std::function<void(MyGUI::Widget*)> handler)
++    {
++        keyFocusHandler() = std::move(handler);
++    }
++
+     void LuaTextEdit::initialize()
+     {
+         mEditBox = createWidget<MyGUI::EditBox>("LuaTextEdit", MyGUI::IntCoord(0, 0, 0, 0), MyGUI::Align::Default);
+@@ -41,6 +55,12 @@ namespace LuaUi
+         // change caption last, for multiline and wordwrap to apply
+         mEditBox->setCaption(propertyValue("text", std::string()));
+ 
++        // Take keyboard focus once when `autoFocus` becomes true (it can be re-armed by setting it false).
++        const bool autoFocus = propertyValue("autoFocus", false);
++        if (autoFocus && !mAutoFocused && keyFocusHandler())
++            keyFocusHandler()(mEditBox);
++        mAutoFocused = autoFocus;
++
+         WidgetExtension::updateProperties();
+     }
+ 
+@@ -84,7 +104,7 @@ namespace LuaUi
+     {
+         static std::vector<std::string_view> usedProps = std::invoke([this] {
+             std::vector<std::string_view> props = { "text", "textSize", "textColor", "wordWrap", "textAlignH",
+-                "textAlignV", "multiline", "readOnly", "autoSize" };
++                "textAlignV", "multiline", "readOnly", "autoSize", "autoFocus" };
+             auto baseProps = WidgetExtension::allUsedProperties();
+             props.insert(props.end(), baseProps.begin(), baseProps.end());
+             return props;
+diff --git a/components/lua_ui/textedit.hpp b/components/lua_ui/textedit.hpp
+index 2b8425f22e..671945dd76 100644
+--- a/components/lua_ui/textedit.hpp
++++ b/components/lua_ui/textedit.hpp
+@@ -1,6 +1,7 @@
+ #ifndef OPENMW_LUAUI_TEXTEDIT
+ #define OPENMW_LUAUI_TEXTEDIT
+ 
++#include <functional>
+ #include <vector>
+ 
+ #include <MyGUI_EditBox.h>
+@@ -16,6 +17,9 @@ namespace LuaUi
+     public:
+         bool isTextInput() override { return mEditBox->getEditStatic(); }
+ 
++        // Used by `props.autoFocus`; the window manager sets this so text input (SDL) is started properly.
++        static void setKeyFocusHandler(std::function<void(MyGUI::Widget*)> handler);
++
+     protected:
+         void initialize() override;
+         void deinitialize() override;
+@@ -32,6 +36,7 @@ namespace LuaUi
+         MyGUI::EditBox* mEditBox = nullptr;
+         bool mMultiline{ false };
+         bool mAutoSize{ false };
++        bool mAutoFocused{ false };
+     };
+ }
+ 

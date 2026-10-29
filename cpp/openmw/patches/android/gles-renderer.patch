@@ -1,0 +1,925 @@
+diff --git a/apps/openmw/engine.cpp b/apps/openmw/engine.cpp
+index a061de522b..4fa8cc5506 100644
+--- a/apps/openmw/engine.cpp
++++ b/apps/openmw/engine.cpp
+@@ -291,7 +291,7 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
+     {
+ #ifdef OPENMW_USE_VULKAN
+         // Input waits here, not after the update.
+-        if (mRendererEntry != Settings::RendererEntry::OpenGL && mClockwork != nullptr)
++        if (!Settings::isOpenGLFamily(mRendererEntry) && mClockwork != nullptr)
+             mClockwork->pace();
+ #endif
+         // Stop the background GC started at the previous frame's end.
+@@ -301,7 +301,7 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
+ 
+ #ifdef OPENMW_USE_VULKAN
+         // A loaded scene's hidden frames still change the screen.
+-        if (mRendererEntry != Settings::RendererEntry::OpenGL)
++        if (!Settings::isOpenGLFamily(mRendererEntry))
+             mWorld->getRenderingManager()->showHidden();
+ #endif
+ 
+@@ -462,7 +462,7 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
+ 
+     mStereoManager->updateSettings(Settings::camera().mNearClip, Settings::camera().mViewingDistance);
+ 
+-    if (mRendererEntry == Settings::RendererEntry::OpenGL)
++    if (Settings::isOpenGLFamily(mRendererEntry))
+         mViewer->eventTraversal();
+     else
+         refreshVulkanWindow();
+@@ -480,7 +480,7 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
+     // if there is a separate Lua thread, it starts the update now
+     mLuaWorker->allowUpdate(frameStart, frameNumber, *stats);
+ 
+-    if (mRendererEntry == Settings::RendererEntry::OpenGL)
++    if (Settings::isOpenGLFamily(mRendererEntry))
+     {
+         mViewer->renderingTraversals();
+         if (mRendererStatus.mOutcome != "success")
+@@ -523,7 +523,7 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
+ 
+ #ifdef OPENMW_USE_VULKAN
+     // The load's probes record beside the Lua update.
+-    if (mRendererEntry != Settings::RendererEntry::OpenGL)
++    if (!Settings::isOpenGLFamily(mRendererEntry))
+     {
+         try
+         {
+@@ -727,13 +727,17 @@ void OMW::Engine::createWindow(bool hidden)
+         if (!hidden && Settings::skipRenderer(previous, entry.mEntry))
+             mRendererStatus.mBlocked.emplace_back(Settings::rendererEntryName(entry.mEntry));
+     bool requested = false;
++    Settings::RendererEntry glEntry = Settings::RendererEntry::OpenGL;
+     for (const auto& entry : Settings::rendererEntries())
+     {
+         requested = requested || entry.mEntry == mRendererRequest.mEntry;
+         if (!requested)
+             continue;
+-        if (entry.mEntry == Settings::RendererEntry::OpenGL)
++        if (Settings::isOpenGLFamily(entry.mEntry))
++        {
++            glEntry = entry.mEntry;
+             break;
++        }
+         if (!hidden && Settings::skipRenderer(previous, entry.mEntry))
+         {
+             runtime.mRendererReason
+@@ -745,18 +749,28 @@ void OMW::Engine::createWindow(bool hidden)
+         if (createVulkanWindow(flags | SDL_WINDOW_VULKAN, posX, posY, entry.mEntry))
+             return;
+     }
+-    if (mRendererRequest.mEntry != Settings::RendererEntry::OpenGL)
++    if (!Settings::isOpenGLFamily(mRendererRequest.mEntry))
+         Log(Debug::Warning) << "Using OpenGL: " << runtime.mRendererReason;
+-    runtime.mFallbackChain.emplace_back("opengl");
+-    mRendererStatus.mActual = "opengl";
++    runtime.mFallbackChain.emplace_back(Settings::rendererEntryName(glEntry));
++    mRendererStatus.mActual = Settings::rendererEntryName(glEntry);
++    runtime.mGles = Settings::isOpenGLES(glEntry);
+     mRendererStatus.mReason = runtime.mRendererReason;
+     Settings::writeRendererStatus(statusPath, mRendererStatus);
+     if (mRendererRequest.mHeadless)
+         Log(Debug::Warning) << "No Vulkan entry started, so the session opens a window";
+ #ifdef ANDROID
+     // renderer = opengl on Android is desktop GL through Mesa Zink (libOSMesa_8.so) on the Vulkan driver, so the window
+-    // gets no SDL/EGL context. OSG_USE_ANGLE or OPENMW_SYSTEM_GLES go back to a GLES library through SDL.
+-    if (!getenv("OSG_USE_ANGLE") && !getenv("OPENMW_SYSTEM_GLES"))
++    // gets no SDL/EGL context. The OpenGL ES entries use an SDL/EGL context: the system driver's, or our ANGLE build's.
++    // OSG_USE_ANGLE or OPENMW_SYSTEM_GLES in the environment also choose a GLES library for the OpenGL entry.
++    if (glEntry == Settings::RendererEntry::OpenGLES32Angle)
++        setenv("OSG_USE_ANGLE", "1", 1);
++    if (Settings::isOpenGLES(glEntry))
++    {
++        setenv("OPENMW_GLES_VERSION", "32", 1);
++        if (glEntry == Settings::RendererEntry::OpenGLES32Angle && SDL_GL_LoadLibrary("libEGL_angle.so") != 0)
++            Log(Debug::Warning) << "Cannot load ANGLE's EGL (" << SDL_GetError() << "), using the system one";
++    }
++    else if (!getenv("OSG_USE_ANGLE") && !getenv("OPENMW_SYSTEM_GLES"))
+     {
+         setenv("OSG_USE_ZINK", "1", 0);
+         setenv("GALLIUM_DRIVER", "zink", 0);
+@@ -1191,7 +1205,7 @@ void OMW::Engine::switchRenderer()
+         }
+     }
+     std::unique_ptr<MWRender::Clockwork::Renderer> oldClockwork = std::move(mClockwork);
+-    const bool serialVulkan = oldClockwork != nullptr && target.mEntry != Settings::RendererEntry::OpenGL;
++    const bool serialVulkan = oldClockwork != nullptr && !Settings::isOpenGLFamily(target.mEntry);
+     if (serialVulkan)
+     {
+         rendering->detachClockwork();
+@@ -1220,12 +1234,12 @@ void OMW::Engine::switchRenderer()
+     mViewer->setReferenceTime(oldReferenceTime);
+     mViewer->stopThreading();
+ 
+-    if (mRendererStatus.mActual == "opengl")
++    if (mRendererStatus.mActual.starts_with("opengl"))
+     {
+-        mRendererEntry = Settings::RendererEntry::OpenGL;
++        mRendererEntry = Settings::readRendererEntry(mRendererStatus.mActual);
+         Diagnostics::runtime().mRendererEntry = "opengl";
+     }
+-    const bool hasOutput = target.mEntry == Settings::RendererEntry::OpenGL ? mWindow != nullptr
++    const bool hasOutput = Settings::isOpenGLFamily(target.mEntry) ? mWindow != nullptr
+ #ifdef OPENMW_USE_VULKAN
+                                                                             : mClockwork != nullptr;
+ #else
+@@ -1323,13 +1337,13 @@ void OMW::Engine::switchRenderer()
+         return;
+     }
+ 
+-    if (target.mEntry == Settings::RendererEntry::OpenGL)
++    if (Settings::isOpenGLFamily(target.mEntry))
+     {
+         mRendererEntry = target.mEntry;
+         Diagnostics::runtime().mRendererEntry = "opengl";
+     }
+     osg::ref_ptr<osg::GraphicsContext> newContext
+-        = target.mEntry == Settings::RendererEntry::OpenGL ? mViewer->getCamera()->getGraphicsContext() : nullptr;
++        = Settings::isOpenGLFamily(target.mEntry) ? mViewer->getCamera()->getGraphicsContext() : nullptr;
+ 
+     if (oldContext != nullptr)
+     {
+@@ -1385,7 +1399,7 @@ void OMW::Engine::switchRenderer()
+     }
+ 
+     mResourceSystem->getSceneManager()->getShaderManager().setMaxTextureUnits(mGlMaxTextureImageUnits);
+-    resetStats(target.mEntry == Settings::RendererEntry::OpenGL, statsLevel, statsDetail, statsPage);
++    resetStats(Settings::isOpenGLFamily(target.mEntry), statsLevel, statsDetail, statsPage);
+     if (newContext != nullptr)
+         newContext->releaseContext();
+     mRendererSwitches.leave(oldEntry);
+@@ -1407,7 +1421,7 @@ void OMW::Engine::switchRenderer()
+         }
+     }
+ #endif
+-    if (target.mEntry == Settings::RendererEntry::OpenGL)
++    if (Settings::isOpenGLFamily(target.mEntry))
+         rendering->refreshRenderer();
+     mViewer->startThreading();
+     mRendererSwitches.restore();
+@@ -1457,7 +1471,7 @@ void OMW::Engine::prepareEngine()
+ 
+     bool stereoEnabled = Settings::stereo().mStereoEnabled || osg::DisplaySettings::instance().get()->getStereo();
+ #ifdef OPENMW_USE_VULKAN
+-    if (stereoEnabled && mRendererRequest.mEntry != Settings::RendererEntry::OpenGL)
++    if (stereoEnabled && !Settings::isOpenGLFamily(mRendererRequest.mEntry))
+     {
+         Log(Debug::Warning) << "Stereo needs the opengl renderer, rendering one view";
+         stereoEnabled = false;
+@@ -1480,7 +1494,7 @@ void OMW::Engine::prepareEngine()
+     mResourceSystem->getSceneManager()->getShaderManager().setMaxTextureUnits(mGlMaxTextureImageUnits);
+     // The GUI builds shaders first.
+     Shader::ShaderManager::DefineMap shaderGlobals
+-        = { { "glslVersion", Diagnostics::runtime().mRendererEntry == "opengl" ? "120" : "450" } };
++        = { { "glslVersion", Diagnostics::runtime().glslVersion() } };
+     mResourceSystem->getSceneManager()->getShaderManager().setGlobalDefines(shaderGlobals);
+     mResourceSystem->getSceneManager()->setUnRefImageDataAfterApply(
+         false); // keep to Off for now to allow better state sharing
+@@ -1765,7 +1779,7 @@ void OMW::Engine::go()
+     // Setup profiler
+     // A Vulkan entry draws both displays itself.
+     mStatsOffline = stats.is_open();
+-    resetStats(mRendererEntry == Settings::RendererEntry::OpenGL, 0, 0, 0);
++    resetStats(Settings::isOpenGLFamily(mRendererEntry), 0, 0, 0);
+ #ifdef OPENMW_USE_VULKAN
+     if (mClockwork != nullptr)
+         mClockwork->setStats(
+@@ -1807,7 +1821,7 @@ void OMW::Engine::go()
+         mWindowManager->executeInConsole(mStartupScript);
+     }
+ 
+-    if (mVulkanSkipped && mRendererEntry == Settings::RendererEntry::OpenGL)
++    if (mVulkanSkipped && Settings::isOpenGLFamily(mRendererEntry))
+         mWindowManager->messageBox("#{OMWEngine:RendererVulkanSkipped}");
+ 
+     // Start the main rendering loop
+@@ -1815,7 +1829,7 @@ void OMW::Engine::go()
+     Misc::FrameRateLimiter frameRateLimiter = Misc::makeFrameRateLimiter(mEnvironment.getFrameRateLimit());
+     const std::chrono::steady_clock::duration maxSimulationInterval(std::chrono::milliseconds(200));
+     // The viewer reports done without a context.
+-    while ((mRendererEntry != Settings::RendererEntry::OpenGL || !mViewer->done()) && !mStateManager->hasQuitRequest())
++    while ((!Settings::isOpenGLFamily(mRendererEntry) || !mViewer->done()) && !mStateManager->hasQuitRequest())
+     {
+         const double dt = std::chrono::duration_cast<std::chrono::duration<double>>(
+                               std::min(frameRateLimiter.getLastFrameDuration(), maxSimulationInterval))
+diff --git a/apps/openmw/main.cpp b/apps/openmw/main.cpp
+index a486bc6840..1c49391ece 100644
+--- a/apps/openmw/main.cpp
++++ b/apps/openmw/main.cpp
+@@ -188,7 +188,7 @@ bool parseOptions(int argc, char** argv, OMW::Engine& engine, Files::Configurati
+     if (rendererRequest.mHeadless)
+     {
+         Diagnostics::runtime().mHeadless = true;
+-        if (rendererRequest.mEntry == Settings::RendererEntry::OpenGL)
++        if (Settings::isOpenGLFamily(rendererRequest.mEntry))
+             Log(Debug::Warning) << "Headless needs a Vulkan entry";
+     }
+     engine.setRendererRequest(rendererRequest);
+diff --git a/apps/openmw/mwrender/clockwork/device/renderer.cpp b/apps/openmw/mwrender/clockwork/device/renderer.cpp
+index 9dbb360418..2e73427750 100644
+--- a/apps/openmw/mwrender/clockwork/device/renderer.cpp
++++ b/apps/openmw/mwrender/clockwork/device/renderer.cpp
+@@ -37,6 +37,8 @@ namespace MWRender::Clockwork
+                 case Settings::RendererEntry::Vulkan12:
+                     return Vulkan::Entry::Vulkan12;
+                 case Settings::RendererEntry::OpenGL:
++                case Settings::RendererEntry::OpenGLES32:
++                case Settings::RendererEntry::OpenGLES32Angle:
+                     break;
+             }
+             return Vulkan::Entry::Vulkan14;
+@@ -53,6 +55,8 @@ namespace MWRender::Clockwork
+                 case Settings::RendererEntry::Vulkan12:
+                     return Shader::SpirvTarget::Vulkan12;
+                 case Settings::RendererEntry::OpenGL:
++                case Settings::RendererEntry::OpenGLES32:
++                case Settings::RendererEntry::OpenGLES32Angle:
+                     break;
+             }
+             return Shader::SpirvTarget::Vulkan14;
+diff --git a/apps/openmw/mwrender/renderingmanager.cpp b/apps/openmw/mwrender/renderingmanager.cpp
+index 99ec1cf3ae..777f3f757d 100644
+--- a/apps/openmw/mwrender/renderingmanager.cpp
++++ b/apps/openmw/mwrender/renderingmanager.cpp
+@@ -433,7 +433,7 @@ namespace MWRender
+             globalDefines[key] = value;
+ 
+         // A Vulkan entry links the 450 dialect.
+-        globalDefines["glslVersion"] = Diagnostics::runtime().mRendererEntry == "opengl" ? "120" : "450";
++        globalDefines["glslVersion"] = Diagnostics::runtime().glslVersion();
+         globalDefines["preLightEnv"] = Settings::shaders().mApplyLightingToEnvironmentMaps ? "1" : "0";
+         Shader::setShadingDefines(globalDefines);
+         Shader::setClassicDefines(globalDefines);
+@@ -452,8 +452,8 @@ namespace MWRender
+ 
+         for (auto itr = lightDefines.begin(); itr != lightDefines.end(); itr++)
+             globalDefines[itr->first] = itr->second;
+-        // Version 450 has no GL_EXT_gpu_shader4.
+-        if (Diagnostics::runtime().mRendererEntry != "opengl")
++        // Version 450 and OpenGL ES have no GL_EXT_gpu_shader4.
++        if (Diagnostics::runtime().mRendererEntry != "opengl" || Diagnostics::runtime().mGles)
+             globalDefines["useGPUShader4"] = "0";
+ 
+         // Refactor this at some point - most shaders don't care about these defines
+@@ -1971,7 +1971,7 @@ namespace MWRender
+             mPerViewUniformStateUpdater->reset();
+         }
+         auto defines = shaders.getGlobalDefines();
+-        defines["glslVersion"] = vulkan ? "450" : "120";
++        defines["glslVersion"] = vulkan ? "450" : Diagnostics::runtime().glslVersion();
+         defines["disableNormals"] = vulkan || mPostProcessor->getNormals() ? "0" : "1";
+         defines["reverseZ"] = reverseZ ? "1" : "0";
+         defines["classicFalloff"] = Shader::classicFalloffDefine();
+diff --git a/apps/openmw/mwrender/sky.cpp b/apps/openmw/mwrender/sky.cpp
+index 438cdb5764..584b330215 100644
+--- a/apps/openmw/mwrender/sky.cpp
++++ b/apps/openmw/mwrender/sky.cpp
+@@ -889,6 +889,12 @@ namespace MWRender
+             cloudTex->setWrap(osg::Texture::WRAP_S, osg::Texture::REPEAT);
+             cloudTex->setWrap(osg::Texture::WRAP_T, osg::Texture::REPEAT);
+ 
++            if (const osg::Image* image = cloudTex->getImage())
++                Log(Debug::Verbose) << "Cloud texture " << mClouds << ": " << image->s() << "x" << image->t()
++                                    << " internal 0x" << std::hex << image->getInternalTextureFormat() << " pixel 0x"
++                                    << image->getPixelFormat() << " type 0x" << image->getDataType() << std::dec
++                                    << " mipmaps " << image->getNumMipmapLevels();
++
+             mCloudUpdater->setTexture(std::move(cloudTex));
+         }
+ 
+diff --git a/components/debug/debugdraw.cpp b/components/debug/debugdraw.cpp
+index 623d781a71..b98c6b2284 100644
+--- a/components/debug/debugdraw.cpp
++++ b/components/debug/debugdraw.cpp
+@@ -318,6 +318,9 @@ namespace Debug
+ 
+         const osg::StateSet* stateSet = getStateSet();
+ 
++        // The program can be missing when it did not link (a driver that refuses its shaders).
++        if (state->getLastAppliedProgramObject() == nullptr)
++            return;
+         const osg::Program::PerContextProgram& pcp = *state->getLastAppliedProgramObject();
+         auto transLocation = pcp.getUniformLocation(stateSet->getUniform("trans")->getNameID());
+         auto colLocation = pcp.getUniformLocation(stateSet->getUniform("color")->getNameID());
+diff --git a/components/diagnostics/identity.hpp b/components/diagnostics/identity.hpp
+index 923f63e471..726c0d46da 100644
+--- a/components/diagnostics/identity.hpp
++++ b/components/diagnostics/identity.hpp
+@@ -15,6 +15,11 @@ namespace Diagnostics
+     struct Runtime
+     {
+         std::string mRendererEntry = "opengl";
++        /// The OpenGL entry runs OpenGL ES (shaders in the 320 es dialect).
++        bool mGles = false;
++
++        /// The GLSL dialect the shaders are written for.
++        std::string glslVersion() const { return mRendererEntry == "opengl" ? (mGles ? "320 es" : "120") : "450"; }
+         std::string mRendererRequested;
+         std::string mRendererReason;
+         /// The device block a Vulkan entry writes.
+diff --git a/components/fx/pass.cpp b/components/fx/pass.cpp
+index 29303276c8..3ac301ca0d 100644
+--- a/components/fx/pass.cpp
++++ b/components/fx/pass.cpp
+@@ -18,6 +18,7 @@
+ #include <osg/State>
+ #include <osg/StateSet>
+ 
++#include <components/diagnostics/identity.hpp>
+ #include <components/resource/scenemanager.hpp>
+ #include <components/sceneutil/lightmanager.hpp>
+ #include <components/settings/values.hpp>
+@@ -306,6 +307,11 @@ layout(location = 0) out vec4 omw_FragColor;
+     std::string extensionBlock(const Fx::Technique& technique)
+     {
+         std::stringstream extBlock;
++        // OpenGL ES wants default precisions for floats and samplers.
++        if (Diagnostics::runtime().mGles)
++            extBlock << "precision highp float;\nprecision highp int;\nprecision highp sampler2D;\n"
++                        "precision highp sampler3D;\nprecision highp samplerCube;\nprecision highp sampler2DShadow;\n"
++                        "precision highp sampler2DArray;\n";
+         for (const auto& extension : technique.getGLSLExtensions())
+             extBlock << "#ifdef " << extension << '\n'
+                      << "\t#extension " << extension << ": enable" << '\n'
+@@ -367,6 +373,8 @@ namespace Fx
+                   { "@fragBinding", mLegacyGLSL ? "" : "out vec4 omw_FragColor;" } };
+ 
+         std::string header = substitute(sPassHeader, defines);
++        // #version has to be on the first line (ANGLE checks).
++        header.erase(0, header.find_first_not_of("\n\r \t"));
+ 
+         for (const auto& target : mRenderTargets)
+             header.append("uniform sampler2D " + target + ";");
+@@ -494,7 +502,7 @@ namespace Fx
+         if (mCompiled)
+             return;
+ 
+-        mLegacyGLSL = technique.getGLSLVersion() < 330;
++        mLegacyGLSL = !Diagnostics::runtime().mGles && technique.getGLSLVersion() < 330;
+ 
+         if (mType == Type::Pixel)
+         {
+diff --git a/components/fx/technique.hpp b/components/fx/technique.hpp
+index e1fca67772..36fdf1f34b 100644
+--- a/components/fx/technique.hpp
++++ b/components/fx/technique.hpp
+@@ -1,6 +1,7 @@
+ #ifndef OPENMW_COMPONENTS_FX_TECHNIQUE_HPP
+ #define OPENMW_COMPONENTS_FX_TECHNIQUE_HPP
+ 
++#include <components/diagnostics/identity.hpp>
+ #include <filesystem>
+ #include <memory>
+ #include <string>
+@@ -166,9 +167,10 @@ namespace Fx
+ 
+         std::string getSourceHash() const;
+ 
+-        int getGLSLVersion() const { return mGLSLVersion; }
++        /// OpenGL ES runs every technique in the 320 es dialect, whatever version it asks for.
++        int getGLSLVersion() const { return Diagnostics::runtime().mGles ? 320 : mGLSLVersion; }
+ 
+-        std::string getGLSLProfile() const { return mGLSLProfile; }
++        std::string getGLSLProfile() const { return Diagnostics::runtime().mGles ? "es" : mGLSLProfile; }
+ 
+         const std::unordered_set<std::string>& getGLSLExtensions() const { return mGLSLExtensions; }
+ 
+diff --git a/components/resource/imagemanager.cpp b/components/resource/imagemanager.cpp
+index 85e08c7913..2161a2b711 100644
+--- a/components/resource/imagemanager.cpp
++++ b/components/resource/imagemanager.cpp
+@@ -9,6 +9,7 @@
+ #include <osgDB/Registry>
+ 
+ #include <components/debug/debuglog.hpp>
++#include <components/diagnostics/identity.hpp>
+ #include <components/files/memorystream.hpp>
+ #include <components/misc/pathhelpers.hpp>
+ #include <components/misc/resourcehelpers.hpp>
+@@ -315,6 +316,23 @@ namespace Resource
+                 image->setOrigin(osg::Image::TOP_LEFT);
+             }
+ 
++            // OpenGL ES has no BGR(A) upload with an RGB(A) internal format: swap the channels once on load
++            if (Diagnostics::runtime().mGles && !image->isCompressed() && image->getNumMipmapLevels() <= 1 && image->getDataType() == GL_UNSIGNED_BYTE
++                && (image->getPixelFormat() == GL_BGRA || image->getPixelFormat() == GL_BGR))
++            {
++                const bool alpha = image->getPixelFormat() == GL_BGRA;
++                const unsigned channels = alpha ? 4 : 3;
++                for (int t = 0; t < image->t(); ++t)
++                {
++                    unsigned char* row = image->data(0, t);
++                    for (int x = 0; x < image->s(); ++x)
++                        std::swap(row[x * channels], row[x * channels + 2]);
++                }
++                image->setPixelFormat(alpha ? GL_RGBA : GL_RGB);
++                image->setInternalTextureFormat(alpha ? GL_RGBA : GL_RGB);
++                Log(Debug::Verbose) << "Swapped BGR(A) to RGB(A) for OpenGL ES: " << path;
++            }
++
+             if (mHeadersOnly)
+                 image = withoutPixels(*image);
+             mCache->addEntryToObjectCache(resolvedPath.value(), image);
+diff --git a/components/settings/rendererentry.hpp b/components/settings/rendererentry.hpp
+index c374f86102..e8ad61f51d 100644
+--- a/components/settings/rendererentry.hpp
++++ b/components/settings/rendererentry.hpp
+@@ -9,8 +9,24 @@ namespace Settings
+         Vulkan14,
+         Vulkan13,
+         Vulkan12,
++        /// OpenGL ES 3.2 through the system driver (Android).
++        OpenGLES32,
++        /// OpenGL ES 3.2 through our ANGLE build (Android).
++        OpenGLES32Angle,
+     };
+ 
++    /// Entries that draw with OpenGL (as opposed to Vulkan).
++    constexpr bool isOpenGLFamily(RendererEntry entry)
++    {
++        return entry == RendererEntry::OpenGL || entry == RendererEntry::OpenGLES32
++            || entry == RendererEntry::OpenGLES32Angle;
++    }
++
++    constexpr bool isOpenGLES(RendererEntry entry)
++    {
++        return entry == RendererEntry::OpenGLES32 || entry == RendererEntry::OpenGLES32Angle;
++    }
++
+     /// The validation layer parts a Vulkan entry runs.
+     struct ValidationModes
+     {
+diff --git a/components/settings/renderers.cpp b/components/settings/renderers.cpp
+index f1c25aa3b0..f0de6ebcac 100644
+--- a/components/settings/renderers.cpp
++++ b/components/settings/renderers.cpp
+@@ -31,6 +31,8 @@ namespace Settings
+                 case RendererEntry::Vulkan12:
+                     return Vulkan::Entry::Vulkan12;
+                 case RendererEntry::OpenGL:
++                case RendererEntry::OpenGLES32:
++                case RendererEntry::OpenGLES32Angle:
+                     break;
+             }
+             return Vulkan::Entry::Vulkan14;
+@@ -48,7 +50,7 @@ namespace Settings
+ 
+     RendererEntry rendererForBuild(RendererEntry requested, bool vulkan)
+     {
+-        return vulkan ? requested : RendererEntry::OpenGL;
++        return vulkan || isOpenGLFamily(requested) ? requested : RendererEntry::OpenGL;
+     }
+ 
+     std::optional<ValidationModes> parseValidationModes(std::string_view list)
+@@ -83,7 +85,7 @@ namespace Settings
+ 
+     bool RendererSupport::available() const
+     {
+-        return mEntry == RendererEntry::OpenGL || std::any_of(mDevices.begin(), mDevices.end(), [](const auto& device) {
++        return isOpenGLFamily(mEntry) || std::any_of(mDevices.begin(), mDevices.end(), [](const auto& device) {
+             return device.mMissing.empty();
+         });
+     }
+@@ -114,7 +116,7 @@ namespace Settings
+                 continue;
+             RendererSupport support;
+             support.mEntry = info.mEntry;
+-            if (info.mEntry != RendererEntry::OpenGL)
++            if (!isOpenGLFamily(info.mEntry))
+             {
+ #ifdef OPENMW_USE_VULKAN
+                 try
+@@ -234,7 +236,7 @@ namespace Settings
+     bool skipRenderer(const RendererStatus& status, RendererEntry entry)
+     {
+         const auto name = rendererEntryName(entry);
+-        return entry != RendererEntry::OpenGL && status.mBuild == currentBuild()
++        return !isOpenGLFamily(entry) && status.mBuild == currentBuild()
+             && ((status.mOutcome == "starting" && status.mActual == name)
+                 || std::find(status.mBlocked.begin(), status.mBlocked.end(), name) != status.mBlocked.end());
+     }
+diff --git a/components/settings/renderers.hpp b/components/settings/renderers.hpp
+index 45202a136e..3f2bfe9191 100644
+--- a/components/settings/renderers.hpp
++++ b/components/settings/renderers.hpp
+@@ -26,10 +26,18 @@ namespace Settings
+         bool mListed;
+     };
+ 
+-    constexpr std::array<RendererInfo, 4> rendererEntries()
++#ifdef ANDROID
++    inline constexpr bool openGLESListed = true;
++#else
++    inline constexpr bool openGLESListed = false;
++#endif
++
++    constexpr std::array<RendererInfo, 6> rendererEntries()
+     {
+         return { { { RendererEntry::Vulkan14, "Vulkan 1.4", true }, { RendererEntry::Vulkan13, "Vulkan 1.3", true },
+-            { RendererEntry::Vulkan12, "Vulkan 1.2", false }, { RendererEntry::OpenGL, "OpenGL", true } } };
++            { RendererEntry::Vulkan12, "Vulkan 1.2", false }, { RendererEntry::OpenGL, "OpenGL", true },
++            { RendererEntry::OpenGLES32, "OpenGL ES 3.2", openGLESListed },
++            { RendererEntry::OpenGLES32Angle, "OpenGL ES 3.2 (ANGLE)", openGLESListed } } };
+     }
+ 
+     std::string_view rendererLabel(RendererEntry entry);
+diff --git a/components/settings/settings.cpp b/components/settings/settings.cpp
+index 268af6c808..26a0f110b6 100644
+--- a/components/settings/settings.cpp
++++ b/components/settings/settings.cpp
+@@ -552,6 +552,10 @@ namespace Settings
+         {
+             if (Misc::StringUtils::ciEqual(value, "opengl"))
+                 return RendererEntry::OpenGL;
++            if (Misc::StringUtils::ciEqual(value, "opengl es 3.2"))
++                return RendererEntry::OpenGLES32;
++            if (Misc::StringUtils::ciEqual(value, "opengl es 3.2 angle"))
++                return RendererEntry::OpenGLES32Angle;
+             if (Misc::StringUtils::ciEqual(value, "vulkan 1.4"))
+                 return RendererEntry::Vulkan14;
+             if (Misc::StringUtils::ciEqual(value, "vulkan 1.3"))
+@@ -588,6 +592,10 @@ namespace Settings
+                 return "vulkan 1.3";
+             case RendererEntry::Vulkan12:
+                 return "vulkan 1.2";
++            case RendererEntry::OpenGLES32:
++                return "opengl es 3.2";
++            case RendererEntry::OpenGLES32Angle:
++                return "opengl es 3.2 angle";
+             case RendererEntry::OpenGL:
+                 break;
+         }
+diff --git a/components/shader/shadermanager.cpp b/components/shader/shadermanager.cpp
+index 9530cd7b01..6cc988dae0 100644
+--- a/components/shader/shadermanager.cpp
++++ b/components/shader/shadermanager.cpp
+@@ -1,5 +1,9 @@
+ #include "shadermanager.hpp"
+ 
++#ifdef ANDROID
++#include <sys/system_properties.h>
++#endif
++
+ #include <components/vulkan/bindings.hpp>
+ 
+ #include "materialmap.hpp"
+@@ -647,8 +651,13 @@ namespace Shader
+         bool expandTemplate(std::string& source, std::vector<std::string>& links, const std::string& templateName,
+             const ShaderManager::DefineMap& defines, const ShaderManager::DefineMap& globals)
+         {
+-            return parseDefines(source, defines, globals, templateName)
+-                && parseDirectives(source, links, defines, globals, templateName);
++            // OpenGL ES has no GL_EXT_gpu_shader4, whatever the caller asked for.
++            const auto version = globals.find("glslVersion");
++            ShaderManager::DefineMap effective = defines;
++            if (version != globals.end() && version->second.ends_with(" es"))
++                effective["useGPUShader4"] = "0";
++            return parseDefines(source, effective, globals, templateName)
++                && parseDirectives(source, links, effective, globals, templateName);
+         }
+     }
+ 
+@@ -1024,10 +1033,40 @@ namespace Shader
+         osg::ref_ptr<SamplerProgram> program = programTemplate
+             ? new SamplerProgram(samplers, capabilities, *programTemplate, osg::CopyOp::SHALLOW_COPY)
+             : new SamplerProgram(samplers, capabilities);
+-        program->addShader(vertexShader);
+-        program->addShader(fragmentShader);
+-        addLinkedShaders(vertexShader, program);
+-        addLinkedShaders(fragmentShader, program);
++        if (usesEsDialect() && vertexShader && fragmentShader)
++        {
++            // The program template brings library shaders along: take them out and merge them in per stage.
++            std::vector<osg::ref_ptr<osg::Shader>> templateVertex, templateFragment;
++            for (unsigned int i = program->getNumShaders(); i > 0; --i)
++            {
++                osg::Shader* shader = program->getShader(i - 1);
++                if (shader->getType() == osg::Shader::VERTEX)
++                    templateVertex.insert(templateVertex.begin(), shader);
++                else if (shader->getType() == osg::Shader::FRAGMENT)
++                    templateFragment.insert(templateFragment.begin(), shader);
++                else
++                    continue;
++                program->removeShader(shader);
++            }
++            program->addShader(getMergedShader(vertexShader, templateVertex));
++            program->addShader(getMergedShader(fragmentShader, templateFragment));
++            std::string names;
++            for (unsigned int i = 0; i < program->getNumShaders(); ++i)
++                names += program->getShader(i)->getName() + " | ";
++            Log(Debug::Verbose) << "ES program " << vertexShader->getName() << " (template shaders "
++                                << templateVertex.size() << "/" << templateFragment.size() << "): " << names;
++            mEsProgramExtras[program.get()] = { templateVertex, templateFragment };
++        }
++        else
++        {
++            program->addShader(vertexShader);
++            program->addShader(fragmentShader);
++            addLinkedShaders(vertexShader, program);
++            addLinkedShaders(fragmentShader, program);
++        }
++        // Compute programs come through here with no vertex or fragment shader
++        program->setName((vertexShader ? vertexShader->getName() : std::string())
++            + " + " + (fragmentShader ? fragmentShader->getName() : std::string()));
+         mPrograms.emplace_hint(end, key, program);
+         return program;
+     }
+@@ -1872,11 +1911,28 @@ namespace Shader
+ 
+             getLinkedShaders(shader, linkedShaderNames, defines);
+         }
+-        for (const auto& [pair, program] : mPrograms)
++        if (usesEsDialect())
+         {
+-            addLinkedShaders(pair.first, program);
+-            addLinkedShaders(pair.second, program);
++            // The sources changed: merge again, one shader per stage in each program.
++            mMergedShaders.clear();
++            for (const auto& [pair, program] : mPrograms)
++            {
++                while (program->getNumShaders() > 0)
++                    program->removeShader(program->getShader(0));
++                const auto extras = mEsProgramExtras.find(program.get());
++                static const std::vector<osg::ref_ptr<osg::Shader>> none;
++                program->addShader(getMergedShader(
++                    pair.first, extras != mEsProgramExtras.end() ? extras->second.first : none));
++                program->addShader(getMergedShader(
++                    pair.second, extras != mEsProgramExtras.end() ? extras->second.second : none));
++            }
+         }
++        else
++            for (const auto& [pair, program] : mPrograms)
++            {
++                addLinkedShaders(pair.first, program);
++                addLinkedShaders(pair.second, program);
++            }
+     }
+ 
+     void ShaderManager::releaseGLObjects(osg::State* state)
+@@ -1898,6 +1954,71 @@ namespace Shader
+         return expandTemplate(source, linkedShaderTemplateNames, templateName, defines, mGlobalDefines);
+     }
+ 
++    bool ShaderManager::usesEsDialect() const
++    {
++        const auto version = mGlobalDefines.find("glslVersion");
++        return version != mGlobalDefines.end() && version->second.ends_with(" es");
++    }
++
++    osg::ref_ptr<osg::Shader> ShaderManager::getMergedShader(
++        const osg::ref_ptr<osg::Shader>& shader, const std::vector<osg::ref_ptr<osg::Shader>>& extras)
++    {
++        std::vector<const osg::Shader*> extraKey;
++        for (const osg::ref_ptr<osg::Shader>& extra : extras)
++            extraKey.push_back(extra.get());
++        const auto key = std::make_pair(shader.get(), extraKey);
++        const auto cached = mMergedShaders.find(key);
++        if (cached != mMergedShaders.end())
++            return cached->second;
++
++        std::string source = shader->getShaderSource();
++        std::set<const osg::Shader*> seen{ shader.get() };
++        int moduleNumber = 0;
++        // Modules link modules: take the whole tree, each module once.
++        const auto append = [&](const auto& self, const osg::ref_ptr<osg::Shader>& from) -> void {
++            const auto linkedIt = mLinkedShaders.find(from);
++            if (linkedIt == mLinkedShaders.end())
++                return;
++            for (const osg::ref_ptr<osg::Shader>& module : linkedIt->second)
++            {
++                if (!seen.insert(module.get()).second)
++                    continue;
++                appendModule(source, module->getShaderSource(), ++moduleNumber);
++                self(self, module);
++            }
++        };
++        append(append, shader);
++        for (const osg::ref_ptr<osg::Shader>& extra : extras)
++        {
++            if (!seen.insert(extra.get()).second)
++                continue;
++            appendModule(source, extra->getShaderSource(), ++moduleNumber);
++            append(append, extra);
++        }
++
++        osg::ref_ptr<osg::Shader> merged(new osg::Shader(shader->getType()));
++        merged->setShaderSource(source);
++        merged->setName(shader->getName() + " (merged)");
++        // Instanced twins are found through the template key of the shader a program holds.
++        if (const auto keyIt = mShaderKeys.find(shader.get()); keyIt != mShaderKeys.end())
++            mShaderKeys.emplace(merged.get(), keyIt->second);
++#ifdef ANDROID
++        // Dev probe: adb shell setprop debug.alpha3.shaderdump 1 writes what the driver is given to /sdcard/Alpha3/shaderdump
++        char dumpProp[PROP_VALUE_MAX] = "";
++        if (__system_property_get("debug.alpha3.shaderdump", dumpProp) > 0 && dumpProp[0] == '1')
++        {
++            std::string name = merged->getName();
++            for (char& c : name)
++                if (c == '/' || c == ' ' || c == '(' || c == ')')
++                    c = '_';
++            std::ofstream("/sdcard/Alpha3/shaderdump/" + name + (shader->getType() == osg::Shader::VERTEX ? ".vert" : ".frag"))
++                << source;
++        }
++#endif
++        mMergedShaders.emplace(key, merged);
++        return merged;
++    }
++
+     void ShaderManager::getLinkedShaders(const osg::ref_ptr<osg::Shader>& shader,
+         const std::vector<std::string>& linkedShaderNames, const DefineMap& defines, BuiltSources* built)
+     {
+diff --git a/components/shader/shadermanager.hpp b/components/shader/shadermanager.hpp
+index 6fcc501478..f4acdc0215 100644
+--- a/components/shader/shadermanager.hpp
++++ b/components/shader/shadermanager.hpp
+@@ -277,6 +277,17 @@ namespace Shader
+         osg::ref_ptr<osg::Program> getProgramInternal(const osg::ref_ptr<osg::Shader>& vertexShader,
+             const osg::ref_ptr<osg::Shader>& fragmentShader, const osg::Program* programTemplate,
+             const SamplerBindingMap& samplers, ProgramCapability capabilities);
++        /// OpenGL ES allows one shader object per stage in a program, so the 320 es dialect gives a program one merged
++        /// shader per stage: the shader's own source with its linked modules appended once each.
++        bool usesEsDialect() const;
++        /// @param extras Shaders a program template adds to the stage; they are merged in as well.
++        osg::ref_ptr<osg::Shader> getMergedShader(
++            const osg::ref_ptr<osg::Shader>& shader, const std::vector<osg::ref_ptr<osg::Shader>>& extras);
++        std::map<std::pair<const osg::Shader*, std::vector<const osg::Shader*>>, osg::ref_ptr<osg::Shader>> mMergedShaders;
++        /// The program template shaders each ES program was merged with (vertex, fragment).
++        std::map<const osg::Program*,
++            std::pair<std::vector<osg::ref_ptr<osg::Shader>>, std::vector<osg::ref_ptr<osg::Shader>>>>
++            mEsProgramExtras;
+         void getLinkedShaders(const osg::ref_ptr<osg::Shader>& shader,
+             const std::vector<std::string>& linkedShaderNames, const DefineMap& defines, BuiltSources* built = nullptr);
+ #ifdef OPENMW_USE_VULKAN
+diff --git a/files/shaders/compatibility/multiview_resolve.frag b/files/shaders/compatibility/multiview_resolve.frag
+index a56ff976c5..cb666deee3 100644
+--- a/files/shaders/compatibility/multiview_resolve.frag
++++ b/files/shaders/compatibility/multiview_resolve.frag
+@@ -12,7 +12,7 @@ void main()
+     if(uvz.x > 1.)
+     {
+         uvz.x -= 1.;
+-        uvz.z = 1;
++        uvz.z = 1.0;
+     }
+ 
+     osg_FragColor = texture2DArray(lastShader, uvz);
+diff --git a/files/shaders/compatibility/water.frag b/files/shaders/compatibility/water.frag
+index b58cd6b563..86be038582 100644
+--- a/files/shaders/compatibility/water.frag
++++ b/files/shaders/compatibility/water.frag
+@@ -262,10 +262,10 @@ void main(void)
+     rawRefraction = refraction;
+ 
+     // brighten up the refraction underwater
+-    if (cameraPos.z < 0)
++    if (cameraPos.z < 0.0)
+         refraction = clamp(refraction * 1.5, 0.0, 1.0);
+ 
+-    if (cameraPos.z >= 0)
++    if (cameraPos.z >= 0.0)
+     {
+         vec3 deepWaterColor = waterColor * fogScale + fogOffset;
+         if (!hasOpaqueGeometry(refractionCoords))
+diff --git a/files/shaders/core/lighting/bound.comp b/files/shaders/core/lighting/bound.comp
+index 6faec56db6..aaa09c8317 100644
+--- a/files/shaders/core/lighting/bound.comp
++++ b/files/shaders/core/lighting/bound.comp
+@@ -136,7 +136,7 @@ void main()
+                     continue;
+                 vec4 clip = inverseProjection * vec4(ndc, stored, 1.0);
+                 vec3 view = clip.xyz / clip.w;
+-                int slice = int((log(abs(view.z) / near) * int(gridSize.z)) / log(clusterFar / near));
++                int slice = int((log(abs(view.z) / near) * float(gridSize.z)) / log(clusterFar / near));
+                 // Only long lists take a box.
+                 if (slice < 0 || slice >= int(slices) || g_Grid[slice].count <= boundLights)
+                     continue;
+diff --git a/files/shaders/lib/core/profile.glsl b/files/shaders/lib/core/profile.glsl
+index 17368ae0d8..ea40937408 100644
+--- a/files/shaders/lib/core/profile.glsl
++++ b/files/shaders/lib/core/profile.glsl
+@@ -2,6 +2,24 @@
+ #define OPENMW_PROFILE_GLSL
+ // clockwork profile begin
+ #if __VERSION__ < 450
++#ifdef GL_ES
++// OpenGL ES 3.2: the OpenGL path in the 320 es dialect. OSG keeps these uniforms up to date by name.
++precision highp float;
++precision highp int;
++precision highp sampler2D;
++precision highp sampler3D;
++precision highp samplerCube;
++precision highp sampler2DShadow;
++precision highp sampler2DArray;
++precision highp sampler2DMS;
++uniform mat4 osg_ModelViewMatrix;
++uniform mat3 osg_NormalMatrix;
++#ifndef OPENMW_FRAGMENT_STAGE
++uniform mat4 osg_ProjectionMatrix;
++uniform mat4 osg_ModelViewProjectionMatrix;
++#endif
++#define osg_ModelViewMatrixInverse inverse(osg_ModelViewMatrix)
++#else
+ #ifdef OPENMW_FRAGMENT_STAGE
+ // Android (OSG built for GLES3, so matrix uniforms): fragment shaders declare the matrices they use here, with no
+ // built-in names in the text for OSG to rewrite. Keep OSG's search keywords out of comments: it looks for the
+@@ -15,10 +33,16 @@ uniform mat3 osg_NormalMatrix;
+ #define osg_ProjectionMatrix gl_ProjectionMatrix
+ #define osg_ModelViewProjectionMatrix gl_ModelViewProjectionMatrix
+ #define osg_ModelViewMatrixInverse gl_ModelViewMatrixInverse
++#endif
+ #define osg_ParamsBegin(name, s, b)
+ #define osg_Param(type, name) uniform type name;
+ #define osg_ParamInit(type, name, value) uniform type name = value;
+ #define osg_ParamsEnd
++#ifdef GL_ES
++// OpenGL ES has no initializers on uniforms.
++#undef osg_ParamInit
++#define osg_ParamInit(type, name, value) uniform type name;
++#endif
+ #define osg_Sampler2D(name, unit) uniform sampler2D name;
+ #define osg_Sampler2DShadow(name, unit) uniform sampler2DShadow name;
+ #define osg_Sampler2DArray(name, unit) uniform sampler2DArray name;
+diff --git a/files/shaders/lib/core/profile_fragment.glsl b/files/shaders/lib/core/profile_fragment.glsl
+index d85be5eea4..6293b43e13 100644
+--- a/files/shaders/lib/core/profile_fragment.glsl
++++ b/files/shaders/lib/core/profile_fragment.glsl
+@@ -4,7 +4,31 @@
+ #include "lib/core/profile.glsl"
+ #include "lib/core/profile_varyings.glsl"
+ // clockwork profile begin
+-#if __VERSION__ < 450
++#if defined(GL_ES)
++// OpenGL ES 3.2
++#ifdef OPENMW_NO_COLOR_OUTPUT
++vec4 osg_FragColor;
++#else
++layout(location = 0) out vec4 osg_FragColor;
++#endif
++#if !@disableNormals
++#ifdef OPENMW_NO_COLOR_OUTPUT
++vec4 osg_FragNormal;
++#else
++layout(location = 1) out vec4 osg_FragNormal;
++#endif
++#endif
++#define osg_Varying(type, name) in type name;
++#define osg_VaryingCentroid(type, name) centroid in type name;
++#define osg_VaryingFlat(type, name) flat in type name;
++#define texture2D texture
++#define texture2DProj textureProj
++#define texture2DLod textureLod
++#define texture2DArray texture
++#define textureCube texture
++#define shadow2D(s, c) vec4(texture(s, c))
++#define shadow2DProj(s, c) vec4(textureProj(s, c))
++#elif __VERSION__ < 450
+ #define osg_FragColor gl_FragData[0]
+ #define osg_FragNormal gl_FragData[1]
+ #define osg_Varying(type, name) varying type name;
+diff --git a/files/shaders/lib/core/profile_vertex.glsl b/files/shaders/lib/core/profile_vertex.glsl
+index fc05d69865..2f5fb8b70f 100644
+--- a/files/shaders/lib/core/profile_vertex.glsl
++++ b/files/shaders/lib/core/profile_vertex.glsl
+@@ -3,7 +3,26 @@
+ #include "lib/core/profile.glsl"
+ #include "lib/core/profile_varyings.glsl"
+ // clockwork profile begin
+-#if __VERSION__ < 450
++#if defined(GL_ES)
++// OpenGL ES 3.2. OSG binds these attribute names to its own locations when the program is linked.
++in vec4 osg_Vertex;
++in vec3 osg_Normal;
++in vec4 osg_Color;
++in vec4 osg_MultiTexCoord0;
++in vec4 osg_MultiTexCoord1;
++in vec4 osg_MultiTexCoord2;
++in vec4 osg_MultiTexCoord3;
++in vec4 osg_MultiTexCoord4;
++in vec4 osg_MultiTexCoord5;
++in vec4 osg_MultiTexCoord6;
++in vec4 osg_MultiTexCoord7;
++// Clip planes are not available to OpenGL ES shaders without an extension: reflections are not clipped.
++#define osg_ClipVertex(v)
++#define osg_Varying(type, name) out type name;
++#define osg_VaryingCentroid(type, name) centroid out type name;
++#define osg_Attribute(loc, type, name) in type name;
++#define osg_VaryingFlat(type, name) flat out type name;
++#elif __VERSION__ < 450
+ #define osg_Vertex gl_Vertex
+ #define osg_Normal gl_Normal
+ #define osg_Color gl_Color
+diff --git a/files/shaders/lib/light/util.glsl b/files/shaders/lib/light/util.glsl
+index bb77c9a420..36547051ef 100644
+--- a/files/shaders/lib/light/util.glsl
++++ b/files/shaders/lib/light/util.glsl
+@@ -144,7 +144,7 @@ float calcAttenuation(PointLight light, float dist) {
+ }
+ 
+ int getClusterTileIndex(vec2 screenRes, vec3 gridSize, float near, vec2 screenCoord, float viewSpaceZ) {
+-    int zTile = int((log(abs(viewSpaceZ) / near) * int(gridSize.z)) / log(clusterFar / near));
++    int zTile = int((log(abs(viewSpaceZ) / near) * float(gridSize.z)) / log(clusterFar / near));
+     vec2 tileSize = screenRes / vec2(gridSize.xy);
+     ivec3 tile = ivec3(screenCoord / tileSize, zTile);
+     int tileIndex = tile.x + (tile.y * int(gridSize.x)) + (tile.z * int(gridSize.x) * int(gridSize.y));

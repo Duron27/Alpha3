@@ -1,0 +1,143 @@
+From fea8bfac8b2b02c0d47f32010057b063ef2715d0 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Fri, 9 Oct 2026 07:59:09 -0400
+Subject: [PATCH] Avatars face the player's facing and strafe/back up relative
+ to it, queued attack animations that stick, drift snap-back protection
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ multiplayer/mod/scripts/mp/global.lua | 26 ++++++++++++++++++--
+ multiplayer/mod/scripts/mp/remote.lua | 35 ++++++++++++++++++++-------
+ 2 files changed, 50 insertions(+), 11 deletions(-)
+
+diff --git a/multiplayer/mod/scripts/mp/global.lua b/multiplayer/mod/scripts/mp/global.lua
+index d48006b164..96289f64d4 100644
+--- a/multiplayer/mod/scripts/mp/global.lua
++++ b/multiplayer/mod/scripts/mp/global.lua
+@@ -379,7 +379,28 @@ local function setHidden(r, hidden, reason)
+     end
+ end
+ 
+-local function updateRemote(r)
++local DRIFT_NEAR, DRIFT_FAR, DRIFT_TIME = 90, 300, 0.8
++
++-- Desync protection: the avatar walks toward the predicted position, but collisions, steps or a bad
++-- connection can leave it behind. Snap it back when it is far off, or somewhat off for too long.
++local function checkDrift(r, dt)
++    local want = predictedPosition(r)
++    local off = (r.obj.position - want):length()
++    if off > DRIFT_FAR then
++        r.offTime = DRIFT_TIME
++    elseif off > DRIFT_NEAR then
++        r.offTime = (r.offTime or 0) + dt
++    else
++        r.offTime = 0
++    end
++    if (r.offTime or 0) >= DRIFT_TIME then
++        r.offTime = 0
++        dlog('avatar', tostring(r.id), 'drifted ' .. math.floor(off) .. ' units, snapping')
++        r.obj:teleport(r.state.cell, want, { rotation = util.transform.rotateZ(r.state.yaw or 0) })
++    end
++end
++
++local function updateRemote(r, dt)
+     local p = player()
+     if not (p and r.profile and r.state) then return end
+     local here = cellKey(p.cell)
+@@ -400,6 +421,7 @@ local function updateRemote(r)
+         return
+     end
+     setHidden(r, false)
++    checkDrift(r, dt)
+     if not r.equipSent and r.equip then stockEquipment(r) end
+     local v = r.state.vel
+     r.obj:sendEvent('MpTarget', {
+@@ -670,7 +692,7 @@ return {
+                 if worldTimer >= WORLD_INTERVAL then worldTimer = 0; sendWorld() end
+             end
+             proxies.onUpdate(dt)
+-            for _, r in pairs(remotes) do updateRemote(r) end
++            for _, r in pairs(remotes) do updateRemote(r, dt) end
+             if net.isConnected() then
+                 sendTimer = sendTimer + dt
+                 equipTimer = equipTimer + dt
+diff --git a/multiplayer/mod/scripts/mp/remote.lua b/multiplayer/mod/scripts/mp/remote.lua
+index de8b3d7bfc..64b5c86950 100644
+--- a/multiplayer/mod/scripts/mp/remote.lua
++++ b/multiplayer/mod/scripts/mp/remote.lua
+@@ -19,6 +19,7 @@ local TURN_RATE = 14 -- rad/s
+ local DAMAGE_REPORT_INTERVAL = 0.2
+ 
+ local playAttack
++local checkGroup, checkTimer, beat
+ local isProxy, key
+ local target -- { pos, yaw, stance, sneak, hp }
+ local walking = false
+@@ -110,7 +111,7 @@ local function attackAnimation(kind)
+     local group = 'handtohand'
+     if ONE_HAND[t] then group = 'weapononehand' elseif TWO_HAND[t] then group = 'weapontwohand'
+     elseif TWO_WIDE[t] then group = 'weapontwowide' end
+-    return group, kind .. ' start', kind .. ' follow stop'
++    return group, kind .. ' start', kind .. ' small follow stop'
+ end
+ 
+ playAttack = function(kind)
+@@ -118,11 +119,11 @@ playAttack = function(kind)
+     local group, from, to = attackAnimation(kind)
+     local ok = pcall(function()
+         if not anim.hasGroup(self, group) then error('no group') end
+-        anim.playBlended(self, group, {
+-            startKey = from, stopKey = to, priority = anim.PRIORITY.Weapon, blendMask = anim.BLEND_MASK.UpperBody,
+-        })
++        -- the character controller cancels playBlended animations on an AI-less actor, a queued one sticks
++        anim.clearAnimationQueue(self, false)
++        anim.playQueued(self, group, { startKey = from, stopKey = to, loops = 0 })
+     end)
+-    if ok then print('[mp-anim] playing ' .. group .. ' ' .. from) end
++    if ok then print('[mp-anim] playing ' .. group .. ' ' .. from .. ' weapon=' .. tostring((Actor.getEquipment(self)[Actor.EQUIPMENT_SLOT.CarriedRight] or {}).recordId)); checkGroup, checkTimer = group, 0.15 end
+     if not ok then print('[mp-anim] could not play ' .. tostring(group) .. ' ' .. tostring(kind)) end
+ end
+ 
+@@ -135,6 +136,15 @@ return {
+         onUpdate = function(dt)
+             if not aiOff and not aggro then self:enableAI(false); aiOff = true end
+             local c = self.controls
++            beat = (beat or 0) + dt
++            if checkGroup and beat > 0.2 then beat = 0 print('[mp-anim] tick, queued ' .. tostring(anim.isPlaying(self, checkGroup))) end
++            if checkGroup then
++                checkTimer = checkTimer - dt
++                if checkTimer <= 0 then
++                    print('[mp-anim] ' .. checkGroup .. ' still playing: ' .. tostring(anim.isPlaying(self, checkGroup)))
++                    checkGroup = nil
++                end
++            end
+ 
+             if isProxy then trackHealth(dt) else keepAvatarUnhurt() end
+ 
+@@ -162,12 +172,19 @@ return {
+                 walking = true
+             end
+ 
+-            -- face where we are going while moving, otherwise where the player faces
+-            local wantYaw = walking and math.atan2(delta.x, delta.y) or target.yaw
+-            local err = wrap(wantYaw - self.rotation:getYaw())
++            -- always face where the player faces; travel relative to that (so strafing and backing up look right)
++            local yaw = self.rotation:getYaw()
++            local err = wrap(target.yaw - yaw)
+             local maxTurn = TURN_RATE * dt
+             c.yawChange = math.max(-maxTurn, math.min(maxTurn, err))
+-            c.movement = walking and 1 or 0
++            if walking and dist > 0 then
++                local dx, dy = delta.x / dist, delta.y / dist
++                local sy, cy = math.sin(yaw), math.cos(yaw)
++                c.movement = dx * sy + dy * cy -- forward component
++                c.sideMovement = dx * cy - dy * sy -- right component
++            else
++                c.movement, c.sideMovement = 0, 0
++            end
+             -- run when the player runs, or when we are far behind and need to catch up
+             c.run = walking and ((target.speed or 0) > RUN_SPEED or dist > 120)
+             c.sneak = target.sneak or false
+-- 
+2.55.0
+

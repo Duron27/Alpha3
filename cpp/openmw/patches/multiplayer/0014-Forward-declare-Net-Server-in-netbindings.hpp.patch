@@ -1,0 +1,25 @@
+From e75f34a8f1b3898d4255127445dbc8093d1d4dd5 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Fri, 9 Oct 2026 07:34:38 -0400
+Subject: [PATCH] Forward-declare Net::Server in netbindings.hpp
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ apps/openmw/mwlua/netbindings.hpp | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/apps/openmw/mwlua/netbindings.hpp b/apps/openmw/mwlua/netbindings.hpp
+index 731413c6f8..97d08baf67 100644
+--- a/apps/openmw/mwlua/netbindings.hpp
++++ b/apps/openmw/mwlua/netbindings.hpp
+@@ -6,6 +6,7 @@
+ namespace Net
+ {
+     class Client;
++    class Server;
+ }
+ 
+ namespace MWLua
+-- 
+2.55.0
+

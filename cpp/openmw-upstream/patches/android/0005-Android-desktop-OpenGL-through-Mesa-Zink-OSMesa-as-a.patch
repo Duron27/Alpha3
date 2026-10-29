@@ -1,0 +1,142 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Sun, 25 Oct 2026 20:36:34 -0400
+Subject: [PATCH 05/17] Android: desktop OpenGL through Mesa Zink (OSMesa) as
+ an alternative to the SDL/EGL context
+
+The OSMesa context and the copy of each frame to the ANativeWindow are Alpha3::ZinkContext of the support library;
+the window only calls it.
+---
+ components/sdlutil/sdlgraphicswindow.cpp | 41 ++++++++++++++++++++++++
+ components/sdlutil/sdlgraphicswindow.hpp | 15 +++++++++
+ 2 files changed, 56 insertions(+)
+
+diff --git a/components/sdlutil/sdlgraphicswindow.cpp b/components/sdlutil/sdlgraphicswindow.cpp
+index 775a92d13d..d934ac1655 100644
+--- a/components/sdlutil/sdlgraphicswindow.cpp
++++ b/components/sdlutil/sdlgraphicswindow.cpp
+@@ -2,6 +2,10 @@
+ 
+ #include <SDL_video.h>
+ 
++#ifdef ANDROID
++#include <alpha3/upstream.hpp>
++#endif
++
+ #ifdef OPENMW_GL4ES_MANUAL_INIT
+ #include "gl4esinit.h"
+ #endif
+@@ -98,6 +102,24 @@ namespace SDLUtil
+             return;
+         }
+ 
++#ifdef ANDROID
++        if (getenv("OSG_USE_ZINK") != nullptr)
++        {
++            mZink = Alpha3::ZinkContext::create(mWindow);
++            if (!mZink)
++                return;
++            _traits->red = _traits->green = _traits->blue = _traits->alpha = 8;
++            _traits->depth = mZink->depthBits();
++            _traits->stencil = mZink->stencilBits();
++            _traits->doubleBuffer = true;
++            _traits->sampleBuffers = 0;
++            _traits->samples = 0;
++            mValid = true;
++            getEventQueue()->syncWindowRectangleWithGraphicsContext();
++            return;
++        }
++#endif
++
+         // SDL will change the current context when it creates a new one, so we
+         // have to get the current one to be able to restore it afterward.
+         SDL_Window* oldWin = SDL_GL_GetCurrentWindow();
+@@ -211,6 +233,10 @@ namespace SDLUtil
+             return false;
+         }
+ 
++#ifdef ANDROID
++        if (mZink)
++            return mZink->makeCurrent();
++#endif
+         return SDL_GL_MakeCurrent(mWindow, mContext) == 0;
+     }
+ 
+@@ -222,11 +248,18 @@ namespace SDLUtil
+             return false;
+         }
+ 
++#ifdef ANDROID
++        if (mZink)
++            return Alpha3::ZinkContext::release();
++#endif
+         return SDL_GL_MakeCurrent(nullptr, nullptr) == 0;
+     }
+ 
+     void GraphicsWindowSDL2::closeImplementation()
+     {
++#ifdef ANDROID
++        mZink.reset();
++#endif
+         if (mContext)
+             SDL_GL_DeleteContext(mContext);
+         mContext = nullptr;
+@@ -244,6 +277,10 @@ namespace SDLUtil
+         if (!mRealized)
+             return;
+ 
++#ifdef ANDROID
++        if (mZink)
++            return mZink->present();
++#endif
+         SDL_GL_SwapWindow(mWindow);
+     }
+ 
+@@ -255,6 +292,10 @@ namespace SDLUtil
+ 
+     void GraphicsWindowSDL2::setSyncToVBlank(VSyncMode mode)
+     {
++#ifdef ANDROID
++        if (mZink)
++            return;
++#endif
+         SDL_Window* oldWin = SDL_GL_GetCurrentWindow();
+         SDL_GLContext oldCtx = SDL_GL_GetCurrentContext();
+ 
+diff --git a/components/sdlutil/sdlgraphicswindow.hpp b/components/sdlutil/sdlgraphicswindow.hpp
+index 238c872fb9..24ef107fae 100644
+--- a/components/sdlutil/sdlgraphicswindow.hpp
++++ b/components/sdlutil/sdlgraphicswindow.hpp
+@@ -3,10 +3,21 @@
+ 
+ #include <SDL_video.h>
+ 
++#ifdef ANDROID
++#include <memory>
++#endif
++
+ #include <osgViewer/GraphicsWindow>
+ 
+ #include "vsyncmode.hpp"
+ 
++#ifdef ANDROID
++namespace Alpha3
++{
++    class ZinkContext;
++}
++#endif
++
+ namespace SDLUtil
+ {
+ 
+@@ -14,6 +25,10 @@ namespace SDLUtil
+     {
+         SDL_Window* mWindow;
+         SDL_GLContext mContext;
++#ifdef ANDROID
++        // renderer = opengl: desktop GL through Mesa Zink instead of an SDL/EGL context (Alpha3's support library)
++        std::unique_ptr<Alpha3::ZinkContext> mZink;
++#endif
+ 
+         bool mValid;
+         bool mRealized;

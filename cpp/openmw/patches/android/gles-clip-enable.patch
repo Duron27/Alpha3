@@ -1,0 +1,47 @@
+--- a/components/sceneutil/stateupdater.cpp
++++ b/components/sceneutil/stateupdater.cpp
+@@ -90,6 +90,10 @@
+         stateset->addUniform(new osg::Uniform("skyBlendingStart", 0.f));
+         stateset->addUniform(new osg::Uniform("screenRes", osg::Vec2f{}));
+         stateset->addUniform(new osg::Uniform("isReflection", false));
++        // The clip planes of the water passes: off everywhere else, so a plane left in a shader program by an earlier draw
++        // cannot clip later ones
++        stateset->addUniform(new osg::Uniform("osg_ClipEnabled0", false));
++        stateset->addUniform(new osg::Uniform("osg_ClipEnabled1", false));
+         stateset->addUniform(new osg::Uniform("windSpeed", 0.0f));
+         stateset->addUniform(new osg::Uniform("playerPos", osg::Vec3f(0.f, 0.f, 0.f)));
+         stateset->addUniform(new osg::Uniform("useTreeAnim", false));
+--- a/files/shaders/lib/core/profile_vertex.glsl
++++ b/files/shaders/lib/core/profile_vertex.glsl
+@@ -22,7 +22,9 @@
+ #ifdef OPENMW_CLIP_DISTANCE
+ uniform vec4 osg_ClipPlane0;
+ uniform vec4 osg_ClipPlane1;
+-#define osg_ClipVertex(v) gl_ClipDistance[0] = dot(osg_ClipPlane0, (v)); gl_ClipDistance[1] = dot(osg_ClipPlane1, (v))
++uniform bool osg_ClipEnabled0;
++uniform bool osg_ClipEnabled1;
++#define osg_ClipVertex(v) gl_ClipDistance[0] = osg_ClipEnabled0 ? dot(osg_ClipPlane0, (v)) : 1.0; gl_ClipDistance[1] = osg_ClipEnabled1 ? dot(osg_ClipPlane1, (v)) : 1.0
+ #else
+ // Without the extension reflections are not clipped.
+ #define osg_ClipVertex(v)
+--- a/apps/openmw/mwrender/water.cpp
++++ b/apps/openmw/mwrender/water.cpp
+@@ -144,6 +144,7 @@
+                 }
+                 osg::ref_ptr<osg::StateSet> clipState = new osg::StateSet;
+                 clipState->addUniform(new osg::Uniform("osg_ClipPlane0", eye));
++                clipState->addUniform(new osg::Uniform("osg_ClipEnabled0", true));
+                 cv->pushStateSet(clipState);
+                 traverse(node, cv);
+                 cv->popStateSet();
+--- a/apps/openmw/mwrender/waterawaretransparentbin.cpp
++++ b/apps/openmw/mwrender/waterawaretransparentbin.cpp
+@@ -160,6 +160,8 @@
+             osg::Vec4f(static_cast<float>(viewPlane[0]), static_cast<float>(viewPlane[1]),
+                 static_cast<float>(viewPlane[2]), static_cast<float>(viewPlane[3]))),
+             osg::StateAttribute::ON | osg::StateAttribute::OVERRIDE | osg::StateAttribute::PROTECTED);
++        mClipStateSet->addUniform(new osg::Uniform("osg_ClipEnabled1", true),
++            osg::StateAttribute::ON | osg::StateAttribute::OVERRIDE | osg::StateAttribute::PROTECTED);
+ 
+         if (previous)
+             osgUtil::StateGraph::moveToRootStateGraph(state, previous->_parent->_parent);

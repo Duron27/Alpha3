@@ -1,0 +1,514 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Alpha3 <noreply@alpha3.invalid>
+Date: Tue, 20 Oct 2026 18:37:02 -0400
+Subject: [PATCH 02/17] MyGUI 3.5 compatibility
+
+---
+ CMakeLists.txt                                |  7 +--
+ apps/openmw/CMakeLists.txt                    |  2 +-
+ apps/openmw/mwgui/bookpage.cpp                |  2 +-
+ apps/openmw/mwgui/console.hpp                 |  1 +
+ apps/openmw/mwgui/itemwidget.cpp              | 13 +++--
+ apps/openmw/mwgui/keyboardnavigation.cpp      | 16 +++---
+ apps/openmw/mwgui/mapwindow.cpp               | 17 +++---
+ apps/openmw/mwgui/postprocessorhud.cpp        | 11 ++--
+ apps/openmw/mwgui/settingswindow.cpp          |  5 +-
+ apps/openmw/mwgui/spellcreationdialog.cpp     |  3 +-
+ apps/openmw/mwgui/trainingwindow.cpp          |  3 +-
+ apps/openmw/mwgui/windowmanagerimp.cpp        | 12 ++---
+ cmake/FindMyGUI.cmake                         | 53 -------------------
+ components/CMakeLists.txt                     |  3 +-
+ components/lua_ui/widget.cpp                  |  2 +-
+ components/myguiplatform/myguidatamanager.cpp |  2 +-
+ components/myguiplatform/myguidatamanager.hpp |  2 +-
+ extern/CMakeLists.txt                         | 12 ++---
+ files/data/mygui/core.skin                    |  2 +-
+ 19 files changed, 50 insertions(+), 118 deletions(-)
+ delete mode 100644 cmake/FindMyGUI.cmake
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index ee65f867ba..de3ed83178 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -549,7 +549,7 @@ set(BOOST_COMPONENTS iostreams program_options)
+ find_package(Boost 1.70.0 CONFIG REQUIRED COMPONENTS ${BOOST_COMPONENTS} OPTIONAL_COMPONENTS ${BOOST_OPTIONAL_COMPONENTS})
+ 
+ if(OPENMW_USE_SYSTEM_MYGUI)
+-    find_package(MyGUI 3.4.3 REQUIRED)
++    find_package(MyGUI 3.5.0 CONFIG REQUIRED)
+ endif()
+ find_package(SDL2 2.26 REQUIRED)
+ find_package(OpenAL REQUIRED)
+@@ -574,7 +574,6 @@ set(SOL_CONFIG_DIR ${OpenMW_SOURCE_DIR}/extern/sol_config)
+ 
+ include_directories(
+     BEFORE SYSTEM
+-    ${MyGUI_INCLUDE_DIRS}
+     ${OPENAL_INCLUDE_DIR}
+     ${OPENGL_INCLUDE_DIR}
+     ${BULLET_INCLUDE_DIRS}
+@@ -585,10 +584,6 @@ include_directories(
+ )
+ include_directories(".")
+ 
+-if(MYGUI_STATIC)
+-    add_compile_definitions(MYGUI_STATIC)
+-endif (MYGUI_STATIC)
+-
+ if (APPLE)
+     configure_file(${OpenMW_SOURCE_DIR}/files/mac/openmw-Info.plist.in
+         "${APP_BUNDLE_DIR}/Contents/Info.plist")
+diff --git a/apps/openmw/CMakeLists.txt b/apps/openmw/CMakeLists.txt
+index 45f0a08167..fe5c085ba8 100644
+--- a/apps/openmw/CMakeLists.txt
++++ b/apps/openmw/CMakeLists.txt
+@@ -183,7 +183,7 @@ target_link_libraries(openmw-lib
+     Boost::program_options
+     ${OPENAL_LIBRARY}
+     ${FFmpeg_LIBRARIES}
+-    ${MyGUI_LIBRARIES}
++    MyGUI::MyGUI
+     SDL2::SDL2
+     ${RecastNavigation_LIBRARIES}
+     osg-ffmpeg-videoplayer
+diff --git a/apps/openmw/mwgui/bookpage.cpp b/apps/openmw/mwgui/bookpage.cpp
+index d2b9ea55f8..4044f8d4f0 100644
+--- a/apps/openmw/mwgui/bookpage.cpp
++++ b/apps/openmw/mwgui/bookpage.cpp
+@@ -944,7 +944,7 @@ namespace MWGui
+ 
+                 if (mTexture != nullptr)
+                 {
+-                    mRenderItem = node->addToRenderItem(mTexture, false, false);
++                    mRenderItem = node->addToRenderItem(mTexture, false);
+                     mRenderItem->addDrawItem(this, mCountVertex);
+                 }
+             }
+diff --git a/apps/openmw/mwgui/console.hpp b/apps/openmw/mwgui/console.hpp
+index f64b40635e..e71db99345 100644
+--- a/apps/openmw/mwgui/console.hpp
++++ b/apps/openmw/mwgui/console.hpp
+@@ -1,6 +1,7 @@
+ #ifndef MWGUI_CONSOLE_H
+ #define MWGUI_CONSOLE_H
+ 
++#include <fstream>
+ #include <list>
+ #include <string>
+ #include <vector>
+diff --git a/apps/openmw/mwgui/itemwidget.cpp b/apps/openmw/mwgui/itemwidget.cpp
+index ac8872f8c6..4823aba2e0 100644
+--- a/apps/openmw/mwgui/itemwidget.cpp
++++ b/apps/openmw/mwgui/itemwidget.cpp
+@@ -71,12 +71,18 @@ namespace MWGui
+ 
+     void ItemWidget::initialiseOverride()
+     {
+-        assignWidget(mItem, "Item");
+-        if (mItem)
+-            mItem->setNeedMouseFocus(false);
+         assignWidget(mItemShadow, "ItemShadow");
+         if (mItemShadow)
++        {
+             mItemShadow->setNeedMouseFocus(false);
++            mItemShadow->setDepth(1);
++        }
++        assignWidget(mItem, "Item");
++        if (mItem)
++        {
++            mItem->setNeedMouseFocus(false);
++            mItem->setDepth(0);
++        }
+         assignWidget(mFrame, "Frame");
+         if (mFrame)
+             mFrame->setNeedMouseFocus(false);
+@@ -123,7 +129,6 @@ namespace MWGui
+     {
+         if (mFrame)
+         {
+-            mFrame->setImageTile(MyGUI::IntSize(coord.width, coord.height)); // Why is this needed? MyGUI bug?
+             mFrame->setImageCoord(coord);
+         }
+ 
+diff --git a/apps/openmw/mwgui/keyboardnavigation.cpp b/apps/openmw/mwgui/keyboardnavigation.cpp
+index f8ce12fcbe..f6d3342e8e 100644
+--- a/apps/openmw/mwgui/keyboardnavigation.cpp
++++ b/apps/openmw/mwgui/keyboardnavigation.cpp
+@@ -27,10 +27,8 @@ namespace MWGui
+         if (!parent->getVisible() || !parent->getEnabled())
+             return;
+ 
+-        MyGUI::EnumeratorWidgetPtr enumerator = parent->getEnumerator();
+-        while (enumerator.next())
++        for (const auto& w : parent->getChildWidgets())
+         {
+-            MyGUI::Widget* w = enumerator.current();
+             if (!w->getVisible() || !w->getEnabled())
+                 continue;
+             if (w->getNeedKeyFocus() && shouldAcceptKeyFocus(w))
+@@ -262,11 +260,15 @@ namespace MWGui
+     bool KeyboardNavigation::selectFirstWidget()
+     {
+         MyGUI::VectorWidgetPtr keyFocusList;
+-        MyGUI::EnumeratorWidgetPtr enumerator = MyGUI::Gui::getInstance().getEnumerator();
++        MyGUI::VectorWidgetPtr enumerator;
++
+         if (mModalWindow)
+-            enumerator = mModalWindow->getEnumerator();
+-        while (enumerator.next())
+-            getKeyFocusWidgets(enumerator.current(), keyFocusList);
++            enumerator = mModalWindow->getChildWidgets();
++        else
++            enumerator = MyGUI::Gui::getInstance().getRootWidgets();
++
++        for (const auto& current : enumerator)
++            getKeyFocusWidgets(current, keyFocusList);
+ 
+         if (!keyFocusList.empty())
+         {
+diff --git a/apps/openmw/mwgui/mapwindow.cpp b/apps/openmw/mwgui/mapwindow.cpp
+index cb4ba1215e..81eab4bb48 100644
+--- a/apps/openmw/mwgui/mapwindow.cpp
++++ b/apps/openmw/mwgui/mapwindow.cpp
+@@ -9,7 +9,6 @@
+ #include <MyGUI_InputManager.h>
+ #include <MyGUI_LanguageManager.h>
+ #include <MyGUI_RenderManager.h>
+-#include <MyGUI_RotatingSkin.h>
+ #include <MyGUI_ScrollView.h>
+ #include <MyGUI_TextIterator.h>
+ #include <MyGUI_Window.h>
+@@ -504,7 +503,7 @@ namespace MWGui
+     void LocalMapBase::redraw()
+     {
+         // Redraw children in proper order
+-        mLocalMap->getParent()->_updateChilds();
++        mLocalMap->getParent()->_updateChilds(false);
+     }
+ 
+     float LocalMapBase::getWidgetSize() const
+@@ -537,11 +536,9 @@ namespace MWGui
+ 
+         notifyPlayerUpdate();
+ 
+-        MyGUI::ISubWidget* main = mCompass->getSubWidgetMain();
+-        MyGUI::RotatingSkin* rotatingSubskin = main->castType<MyGUI::RotatingSkin>();
+-        rotatingSubskin->setCenter(MyGUI::IntPoint(16, 16));
++        mCompass->setRotationCenter(MyGUI::FloatPoint(16.f, 16.f));
+         float angle = std::atan2(x, y);
+-        rotatingSubskin->setAngle(angle);
++        mCompass->setRotation(angle);
+ 
+         mLastDirectionX = x;
+         mLastDirectionY = y;
+@@ -1316,11 +1313,9 @@ namespace MWGui
+ 
+     void MapWindow::setGlobalMapPlayerDir(const float x, const float y)
+     {
+-        MyGUI::ISubWidget* main = mPlayerArrowGlobal->getSubWidgetMain();
+-        MyGUI::RotatingSkin* rotatingSubskin = main->castType<MyGUI::RotatingSkin>();
+-        rotatingSubskin->setCenter(MyGUI::IntPoint(16, 16));
++        mPlayerArrowGlobal->setRotationCenter(MyGUI::FloatPoint(16.f, 16.f));
+         float angle = std::atan2(x, y);
+-        rotatingSubskin->setAngle(angle);
++        mPlayerArrowGlobal->setRotation(angle);
+     }
+ 
+     void MapWindow::ensureGlobalMapLoaded()
+@@ -1340,7 +1335,7 @@ namespace MWGui
+             mGlobalMapOverlay->getSubWidgetMain()->_setUVSet(MyGUI::FloatRect(0.f, 1.f, 1.f, 0.f));
+ 
+             // Redraw children in proper order
+-            mGlobalMap->getParent()->_updateChilds();
++            mGlobalMap->getParent()->_updateChilds(false);
+         }
+     }
+ 
+diff --git a/apps/openmw/mwgui/postprocessorhud.cpp b/apps/openmw/mwgui/postprocessorhud.cpp
+index ff014c8942..da83ab2fa2 100644
+--- a/apps/openmw/mwgui/postprocessorhud.cpp
++++ b/apps/openmw/mwgui/postprocessorhud.cpp
+@@ -38,7 +38,7 @@ namespace MWGui
+     {
+         std::shared_ptr<Fx::Technique>& getTechnique(const MyGUI::ListBox& list, size_t selected)
+         {
+-            return *list.getItemDataAt<std::shared_ptr<Fx::Technique>>(selected);
++            return *const_cast<std::shared_ptr<Fx::Technique>*>(list.getItemDataAt<std::shared_ptr<Fx::Technique>>(selected));
+         }
+     }
+ 
+@@ -267,12 +267,11 @@ namespace MWGui
+         mConfigArea->setCoord({ padding, totalHeight, mShaderInfo->getSize().width, mConfigLayout->getHeight() });
+ 
+         int childHeights = 0;
+-        MyGUI::EnumeratorWidgetPtr enumerator = mConfigArea->getEnumerator();
+-        while (enumerator.next())
++        for (const auto& current : mConfigArea->getChildWidgets())
+         {
+-            enumerator.current()->setCoord(padding, childHeights + padding, mShaderInfo->getSize().width - padding2,
+-                enumerator.current()->getHeight());
+-            childHeights += enumerator.current()->getHeight() + padding;
++            current->setCoord(
++                padding, childHeights + padding, mShaderInfo->getSize().width - padding2, current->getHeight());
++            childHeights += current->getHeight() + padding;
+         }
+         totalHeight += childHeights;
+ 
+diff --git a/apps/openmw/mwgui/settingswindow.cpp b/apps/openmw/mwgui/settingswindow.cpp
+index d3bdf1c12f..c692988220 100644
+--- a/apps/openmw/mwgui/settingswindow.cpp
++++ b/apps/openmw/mwgui/settingswindow.cpp
+@@ -167,11 +167,8 @@ namespace MWGui
+ {
+     void SettingsWindow::configureWidgets(MyGUI::Widget* widget, bool init)
+     {
+-        MyGUI::EnumeratorWidgetPtr widgets = widget->getEnumerator();
+-        while (widgets.next())
++        for (const auto& current : widget->getChildWidgets())
+         {
+-            MyGUI::Widget* current = widgets.current();
+-
+             std::string_view type = getSettingType(current);
+             if (type == checkButtonType)
+             {
+diff --git a/apps/openmw/mwgui/spellcreationdialog.cpp b/apps/openmw/mwgui/spellcreationdialog.cpp
+index 640249218a..24855a2efd 100644
+--- a/apps/openmw/mwgui/spellcreationdialog.cpp
++++ b/apps/openmw/mwgui/spellcreationdialog.cpp
+@@ -947,8 +947,7 @@ namespace MWGui
+ 
+     void EffectEditorBase::updateEffectsView()
+     {
+-        MyGUI::EnumeratorWidgetPtr oldWidgets = mUsedEffectsView->getEnumerator();
+-        MyGUI::Gui::getInstance().destroyWidgets(oldWidgets);
++        MyGUI::Gui::getInstance().destroyWidgets(mUsedEffectsView->getChildWidgets());
+ 
+         MyGUI::IntSize size(0, 0);
+ 
+diff --git a/apps/openmw/mwgui/trainingwindow.cpp b/apps/openmw/mwgui/trainingwindow.cpp
+index 9d26d36847..901cd7a54e 100644
+--- a/apps/openmw/mwgui/trainingwindow.cpp
++++ b/apps/openmw/mwgui/trainingwindow.cpp
+@@ -104,8 +104,7 @@ namespace MWGui
+             }
+         }
+ 
+-        MyGUI::EnumeratorWidgetPtr widgets = mTrainingOptions->getEnumerator();
+-        MyGUI::Gui::getInstance().destroyWidgets(widgets);
++        MyGUI::Gui::getInstance().destroyWidgets(mTrainingOptions->getChildWidgets());
+ 
+         MWMechanics::NpcStats& pcStats = player.getClass().getNpcStats(player);
+ 
+diff --git a/apps/openmw/mwgui/windowmanagerimp.cpp b/apps/openmw/mwgui/windowmanagerimp.cpp
+index 5f539d5ca6..ab8950d14d 100644
+--- a/apps/openmw/mwgui/windowmanagerimp.cpp
++++ b/apps/openmw/mwgui/windowmanagerimp.cpp
+@@ -1264,7 +1264,7 @@ namespace MWGui
+         else if (tagView.starts_with(tokenToFind))
+         {
+             std::string_view cellName = mTranslationDataStorage.translateCellName(tagView.substr(tokenToFind.length()));
+-            result.assign(cellName.data(), cellName.size());
++            result.assign(cellName);
+             result = MyGUI::TextIterator::toTagsString(result);
+         }
+         else if (Gui::replaceTag(tagView, result))
+@@ -1290,7 +1290,7 @@ namespace MWGui
+             {
+                 Log(Debug::Error) << "Error: WindowManager::onRetrieveTag: no Store set up yet, can not replace '"
+                                   << tagView << "'";
+-                result.assign(tagView.data(), tagView.size());
++                result.assign(tagView);
+                 return;
+             }
+             const ESM::GameSetting* setting = mStore->get<ESM::GameSetting>().search(tagView);
+@@ -1298,7 +1298,7 @@ namespace MWGui
+             if (setting && setting->mValue.getType() == ESM::VT_String)
+                 result = setting->mValue.getString();
+             else
+-                result.assign(tagView.data(), tagView.size());
++                result.assign(tagView);
+         }
+     }
+ 
+@@ -2511,11 +2511,9 @@ namespace MWGui
+ 
+     void WindowManager::createCursors()
+     {
+-        MyGUI::ResourceManager::EnumeratorPtr enumerator = MyGUI::ResourceManager::getInstance().getEnumerator();
+-        while (enumerator.next())
++        for (const auto& resourceMap : MyGUI::ResourceManager::getInstance().getResources())
+         {
+-            MyGUI::IResource* resource = enumerator.current().second;
+-            ResourceImageSetPointerFix* imgSetPointer = resource->castType<ResourceImageSetPointerFix>(false);
++            ResourceImageSetPointerFix* imgSetPointer = resourceMap.second->castType<ResourceImageSetPointerFix>(false);
+             if (!imgSetPointer)
+                 continue;
+ 
+diff --git a/cmake/FindMyGUI.cmake b/cmake/FindMyGUI.cmake
+deleted file mode 100644
+index 473f543ba9..0000000000
+--- a/cmake/FindMyGUI.cmake
++++ /dev/null
+@@ -1,53 +0,0 @@
+-# - Find MyGUI includes and library
+-#
+-# This module accepts the following env variables
+-#  MYGUI_HOME - Can be set to MyGUI install path or Windows build path
+-#
+-# This module defines
+-# MyGUI_INCLUDE_DIRS
+-# MyGUI_LIBRARIES, the libraries to link against to use MyGUI.
+-# MyGUI_FOUND, If false, do not try to use MyGUI
+-#
+-# Copyright © 2007, Matt Williams
+-#
+-# Redistribution and use is allowed according to the terms of the BSD license.
+-# For details see the accompanying COPYING-CMAKE-SCRIPTS file.
+-
+-include(LibFindMacros)
+-
+-if (MYGUI_STATIC)
+-    set(MYGUI_STATIC_SUFFIX "Static")
+-else()
+-    set(MYGUI_STATIC_SUFFIX "")
+-endif()
+-
+-libfind_pkg_detect(MyGUI_Debug MyGUI${MYGUI_STATIC_SUFFIX} MYGUI${MYGUI_STATIC_SUFFIX}
+-    FIND_LIBRARY MyGUIEngine_d${MYGUI_STATIC_SUFFIX}
+-        HINTS $ENV{MYGUI_HOME}/lib
+-        PATH_SUFFIXES "" debug
+-)
+-set(MyGUI_Debug_FIND_QUIETLY TRUE)
+-libfind_process(MyGUI_Debug)
+-
+-libfind_pkg_detect(MyGUI MyGUI${MYGUI_STATIC_SUFFIX} MYGUI${MYGUI_STATIC_SUFFIX}
+-    FIND_PATH MyGUI.h
+-        HINTS $ENV{MYGUI_HOME}/include
+-        PATH_SUFFIXES MYGUI MyGUI
+-    FIND_LIBRARY MyGUIEngine${MYGUI_STATIC_SUFFIX}
+-        HINTS $ENV{MYGUI_HOME}/lib
+-        PATH_SUFFIXES "" release relwithdebinfo minsizerel
+-)
+-if (MYGUI_STATIC AND (APPLE OR ANDROID))
+-    # we need explicit Freetype libs only on OS X and ANDROID for static build
+-    libfind_package(MyGUI Freetype)
+-endif()
+-
+-libfind_version_n_header(MyGUI
+-    NAMES MyGUI_Prerequest.h
+-    DEFINES MYGUI_VERSION_MAJOR MYGUI_VERSION_MINOR MYGUI_VERSION_PATCH
+-)
+-libfind_process(MyGUI)
+-
+-if (MyGUI_Debug_FOUND)
+-    set(MyGUI_LIBRARIES optimized ${MyGUI_LIBRARIES} debug ${MyGUI_Debug_LIBRARIES})
+-endif()
+diff --git a/components/CMakeLists.txt b/components/CMakeLists.txt
+index 3870deb1ce..0d428d2e17 100644
+--- a/components/CMakeLists.txt
++++ b/components/CMakeLists.txt
+@@ -615,7 +615,7 @@ target_link_libraries(components
+ 
+     SDL2::SDL2
+     ${OPENGL_gl_LIBRARY}
+-    ${MyGUI_LIBRARIES}
++    MyGUI::MyGUI
+     ${LUA_LIBRARIES}
+     LZ4::LZ4
+     RecastNavigation::DebugUtils
+@@ -680,7 +680,6 @@ set(COMPONENT_FILES ${COMPONENT_FILES} PARENT_SCOPE)
+ 
+ target_compile_definitions(components PUBLIC
+     BT_USE_DOUBLE_PRECISION
+-    MYGUI_DONT_USE_OBSOLETE=ON
+ )
+ 
+ if(OSG_STATIC)
+diff --git a/components/lua_ui/widget.cpp b/components/lua_ui/widget.cpp
+index 742e0492e2..2f8bb0362c 100644
+--- a/components/lua_ui/widget.cpp
++++ b/components/lua_ui/widget.cpp
+@@ -552,7 +552,7 @@ namespace LuaUi
+             {
+                 propagateEvent("textInput", [&](auto w) {
+                     MyGUI::UString uString;
+-                    uString.push_back(static_cast<MyGUI::UString::unicode_char>(ch));
++                    uString.push_back(static_cast<MyGUI::UString::code_point>(ch));
+                     return sol::make_object(view.sol(), uString.asUTF8());
+                 });
+             }
+diff --git a/components/myguiplatform/myguidatamanager.cpp b/components/myguiplatform/myguidatamanager.cpp
+index a5fc1531ac..619690b110 100644
+--- a/components/myguiplatform/myguidatamanager.cpp
++++ b/components/myguiplatform/myguidatamanager.cpp
+@@ -61,7 +61,7 @@ namespace MyGUIPlatform
+         return mVfs->exists(path);
+     }
+ 
+-    const MyGUI::VectorString& DataManager::getDataListNames(const std::string& /*pattern*/) const
++    MyGUI::VectorString DataManager::getDataListNames(const std::string& /*pattern*/) const
+     {
+         throw std::runtime_error("DataManager::getDataListNames is not implemented - VFS is used");
+     }
+diff --git a/components/myguiplatform/myguidatamanager.hpp b/components/myguiplatform/myguidatamanager.hpp
+index efc386e34b..6ec725e480 100644
+--- a/components/myguiplatform/myguidatamanager.hpp
++++ b/components/myguiplatform/myguidatamanager.hpp
+@@ -41,7 +41,7 @@ namespace MyGUIPlatform
+         /** Get all data names with names that matches pattern.
+             @param pattern Pattern to match (for example "*.layout").
+         */
+-        const MyGUI::VectorString& getDataListNames(const std::string& pattern) const override;
++        MyGUI::VectorString getDataListNames(const std::string& pattern) const override;
+ 
+         /** Get full path to data.
+             @param name Resource name.
+diff --git a/extern/CMakeLists.txt b/extern/CMakeLists.txt
+index 1aad46658f..b6f0fb0007 100644
+--- a/extern/CMakeLists.txt
++++ b/extern/CMakeLists.txt
+@@ -48,12 +48,11 @@ endif()
+ 
+ if(NOT OPENMW_USE_SYSTEM_MYGUI)
+ 
+-    set(MYGUI_RENDERSYSTEM 4 CACHE STRING "")
+-    set(MYGUI_DISABLE_PLUGINS TRUE CACHE BOOL "")
++    set(MYGUI_RENDERSYSTEM 1 CACHE STRING "")
+     set(MYGUI_BUILD_DEMOS OFF CACHE BOOL "")
+-    set(MYGUI_BUILD_PLUGINS OFF CACHE BOOL "")
+     set(MYGUI_BUILD_TOOLS OFF CACHE BOOL "")
+     set(MYGUI_DONT_USE_OBSOLETE ON CACHE BOOL "")
++    set(MYGUI_MSDF_FONTS ON CACHE BOOL "")
+ 
+     if(MYGUI_STATIC)
+         set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+@@ -63,14 +62,11 @@ if(NOT OPENMW_USE_SYSTEM_MYGUI)
+ 
+     include(FetchContent)
+     FetchContent_Declare(mygui
+-        URL https://github.com/MyGUI/mygui/archive/refs/tags/MyGUI3.4.3.zip
+-        URL_HASH SHA512=c804ef665e786076582367f171082cd2181fdbd214300ddcca4a4245c5a0f45e62e72778ee2d96ec46b393e22477dd729f9bb3006e6eecbf536674e34a057721
++        URL https://github.com/MyGUI/mygui/archive/refs/tags/v3.5.0.zip
++        URL_HASH SHA512=6bf0430d170a0a6a2afa3724973811025e11bf6622afab8077f4024eea12f4e2835e19b88b46f7a9231ba151445e2a79a8dabee13b6a1e5f6725ac3b880afbeb
+         SOURCE_DIR fetched/mygui
+     )
+     FetchContent_MakeAvailable(mygui)
+-
+-    set(MyGUI_INCLUDE_DIRS ${mygui_SOURCE_DIR}/MyGUIEngine/include PARENT_SCOPE)
+-    set(MyGUI_LIBRARIES MyGUIEngine PARENT_SCOPE)
+ endif()
+ 
+ if(NOT OPENMW_USE_SYSTEM_OSG)
+diff --git a/files/data/mygui/core.skin b/files/data/mygui/core.skin
+index ee9135554e..2a24e5c3f9 100644
+--- a/files/data/mygui/core.skin
++++ b/files/data/mygui/core.skin
+@@ -9,7 +9,7 @@
+     </Resource>
+ 
+     <Resource type="ResourceSkin" name="RotatingSkin" size="16 16">
+-        <BasisSkin type="RotatingSkin" offset="0 0 16 16" align="Stretch"/>
++        <BasisSkin type="MainSkin" offset="0 0 16 16" align="Stretch"/>
+     </Resource>
+ 
+     <Resource type="ResourceSkin" name="ImageBox" size="16 16">

@@ -1,0 +1,234 @@
+From: Duron27 <duron27@gmail.com>
+Subject: [PATCH] The multiplayer folder is copied into the build folder; mpserver-bundle makes a self-contained server zip
+
+- multiplayer/stage.cmake (included by the main CMakeLists.txt): copies mod, server and README.md into <build>/multiplayer
+  (only those files: it is an include, not a subdirectory, so no CMake files land there). Reruns on change.
+- everything that runs from the build folder uses that copy: openmw-mp-server finds it next to itself (before looking in
+  the current directory), and the engine's built-in multiplayer scripts are copied from it (files/data)
+- target mpserver-bundle: openmw-mp-server-<system>-<cpu>.zip with the stripped program, the multiplayer folder, start-server
+  .sh/.bat and a README, ready to unpack and run anywhere (apps/mpserver/bundle.cmake). With -DBUILD_MP_SERVER_GUI=OFF it
+  needs nothing but the C++ runtime (the build says so when the window is built in: it then needs Qt 6)
+
+---
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index f7e7e2f63e..3f9e151f4a 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -579,6 +579,7 @@ if (NOT APPLE)  # this is modified for macOS use later in "apps/open[mw|cs]/CMak
+     set(OPENMW_RESOURCES_ROOT ${OpenMW_BINARY_DIR})
+ endif ()
+ 
++include(multiplayer/stage.cmake) # copies the multiplayer folder into the build folder, see there
+ add_subdirectory(files/)
+ 
+ # Specify build paths
+diff --git a/apps/mpserver/BUNDLE-README.txt b/apps/mpserver/BUNDLE-README.txt
+new file mode 100644
+index 0000000000..e6e5649c01
+--- /dev/null
++++ b/apps/mpserver/BUNDLE-README.txt
+@@ -0,0 +1,25 @@
++OpenMW multiplayer server
++=========================
++
++Everything the server needs is in this folder:
++
++  openmw-mp-server          the program
++  multiplayer/mod           the multiplayer mod (the server runs its relay)
++  multiplayer/server        server.lua, what the program runs
++  multiplayer/README.md     how the multiplayer works, the server's commands and settings
++  start-server.sh / .bat    starts it from this folder
++
++Start it:
++
++  ./start-server.sh --port 25565 --password secret --admin-password hunter2
++  ./start-server.sh --help          every option and every console command
++
++Players join with "Join a server" on the multiplayer screen: your address, the port, the password. The port (TCP, 25565
++unless you change it) must be open on this machine's firewall and forwarded on your router if the server is at home.
++Type "help" in the server's terminal for the commands; "quit" stops it. Up to 128 players.
++
++A window (players, kick/ban/mute buttons, the sky, a log) opens by default when there is a screen and this build has it;
++add --cli-only for a plain terminal. A build with the window needs the Qt 6 libraries installed on this machine; a
++terminal-only build needs nothing but the system's C++ runtime.
++
++The mod is found by itself next to the program. To use another copy: --mod <folder holding scripts/mp>.
+diff --git a/apps/mpserver/CMakeLists.txt b/apps/mpserver/CMakeLists.txt
+index 41611f8311..066fa6cbfb 100644
+--- a/apps/mpserver/CMakeLists.txt
++++ b/apps/mpserver/CMakeLists.txt
+@@ -48,6 +48,28 @@ endif()
+ 
+ install(TARGETS openmw-mp-server)
+ 
++# mpserver-bundle: openmw-mp-server-<system>-<cpu>.zip with the program, the multiplayer folder (mod, server.lua, README) and
++# start scripts, ready to unpack anywhere:  cmake --build . --target mpserver-bundle
++# The multiplayer folder comes from the copy in the build folder (multiplayer/stage.cmake).
++if (OPENMW_MULTIPLAYER_STAGED AND EXISTS "${OPENMW_MULTIPLAYER_STAGED}/mod/mp.omwscripts")
++    set(MPSERVER_BUNDLE_FOLDER "${OPENMW_MULTIPLAYER_STAGED}")
++else ()
++    set(MPSERVER_BUNDLE_FOLDER "${CMAKE_SOURCE_DIR}/multiplayer")
++endif ()
++set(MPSERVER_BUNDLE_NAME "openmw-mp-server-${CMAKE_SYSTEM_NAME}-${CMAKE_SYSTEM_PROCESSOR}")
++add_custom_target(mpserver-bundle
++    COMMAND ${CMAKE_COMMAND}
++        "-DSERVER=$<TARGET_FILE:openmw-mp-server>" "-DMULTIPLAYER_DIR=${MPSERVER_BUNDLE_FOLDER}"
++        "-DFILES_DIR=${CMAKE_CURRENT_SOURCE_DIR}" "-DOUT_DIR=${CMAKE_BINARY_DIR}" "-DNAME=${MPSERVER_BUNDLE_NAME}"
++        "-DSTRIP=${CMAKE_STRIP}" -P "${CMAKE_CURRENT_SOURCE_DIR}/bundle.cmake"
++    DEPENDS openmw-mp-server
++    COMMENT "Making ${MPSERVER_BUNDLE_NAME}.zip"
++    VERBATIM)
++if (MPSERVER_QT_FOUND)
++    message(STATUS "openmw-mp-server has a window: its bundle needs the Qt 6 libraries on the machine it runs on "
++        "(-DBUILD_MP_SERVER_GUI=OFF makes one that needs nothing but the C++ runtime)")
++endif ()
++
+ # Where the server looks for the mod when it is installed (<prefix>/share/openmw-mp/mod and .../server/server.lua)
+ install(DIRECTORY ${CMAKE_SOURCE_DIR}/multiplayer/mod DESTINATION share/openmw-mp)
+ install(FILES ${CMAKE_SOURCE_DIR}/multiplayer/server/server.lua DESTINATION share/openmw-mp/server)
+diff --git a/apps/mpserver/bundle.cmake b/apps/mpserver/bundle.cmake
+new file mode 100644
+index 0000000000..0d646bd1ac
+--- /dev/null
++++ b/apps/mpserver/bundle.cmake
+@@ -0,0 +1,47 @@
++# Makes <OUT_DIR>/<NAME>.zip: the server program, the multiplayer folder and start scripts, ready to unpack anywhere.
++#   cmake -DSERVER=<program> -DMULTIPLAYER_DIR=<folder with mod, server, README.md> -DFILES_DIR=<apps/mpserver>
++#         -DOUT_DIR=<folder> -DNAME=<name> [-DSTRIP=<strip tool>] -P bundle.cmake
++foreach (required SERVER MULTIPLAYER_DIR FILES_DIR OUT_DIR NAME)
++    if (NOT DEFINED ${required})
++        message(FATAL_ERROR "bundle.cmake: ${required} is not set")
++    endif ()
++endforeach ()
++
++set(stage "${OUT_DIR}/${NAME}-staging")
++set(dir "${stage}/openmw-mp-server")
++file(REMOVE_RECURSE "${stage}")
++file(MAKE_DIRECTORY "${dir}/multiplayer")
++
++get_filename_component(exe "${SERVER}" NAME)
++file(COPY "${SERVER}" DESTINATION "${dir}" FILE_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE
++    WORLD_READ WORLD_EXECUTE)
++if (STRIP AND NOT STRIP MATCHES "NOTFOUND" AND NOT WIN32)
++    execute_process(COMMAND "${STRIP}" "${dir}/${exe}" RESULT_VARIABLE strip_result ERROR_QUIET)
++endif ()
++
++foreach (part mod server README.md)
++    if (NOT EXISTS "${MULTIPLAYER_DIR}/${part}")
++        message(FATAL_ERROR "bundle.cmake: ${MULTIPLAYER_DIR}/${part} is missing")
++    endif ()
++    file(COPY "${MULTIPLAYER_DIR}/${part}" DESTINATION "${dir}/multiplayer")
++endforeach ()
++
++file(COPY "${FILES_DIR}/start-server.sh" DESTINATION "${dir}" FILE_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE
++    GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
++# (a batch file wants Windows line endings, whatever git did to the one in the source tree)
++file(READ "${FILES_DIR}/start-server.bat" bat)
++string(REGEX REPLACE "\r?\n" "\r\n" bat "${bat}")
++file(WRITE "${dir}/start-server.bat" "${bat}")
++file(COPY "${FILES_DIR}/BUNDLE-README.txt" DESTINATION "${dir}")
++file(RENAME "${dir}/BUNDLE-README.txt" "${dir}/README.txt")
++
++file(REMOVE "${OUT_DIR}/${NAME}.zip")
++execute_process(COMMAND "${CMAKE_COMMAND}" -E tar cf "${OUT_DIR}/${NAME}.zip" --format=zip openmw-mp-server
++    WORKING_DIRECTORY "${stage}" RESULT_VARIABLE zip_result)
++if (NOT zip_result EQUAL 0)
++    message(FATAL_ERROR "bundle.cmake: could not make the zip")
++endif ()
++file(REMOVE_RECURSE "${stage}")
++file(SIZE "${OUT_DIR}/${NAME}.zip" size)
++math(EXPR kilobytes "${size} / 1024")
++message(STATUS "${OUT_DIR}/${NAME}.zip (${kilobytes} KB)")
+diff --git a/apps/mpserver/main.cpp b/apps/mpserver/main.cpp
+index fbe3bca046..1d3f9f5dc2 100644
+--- a/apps/mpserver/main.cpp
++++ b/apps/mpserver/main.cpp
+@@ -49,7 +49,7 @@ namespace
+     {
+         const std::filesystem::path cwd = std::filesystem::current_path();
+         const std::filesystem::path candidates[] = {
+-            cwd / "multiplayer" / "mod", cwd / "mod", exeDir / "multiplayer" / "mod", exeDir / "mod",
++            exeDir / "multiplayer" / "mod", exeDir / "mod", cwd / "multiplayer" / "mod", cwd / "mod",
+             exeDir / ".." / "multiplayer" / "mod", exeDir / ".." / ".." / "multiplayer" / "mod",
+             exeDir / ".." / "share" / "openmw-mp" / "mod",
+         };
+diff --git a/apps/mpserver/start-server.bat b/apps/mpserver/start-server.bat
+new file mode 100644
+index 0000000000..090b290752
+--- /dev/null
++++ b/apps/mpserver/start-server.bat
+@@ -0,0 +1,4 @@
++@echo off
++rem Starts the OpenMW multiplayer server from this folder. Anything you add is passed on: start-server.bat --help
++cd /d "%~dp0"
++openmw-mp-server.exe %*
+diff --git a/apps/mpserver/start-server.sh b/apps/mpserver/start-server.sh
+new file mode 100755
+index 0000000000..15304d90ee
+--- /dev/null
++++ b/apps/mpserver/start-server.sh
+@@ -0,0 +1,4 @@
++#!/bin/sh
++# Starts the OpenMW multiplayer server from this folder. Anything you add is passed on: ./start-server.sh --help
++cd "$(dirname "$0")" || exit 1
++exec ./openmw-mp-server "$@"
+diff --git a/files/data/CMakeLists.txt b/files/data/CMakeLists.txt
+index a0786d887f..db0d472453 100644
+--- a/files/data/CMakeLists.txt
++++ b/files/data/CMakeLists.txt
+@@ -287,6 +287,9 @@ option(OPENMW_BUILTIN_MULTIPLAYER "Ship the multiplayer mod (multiplayer/mod) wi
+ 
+ set(builtinScripts "${CMAKE_CURRENT_SOURCE_DIR}/builtin.omwscripts")
+ set(MULTIPLAYER_MOD_DIR "${OpenMW_SOURCE_DIR}/multiplayer/mod")
++if (OPENMW_MULTIPLAYER_STAGED AND EXISTS "${OPENMW_MULTIPLAYER_STAGED}/mod/mp.omwscripts")
++    set(MULTIPLAYER_MOD_DIR "${OPENMW_MULTIPLAYER_STAGED}/mod") # the copy in the build folder (see multiplayer/stage.cmake)
++endif ()
+ if (OPENMW_BUILTIN_MULTIPLAYER AND EXISTS "${MULTIPLAYER_MOD_DIR}/mp.omwscripts")
+     file(GLOB MULTIPLAYER_MOD_FILES CONFIGURE_DEPENDS RELATIVE "${MULTIPLAYER_MOD_DIR}"
+         "${MULTIPLAYER_MOD_DIR}/scripts/mp/*.lua" "${MULTIPLAYER_MOD_DIR}/l10n/*/*.yaml" "${MULTIPLAYER_MOD_DIR}/textures/*")
+diff --git a/multiplayer/README.md b/multiplayer/README.md
+index 9fb1bba7e4..3455dd8c74 100644
+--- a/multiplayer/README.md
++++ b/multiplayer/README.md
+@@ -76,6 +76,10 @@ By default it opens a **window**: the players (name, latency, address, location,
+ Copy address buttons for the selected one, the sky (weather box and time of day), an announcement box, the banned names with
+ an Unban button, the log, and a command line for everything else (Help lists the commands). Closing the window asks first if
+ players are connected. `--cli-only` runs it in the terminal instead, and so does a machine with no display (a VPS) by itself.
++The build copies the whole `multiplayer/` folder into the build folder (`<build>/multiplayer`); the server finds it next to its
++program and the engine's built-in scripts are copied from it, so a build folder does not need the source tree. `cmake --build .
++--target mpserver-bundle` makes `openmw-mp-server-<system>-<cpu>.zip` with the program, that folder, start scripts and a short
++README, ready to unpack on a server (use `-DBUILD_MP_SERVER_GUI=OFF` for a bundle that needs nothing but the C++ runtime).
+ `--help` lists the rest (player limit, weather, how fast time runs...). The passwords can also come from `MP_PASSWORD` and
+ `MP_ADMIN_PASSWORD`. The program embeds the same Luau VM as the game and the engine's own sockets (`components/net`), and
+ loads `relay.lua` unchanged, so a server behaves exactly like a hosted game (resume tokens, rate limits, trade checks).
+diff --git a/multiplayer/stage.cmake b/multiplayer/stage.cmake
+new file mode 100644
+index 0000000000..057f5837ed
+--- /dev/null
++++ b/multiplayer/stage.cmake
+@@ -0,0 +1,25 @@
++# Copies the multiplayer folder (the mod, server/server.lua, the README) into the build folder, once:
++#   <build>/multiplayer/mod, <build>/multiplayer/server, <build>/multiplayer/README.md
++# Everything that runs from the build folder uses that copy and not the source tree: openmw-mp-server finds it next to
++# itself, the engine's built-in multiplayer scripts are copied from it (files/data), and the server bundle zip is made from
++# it. Edit the files here as usual; CMake copies them again when it reruns (it reruns by itself when a file changes).
++# (This is included by the main CMakeLists.txt, not a subdirectory, so only the real files land in <build>/multiplayer.)
++if (NOT DEFINED OPENMW_RESOURCES_ROOT)
++    return()
++endif ()
++
++file(GLOB_RECURSE MULTIPLAYER_STAGE_FILES CONFIGURE_DEPENDS RELATIVE "${CMAKE_CURRENT_LIST_DIR}"
++    "${CMAKE_CURRENT_LIST_DIR}/mod/*" "${CMAKE_CURRENT_LIST_DIR}/server/*")
++list(APPEND MULTIPLAYER_STAGE_FILES README.md)
++foreach (f ${MULTIPLAYER_STAGE_FILES})
++    copy_resource_file("${CMAKE_CURRENT_LIST_DIR}/${f}" "${OPENMW_RESOURCES_ROOT}" "multiplayer/${f}")
++endforeach (f)
++
++# With a multi-config generator the copy lives in one folder per configuration: users of the path below then fall back to
++# the source tree.)
++get_generator_is_multi_config(multi_config)
++if (multi_config)
++    set(OPENMW_MULTIPLAYER_STAGED "" CACHE INTERNAL "")
++else ()
++    set(OPENMW_MULTIPLAYER_STAGED "${OPENMW_RESOURCES_ROOT}/multiplayer" CACHE INTERNAL "the multiplayer folder in the build folder")
++endif ()

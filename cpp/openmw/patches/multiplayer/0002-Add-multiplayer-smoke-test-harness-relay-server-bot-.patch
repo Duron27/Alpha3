@@ -1,0 +1,269 @@
+From 37e17be0eab5b20d89b724a81d943dad7361d999 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Wed, 7 Oct 2026 01:26:54 -0400
+Subject: [PATCH] Add multiplayer smoke-test harness: relay server, bot, and
+ openmw.net Lua mod
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ multiplayer/README.md                 |  9 +++
+ multiplayer/mod/mp.omwscripts         |  1 +
+ multiplayer/mod/scripts/mp/global.lua | 97 +++++++++++++++++++++++++++
+ multiplayer/run-test.sh               | 12 ++++
+ multiplayer/server/bot.py             | 26 +++++++
+ multiplayer/server/relay.py           | 63 +++++++++++++++++
+ 6 files changed, 208 insertions(+)
+ create mode 100644 multiplayer/README.md
+ create mode 100644 multiplayer/mod/mp.omwscripts
+ create mode 100644 multiplayer/mod/scripts/mp/global.lua
+ create mode 100755 multiplayer/run-test.sh
+ create mode 100644 multiplayer/server/bot.py
+ create mode 100644 multiplayer/server/relay.py
+
+diff --git a/multiplayer/README.md b/multiplayer/README.md
+new file mode 100644
+index 0000000000..da5b8fa54c
+--- /dev/null
++++ b/multiplayer/README.md
+@@ -0,0 +1,9 @@
++# OpenMW multiplayer test harness
++
++- `server/relay.py` — newline-delimited JSON relay (`--mirror` echoes you back as a ghost 300 units east).
++- `server/bot.py` — fake second player walking in a circle.
++- `mod/` — `mp.omwscripts` + `scripts/mp/global.lua`, a global script using `openmw.net`:
++  streams the player's cell/position/yaw 5x/second and shows each remote player as a `com_chest_01`.
++
++Run: `multiplayer/run-test.sh [path/to/openmw]`, then load a save. Watch `openmw.log` for `[mp]` lines.
++Protocol: one JSON object per line, `{"t":"state","name","cell","pos":[x,y,z],"yaw"}`; the server adds `id`.
+diff --git a/multiplayer/mod/mp.omwscripts b/multiplayer/mod/mp.omwscripts
+new file mode 100644
+index 0000000000..8c437c83ef
+--- /dev/null
++++ b/multiplayer/mod/mp.omwscripts
+@@ -0,0 +1 @@
++GLOBAL: scripts/mp/global.lua
+diff --git a/multiplayer/mod/scripts/mp/global.lua b/multiplayer/mod/scripts/mp/global.lua
+new file mode 100644
+index 0000000000..c388d20a4b
+--- /dev/null
++++ b/multiplayer/mod/scripts/mp/global.lua
+@@ -0,0 +1,97 @@
++-- Multiplayer test client: streams the local player's state to a relay server
++-- and shows every remote player as a placeholder object.
++local net = require('openmw.net')
++local world = require('openmw.world')
++local util = require('openmw.util')
++local markup = require('openmw.markup')
++
++local HOST = '127.0.0.1'
++local PORT = 25565
++local SEND_INTERVAL = 0.2 -- seconds
++local MARKER = 'com_chest_01' -- placeholder record for remote players
++local RETRY_INTERVAL = 3
++
++local timer = 0
++local retry = 0
++local wantConnect = true
++local myId
++local remotes = {} -- id -> { obj = GameObject }
++
++local function log(...) print('[mp]', ...) end
++
++local function connect()
++    log('connecting to ' .. HOST .. ':' .. PORT)
++    net.connect(HOST, PORT)
++end
++
++local function sendState()
++    local p = world.players[1]
++    if not p then return end
++    local pos = p.position
++    net.send(net.encodeJson({
++        t = 'state',
++        name = p.recordId,
++        cell = p.cell.isExterior and '' or p.cell.name,
++        pos = { pos.x, pos.y, pos.z },
++        yaw = p.rotation:getYaw(),
++    }))
++end
++
++local function applyState(msg)
++    if type(msg.pos) ~= 'table' then return end
++    local r = remotes[msg.id]
++    if not r then
++        r = { obj = world.createObject(MARKER, 1) }
++        remotes[msg.id] = r
++        log('remote player ' .. tostring(msg.id) .. ' appeared')
++    end
++    local pos = util.vector3(msg.pos[1], msg.pos[2], msg.pos[3])
++    r.obj:teleport(msg.cell or '', pos, { rotation = util.transform.rotateZ(msg.yaw or 0) })
++end
++
++local function removeRemote(id)
++    local r = remotes[id]
++    if r then
++        r.obj:remove()
++        remotes[id] = nil
++        log('remote player ' .. tostring(id) .. ' left')
++    end
++end
++
++local function clearRemotes()
++    for id in pairs(remotes) do removeRemote(id) end
++end
++
++return {
++    engineHandlers = {
++        onPlayerAdded = function() connect() end,
++        onLoad = function() remotes = {}; wantConnect = true end,
++        onUpdate = function(dt)
++            if net.isConnected() then
++                timer = timer + dt
++                if timer >= SEND_INTERVAL then
++                    timer = 0
++                    sendState()
++                end
++            elseif wantConnect and world.players[1] then
++                retry = retry + dt
++                if retry >= RETRY_INTERVAL then
++                    retry = 0
++                    connect()
++                end
++            end
++        end,
++        onNetConnected = function() log('connected'); retry = 0 end,
++        onNetDisconnected = function(reason)
++            log('disconnected: ' .. tostring(reason))
++            clearRemotes()
++        end,
++        onNetMessage = function(line)
++            local ok, msg = pcall(markup.decodeYaml, line)
++            if not ok or type(msg) ~= 'table' then return end
++            if msg.t == 'hello' then myId = msg.id; log('my id is ' .. tostring(myId))
++            elseif msg.t == 'state' then applyState(msg)
++            elseif msg.t == 'leave' then removeRemote(msg.id) end
++        end,
++    },
++}
+diff --git a/multiplayer/run-test.sh b/multiplayer/run-test.sh
+new file mode 100755
+index 0000000000..087e4dda68
+--- /dev/null
++++ b/multiplayer/run-test.sh
+@@ -0,0 +1,12 @@
++#!/usr/bin/env bash
++# Smoke test: relay + fake bot player + OpenMW with the mp test mod.
++# usage: multiplayer/run-test.sh [path/to/openmw] [bot cx cy z]
++# With --mirror the relay shows you a ghost chest 300 units east of yourself, so no bot is needed.
++set -e
++HERE="$(cd "$(dirname "$0")" && pwd)"
++OPENMW="${1:-/tmp/claude-1000/-home-arinmal-AndroidStudioProjects-openmw3/46de22f9-4029-44ad-89e9-b4b5c94bec0b/scratchpad/build/openmw}"
++python3 "$HERE/server/relay.py" --mirror & RELAY=$!
++trap 'kill $RELAY ${BOT:-} 2>/dev/null' EXIT
++sleep 1
++if [ -n "$2" ]; then python3 "$HERE/server/bot.py" 127.0.0.1 25565 "$2" "$3" "$4" & BOT=$!; fi
++"$OPENMW" --data "$HERE/mod" --content mp.omwscripts || true
+diff --git a/multiplayer/server/bot.py b/multiplayer/server/bot.py
+new file mode 100644
+index 0000000000..64414ab92c
+--- /dev/null
++++ b/multiplayer/server/bot.py
+@@ -0,0 +1,26 @@
++#!/usr/bin/env python3
++"""Fake second player: walks in a circle around (cx, cy, z) so you can test with one game client.
++
++usage: bot.py [host] [port] [cx cy z] [cell]   (cell "" = exterior)
++Get your coordinates from the position line the mod prints in openmw.log.
++"""
++import json
++import math
++import socket
++import sys
++import time
++
++host = sys.argv[1] if len(sys.argv) > 1 else "127.0.0.1"
++port = int(sys.argv[2]) if len(sys.argv) > 2 else 25565
++cx, cy, z = (float(v) for v in sys.argv[3:6]) if len(sys.argv) >= 6 else (0.0, 0.0, 0.0)
++cell = sys.argv[6] if len(sys.argv) > 6 else ""
++
++s = socket.create_connection((host, port))
++t = 0.0
++while True:
++    msg = {"t": "state", "name": "bot", "cell": cell,
++           "pos": [cx + 300 * math.cos(t), cy + 300 * math.sin(t), z],
++           "yaw": t + math.pi / 2}
++    s.sendall((json.dumps(msg) + "\n").encode())
++    t += 0.1
++    time.sleep(0.2)
+diff --git a/multiplayer/server/relay.py b/multiplayer/server/relay.py
+new file mode 100644
+index 0000000000..4fa65a5506
+--- /dev/null
++++ b/multiplayer/server/relay.py
+@@ -0,0 +1,63 @@
++#!/usr/bin/env python3
++"""Minimal OpenMW multiplayer relay: newline-delimited JSON over TCP.
++
++Every line a client sends is stamped with its id and forwarded to all others.
++With --mirror each client also sees a ghost copy of itself (id -N), for one-client testing.
++Sends {"t":"hello","id":N} on connect, {"t":"leave","id":N} when a client goes.
++"""
++import asyncio
++import json
++import sys
++
++MIRROR = "--mirror" in sys.argv
++sys.argv = [a for a in sys.argv if a != "--mirror"]
++clients = {}  # id -> StreamWriter
++next_id = 1
++
++
++async def broadcast(msg, exclude=None):
++    data = (json.dumps(msg, separators=(",", ":")) + "\n").encode()
++    for cid, w in list(clients.items()):
++        if cid != exclude:
++            w.write(data)
++
++
++async def handle(reader, writer):
++    global next_id
++    cid, next_id = next_id, next_id + 1
++    clients[cid] = writer
++    print(f"+ client {cid} from {writer.get_extra_info('peername')}", flush=True)
++    writer.write((json.dumps({"t": "hello", "id": cid}) + "\n").encode())
++    try:
++        async for line in reader:
++            try:
++                msg = json.loads(line)
++            except ValueError:
++                continue
++            if not isinstance(msg, dict):
++                continue
++            msg["id"] = cid
++            await broadcast(msg, exclude=cid)
++            if MIRROR and msg.get("t") == "state" and isinstance(msg.get("pos"), list) and len(msg["pos"]) == 3:
++                # Echo the sender back as a fake second player standing 300 units east of them.
++                ghost = dict(msg, id=-cid, pos=[msg["pos"][0] + 300, msg["pos"][1], msg["pos"][2]])
++                writer.write((json.dumps(ghost, separators=(",", ":")) + "\n").encode())
++    except (ConnectionError, asyncio.LimitOverrunError):
++        pass
++    finally:
++        del clients[cid]
++        writer.close()
++        print(f"- client {cid}", flush=True)
++        await broadcast({"t": "leave", "id": cid})
++
++
++async def main(host, port):
++    server = await asyncio.start_server(handle, host, port)
++    print(f"relay listening on {host}:{port}", flush=True)
++    async with server:
++        await server.serve_forever()
++
++
++if __name__ == "__main__":
++    asyncio.run(main(sys.argv[1] if len(sys.argv) > 1 else "127.0.0.1",
++                     int(sys.argv[2]) if len(sys.argv) > 2 else 25565))
+-- 
+2.55.0
+

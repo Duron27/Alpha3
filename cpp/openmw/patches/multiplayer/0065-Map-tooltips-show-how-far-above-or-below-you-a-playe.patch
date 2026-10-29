@@ -1,0 +1,147 @@
+From 2964a99363303c34ab392e2f833f8aede429206e Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Thu, 15 Oct 2026 14:55:47 -0400
+Subject: [PATCH 65/66] Map tooltips show how far above or below you a player
+ is
+
+ui.setMapMarkers takes an optional info string that follows the name in the tooltip of the world map, local map and
+minimap markers. global.lua sends "340 above you", "120 below you" or "level with you" (within 60 units), rounded to 10.
+A change of the text only updates the widgets, it does not rebuild them.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ apps/openmw/mwgui/mapwindow.cpp       |  9 ++++++---
+ apps/openmw/mwgui/playermarker.hpp    |  6 ++++++
+ apps/openmw/mwlua/uibindings.cpp      |  1 +
+ files/lua_api/openmw/ui.lua           |  5 +++--
+ multiplayer/mod/scripts/mp/global.lua | 10 +++++++++-
+ 5 files changed, 25 insertions(+), 6 deletions(-)
+
+diff --git a/apps/openmw/mwgui/mapwindow.cpp b/apps/openmw/mwgui/mapwindow.cpp
+index e1430fed62..d6f2eba6d1 100644
+--- a/apps/openmw/mwgui/mapwindow.cpp
++++ b/apps/openmw/mwgui/mapwindow.cpp
+@@ -183,7 +183,7 @@ namespace MWGui
+             {
+                 const PlayerMarker* before = findTransient(player.mMarker.mNote);
+                 if (!before || before->mMarker.mWorldX != player.mMarker.mWorldX
+-                    || before->mMarker.mWorldY != player.mMarker.mWorldY)
++                    || before->mMarker.mWorldY != player.mMarker.mWorldY || before->mInfo != player.mInfo)
+                 {
+                     moved = true;
+                     break;
+@@ -405,7 +405,8 @@ namespace MWGui
+             markerWidget->setDepth(Local_MarkerAboveFogLayer);
+             markerWidget->setUserString("ToolTipType", "Layout");
+             markerWidget->setUserString("ToolTipLayout", "TextToolTipOneLine");
+-            markerWidget->setUserString("Caption_TextOneLine", MyGUI::TextIterator::toTagsString(marker.mNote));
++            markerWidget->setUserString("Caption_TextOneLine",
++                MyGUI::TextIterator::toTagsString(player ? player->caption() : marker.mNote));
+             if (player)
+             {
+                 markerWidget->setNormalColour(player->mGroup ? MyGUI::Colour(1.0f, 0.55f, 0.1f) : MyGUI::Colour(0.2f, 1.0f, 0.2f));
+@@ -466,6 +467,7 @@ namespace MWGui
+             if (!player)
+                 continue;
+             widget->setUserData(player->mMarker);
++            widget->setUserString("Caption_TextOneLine", MyGUI::TextIterator::toTagsString(player->caption()));
+             widget->setCoord(getMarkerCoordinates(player->mMarker.mWorldX, player->mMarker.mWorldY, markerPos, 12));
+         }
+     }
+@@ -1349,7 +1351,7 @@ namespace MWGui
+             widget->setDepth(Global_MarkerLayer);
+             widget->setUserString("ToolTipType", "Layout");
+             widget->setUserString("ToolTipLayout", "TextToolTipOneLine");
+-            widget->setUserString("Caption_TextOneLine", MyGUI::TextIterator::toTagsString(player.mMarker.mNote));
++            widget->setUserString("Caption_TextOneLine", MyGUI::TextIterator::toTagsString(player.caption()));
+             widget->setUserString("PlayerName", player.mMarker.mNote);
+             widget->setNormalColour(player.mGroup ? MyGUI::Colour(1.0f, 0.55f, 0.1f) : MyGUI::Colour(0.2f, 1.0f, 0.2f));
+             widget->setHoverColour(player.mGroup ? MyGUI::Colour(1.0f, 0.75f, 0.4f) : MyGUI::Colour(0.6f, 1.0f, 0.6f));
+@@ -1372,6 +1374,7 @@ namespace MWGui
+             const PlayerMarker* player = mCustomMarkers.findTransient(widget->getUserString("PlayerName"));
+             if (!player)
+                 continue;
++            widget->setUserString("Caption_TextOneLine", MyGUI::TextIterator::toTagsString(player->caption()));
+             float x, y;
+             worldPosToGlobalMapImageSpace(player->mMarker.mWorldX, player->mMarker.mWorldY, x, y);
+             widget->setPosition(MyGUI::IntPoint(static_cast<int>(x) - 6, static_cast<int>(y) - 6));
+diff --git a/apps/openmw/mwgui/playermarker.hpp b/apps/openmw/mwgui/playermarker.hpp
+index e70d088f01..4fde04f893 100644
+--- a/apps/openmw/mwgui/playermarker.hpp
++++ b/apps/openmw/mwgui/playermarker.hpp
+@@ -3,6 +3,8 @@
+ 
+ #include <components/esm3/custommarkerstate.hpp>
+ 
++#include <string>
++
+ namespace MWGui
+ {
+     // Another player on the maps (set from Lua, never saved).
+@@ -11,6 +13,10 @@ namespace MWGui
+         ESM::CustomMarker mMarker; // mNote is the player's name
+         bool mGroup = false; // in our group: orange; everybody else: green
+         bool mExterior = true; // the global map only shows players who are outside
++        std::string mInfo; // shown after the name in the tooltip, e.g. how far above or below us they are
++
++        // Tooltip text: the maps are flat, so height goes here
++        std::string caption() const { return mInfo.empty() ? mMarker.mNote : mMarker.mNote + ", " + mInfo; }
+     };
+ }
+ 
+diff --git a/apps/openmw/mwlua/uibindings.cpp b/apps/openmw/mwlua/uibindings.cpp
+index 72bcfe4d78..ea65d68cb7 100644
+--- a/apps/openmw/mwlua/uibindings.cpp
++++ b/apps/openmw/mwlua/uibindings.cpp
+@@ -405,6 +405,7 @@ namespace MWLua
+                 MWGui::PlayerMarker player;
+                 ESM::CustomMarker& marker = player.mMarker;
+                 player.mGroup = entry.getOptional<bool>("group").value_or(false);
++                player.mInfo = entry.getOptional<std::string>("info").value_or(std::string());
+                 marker.mWorldX = entry.getOptional<float>("x").value_or(0.f);
+                 marker.mWorldY = entry.getOptional<float>("y").value_or(0.f);
+                 marker.mNote = entry.getOptional<std::string>("name").value_or(std::string());
+diff --git a/files/lua_api/openmw/ui.lua b/files/lua_api/openmw/ui.lua
+index 0748c1b77f..6f3f3aca18 100644
+--- a/files/lua_api/openmw/ui.lua
++++ b/files/lua_api/openmw/ui.lua
+@@ -79,9 +79,10 @@
+ -- Shows extra markers on the map window and the minimap (for example other players), replacing the previous ones.
+ -- They are not saved and can not be edited. Pass an empty list to remove them.
+ -- @function [parent=#ui] setMapMarkers
+--- @param #list<#table> markers Each entry is a table `{ cell = "", x = 0, y = 0, name = "", group = false }`: `cell` is empty for the
++-- @param #list<#table> markers Each entry is a table `{ cell = "", x = 0, y = 0, name = "", group = false, info = "" }`: `cell` is empty for the
+ -- exterior or the name of an interior cell, `x` and `y` are world coordinates, `name` is shown as the tooltip and must be
+--- unique, `group` makes the marker orange (green otherwise). They are also shown on the global map when `cell` is empty.
++-- unique, `info` is optional text shown after the name in the tooltip (for example how far above or below the player is),
++-- `group` makes the marker orange (green otherwise). They are also shown on the global map when `cell` is empty.
+ -- Call it as often as you like: while the same names stay in the same cells only the positions are updated.
+ 
+ ---
+diff --git a/multiplayer/mod/scripts/mp/global.lua b/multiplayer/mod/scripts/mp/global.lua
+index 235d5aa5f5..60e8559dd8 100644
+--- a/multiplayer/mod/scripts/mp/global.lua
++++ b/multiplayer/mod/scripts/mp/global.lua
+@@ -1137,10 +1137,18 @@ return {
+                 -- every online player on the map, wherever they are
+                 local markers = {}
+                 if settings:get('ShowMapMarkers') ~= false then
++                    local me = player()
+                     for id, r in pairs(remotes) do
+                         if r.state and r.profile then
++                            -- how far above or below us they are (the maps are flat), for the tooltip
++                            local info
++                            if me and r.state.pos[3] then
++                                local dz = r.state.pos[3] - me.position.z
++                                if math.abs(dz) < 60 then info = 'level with you'
++                                else info = string.format('%d %s you', math.floor(math.abs(dz) / 10 + 0.5) * 10, dz > 0 and 'above' or 'below') end
++                            end
+                             markers[#markers + 1] = { cell = r.state.cell, x = r.state.pos[1], y = r.state.pos[2],
+-                                name = nameOf(id), group = isMember(id) }
++                                name = nameOf(id), group = isMember(id), info = info }
+                         end
+                     end
+                 end
+-- 
+2.55.0
+

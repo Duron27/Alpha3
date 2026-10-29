@@ -1,0 +1,409 @@
+From 63114440943562eb9dad53b220b38740c93a533c Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Fri, 9 Oct 2026 09:00:05 -0400
+Subject: [PATCH] Shared kills in a group (setting, default on; essential NPCs
+ stay alive), invite guards (no accepts without a pending invite, no invites
+ to party members, rate limits, no repeated 'expired' spam)
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ multiplayer/debug/autokill.omwscripts         |  1 +
+ .../debug/scripts/mp_debug/autojoin.lua       |  7 +++
+ .../debug/scripts/mp_debug/autokill.lua       | 34 ++++++++++++++
+ multiplayer/mod/scripts/mp/damage.lua         |  8 ++++
+ multiplayer/mod/scripts/mp/global.lua         | 24 +++++++++-
+ multiplayer/mod/scripts/mp/proxies.lua        | 46 ++++++++++++++++++-
+ multiplayer/mod/scripts/mp/relay.lua          | 23 +++++++++-
+ multiplayer/mod/scripts/mp/remote.lua         |  7 +++
+ multiplayer/run-two.sh                        |  2 +-
+ 9 files changed, 146 insertions(+), 6 deletions(-)
+ create mode 100644 multiplayer/debug/autokill.omwscripts
+ create mode 100644 multiplayer/debug/scripts/mp_debug/autokill.lua
+
+diff --git a/multiplayer/debug/autokill.omwscripts b/multiplayer/debug/autokill.omwscripts
+new file mode 100644
+index 0000000000..5bec444e9b
+--- /dev/null
++++ b/multiplayer/debug/autokill.omwscripts
+@@ -0,0 +1 @@
++GLOBAL: scripts/mp_debug/autokill.lua
+diff --git a/multiplayer/debug/scripts/mp_debug/autojoin.lua b/multiplayer/debug/scripts/mp_debug/autojoin.lua
+index 0c37956de5..e9893cfbe9 100644
+--- a/multiplayer/debug/scripts/mp_debug/autojoin.lua
++++ b/multiplayer/debug/scripts/mp_debug/autojoin.lua
+@@ -2,10 +2,17 @@
+ -- (alternating attacks, jumping, sneaking) so the host can check the avatar animations.
+ local core = require('openmw.core')
+ local done, t, seq = false, 0, 0
++local acceptTimer = 0
++local done2 = false
+ local kinds = { 'chop', 'slash', 'thrust' }
+ return {
+     engineHandlers = {
+         onUpdate = function(dt)
++            acceptTimer = acceptTimer + dt
++            if acceptTimer > 4 and not done2 then -- accept any party invite from the host (id 1)
++                acceptTimer = 0
++                core.sendGlobalEvent('MpCmd', { cmd = 'accept', id = 1 })
++            end
+             if not done then
+                 done = true
+                 core.sendGlobalEvent('MpCmd', { cmd = 'configure', mode = 'join', host = '127.0.0.1', port = 25565 })
+diff --git a/multiplayer/debug/scripts/mp_debug/autokill.lua b/multiplayer/debug/scripts/mp_debug/autokill.lua
+new file mode 100644
+index 0000000000..bdc0ebdb33
+--- /dev/null
++++ b/multiplayer/debug/scripts/mp_debug/autokill.lua
+@@ -0,0 +1,34 @@
++-- Test helper (host): invites the other player into a party, then kills the nearest living NPC/creature.
++local core = require('openmw.core')
++local world = require('openmw.world')
++local types = require('openmw.types')
++local t, invited, killed = 0, false, false
++return {
++    engineHandlers = {
++        onUpdate = function(dt)
++            t = t + dt
++            if t > 75 and not invited then
++                invited = true
++                core.sendGlobalEvent('MpCmd', { cmd = 'invite', id = 2 })
++            end
++            if t > 105 and not killed then
++                killed = true
++                local p = world.players[1]
++                local best, bestD
++                for _, a in ipairs(world.activeActors) do
++                    if a ~= p and (a.type == types.NPC or a.type == types.Creature) and not types.Actor.isDead(a) and not tostring(a.recordId):find('Generated') then
++                        local d = (a.position - p.position):length()
++                        if d < 3000 and (not bestD or d < bestD) then best, bestD = a, d end
++                    end
++                end
++                if best then
++                    print('[mp-debug] killing ' .. best.recordId .. ' ' .. tostring(best.id) .. ' at distance ' .. math.floor(bestD))
++                    best:addScript('scripts/mp/damage.lua')
++                    best:sendEvent('MpKillNow', {})
++                else
++                    print('[mp-debug] nobody to kill nearby')
++                end
++            end
++        end,
++    },
++}
+diff --git a/multiplayer/mod/scripts/mp/damage.lua b/multiplayer/mod/scripts/mp/damage.lua
+index 03957fedfe..d3e690bbdf 100644
+--- a/multiplayer/mod/scripts/mp/damage.lua
++++ b/multiplayer/mod/scripts/mp/damage.lua
+@@ -8,6 +8,14 @@ local I = require('openmw.interfaces')
+ 
+ return {
+     eventHandlers = {
++        -- A group member killed this actor in their world; it dies here too (essential actors cannot die).
++        MpKillNow = function()
++            local essential = false
++            pcall(function() essential = types.NPC.objectIsInstance(self) and types.NPC.record(self).isEssential end)
++            if essential or types.Actor.isDead(self) then return end
++            pcall(function() I.AI.removePackages() end)
++            types.Actor.stats.dynamic.health(self).current = 0
++        end,
+         MpDamage = function(d)
+             local health = types.Actor.stats.dynamic.health(self)
+             local max = health.base + health.modifier
+diff --git a/multiplayer/mod/scripts/mp/global.lua b/multiplayer/mod/scripts/mp/global.lua
+index dc6c17003d..12a4cb92cf 100644
+--- a/multiplayer/mod/scripts/mp/global.lua
++++ b/multiplayer/mod/scripts/mp/global.lua
+@@ -35,6 +35,7 @@ I.Settings.registerGroup {
+         { key = 'Mode', renderer = 'select', name = 'Mode', default = 'join',
+           argument = { l10n = 'Multiplayer', items = { 'join', 'host' } } },
+         { key = 'Host', renderer = 'textLine', name = 'Server host', default = '127.0.0.1' },
++        { key = 'SharedKills', renderer = 'checkbox', name = 'Kills are shared with your group', default = true },
+         { key = 'Port', renderer = 'number', name = 'Server port', default = 25565,
+           argument = { integer = true, min = 1, max = 65535 } },
+     },
+@@ -46,6 +47,7 @@ local hostErrorShown = false
+ local players = {} -- latest list from the relay: { id, name, ping, host }
+ local worldTimer = 0
+ local lastReal
++local lastFailure = {} -- invite failure text -> clock, so a repeated failure is not spammed
+ local botWanted = false -- test bot (menu): only while hosting
+ local hostInfo -- when hosting: { port, lan, public, error, looking }
+ local savedTimeScale -- our game time scale while we wait for the host's clock to catch up
+@@ -91,6 +93,7 @@ proxies.init({
+     active = function() return net.isConnected() and inParty() end,
+     isAvatar = function(obj) return avatarIds[obj.id] ~= nil end,
+     ownerName = nameOf,
++    sharedKills = function() return settings:get('SharedKills') ~= false end,
+ })
+ 
+ ------------------------------------------------------------------ connection / group
+@@ -529,6 +532,7 @@ local function onParty(msg)
+     if #members == 0 and #party.members > 1 then notice('You are no longer in a party.') end
+     if #members > 1 and #party.members <= 1 then notice('You joined a party.') end
+     party = { members = members, leader = msg.leader }
++    for _, m in ipairs(members) do invitesIn[m], invitesOut[m] = nil, nil end -- no invites between party members
+     pushUi()
+ end
+ 
+@@ -537,6 +541,8 @@ local REASONS = {
+     busy = 'That player is already in a party.',
+     full = 'A party can have at most ' .. MAX_PARTY .. ' players.',
+     expired = 'That invite has expired.',
++    slow = 'Slow down: wait a moment before inviting again.',
++    already = 'That player is already in your party.',
+ }
+ 
+ local function onCommand(d)
+@@ -566,11 +572,19 @@ local function onCommand(d)
+         net.send(net.encodeJson({ t = 'chat', scope = 'whisper', to = target, text = d.text }))
+         chatLine('whisper', 'To ' .. d.to, d.text, true)
+     elseif cmd == 'invite' then
++        if isMember(d.id) then notice(nameOf(d.id) .. ' is already in your party.') return end
++        local out = invitesOut[d.id]
++        if out and out > clock then notice('You already invited ' .. nameOf(d.id) .. '.') return end
+         net.send(net.encodeJson({ t = 'invite', to = d.id }))
+     elseif cmd == 'accept' then
++        -- guards: only answer an invite that is really pending, and never while already in a party
++        local exp = invitesIn[d.id]
++        if not exp or exp <= clock then dlog('ignored accept without a pending invite from', tostring(d.id)) return end
++        if inParty() then invitesIn[d.id] = nil return end
+         net.send(net.encodeJson({ t = 'accept', from = d.id }))
+         invitesIn[d.id] = nil
+     elseif cmd == 'decline' then
++        if not invitesIn[d.id] then return end
+         net.send(net.encodeJson({ t = 'decline', from = d.id }))
+         invitesIn[d.id] = nil
+         notice('Declined the invite from ' .. nameOf(d.id) .. '.')
+@@ -643,6 +657,8 @@ local function onMessage(msg)
+     end
+     if t == 'party' then onParty(msg) return end
+     if t == 'invite' then
++        -- guards: nobody in our party needs inviting, and while we are in a party invites cannot be accepted anyway
++        if isMember(msg.from) or inParty() then dlog('ignored invite from', tostring(msg.from)) return end
+         invitesIn[msg.from] = clock + INVITE_TTL
+         notice(nameOf(msg.from) .. ' invited you to a party. Activate them, or type /accept.')
+         pushUi()
+@@ -653,6 +669,10 @@ local function onMessage(msg)
+             invitesOut[msg.to] = clock + INVITE_TTL
+             notice('Invite sent to ' .. nameOf(msg.to) .. '.')
+         else
++            -- the same failure is shown at most once every few seconds
++            local key = tostring(msg.reason) .. tostring(msg.to)
++            if lastFailure[key] and clock - lastFailure[key] < 5 then return end
++            lastFailure[key] = clock
+             notice(REASONS[msg.reason] or ('Invite failed: ' .. tostring(msg.reason)))
+         end
+         return
+@@ -719,12 +739,13 @@ return {
+             local objs = {}
+             for _, r in pairs(remotes) do if r.obj then objs[#objs + 1] = r.obj end end
+             for _, o in ipairs(proxies.savedObjects()) do objs[#objs + 1] = o end
+-            return { objs = objs }
++            return { objs = objs, kills = proxies.getPendingKills() }
+         end,
+         onLoad = function(saved)
+             remotes, avatarIds, lastEquipJson = {}, {}, nil
+             party, vitals, invitesIn, invitesOut = { members = {}, leader = nil }, {}, {}, {}
+             proxies.reset()
++            proxies.setPendingKills(saved and saved.kills)
+             for _, obj in ipairs(saved and saved.objs or {}) do
+                 if obj:isValid() then pcall(function() obj:remove() end) end
+             end
+@@ -846,6 +867,7 @@ return {
+             end
+         end,
+         MpProxyDamage = proxies.onProxyDamage,
++        MpProxyDied = proxies.onProxyDied,
+         MpAvatarHit = proxies.onAvatarHit,
+         -- Player-to-player trade: d.give / d.get are { [recordId] = count }. Items leave this world's
+         -- inventory and are recreated from their record id on the other side (conditions/enchant charges reset,
+diff --git a/multiplayer/mod/scripts/mp/proxies.lua b/multiplayer/mod/scripts/mp/proxies.lua
+index e104e58a8a..adbbea38d2 100644
+--- a/multiplayer/mod/scripts/mp/proxies.lua
++++ b/multiplayer/mod/scripts/mp/proxies.lua
+@@ -29,7 +29,9 @@ local ownerCells = {} -- owner id -> cell key
+ local records = {} -- owner..'|'..recordId -> custom record
+ local recentDead = {} -- nid -> repeats left (our actors that just died)
+ local previousRoster = {} -- nid -> true
+-local damageQueue = {} -- { obj, frac, wait }
++local damageQueue = {} -- { obj, frac, wait, kill }
++local pendingKills = {} -- nid -> true: actors a group member killed that we have not been able to kill yet
++local killTimer = 0
+ local crimeSamples = {} -- { t, level }
+ local crimeBase
+ local crimeGuard = 0
+@@ -41,6 +43,7 @@ function M.reset()
+         if px.obj and px.obj:isValid() then pcall(function() px.obj:remove() end) end
+     end
+     proxies, proxyById, ownerCells, previousRoster, recentDead, damageQueue = {}, {}, {}, {}, {}, {}
++    pendingKills = {}
+ end
+ 
+ function M.isProxy(obj) return proxyById[obj.id] ~= nil end
+@@ -246,11 +249,16 @@ local function onRoster(msg)
+     for _, nid in ipairs(msg.dead or {}) do
+         local px = proxies[nid]
+         if px and px.owner == owner then kill(px) end
++        if ctx.sharedKills() then pendingKills[nid] = true end -- killed in their world: dead in ours too
+     end
+ end
+ 
+ -- Another member damaged our real actor's proxy in their world.
+ local function onDamage(msg)
++    if msg.kill then -- they killed the stand-in for our actor
++        if ctx.sharedKills() then pendingKills[msg.nid] = true end
++        return
++    end
+     local obj = objectById(msg.nid)
+     if obj and not types.Actor.isDead(obj) then
+         damageQueue[#damageQueue + 1] = { obj = obj, frac = msg.frac, wait = 0 }
+@@ -266,6 +274,24 @@ function M.onMessage(msg)
+     return false
+ end
+ 
++-- Event from a proxy's local script: it died here, so its owner's real actor must die too.
++function M.onProxyDied(d)
++    local px = proxies[d.key]
++    if not px or not ctx.sharedKills() then return end
++    ctx.send({ t = 'dmg', to = px.owner, nid = px.last.n, kill = true })
++end
++
++-- Kills waiting for their actor to be loaded (saved with the game).
++function M.getPendingKills()
++    local list = {}
++    for nid in pairs(pendingKills) do list[#list + 1] = nid end
++    return list
++end
++function M.setPendingKills(list)
++    pendingKills = {}
++    for _, nid in ipairs(list or {}) do pendingKills[nid] = true end
++end
++
+ -- Event from a proxy's local script: we hurt it.
+ function M.onProxyDamage(d)
+     local px = proxies[d.key]
+@@ -311,12 +337,28 @@ function M.onUpdate(dt)
+                 d.obj:addScript(DAMAGE_SCRIPT)
+                 d.wait = 0.2
+             else
+-                d.obj:sendEvent('MpDamage', { frac = d.frac })
++                d.obj:sendEvent(d.kill and 'MpKillNow' or 'MpDamage', { frac = d.frac })
+                 table.remove(damageQueue, i)
+             end
+         end
+     end
+ 
++    -- carry out kills our group made: the actor dies here as well (once it is loaded)
++    killTimer = killTimer + dt
++    if killTimer >= 0.5 then
++        killTimer = 0
++        for nid in pairs(pendingKills) do
++            local obj = objectById(nid)
++            if obj and (types.Actor.isDead(obj) or M.isProxy(obj)) then
++                pendingKills[nid] = nil
++            elseif obj then
++                pendingKills[nid] = nil
++                ctx.log('group kill: ' .. tostring(obj.recordId) .. ' (' .. nid .. ') dies in this world too')
++                damageQueue[#damageQueue + 1] = { obj = obj, frac = 1, wait = 0, kill = true }
++            end
++        end
++    end
++
+     -- a stand-in must not outlive its reason: if our own copy of the actor is alive and enabled again, drop it
+     cleanTimer = cleanTimer + dt
+     if cleanTimer >= 1 then
+diff --git a/multiplayer/mod/scripts/mp/relay.lua b/multiplayer/mod/scripts/mp/relay.lua
+index 26106cca49..441d202426 100644
+--- a/multiplayer/mod/scripts/mp/relay.lua
++++ b/multiplayer/mod/scripts/mp/relay.lua
+@@ -93,11 +93,22 @@ local function pendingTo(id)
+     return out
+ end
+ 
++-- one invite action per client per second (a stuck script or a held key must not flood anybody)
++local function inviteAllowed(c)
++    if c.lastInviteAt and clock - c.lastInviteAt < 1 then return false end
++    c.lastInviteAt = clock
++    return true
++end
++
+ local function handleInvite(id, msg)
+     purgeInvites()
+     local to = msg.to
+     local function fail(reason) sendTo(id, { t = 'invite_result', ok = false, to = to, reason = reason }) end
++    if not inviteAllowed(clients[id]) then return fail('slow') end
+     if type(to) ~= 'number' or not clients[to] or to == id then return fail('unknown') end
++    if clients[to].party and clients[to].party == clients[id].party then return fail('already') end
++    local existing = invites[id .. ':' .. to]
++    if existing and existing.exp > clock then return end -- already pending: say nothing
+     if clients[to].party then return fail('busy') end
+     local members = partyMembers(id)
+     local waiting = pendingTo(id)
+@@ -116,7 +127,13 @@ local function handleAccept(id, msg)
+     local frm = msg.from
+     local key = tostring(frm) .. ':' .. id
+     if not invites[key] or not clients[frm] then
+-        return sendTo(id, { t = 'invite_result', ok = false, to = frm, reason = 'expired' })
++        -- an accept for nothing: tell them once in a while, never repeatedly
++        local c = clients[id]
++        if not c.lastExpiredAt or clock - c.lastExpiredAt > 5 then
++            c.lastExpiredAt = clock
++            sendTo(id, { t = 'invite_result', ok = false, to = frm, reason = 'expired' })
++        end
++        return
+     end
+     invites[key] = nil
+     if clients[id].party then
+@@ -135,7 +152,9 @@ local function handleAccept(id, msg)
+     local pid = clients[frm].party
+     table.insert(parties[pid].members, id)
+     clients[id].party = pid
+-    for k, inv in pairs(invites) do if inv.to == id then invites[k] = nil end end
++    for k, inv in pairs(invites) do
++        if inv.to == id or inv.from == id then invites[k] = nil end -- nothing pending once grouped
++    end
+     announceParty(pid)
+     -- bring everyone up to date on each other's actors/vitals
+     for _, m in ipairs(parties[pid].members) do
+diff --git a/multiplayer/mod/scripts/mp/remote.lua b/multiplayer/mod/scripts/mp/remote.lua
+index 875d28fedd..ddd9957361 100644
+--- a/multiplayer/mod/scripts/mp/remote.lua
++++ b/multiplayer/mod/scripts/mp/remote.lua
+@@ -77,8 +77,14 @@ local function keepAvatarUnhurt()
+     end
+ end
+ 
++local deathReported = false
++
+ local function trackHealth(dt)
+     local h = healthStat()
++    if Actor.isDead(self) and not deathReported then
++        deathReported = true
++        core.sendGlobalEvent('MpProxyDied', { key = key }) -- dead for everyone in the group
++    end
+     if lastHp == nil then lastHp = h.current end
+     if h.current < lastHp - 0.001 then
+         pendingDamage = pendingDamage + (lastHp - h.current) / maxHealth(h)
+@@ -348,6 +354,7 @@ return {
+             equipTimer = 0
+         end,
+         MpKill = function()
++            deathReported = true -- the owner already knows
+             local h = healthStat()
+             lastHp = 0
+             h.current = 0
+diff --git a/multiplayer/run-two.sh b/multiplayer/run-two.sh
+index 947107c60a..b4358d6ced 100755
+--- a/multiplayer/run-two.sh
++++ b/multiplayer/run-two.sh
+@@ -8,7 +8,7 @@ OPENMW="${1:?path to openmw}"; SAVE="${2:?path to a .omwsave}"; shift 2
+ [ "${1:-}" = "--" ] && shift
+ OUT="${TMPDIR:-/tmp}/mp-two"; mkdir -p "$OUT/host" "$OUT/join"
+ common=(--data "$HERE/mod" --data "$HERE/debug" --load-savegame "$SAVE")
+-"$OPENMW" "${common[@]}" --content mp.omwscripts --content autohost.omwscripts --user-data "$OUT/host" "$@" > "$OUT/host.log" 2>&1 &
++"$OPENMW" "${common[@]}" --content mp.omwscripts --content autohost.omwscripts --content autokill.omwscripts --user-data "$OUT/host" "$@" > "$OUT/host.log" 2>&1 &
+ HOST=$!
+ trap 'kill $HOST ${JOIN:-} 2>/dev/null' EXIT
+ sleep 25   # let the host load and start listening
+-- 
+2.55.0
+

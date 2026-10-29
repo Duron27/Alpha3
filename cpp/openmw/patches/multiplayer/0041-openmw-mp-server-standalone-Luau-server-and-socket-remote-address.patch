@@ -1,0 +1,1918 @@
+From: Duron27 <duron27@gmail.com>
+Subject: [PATCH] openmw-mp-server: standalone Luau multiplayer server with a Qt window (or --cli-only), socket remoteAddress
+
+- apps/mpserver embeds the Luau VM and the engine's own sockets and runs multiplayer relay.lua unchanged; it supplies
+  openmw.net, openmw.core.getRealTime and openmw.markup.decodeYaml (JSON, depth-limited)
+- servercore: the server without any user interface (tick, console, snapshot, log sink); main: options, finds the mod by
+  itself, terminal mode; gui: Qt6 Widgets window (players with latency/address/location and kick/ban/mute buttons, sky,
+  announcements, bans, log, command line). --cli-only, or no display, runs in the terminal
+- optional targets: BUILD_MP_SERVER (OFF by default, so phone builds never build it); BUILD_MP_SERVER_GUI (ON, needs Qt6
+  Widgets, else terminal-only)
+- Net::Sockets::remoteAddress / openmw.net.remoteAddress: where a connection comes from
+
+---
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 952add0..f7e7e2f 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -27,6 +27,7 @@ option(DEPLOY_QT_TRANSLATIONS "Deploy standard Qt translations to resources fold
+ 
+ # Apps and tools
+ option(BUILD_OPENMW             "Build OpenMW" ON)
++option(BUILD_MP_SERVER          "Build the standalone multiplayer server" OFF)
+ option(BUILD_LAUNCHER           "Build Launcher" ON)
+ option(BUILD_WIZARD             "Build Installation Wizard" ON)
+ option(BUILD_MWINIIMPORTER      "Build MWiniImporter" ON)
+@@ -729,6 +730,10 @@ endif()
+ add_subdirectory (components)
+ 
+ # Apps and tools
++if (BUILD_MP_SERVER)
++    add_subdirectory( apps/mpserver )
++endif()
++
+ if (BUILD_OPENMW OR BUILD_OPENMW_TESTS)
+     add_subdirectory( apps/openmw )
+ endif()
+diff --git a/apps/components_tests/net/sockets.cpp b/apps/components_tests/net/sockets.cpp
+index 0267c44..4d658f4 100644
+--- a/apps/components_tests/net/sockets.cpp
++++ b/apps/components_tests/net/sockets.cpp
+@@ -62,6 +62,8 @@ namespace
+         EXPECT_TRUE(connected);
+         ASSERT_NE(accepted, 0u);
+         EXPECT_EQ(s.localAddress(client), "127.0.0.1");
++        EXPECT_EQ(s.remoteAddress(client), "127.0.0.1");
++        EXPECT_EQ(s.remoteAddress(accepted), "127.0.0.1");
+ 
+         EXPECT_TRUE(s.send(client, "hello", false));
+         EXPECT_FALSE(s.send(client, "bad\nline", false));
+diff --git a/apps/mpserver/CMakeLists.txt b/apps/mpserver/CMakeLists.txt
+new file mode 100644
+index 0000000..10954ad
+--- /dev/null
++++ b/apps/mpserver/CMakeLists.txt
+@@ -0,0 +1,49 @@
++# A standalone multiplayer server: the Luau relay of the multiplayer mod on the engine's own sockets, without a game.
++# By default it has a window (Qt); --cli-only runs it in the terminal. Without Qt (or with BUILD_MP_SERVER_GUI=OFF) it is
++# terminal-only, which is also what a headless machine needs.
++find_package(Threads REQUIRED)
++
++option(BUILD_MP_SERVER_GUI "Give openmw-mp-server a window (needs Qt Widgets)" ON)
++
++set(MPSERVER_SOURCES
++    main.cpp
++    servercore.cpp
++    ${CMAKE_SOURCE_DIR}/components/net/sockets.cpp
++)
++
++set(MPSERVER_QT_FOUND OFF)
++if (BUILD_MP_SERVER_GUI)
++    find_package(Qt6 QUIET COMPONENTS Widgets)
++    if (Qt6_FOUND)
++        set(MPSERVER_QT_FOUND ON)
++    else()
++        message(STATUS "openmw-mp-server: Qt6 Widgets not found, it will have no window")
++    endif()
++endif()
++
++if (MPSERVER_QT_FOUND)
++    list(APPEND MPSERVER_SOURCES gui.cpp)
++endif()
++
++add_executable(openmw-mp-server ${MPSERVER_SOURCES})
++
++target_include_directories(openmw-mp-server PRIVATE ${CMAKE_SOURCE_DIR})
++
++target_link_libraries(openmw-mp-server
++    Luau.VM
++    Luau.Compiler
++    Boost::headers
++    Threads::Threads
++)
++
++if (MPSERVER_QT_FOUND)
++    target_compile_definitions(openmw-mp-server PRIVATE MPSERVER_WITH_GUI)
++    target_link_libraries(openmw-mp-server Qt6::Widgets)
++    set_target_properties(openmw-mp-server PROPERTIES AUTOMOC OFF) # (no signals or slots are declared)
++endif()
++
++if (WIN32)
++    target_link_libraries(openmw-mp-server ws2_32 mswsock)
++endif()
++
++install(TARGETS openmw-mp-server)
+diff --git a/apps/mpserver/gui.cpp b/apps/mpserver/gui.cpp
+new file mode 100644
+index 0000000..be58c64
+--- /dev/null
++++ b/apps/mpserver/gui.cpp
+@@ -0,0 +1,501 @@
++// The server window: who is online (with latency, address and location), buttons to kick, ban and mute the selected
++// player, the sky (weather and time of day), announcements, banned names, the log and a command line.
++// Everything runs on the GUI thread; the server is driven from a timer.
++#include "gui.hpp"
++
++#include <QApplication>
++#include <QClipboard>
++#include <QCloseEvent>
++#include <QComboBox>
++#include <QElapsedTimer>
++#include <QFontDatabase>
++#include <QGridLayout>
++#include <QGroupBox>
++#include <QHBoxLayout>
++#include <QHeaderView>
++#include <QLabel>
++#include <QLineEdit>
++#include <QListWidget>
++#include <QMainWindow>
++#include <QMessageBox>
++#include <QPlainTextEdit>
++#include <QPushButton>
++#include <QStatusBar>
++#include <QTableWidget>
++#include <QTime>
++#include <QTimeEdit>
++#include <QTimer>
++#include <QVBoxLayout>
++
++namespace
++{
++    using MpServer::PlayerInfo;
++    using MpServer::ServerCore;
++    using MpServer::Snapshot;
++
++    const char* const sWeathers[] = { "clear", "cloudy", "overcast", "foggy", "rain", "thunder", "snow", "ash", "blight",
++        "blizzard" };
++
++    QString flagsOf(const PlayerInfo& p)
++    {
++        QStringList flags;
++        if (p.mHost)
++            flags << "host";
++        if (p.mAdmin)
++            flags << "admin";
++        if (p.mMuted)
++            flags << "muted";
++        if (p.mAway)
++            flags << "lost connection";
++        if (p.mBot)
++            flags << "test player";
++        return flags.join(", ");
++    }
++
++    // No Q_OBJECT: nothing here declares signals or slots, connections go to lambdas.
++    class MainWindow : public QMainWindow
++    {
++    public:
++        explicit MainWindow(ServerCore& core)
++            : mCore(core)
++        {
++            setWindowTitle("OpenMW Multiplayer Server");
++            resize(1100, 760);
++            build();
++            mUptime.start();
++        }
++
++        void appendLog(const QString& text) { mLog->appendPlainText(text); }
++
++        void refresh()
++        {
++            const Snapshot snap = mCore.snapshot();
++            if (!snap.mValid)
++                return;
++            mSnap = snap;
++            fillPlayers();
++            fillBans();
++            fillWorld();
++            updateButtons();
++            const qint64 s = mUptime.elapsed() / 1000;
++            int online = 0;
++            for (const PlayerInfo& p : snap.mPlayers)
++                online += p.mBot ? 0 : 1;
++            mStatus->setText(QString("Port %1  |  %2  |  %3/%4 players  |  up %5:%6:%7")
++                                 .arg(mCore.options().mPort)
++                                 .arg(snap.mPasswordProtected ? "password protected" : "no password")
++                                 .arg(online)
++                                 .arg(snap.mMaxPlayers)
++                                 .arg(s / 3600)
++                                 .arg((s / 60) % 60, 2, 10, QChar('0'))
++                                 .arg(s % 60, 2, 10, QChar('0')));
++        }
++
++        int playersOnline() const
++        {
++            int n = 0;
++            for (const PlayerInfo& p : mSnap.mPlayers)
++                n += p.mBot ? 0 : 1;
++            return n;
++        }
++
++        // Tests drive the window the way a person would: MP_SERVER_TEST_STEPS="select Name;kick;ban;mute;unban Name;
++        // weather rain;time 23:30;announce text;copy". Questions are answered with yes.
++        void testStep(const QString& step)
++        {
++            mAutoConfirm = true;
++            const QString verb = step.section(' ', 0, 0);
++            const QString arg = step.section(' ', 1).trimmed();
++            if (verb == "select")
++            {
++                for (int row = 0; row < mTable->rowCount(); ++row)
++                    if (mTable->item(row, 0)->text() == arg)
++                        mTable->selectRow(row);
++            }
++            else if (verb == "kick") mKick->click();
++            else if (verb == "ban") mBan->click();
++            else if (verb == "mute") mMute->click();
++            else if (verb == "copy") mCopy->click();
++            else if (verb == "unban")
++            {
++                for (int i = 0; i < mBans->count(); ++i)
++                    if (mBans->item(i)->text() == arg.toLower())
++                        mBans->setCurrentRow(i);
++                mUnban->click();
++            }
++            else if (verb == "weather")
++            {
++                mWeather->setCurrentIndex(mWeather->findData(arg));
++                mApplyWeather->click();
++            }
++            else if (verb == "time")
++            {
++                mTime->setTime(QTime::fromString(arg, "HH:mm"));
++                mApplyTime->click();
++            }
++            else if (verb == "announce")
++            {
++                mAnnounce->setText(arg);
++                mSend->click();
++            }
++            else if (verb == "command")
++            {
++                mCommand->setText(arg);
++                mRun->click();
++            }
++        }
++
++    protected:
++        void closeEvent(QCloseEvent* event) override
++        {
++            const int n = playersOnline();
++            if (n > 0
++                && !confirm("Stop the server?",
++                    QString("%1 player%2 connected. Stop the server and disconnect everybody?").arg(n).arg(n == 1 ? " is" : "s are")))
++            {
++                event->ignore();
++                return;
++            }
++            event->accept();
++        }
++
++    private:
++        const PlayerInfo* selected() const
++        {
++            const int row = mTable->currentRow();
++            if (row < 0 || row >= static_cast<int>(mSnap.mPlayers.size()))
++                return nullptr;
++            const auto id = mTable->item(row, 0)->data(Qt::UserRole).toUInt();
++            for (const PlayerInfo& p : mSnap.mPlayers)
++                if (p.mId == id)
++                    return &p;
++            return nullptr;
++        }
++
++        bool confirm(const QString& title, const QString& text)
++        {
++            return mAutoConfirm || QMessageBox::question(this, title, text) == QMessageBox::Yes;
++        }
++
++        void run(const QString& command)
++        {
++            appendLog("> " + command);
++            const std::string answer = mCore.console(command.toStdString());
++            if (!answer.empty())
++                appendLog(QString::fromStdString(answer));
++            refresh();
++        }
++
++        static QPushButton* button(const QString& text, const QString& tip)
++        {
++            auto* b = new QPushButton(text);
++            b->setToolTip(tip);
++            return b;
++        }
++
++        void build()
++        {
++            auto* central = new QWidget;
++            auto* grid = new QGridLayout(central);
++
++            // ---- players
++            auto* playersBox = new QGroupBox("Players");
++            auto* playersLayout = new QVBoxLayout(playersBox);
++            mTable = new QTableWidget(0, 5);
++            mTable->setHorizontalHeaderLabels({ "Name", "Ping", "Address", "Location", "Status" });
++            mTable->setSelectionBehavior(QAbstractItemView::SelectRows);
++            mTable->setSelectionMode(QAbstractItemView::SingleSelection);
++            mTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
++            mTable->setAlternatingRowColors(true);
++            mTable->verticalHeader()->hide();
++            mTable->horizontalHeader()->setStretchLastSection(false);
++            mTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
++            mTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
++            mTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
++            mTable->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
++            mTable->horizontalHeader()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
++            playersLayout->addWidget(mTable);
++            auto* playerButtons = new QHBoxLayout;
++            mKick = button("Kick", "Disconnect the selected player (they can join again)");
++            mBan = button("Ban", "Disconnect the selected player and refuse their name until the server restarts");
++            mMute = button("Mute", "Stop or allow the selected player's chat");
++            mCopy = button("Copy address", "Copy the selected player's address to the clipboard");
++            for (QPushButton* b : { mKick, mBan, mMute, mCopy })
++                playerButtons->addWidget(b);
++            playerButtons->addStretch();
++            playersLayout->addLayout(playerButtons);
++            grid->addWidget(playersBox, 0, 0, 3, 1);
++
++            QObject::connect(mTable, &QTableWidget::itemSelectionChanged, this, [this] { updateButtons(); });
++            QObject::connect(mKick, &QPushButton::clicked, this, [this] {
++                if (const PlayerInfo* p = selected())
++                    run("kick " + QString::fromStdString(p->mName));
++            });
++            QObject::connect(mBan, &QPushButton::clicked, this, [this] {
++                const PlayerInfo* p = selected();
++                if (!p)
++                    return;
++                const QString name = QString::fromStdString(p->mName);
++                if (confirm("Ban " + name + "?",
++                        name + " will be disconnected and cannot join under that name until the server restarts."))
++                    run("ban " + name);
++            });
++            QObject::connect(mMute, &QPushButton::clicked, this, [this] {
++                if (const PlayerInfo* p = selected())
++                    run((p->mMuted ? "unmute " : "mute ") + QString::fromStdString(p->mName));
++            });
++            QObject::connect(mCopy, &QPushButton::clicked, this, [this] {
++                if (const PlayerInfo* p = selected())
++                    QApplication::clipboard()->setText(QString::fromStdString(p->mAddress));
++            });
++
++            // ---- the sky
++            auto* worldBox = new QGroupBox("Sky");
++            auto* worldLayout = new QGridLayout(worldBox);
++            mSky = new QLabel("-");
++            worldLayout->addWidget(mSky, 0, 0, 1, 3);
++            worldLayout->addWidget(new QLabel("Weather"), 1, 0);
++            mWeather = new QComboBox;
++            mWeather->addItem("Changes by itself", "cycle");
++            for (const char* w : sWeathers)
++                mWeather->addItem(w, w);
++            worldLayout->addWidget(mWeather, 1, 1);
++            auto* applyWeather = mApplyWeather = button("Set", "Fix the weather for everybody, or let it change by itself again");
++            worldLayout->addWidget(applyWeather, 1, 2);
++            worldLayout->addWidget(new QLabel("Time of day"), 2, 0);
++            mTime = new QTimeEdit(QTime(9, 0));
++            mTime->setDisplayFormat("HH:mm");
++            worldLayout->addWidget(mTime, 2, 1);
++            auto* applyTime = mApplyTime = button("Set", "Set the time of day for everybody (the date is never synced)");
++            worldLayout->addWidget(applyTime, 2, 2);
++            QObject::connect(applyWeather, &QPushButton::clicked, this,
++                [this] { run("weather " + mWeather->currentData().toString()); });
++            QObject::connect(applyTime, &QPushButton::clicked, this, [this] {
++                const QTime t = mTime->time();
++                run(QString("time %1").arg(t.hour() + t.minute() / 60.0, 0, 'f', 3));
++            });
++            grid->addWidget(worldBox, 0, 1);
++
++            // ---- announcements
++            auto* announceBox = new QGroupBox("Announcement");
++            auto* announceLayout = new QHBoxLayout(announceBox);
++            mAnnounce = new QLineEdit;
++            mAnnounce->setPlaceholderText("A message for everybody");
++            auto* send = mSend = button("Send", "Show the message to everybody online");
++            announceLayout->addWidget(mAnnounce);
++            announceLayout->addWidget(send);
++            auto sendAnnouncement = [this] {
++                const QString text = mAnnounce->text().trimmed();
++                if (text.isEmpty())
++                    return;
++                mAnnounce->clear();
++                run("announce " + text);
++            };
++            QObject::connect(send, &QPushButton::clicked, this, sendAnnouncement);
++            QObject::connect(mAnnounce, &QLineEdit::returnPressed, this, sendAnnouncement);
++            grid->addWidget(announceBox, 1, 1);
++
++            // ---- bans
++            auto* bansBox = new QGroupBox("Banned names");
++            auto* bansLayout = new QVBoxLayout(bansBox);
++            mBans = new QListWidget;
++            mUnban = button("Unban", "Let the selected name join again");
++            bansLayout->addWidget(mBans);
++            bansLayout->addWidget(mUnban);
++            QObject::connect(mBans, &QListWidget::itemSelectionChanged, this, [this] { updateButtons(); });
++            QObject::connect(mUnban, &QPushButton::clicked, this, [this] {
++                if (auto* item = mBans->currentItem())
++                    run("unban " + item->text());
++            });
++            grid->addWidget(bansBox, 2, 1);
++
++            // ---- log and command line
++            auto* logBox = new QGroupBox("Log and commands");
++            auto* logLayout = new QVBoxLayout(logBox);
++            mLog = new QPlainTextEdit;
++            mLog->setReadOnly(true);
++            mLog->setMaximumBlockCount(5000);
++            mLog->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
++            logLayout->addWidget(mLog);
++            auto* commandRow = new QHBoxLayout;
++            mCommand = new QLineEdit;
++            mCommand->setPlaceholderText("Type a command, for example: players  or  help");
++            auto* runButton = mRun = button("Run", "Run the command");
++            auto* helpButton = button("Help", "List every command");
++            commandRow->addWidget(mCommand);
++            commandRow->addWidget(runButton);
++            commandRow->addWidget(helpButton);
++            logLayout->addLayout(commandRow);
++            auto runCommand = [this] {
++                const QString text = mCommand->text().trimmed();
++                if (text.isEmpty())
++                    return;
++                mCommand->clear();
++                run(text);
++            };
++            QObject::connect(runButton, &QPushButton::clicked, this, runCommand);
++            QObject::connect(mCommand, &QLineEdit::returnPressed, this, runCommand);
++            QObject::connect(helpButton, &QPushButton::clicked, this, [this] { run("help"); });
++            grid->addWidget(logBox, 3, 0, 1, 2);
++
++            grid->setColumnStretch(0, 3);
++            grid->setColumnStretch(1, 2);
++            grid->setRowStretch(0, 1);
++            grid->setRowStretch(1, 0);
++            grid->setRowStretch(2, 1);
++            grid->setRowStretch(3, 2);
++            setCentralWidget(central);
++
++            mStatus = new QLabel;
++            statusBar()->addPermanentWidget(mStatus);
++            updateButtons();
++        }
++
++        void fillPlayers()
++        {
++            const PlayerInfo* before = selected();
++            const std::uint32_t keep = before ? before->mId : 0;
++            const auto& players = mSnap.mPlayers;
++            mTable->setRowCount(static_cast<int>(players.size()));
++            int select = -1;
++            for (int row = 0; row < static_cast<int>(players.size()); ++row)
++            {
++                const PlayerInfo& p = players[row];
++                const QString ping = p.mAway || p.mBot ? "-" : p.mPing < 0 ? "..." : QString("%1 ms").arg(p.mPing);
++                const QString address = p.mBot ? "(in the server)" : QString::fromStdString(p.mAddress);
++                const QStringList cells = { QString::fromStdString(p.mName), ping, address,
++                    QString::fromStdString(p.mLocation), flagsOf(p) };
++                for (int col = 0; col < cells.size(); ++col)
++                {
++                    auto* item = new QTableWidgetItem(cells[col]);
++                    if (col == 0)
++                        item->setData(Qt::UserRole, p.mId);
++                    mTable->setItem(row, col, item);
++                }
++                if (p.mId == keep)
++                    select = row;
++            }
++            if (select >= 0)
++                mTable->selectRow(select);
++        }
++
++        void fillBans()
++        {
++            const QString keep = mBans->currentItem() ? mBans->currentItem()->text() : QString();
++            QStringList names;
++            for (const std::string& b : mSnap.mBans)
++                names << QString::fromStdString(b);
++            QStringList current;
++            for (int i = 0; i < mBans->count(); ++i)
++                current << mBans->item(i)->text();
++            if (names == current)
++                return;
++            mBans->clear();
++            mBans->addItems(names);
++            for (int i = 0; i < mBans->count(); ++i)
++                if (mBans->item(i)->text() == keep)
++                    mBans->setCurrentRow(i);
++        }
++
++        void fillWorld()
++        {
++            const int minutes = static_cast<int>(mSnap.mHour * 60) % (24 * 60);
++            mSky->setText(QString("Now: %1:%2, weather %3 (%4)")
++                              .arg(minutes / 60, 2, 10, QChar('0'))
++                              .arg(minutes % 60, 2, 10, QChar('0'))
++                              .arg(QString::fromStdString(mSnap.mWeather))
++                              .arg(mSnap.mWeatherFixed ? "fixed" : "changes by itself"));
++            if (!mWorldShown)
++            {
++                // start the controls where the server is; after that they are the operator's to change
++                mWorldShown = true;
++                mTime->setTime(QTime(minutes / 60, minutes % 60));
++                const int index = mWeather->findData(mSnap.mWeatherFixed ? QString::fromStdString(mSnap.mWeather) : "cycle");
++                if (index >= 0)
++                    mWeather->setCurrentIndex(index);
++            }
++        }
++
++        void updateButtons()
++        {
++            const PlayerInfo* p = selected();
++            mKick->setEnabled(p != nullptr);
++            mBan->setEnabled(p != nullptr && !p->mBot);
++            mMute->setEnabled(p != nullptr);
++            mMute->setText(p && p->mMuted ? "Unmute" : "Mute");
++            mCopy->setEnabled(p != nullptr && !p->mBot && !p->mAddress.empty());
++            mUnban->setEnabled(mBans->currentItem() != nullptr);
++        }
++
++        ServerCore& mCore;
++        Snapshot mSnap;
++        QElapsedTimer mUptime;
++        bool mWorldShown = false;
++        bool mAutoConfirm = false;
++        QTableWidget* mTable = nullptr;
++        QPushButton *mKick = nullptr, *mBan = nullptr, *mMute = nullptr, *mCopy = nullptr, *mUnban = nullptr;
++        QPushButton *mApplyWeather = nullptr, *mApplyTime = nullptr, *mSend = nullptr, *mRun = nullptr;
++        QLabel *mSky = nullptr, *mStatus = nullptr;
++        QComboBox* mWeather = nullptr;
++        QTimeEdit* mTime = nullptr;
++        QLineEdit *mAnnounce = nullptr, *mCommand = nullptr;
++        QListWidget* mBans = nullptr;
++        QPlainTextEdit* mLog = nullptr;
++    };
++}
++
++int runWindow(ServerCore& core, int argc, char** argv, std::atomic<bool>& stopFlag)
++{
++    QApplication app(argc, argv);
++    MainWindow window(core);
++    core.setLogSink([&window](const std::string& line) { window.appendLog(QString::fromStdString(line)); });
++    const std::string error = core.start();
++    if (!error.empty())
++    {
++        QMessageBox::critical(nullptr, "The server could not start", QString::fromStdString(error));
++        return 1;
++    }
++
++    QTimer tick;
++    tick.setInterval(20);
++    QObject::connect(&tick, &QTimer::timeout, &app, [&] {
++        if (!core.tick() || stopFlag)
++            app.quit();
++    });
++    tick.start();
++
++    QTimer refresh;
++    refresh.setInterval(1000);
++    QObject::connect(&refresh, &QTimer::timeout, &app, [&] { window.refresh(); });
++    refresh.start();
++
++    window.show();
++    window.refresh();
++
++    // For the tests: MP_SERVER_TEST_STEPS runs button presses one after the other (see MainWindow::testStep),
++    // MP_SERVER_SCREENSHOT=<file.png> then saves a picture of the window; either one ends with the program quitting.
++    const QByteArray steps = qgetenv("MP_SERVER_TEST_STEPS");
++    const QByteArray shot = qgetenv("MP_SERVER_SCREENSHOT");
++    QTimer script;
++    QStringList queue = QString::fromLocal8Bit(steps).split(';', Qt::SkipEmptyParts);
++    if (!queue.isEmpty() || !shot.isEmpty())
++    {
++        script.setInterval(500);
++        QObject::connect(&script, &QTimer::timeout, &app, [&] {
++            window.refresh();
++            if (!queue.isEmpty())
++            {
++                window.testStep(queue.takeFirst().trimmed());
++                return;
++            }
++            if (!shot.isEmpty())
++                window.grab().save(QString::fromLocal8Bit(shot));
++            app.quit();
++        });
++        QTimer::singleShot(2500, &script, [&] { script.start(); }); // (give the test clients time to join first)
++    }
++    const int code = app.exec();
++    core.setLogSink({});
++    core.shutdown();
++    return code;
++}
+diff --git a/apps/mpserver/gui.hpp b/apps/mpserver/gui.hpp
+new file mode 100644
+index 0000000..44a8c63
+--- /dev/null
++++ b/apps/mpserver/gui.hpp
+@@ -0,0 +1,12 @@
++#ifndef MPSERVER_GUI_H
++#define MPSERVER_GUI_H
++
++#include <atomic>
++
++#include "servercore.hpp"
++
++// Opens the server window, starts the server and runs until the window is closed, the server is told to stop (the quit
++// command) or stopFlag is set (Ctrl+C). Returns the exit code.
++int runWindow(MpServer::ServerCore& core, int argc, char** argv, std::atomic<bool>& stopFlag);
++
++#endif
+diff --git a/apps/mpserver/main.cpp b/apps/mpserver/main.cpp
+new file mode 100644
+index 0000000..f9b3af3
+--- /dev/null
++++ b/apps/mpserver/main.cpp
+@@ -0,0 +1,284 @@
++// openmw-mp-server: a standalone multiplayer server. By default it opens a window with the players, the sky, buttons
++// for kick/ban/mute and a log; with --cli-only (or where there is no display) it runs in the terminal instead.
++#include <atomic>
++#include <cctype>
++#include <chrono>
++#include <csignal>
++#include <cstdio>
++#include <cstdlib>
++#include <deque>
++#include <filesystem>
++#include <iostream>
++#include <mutex>
++#include <string>
++#include <thread>
++#include <vector>
++
++#include "servercore.hpp"
++#ifdef MPSERVER_WITH_GUI
++#include "gui.hpp"
++#endif
++
++namespace
++{
++    using MpServer::Options;
++
++    std::atomic<bool> gStop{ false };
++    void onSignal(int) { gStop = true; }
++
++    bool gCliOnly = false;
++
++    std::filesystem::path executableDir(const char* argv0)
++    {
++        std::error_code ec;
++        std::filesystem::path exe = std::filesystem::read_symlink("/proc/self/exe", ec);
++        if (ec || exe.empty())
++            exe = std::filesystem::absolute(argv0, ec);
++        return exe.parent_path();
++    }
++
++    bool isModDir(const std::filesystem::path& dir)
++    {
++        std::error_code ec;
++        return std::filesystem::exists(dir / "scripts" / "mp" / "relay.lua", ec);
++    }
++
++    // Without --mod: the mod's directory (the one holding scripts/mp) next to the program, in the source tree above it,
++    // or below the directory the program was started from.
++    std::filesystem::path findMod(const std::filesystem::path& exeDir, std::vector<std::filesystem::path>& tried)
++    {
++        const std::filesystem::path cwd = std::filesystem::current_path();
++        const std::filesystem::path candidates[] = {
++            cwd / "multiplayer" / "mod", cwd / "mod", exeDir / "multiplayer" / "mod", exeDir / "mod",
++            exeDir / ".." / "multiplayer" / "mod", exeDir / ".." / ".." / "multiplayer" / "mod",
++            exeDir / ".." / "share" / "openmw-mp" / "mod",
++        };
++        for (const auto& c : candidates)
++        {
++            tried.push_back(c.lexically_normal());
++            if (isModDir(c))
++                return c.lexically_normal();
++        }
++        return {};
++    }
++
++    void usage()
++    {
++        std::puts(
++            "openmw-mp-server: a dedicated server for the OpenMW multiplayer mod\n\n"
++            "It opens a window (players, sky, buttons for kick/ban/mute, a log and a command line). Use --cli-only for a\n"
++            "plain terminal instead; without a display it does that by itself.\n\n"
++            "  --cli-only               no window: run in the terminal\n"
++            "  --mod <dir>              the mod's directory (the one containing scripts/mp); by default it is looked for\n"
++            "                           next to the program and in the source tree above it\n"
++            "  --script <file>          the server script; default <mod>/../server/server.lua\n"
++            "  --port <n>               TCP port to listen on (default 25565)\n"
++            "  --password <text>        password to join (or set MP_PASSWORD)\n"
++            "  --admin-password <text>  password for /login (or set MP_ADMIN_PASSWORD)\n"
++            "  --max-players <n>        most players at once (default 64, at most 127)\n"
++            "  --motd <text>            message shown to players who join\n"
++            "  --weather <id|cycle>     a fixed weather id, or cycle (default) to let it change by itself\n"
++            "  --weather-minutes <n>    about how often the weather changes (default 15)\n"
++            "  --time-scale <n>         game seconds per real second (default 30)\n"
++            "  --start-hour <h>         time of day when the server starts (default 9)\n\n"
++            "\n"
++            "Server console commands (type them while the server runs; help lists them again):\n"
++            "  players | who              list everybody online: id, name, flags, latency, address and location\n"
++            "  kick <name>                disconnect a player\n"
++            "  ban <name>                 disconnect a player and refuse that name until the server restarts\n"
++            "  unban <name>               let a banned name join again\n"
++            "  mute <name> | unmute <name>   stop or allow a player's chat\n"
++            "  announce <text> | say <text>  send a message to everybody\n"
++            "  weather                    show the current weather\n"
++            "  weather <id>               fix the weather: clear, cloudy, overcast, foggy, rain, thunder, snow, ash, blight, blizzard\n"
++            "  weather cycle              let the weather change by itself again\n"
++            "  time <hour>                set the time of day, 0 to 24 (for example 14.5); the date is never synced\n"
++            "  help | ?                   this list\n"
++            "  quit | exit | stop         stop the server (Ctrl+C does the same)\n\n"
++            "In the game, admins (after /login <admin password>) can use: /who /kick /ban /unban /mute /unmute\n"
++            "/announce /weather /time. Everyone can use /players /me /w /r /g /p /goto /accept /decline /leave /pkick.");
++    }
++
++    bool parseArgs(int argc, char** argv, Options& o)
++    {
++        if (const char* v = std::getenv("MP_PASSWORD"))
++            o.mPassword = v;
++        if (const char* v = std::getenv("MP_ADMIN_PASSWORD"))
++            o.mAdminPassword = v;
++        for (int i = 1; i < argc; ++i)
++        {
++            const std::string a = argv[i];
++            auto next = [&]() -> const char* {
++                if (i + 1 >= argc)
++                {
++                    std::fprintf(stderr, "%s needs a value\n", a.c_str());
++                    return nullptr;
++                }
++                return argv[++i];
++            };
++            if (a == "--cli-only" || a == "-cli-only")
++            {
++                gCliOnly = true;
++                continue;
++            }
++            const char* v = nullptr;
++            if (a == "--help" || a == "-h")
++                return usage(), false;
++            if (!(v = next()))
++                return false;
++            if (a == "--mod") o.mMod = v;
++            else if (a == "--script") o.mScript = v;
++            else if (a == "--port") o.mPort = std::atoi(v);
++            else if (a == "--password") o.mPassword = v;
++            else if (a == "--admin-password") o.mAdminPassword = v;
++            else if (a == "--max-players") o.mMaxPlayers = std::atoi(v);
++            else if (a == "--motd") o.mMotd = v;
++            else if (a == "--weather") o.mWeather = v;
++            else if (a == "--weather-minutes") o.mWeatherMinutes = std::atof(v);
++            else if (a == "--time-scale") o.mTimeScale = std::atof(v);
++            else if (a == "--start-hour") o.mStartHour = std::atof(v);
++            else
++            {
++                std::fprintf(stderr, "unknown option %s (try --help)\n", a.c_str());
++                return false;
++            }
++        }
++        if (o.mPort < 1 || o.mPort > 65535)
++        {
++            std::fprintf(stderr, "the port must be 1-65535\n");
++            return false;
++        }
++        return true;
++    }
++
++
++    // Whether a window can be opened here: always on Windows and macOS, on Linux only with a display (or when Qt was
++    // told which platform to use, e.g. offscreen for tests).
++    bool haveDisplay()
++    {
++#if defined(_WIN32) || defined(__APPLE__)
++        return true;
++#else
++        auto set = [](const char* name) {
++            const char* v = std::getenv(name);
++            return v != nullptr && *v != '\0';
++        };
++        return set("DISPLAY") || set("WAYLAND_DISPLAY") || set("QT_QPA_PLATFORM");
++#endif
++    }
++
++    // The terminal: lines typed by the operator are the console.
++    int runTerminal(MpServer::ServerCore& core)
++    {
++        std::mutex mutex;
++        std::deque<std::string> lines;
++        std::thread([&] {
++            std::string line;
++            while (std::getline(std::cin, line))
++            {
++                const std::lock_guard lock(mutex);
++                lines.push_back(line);
++            }
++        }).detach();
++
++        bool running = true;
++        while (!gStop && running)
++        {
++            running = core.tick();
++            std::vector<std::string> typed;
++            {
++                const std::lock_guard lock(mutex);
++                typed.assign(lines.begin(), lines.end());
++                lines.clear();
++            }
++            for (const std::string& line : typed)
++            {
++                const std::string answer = core.console(line);
++                if (!answer.empty())
++                    std::printf("%s\n", answer.c_str());
++            }
++            std::this_thread::sleep_for(std::chrono::milliseconds(20));
++        }
++        std::puts("[server] stopping");
++        core.shutdown();
++        std::fflush(stdout);
++        // The console thread is blocked reading stdin and holds its lock; the normal exit path would wait for it forever.
++        std::_Exit(0);
++    }
++}
++
++int main(int argc, char** argv)
++{
++    Options options;
++    if (!parseArgs(argc, argv, options))
++        return 1;
++    {
++        const std::filesystem::path exeDir = executableDir(argv[0]);
++        if (options.mMod.empty())
++        {
++            std::vector<std::filesystem::path> tried;
++            options.mMod = findMod(exeDir, tried);
++            if (options.mMod.empty())
++            {
++                std::fprintf(stderr, "[server] cannot find the multiplayer mod (a directory containing scripts/mp/relay.lua).\n"
++                                     "         Looked in:\n");
++                for (const auto& t : tried)
++                    std::fprintf(stderr, "           %s\n", t.string().c_str());
++                std::fprintf(stderr, "         Pass it with --mod <dir>, e.g. --mod /path/to/clockwork-alpha/multiplayer/mod\n");
++                return 1;
++            }
++            std::printf("[server] using the mod in %s\n", options.mMod.string().c_str());
++        }
++        else if (!isModDir(options.mMod))
++        {
++            std::fprintf(stderr, "[server] %s is not the multiplayer mod (scripts/mp/relay.lua is missing)\n",
++                options.mMod.string().c_str());
++            return 1;
++        }
++        if (options.mScript.empty())
++            options.mScript = options.mMod / ".." / "server" / "server.lua";
++        std::error_code ec;
++        if (!std::filesystem::exists(options.mScript, ec))
++        {
++            const std::filesystem::path beside = exeDir / "server.lua";
++            if (std::filesystem::exists(beside, ec))
++                options.mScript = beside;
++            else
++            {
++                std::fprintf(stderr, "[server] cannot find the server script %s (pass --script <file>)\n",
++                    options.mScript.lexically_normal().string().c_str());
++                return 1;
++            }
++        }
++    }
++
++    std::setvbuf(stdout, nullptr, _IOLBF, 0);
++    std::signal(SIGINT, onSignal);
++    std::signal(SIGTERM, onSignal);
++
++    bool window = false;
++#ifdef MPSERVER_WITH_GUI
++    window = !gCliOnly && haveDisplay();
++    if (!gCliOnly && !window)
++        std::puts("[server] no display found: running in the terminal (use --cli-only to skip this check)");
++#else
++    if (!gCliOnly)
++        std::puts("[server] this build has no window: running in the terminal");
++#endif
++
++    MpServer::ServerCore core(options);
++    // In the window the log goes to its log pane; the terminal gets the lines through stdout either way.
++    const std::string error = window ? std::string() : core.start();
++    if (!error.empty())
++    {
++        std::fprintf(stderr, "[server] %s\n", error.c_str());
++        return 1;
++    }
++    if (!window)
++        return runTerminal(core);
++#ifdef MPSERVER_WITH_GUI
++    return runWindow(core, argc, argv, gStop);
++#else
++    return 0;
++#endif
++}
+diff --git a/apps/mpserver/servercore.cpp b/apps/mpserver/servercore.cpp
+new file mode 100644
+index 0000000..7bec73e
+--- /dev/null
++++ b/apps/mpserver/servercore.cpp
+@@ -0,0 +1,794 @@
++// The server without a user interface: embeds the Luau VM and the engine's own sockets (components/net), supplies the
++// three engine modules the relay uses (openmw.net sockets, openmw.core a clock, openmw.markup a JSON decoder) and
++// runs multiplayer/server/server.lua, which runs the relay of the mod unchanged.
++#include "servercore.hpp"
++
++// engine modules the relay uses: openmw.net (sockets), openmw.core (a clock) and openmw.markup (a JSON decoder).
++#include <atomic>
++#include <cctype>
++#include <chrono>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <deque>
++#include <filesystem>
++#include <fstream>
++#include <iostream>
++#include <memory>
++#include <mutex>
++#include <sstream>
++#include <stdexcept>
++#include <string>
++#include <thread>
++#include <vector>
++
++#include <lua.h>
++#include <luacode.h>
++#include <lualib.h>
++
++#include <components/net/sockets.hpp>
++
++namespace
++{
++    struct Host
++    {
++        Net::Sockets mSockets;
++        std::filesystem::path mModDir;
++        std::chrono::steady_clock::time_point mStart = std::chrono::steady_clock::now();
++        std::function<void(const std::string&)> mSink;
++    };
++    Host* gHost = nullptr;
++
++    constexpr const char* sLoadedKey = "mp_loaded";
++    constexpr std::size_t sMaxJsonDepth = 64;
++
++    ///////////////////////////////////////////////////////////////// JSON -> Lua
++
++    class JsonReader
++    {
++    public:
++        JsonReader(lua_State* l, std::string_view text)
++            : mL(l)
++            , mText(text)
++        {
++        }
++
++        // Pushes the decoded value. Throws std::runtime_error on bad input.
++        void parse()
++        {
++            skipSpace();
++            value(0);
++            skipSpace();
++            if (mPos != mText.size())
++                fail("unexpected data after the value");
++        }
++
++    private:
++        [[noreturn]] void fail(const char* what) const
++        {
++            throw std::runtime_error(std::string("bad JSON at ") + std::to_string(mPos) + ": " + what);
++        }
++        void skipSpace()
++        {
++            while (mPos < mText.size() && (mText[mPos] == ' ' || mText[mPos] == '\t' || mText[mPos] == '\n' || mText[mPos] == '\r'))
++                ++mPos;
++        }
++        bool consume(std::string_view word)
++        {
++            if (mText.substr(mPos, word.size()) != word)
++                return false;
++            mPos += word.size();
++            return true;
++        }
++        void value(std::size_t depth)
++        {
++            if (depth > sMaxJsonDepth)
++                fail("nested too deeply");
++            if (mPos >= mText.size())
++                fail("unexpected end");
++            if (!lua_checkstack(mL, 4))
++                fail("too deep for the stack");
++            const char c = mText[mPos];
++            if (c == '{')
++                object(depth);
++            else if (c == '[')
++                array(depth);
++            else if (c == '"')
++            {
++                const std::string s = string();
++                lua_pushlstring(mL, s.data(), s.size());
++            }
++            else if (consume("true"))
++                lua_pushboolean(mL, 1);
++            else if (consume("false"))
++                lua_pushboolean(mL, 0);
++            else if (consume("null"))
++                lua_pushnil(mL);
++            else
++                number();
++        }
++        void object(std::size_t depth)
++        {
++            ++mPos;
++            lua_createtable(mL, 0, 4);
++            skipSpace();
++            if (mPos < mText.size() && mText[mPos] == '}')
++            {
++                ++mPos;
++                return;
++            }
++            for (;;)
++            {
++                skipSpace();
++                if (mPos >= mText.size() || mText[mPos] != '"')
++                    fail("expected a key");
++                const std::string key = string();
++                skipSpace();
++                if (mPos >= mText.size() || mText[mPos] != ':')
++                    fail("expected ':'");
++                ++mPos;
++                skipSpace();
++                value(depth + 1);
++                lua_setfield(mL, -2, key.c_str()); // (a nil value leaves the key out)
++                skipSpace();
++                if (mPos >= mText.size())
++                    fail("unexpected end");
++                if (mText[mPos] == ',')
++                {
++                    ++mPos;
++                    continue;
++                }
++                if (mText[mPos] == '}')
++                {
++                    ++mPos;
++                    return;
++                }
++                fail("expected ',' or '}'");
++            }
++        }
++        void array(std::size_t depth)
++        {
++            ++mPos;
++            lua_createtable(mL, 4, 0);
++            skipSpace();
++            if (mPos < mText.size() && mText[mPos] == ']')
++            {
++                ++mPos;
++                return;
++            }
++            int index = 1;
++            for (;;)
++            {
++                skipSpace();
++                value(depth + 1);
++                lua_rawseti(mL, -2, index++);
++                skipSpace();
++                if (mPos >= mText.size())
++                    fail("unexpected end");
++                if (mText[mPos] == ',')
++                {
++                    ++mPos;
++                    continue;
++                }
++                if (mText[mPos] == ']')
++                {
++                    ++mPos;
++                    return;
++                }
++                fail("expected ',' or ']'");
++            }
++        }
++        static void appendUtf8(std::string& out, unsigned code)
++        {
++            if (code < 0x80)
++                out.push_back(static_cast<char>(code));
++            else if (code < 0x800)
++            {
++                out.push_back(static_cast<char>(0xC0 | (code >> 6)));
++                out.push_back(static_cast<char>(0x80 | (code & 0x3F)));
++            }
++            else if (code < 0x10000)
++            {
++                out.push_back(static_cast<char>(0xE0 | (code >> 12)));
++                out.push_back(static_cast<char>(0x80 | ((code >> 6) & 0x3F)));
++                out.push_back(static_cast<char>(0x80 | (code & 0x3F)));
++            }
++            else
++            {
++                out.push_back(static_cast<char>(0xF0 | (code >> 18)));
++                out.push_back(static_cast<char>(0x80 | ((code >> 12) & 0x3F)));
++                out.push_back(static_cast<char>(0x80 | ((code >> 6) & 0x3F)));
++                out.push_back(static_cast<char>(0x80 | (code & 0x3F)));
++            }
++        }
++        unsigned hex4()
++        {
++            if (mPos + 4 > mText.size())
++                fail("bad \\u escape");
++            unsigned code = 0;
++            for (int i = 0; i < 4; ++i)
++            {
++                const char h = mText[mPos++];
++                code <<= 4;
++                if (h >= '0' && h <= '9')
++                    code |= static_cast<unsigned>(h - '0');
++                else if (h >= 'a' && h <= 'f')
++                    code |= static_cast<unsigned>(h - 'a' + 10);
++                else if (h >= 'A' && h <= 'F')
++                    code |= static_cast<unsigned>(h - 'A' + 10);
++                else
++                    fail("bad \\u escape");
++            }
++            return code;
++        }
++        std::string string()
++        {
++            ++mPos; // opening quote
++            std::string out;
++            for (;;)
++            {
++                if (mPos >= mText.size())
++                    fail("unterminated string");
++                const char c = mText[mPos++];
++                if (c == '"')
++                    return out;
++                if (c != '\\')
++                {
++                    out.push_back(c);
++                    continue;
++                }
++                if (mPos >= mText.size())
++                    fail("unterminated string");
++                const char e = mText[mPos++];
++                switch (e)
++                {
++                    case '"': out.push_back('"'); break;
++                    case '\\': out.push_back('\\'); break;
++                    case '/': out.push_back('/'); break;
++                    case 'b': out.push_back('\b'); break;
++                    case 'f': out.push_back('\f'); break;
++                    case 'n': out.push_back('\n'); break;
++                    case 'r': out.push_back('\r'); break;
++                    case 't': out.push_back('\t'); break;
++                    case 'u':
++                    {
++                        unsigned code = hex4();
++                        if (code >= 0xD800 && code < 0xDC00 && consume("\\u"))
++                        {
++                            const unsigned low = hex4();
++                            if (low >= 0xDC00 && low < 0xE000)
++                                code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
++                            else
++                                code = 0xFFFD;
++                        }
++                        else if (code >= 0xD800 && code < 0xE000)
++                            code = 0xFFFD;
++                        appendUtf8(out, code);
++                        break;
++                    }
++                    default: fail("bad escape");
++                }
++            }
++        }
++        void number()
++        {
++            const std::size_t start = mPos;
++            while (mPos < mText.size() && std::strchr("+-0123456789.eE", mText[mPos]) != nullptr && mText[mPos] != '\0')
++                ++mPos;
++            if (mPos == start)
++                fail("unexpected character");
++            const std::string token(mText.substr(start, mPos - start));
++            char* end = nullptr;
++            const double number = std::strtod(token.c_str(), &end);
++            if (end == nullptr || *end != '\0')
++                fail("bad number");
++            lua_pushnumber(mL, number);
++        }
++
++        lua_State* mL;
++        std::string_view mText;
++        std::size_t mPos = 0;
++    };
++
++    ///////////////////////////////////////////////////////////////// openmw.* modules
++
++    std::uint32_t socketId(lua_State* l, int index)
++    {
++        const double n = luaL_checknumber(l, index);
++        if (n < 0 || n > 4294967295.0)
++            return 0;
++        return static_cast<std::uint32_t>(n);
++    }
++
++    int netConnect(lua_State* l)
++    {
++        std::size_t len = 0;
++        const char* host = luaL_checklstring(l, 1, &len);
++        const double port = luaL_checknumber(l, 2);
++        if (port < 1 || port > 65535)
++            luaL_error(l, "invalid port");
++        const std::uint32_t id = gHost->mSockets.connect(std::string(host, len), static_cast<std::uint16_t>(port));
++        if (id == 0)
++            lua_pushnil(l);
++        else
++            lua_pushnumber(l, id);
++        return 1;
++    }
++
++    int netListen(lua_State* l)
++    {
++        const double port = luaL_checknumber(l, 1);
++        if (port < 1 || port > 65535)
++            luaL_error(l, "invalid port");
++        std::string error;
++        const std::uint32_t id = gHost->mSockets.listen(static_cast<std::uint16_t>(port), error);
++        if (id == 0)
++        {
++            lua_pushnil(l);
++            lua_pushlstring(l, error.data(), error.size());
++            return 2;
++        }
++        lua_pushnumber(l, id);
++        return 1;
++    }
++
++    int netSend(lua_State* l)
++    {
++        const std::uint32_t id = socketId(l, 1);
++        std::size_t len = 0;
++        const char* data = luaL_checklstring(l, 2, &len);
++        const bool raw = lua_toboolean(l, 3) != 0;
++        lua_pushboolean(l, gHost->mSockets.send(id, std::string_view(data, len), raw));
++        return 1;
++    }
++
++    int netClose(lua_State* l)
++    {
++        gHost->mSockets.close(socketId(l, 1));
++        return 0;
++    }
++
++    int pushAddress(lua_State* l, const std::string& address)
++    {
++        if (address.empty())
++            lua_pushnil(l);
++        else
++            lua_pushlstring(l, address.data(), address.size());
++        return 1;
++    }
++
++    int netLocalAddress(lua_State* l) { return pushAddress(l, gHost->mSockets.localAddress(socketId(l, 1))); }
++    int netRemoteAddress(lua_State* l) { return pushAddress(l, gHost->mSockets.remoteAddress(socketId(l, 1))); }
++
++    int coreGetRealTime(lua_State* l)
++    {
++        lua_pushnumber(l, std::chrono::duration<double>(std::chrono::steady_clock::now() - gHost->mStart).count());
++        return 1;
++    }
++
++    int markupDecode(lua_State* l)
++    {
++        std::size_t len = 0;
++        const char* text = luaL_checklstring(l, 1, &len);
++        std::string error;
++        const int top = lua_gettop(l);
++        try
++        {
++            JsonReader(l, std::string_view(text, len)).parse();
++        }
++        catch (const std::exception& e)
++        {
++            lua_settop(l, top);
++            error = e.what();
++        }
++        if (!error.empty())
++            luaL_error(l, "%s", error.c_str());
++        return 1;
++    }
++
++    void registerFunction(lua_State* l, const char* name, lua_CFunction f)
++    {
++        lua_pushcfunction(l, f, name);
++        lua_setfield(l, -2, name);
++    }
++
++    bool buildBuiltin(lua_State* l, const std::string& name)
++    {
++        if (name == "openmw.net")
++        {
++            lua_createtable(l, 0, 8);
++            registerFunction(l, "connect", netConnect);
++            registerFunction(l, "listen", netListen);
++            registerFunction(l, "send", netSend);
++            registerFunction(l, "close", netClose);
++            registerFunction(l, "localAddress", netLocalAddress);
++            registerFunction(l, "remoteAddress", netRemoteAddress);
++            return true;
++        }
++        if (name == "openmw.core")
++        {
++            lua_createtable(l, 0, 2);
++            registerFunction(l, "getRealTime", coreGetRealTime);
++            return true;
++        }
++        if (name == "openmw.markup")
++        {
++            lua_createtable(l, 0, 2);
++            registerFunction(l, "decodeYaml", markupDecode);
++            return true;
++        }
++        return false;
++    }
++
++    ///////////////////////////////////////////////////////////////// running Luau files
++
++    bool readFile(const std::filesystem::path& path, std::string& out)
++    {
++        std::ifstream in(path, std::ios::binary);
++        if (!in)
++            return false;
++        std::ostringstream ss;
++        ss << in.rdbuf();
++        out = ss.str();
++        return true;
++    }
++
++    // Compiles a file and leaves the resulting function on the stack. Returns an error message, or an empty string.
++    std::string loadFile(lua_State* l, const std::filesystem::path& path)
++    {
++        std::string source;
++        if (!readFile(path, source))
++            return "cannot read " + path.string();
++        lua_CompileOptions options = {};
++        options.optimizationLevel = 1;
++        options.debugLevel = 1;
++        std::size_t size = 0;
++        char* bytecode = luau_compile(source.data(), source.size(), &options, &size);
++        const std::string chunk = "=" + path.filename().string();
++        const int result = luau_load(l, chunk.c_str(), bytecode, size, 0);
++        std::free(bytecode);
++        if (result != 0)
++        {
++            std::string message = lua_tostring(l, -1) ? lua_tostring(l, -1) : "load error";
++            lua_pop(l, 1);
++            return message;
++        }
++        return {};
++    }
++
++    bool safeModuleName(const std::string& name)
++    {
++        if (name.empty() || name.size() > 100 || name.find("..") != std::string::npos)
++            return false;
++        for (const char c : name)
++        {
++            if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '/'))
++                return false;
++        }
++        return true;
++    }
++
++    // require(name): the three openmw.* modules are built in, scripts/mp/* come from the mod directory.
++    int luaRequire(lua_State* l)
++    {
++        const std::string name = luaL_checkstring(l, 1);
++        lua_getfield(l, LUA_REGISTRYINDEX, sLoadedKey);
++        lua_getfield(l, -1, name.c_str());
++        if (!lua_isnil(l, -1))
++            return 1;
++        lua_pop(l, 1);
++
++        std::string error;
++        if (!buildBuiltin(l, name))
++        {
++            if (name.rfind("scripts/mp/", 0) != 0 || !safeModuleName(name))
++                luaL_error(l, "module '%s' is not available in the server", name.c_str());
++            error = loadFile(l, gHost->mModDir / (name + ".lua"));
++            if (error.empty() && lua_pcall(l, 0, 1, 0) != 0)
++            {
++                error = lua_tostring(l, -1) ? lua_tostring(l, -1) : "error";
++                lua_pop(l, 1);
++            }
++            if (!error.empty())
++                luaL_error(l, "module '%s': %s", name.c_str(), error.c_str());
++            if (lua_isnil(l, -1))
++            {
++                lua_pop(l, 1);
++                lua_pushboolean(l, 1);
++            }
++        }
++        lua_pushvalue(l, -1);
++        lua_setfield(l, 2, name.c_str()); // loaded[name] = module (the table is at index 2)
++        return 1;
++    }
++
++    void setField(lua_State* l, const char* key, const std::string& value)
++    {
++        lua_pushlstring(l, value.data(), value.size());
++        lua_setfield(l, -2, key);
++    }
++    void setField(lua_State* l, const char* key, double value)
++    {
++        lua_pushnumber(l, value);
++        lua_setfield(l, -2, key);
++    }
++
++    // print(...): to stdout and to whoever listens (the window's log).
++    int luaPrint(lua_State* l)
++    {
++        const int n = lua_gettop(l);
++        std::string line;
++        for (int i = 1; i <= n; ++i)
++        {
++            std::size_t len = 0;
++            const char* s = luaL_tolstring(l, i, &len);
++            if (i > 1)
++                line.push_back('\t');
++            line.append(s, len);
++            lua_pop(l, 1);
++        }
++        std::printf("%s\n", line.c_str());
++        std::fflush(stdout);
++        if (gHost && gHost->mSink)
++            gHost->mSink(line);
++        return 0;
++    }
++
++    const char* eventName(Net::SocketEvent::Type type)
++    {
++        switch (type)
++        {
++            case Net::SocketEvent::Type::Connected: return "connected";
++            case Net::SocketEvent::Type::Accepted: return "accepted";
++            case Net::SocketEvent::Type::Line: return "line";
++            case Net::SocketEvent::Type::Closed: return "closed";
++        }
++        return "";
++    }
++
++    std::string getString(lua_State* l, const char* key)
++    {
++        lua_getfield(l, -1, key);
++        std::string out;
++        if (lua_isstring(l, -1))
++        {
++            std::size_t len = 0;
++            const char* s = lua_tolstring(l, -1, &len);
++            out.assign(s, len);
++        }
++        lua_pop(l, 1);
++        return out;
++    }
++    double getNumber(lua_State* l, const char* key, double fallback)
++    {
++        lua_getfield(l, -1, key);
++        const double out = lua_isnumber(l, -1) ? lua_tonumber(l, -1) : fallback;
++        lua_pop(l, 1);
++        return out;
++    }
++    bool getBool(lua_State* l, const char* key)
++    {
++        lua_getfield(l, -1, key);
++        const bool out = lua_toboolean(l, -1) != 0;
++        lua_pop(l, 1);
++        return out;
++    }
++}
++
++namespace MpServer
++{
++    struct ServerCore::Impl
++    {
++        Options mOptions;
++        Host mHost;
++        std::unique_ptr<lua_State, decltype(&lua_close)> mState{ nullptr, &lua_close };
++        std::chrono::steady_clock::time_point mLast = std::chrono::steady_clock::now();
++        bool mStop = false;
++
++        // Calls a function of the table the server script returned. The arguments are on the stack; the function is
++        // inserted below them. Errors are reported, never fatal.
++        bool call(const char* name, int nargs, int nresults)
++        {
++            lua_State* l = mState.get();
++            lua_getfield(l, LUA_REGISTRYINDEX, "mp_script");
++            lua_getfield(l, -1, name);
++            lua_remove(l, -2);
++            lua_insert(l, -(nargs + 1));
++            if (lua_pcall(l, nargs, nresults, 0) != 0)
++            {
++                std::fprintf(stderr, "[server] error in %s: %s\n", name, lua_tostring(l, -1) ? lua_tostring(l, -1) : "?");
++                lua_pop(l, 1);
++                return false;
++            }
++            return true;
++        }
++    };
++
++    ServerCore::ServerCore(const Options& options)
++        : mImpl(std::make_unique<Impl>())
++    {
++        mImpl->mOptions = options;
++        mImpl->mHost.mModDir = options.mMod;
++        gHost = &mImpl->mHost;
++    }
++
++    ServerCore::~ServerCore()
++    {
++        shutdown();
++        if (gHost == &mImpl->mHost)
++            gHost = nullptr;
++    }
++
++    const Options& ServerCore::options() const
++    {
++        return mImpl->mOptions;
++    }
++
++    void ServerCore::setLogSink(std::function<void(const std::string&)> sink)
++    {
++        mImpl->mHost.mSink = std::move(sink);
++    }
++
++    std::string ServerCore::start()
++    {
++        const Options& o = mImpl->mOptions;
++        mImpl->mState.reset(luaL_newstate());
++        lua_State* l = mImpl->mState.get();
++        luaL_openlibs(l);
++
++        lua_newtable(l);
++        lua_setfield(l, LUA_REGISTRYINDEX, sLoadedKey);
++        lua_pushcfunction(l, luaRequire, "require");
++        lua_setglobal(l, "require");
++        lua_pushcfunction(l, luaPrint, "print");
++        lua_setglobal(l, "print");
++
++        lua_createtable(l, 0, 12);
++        setField(l, "port", o.mPort);
++        setField(l, "password", o.mPassword);
++        setField(l, "adminPassword", o.mAdminPassword);
++        setField(l, "maxPlayers", o.mMaxPlayers);
++        setField(l, "motd", o.mMotd);
++        setField(l, "weather", o.mWeather);
++        setField(l, "weatherMinutes", o.mWeatherMinutes);
++        setField(l, "timeScale", o.mTimeScale);
++        setField(l, "startHour", o.mStartHour);
++        lua_setglobal(l, "OPTIONS");
++
++        std::string error = loadFile(l, o.mScript);
++        if (error.empty() && lua_pcall(l, 0, 1, 0) != 0)
++        {
++            error = lua_tostring(l, -1) ? lua_tostring(l, -1) : "error";
++            lua_pop(l, 1);
++        }
++        if (!error.empty())
++            return error;
++        if (!lua_istable(l, -1))
++            return o.mScript.string() + " must return a table with onEvent, update, console and snapshot";
++        lua_setfield(l, LUA_REGISTRYINDEX, "mp_script");
++        mImpl->mLast = std::chrono::steady_clock::now();
++        return {};
++    }
++
++    bool ServerCore::tick()
++    {
++        lua_State* l = mImpl->mState.get();
++        if (!l || mImpl->mStop)
++            return false;
++        for (const Net::SocketEvent& e : mImpl->mHost.mSockets.poll())
++        {
++            lua_pushstring(l, eventName(e.mType));
++            lua_pushnumber(l, e.mId);
++            lua_pushlstring(l, e.mData.data(), e.mData.size());
++            lua_pushnumber(l, e.mListener);
++            mImpl->call("onEvent", 4, 0);
++        }
++        const auto now = std::chrono::steady_clock::now();
++        const double dt = std::chrono::duration<double>(now - mImpl->mLast).count();
++        mImpl->mLast = now;
++        lua_pushnumber(l, dt);
++        mImpl->call("update", 1, 0);
++        return !mImpl->mStop;
++    }
++
++    std::string ServerCore::console(const std::string& line)
++    {
++        lua_State* l = mImpl->mState.get();
++        if (!l)
++            return {};
++        const std::size_t first = line.find_first_not_of(" \t");
++        const std::string trimmed = first == std::string::npos ? std::string() : line.substr(first);
++        if (trimmed == "quit" || trimmed == "exit" || trimmed == "stop")
++        {
++            mImpl->mStop = true;
++            return {};
++        }
++        lua_pushlstring(l, line.data(), line.size());
++        std::string answer;
++        if (mImpl->call("console", 1, 1))
++        {
++            if (lua_isstring(l, -1))
++                answer = lua_tostring(l, -1);
++            lua_pop(l, 1);
++        }
++        return answer;
++    }
++
++    Snapshot ServerCore::snapshot()
++    {
++        Snapshot out;
++        lua_State* l = mImpl->mState.get();
++        if (!l)
++            return out;
++        if (!mImpl->call("snapshot", 0, 1))
++            return out;
++        if (lua_istable(l, -1))
++        {
++            out.mValid = true;
++            out.mMaxPlayers = static_cast<int>(getNumber(l, "maxPlayers", 0));
++            out.mPasswordProtected = getBool(l, "passworded");
++            out.mHour = getNumber(l, "hour", 0);
++            out.mWeather = getString(l, "weather");
++            out.mWeatherFixed = getBool(l, "weatherFixed");
++            lua_getfield(l, -1, "players");
++            if (lua_istable(l, -1))
++            {
++                for (int i = 1;; ++i)
++                {
++                    lua_rawgeti(l, -1, i);
++                    if (!lua_istable(l, -1))
++                    {
++                        lua_pop(l, 1);
++                        break;
++                    }
++                    PlayerInfo p;
++                    p.mId = static_cast<std::uint32_t>(getNumber(l, "id", 0));
++                    p.mName = getString(l, "name");
++                    p.mAddress = getString(l, "ip");
++                    p.mLocation = getString(l, "location");
++                    p.mAdmin = getBool(l, "admin");
++                    p.mMuted = getBool(l, "muted");
++                    p.mAway = getBool(l, "away");
++                    p.mHost = getBool(l, "host");
++                    p.mBot = getBool(l, "bot");
++                    p.mPing = static_cast<int>(getNumber(l, "ping", -1));
++                    out.mPlayers.push_back(std::move(p));
++                    lua_pop(l, 1);
++                }
++            }
++            lua_pop(l, 1);
++            lua_getfield(l, -1, "bans");
++            if (lua_istable(l, -1))
++            {
++                for (int i = 1;; ++i)
++                {
++                    lua_rawgeti(l, -1, i);
++                    if (!lua_isstring(l, -1))
++                    {
++                        lua_pop(l, 1);
++                        break;
++                    }
++                    out.mBans.emplace_back(lua_tostring(l, -1));
++                    lua_pop(l, 1);
++                }
++            }
++            lua_pop(l, 1);
++        }
++        lua_pop(l, 1);
++        return out;
++    }
++
++    void ServerCore::requestStop()
++    {
++        mImpl->mStop = true;
++    }
++
++    void ServerCore::shutdown()
++    {
++        if (mImpl->mState)
++        {
++            mImpl->mHost.mSockets.closeAll();
++            mImpl->mState.reset();
++        }
++    }
++}
+diff --git a/apps/mpserver/servercore.hpp b/apps/mpserver/servercore.hpp
+new file mode 100644
+index 0000000..357b42c
+--- /dev/null
++++ b/apps/mpserver/servercore.hpp
+@@ -0,0 +1,79 @@
++#ifndef MPSERVER_SERVERCORE_H
++#define MPSERVER_SERVERCORE_H
++
++#include <cstdint>
++#include <filesystem>
++#include <functional>
++#include <memory>
++#include <string>
++#include <vector>
++
++namespace MpServer
++{
++    struct Options
++    {
++        std::filesystem::path mMod; // the directory holding scripts/mp
++        std::filesystem::path mScript; // server.lua
++        int mPort = 25565;
++        std::string mPassword, mAdminPassword, mMotd, mWeather = "cycle";
++        int mMaxPlayers = 64;
++        double mTimeScale = 30, mStartHour = 9, mWeatherMinutes = 15;
++    };
++
++    struct PlayerInfo
++    {
++        std::uint32_t mId = 0;
++        std::string mName, mAddress, mLocation;
++        bool mAdmin = false, mMuted = false, mAway = false, mHost = false, mBot = false;
++        int mPing = -1; // milliseconds, -1 if unknown
++    };
++
++    // What a window needs to show, taken from the relay.
++    struct Snapshot
++    {
++        bool mValid = false;
++        std::vector<PlayerInfo> mPlayers;
++        std::vector<std::string> mBans;
++        int mMaxPlayers = 0;
++        bool mPasswordProtected = false;
++        double mHour = 0;
++        std::string mWeather;
++        bool mWeatherFixed = false;
++    };
++
++    // The server without any user interface: the Luau relay on the engine's sockets. Everything is used from one
++    // thread: call tick() often (every ~20 ms).
++    class ServerCore
++    {
++    public:
++        explicit ServerCore(const Options& options);
++        ~ServerCore();
++        ServerCore(const ServerCore&) = delete;
++        ServerCore& operator=(const ServerCore&) = delete;
++
++        // Starts listening. Returns an error message, or an empty string.
++        std::string start();
++
++        // Handles network events and time. Returns false once the server was asked to stop.
++        bool tick();
++
++        // One line of the server console; returns the answer (possibly several lines). quit/exit/stop ends tick().
++        std::string console(const std::string& line);
++
++        Snapshot snapshot();
++
++        // Every line the server prints (it is also written to stdout).
++        void setLogSink(std::function<void(const std::string&)> sink);
++
++        void requestStop();
++        void shutdown();
++
++        const Options& options() const;
++
++    private:
++        struct Impl;
++        std::unique_ptr<Impl> mImpl;
++    };
++}
++
++#endif
+diff --git a/apps/openmw/mwlua/netbindings.cpp b/apps/openmw/mwlua/netbindings.cpp
+index 8d39a8b..6b67df0 100644
+--- a/apps/openmw/mwlua/netbindings.cpp
++++ b/apps/openmw/mwlua/netbindings.cpp
+@@ -59,6 +59,12 @@ namespace MWLua
+                 return std::nullopt;
+             return address;
+         });
++        api.function("remoteAddress", [&sockets](double id) -> std::optional<std::string> {
++            std::string address = sockets.remoteAddress(socketId(id));
++            if (address.empty())
++                return std::nullopt;
++            return address;
++        });
+ 
+         return api.readOnly();
+     }
+diff --git a/components/net/sockets.cpp b/components/net/sockets.cpp
+index 8dc8293..2b0252c 100644
+--- a/components/net/sockets.cpp
++++ b/components/net/sockets.cpp
+@@ -22,6 +22,7 @@ namespace Net
+             std::mutex mMutex;
+             std::vector<SocketEvent> mEvents;
+             std::map<std::uint32_t, std::string> mLocalAddress;
++            std::map<std::uint32_t, std::string> mRemoteAddress;
+ 
+             void push(SocketEvent event)
+             {
+@@ -91,6 +92,7 @@ namespace Net
+                 mSocket.close(ignored);
+                 const std::lock_guard lock(mShared->mMutex);
+                 mShared->mLocalAddress.erase(mId);
++                mShared->mRemoteAddress.erase(mId);
+             }
+ 
+         private:
+@@ -104,6 +106,12 @@ namespace Net
+                     const std::lock_guard lock(mShared->mMutex);
+                     mShared->mLocalAddress[mId] = local.address().to_string();
+                 }
++                const tcp::endpoint remote = mSocket.remote_endpoint(ec);
++                if (!ec)
++                {
++                    const std::lock_guard lock(mShared->mMutex);
++                    mShared->mRemoteAddress[mId] = remote.address().to_string();
++                }
+             }
+ 
+             void read()
+@@ -271,6 +279,7 @@ namespace Net
+             const std::lock_guard lock(mShared->mMutex);
+             mShared->mEvents.clear();
+             mShared->mLocalAddress.clear();
++            mShared->mRemoteAddress.clear();
+         }
+ 
+         std::string localAddress(std::uint32_t id) const
+@@ -280,6 +289,13 @@ namespace Net
+             return it == mShared->mLocalAddress.end() ? std::string() : it->second;
+         }
+ 
++        std::string remoteAddress(std::uint32_t id) const
++        {
++            const std::lock_guard lock(mShared->mMutex);
++            const auto it = mShared->mRemoteAddress.find(id);
++            return it == mShared->mRemoteAddress.end() ? std::string() : it->second;
++        }
++
+         std::vector<SocketEvent> poll()
+         {
+             std::vector<SocketEvent> raw;
+@@ -404,6 +420,11 @@ namespace Net
+         return mImpl->localAddress(id);
+     }
+ 
++    std::string Sockets::remoteAddress(std::uint32_t id) const
++    {
++        return mImpl->remoteAddress(id);
++    }
++
+     std::vector<SocketEvent> Sockets::poll()
+     {
+         return mImpl->poll();
+diff --git a/components/net/sockets.hpp b/components/net/sockets.hpp
+index 8661d47..4746567 100644
+--- a/components/net/sockets.hpp
++++ b/components/net/sockets.hpp
+@@ -59,6 +59,10 @@ namespace Net
+         // Our address on this connection, or an empty string if it is not connected.
+         std::string localAddress(std::uint32_t id) const;
+ 
++        // The other end's address on this connection (for a server: where a player connects from), or an empty
++        // string if it is not connected.
++        std::string remoteAddress(std::uint32_t id) const;
++
+         std::vector<SocketEvent> poll();
+ 
+     private:
+diff --git a/files/lua_api/openmw/net.lua b/files/lua_api/openmw/net.lua
+index 193d303..b999d93 100644
+--- a/files/lua_api/openmw/net.lua
++++ b/files/lua_api/openmw/net.lua
+@@ -52,4 +52,10 @@
+ -- @param #number id
+ -- @return #string The address, or `nil` if the connection is not established.
+ 
++---
++-- The address of the other end of a connection, e.g. where a player that a listener accepted connects from.
++-- @function [parent=#net] remoteAddress
++-- @param #number id
++-- @return #string The address, or `nil` if the connection is not established.
++
+ return nil

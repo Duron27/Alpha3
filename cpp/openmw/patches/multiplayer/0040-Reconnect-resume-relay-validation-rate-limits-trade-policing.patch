@@ -1,0 +1,564 @@
+From: Duron27 <duron27@gmail.com>
+Subject: [PATCH] Reconnect with a resume token; relay validates messages, rate limits them and polices trades
+
+- joining gives a token; a dropped or silent player keeps id, name and party for 90 s (away/back notices) and a
+  reconnect with the token takes the place over (the old socket is cut)
+- players are separate from sockets in the relay (conn map)
+- per-type rate limits, shape checks for state/vitals/actors/dmg/aid/shot/equip/trade messages
+- the relay tracks trades (request, accept, then deal/ok/done) and only forwards inside an agreed trade; a dropped
+  player cancels it
+- relay_test.lua covers all of it
+
+---
+diff --git a/multiplayer/README.md b/multiplayer/README.md
+index 912f40b..ef11f30 100644
+--- a/multiplayer/README.md
++++ b/multiplayer/README.md
+@@ -34,6 +34,14 @@ When hosting the game looks up your internet address (one request to `api.ipify.
+ line and on *Options → Scripts → Multiplayer*, together with your LAN address. Friends outside your network need that address
+ and the TCP port forwarded on your router to your computer. Joiners also get a list of servers they joined before.
+ 
++Reconnecting: if your connection drops (or goes silent), the host keeps your name, party and place for 90 seconds. The game
++reconnects by itself and gives the token it was handed at joining; you get your old id and party back and the others see
++"is back". After 90 seconds the place is given up. Joining again under the same name in the meantime gets "(2)".
++
++The host's relay checks what it passes on: messages have to fit their type (finite positions, bounded lists, sane damage), are
++rate limited per type (positions, shots, rosters...), and a trade is only forwarded between two players who agreed to it
++(request, accept, then deals) - an outsider or a stray message cannot inject into one.
++
+ Safety: protocol version check (both sides must run the same mod), optional password, player limit (default 8), unique
+ names (a second "Alice" becomes "Alice (2)"), a message of the day, and a 10 second limit to say who you are.
+ 
+diff --git a/multiplayer/mod/scripts/mp/global.lua b/multiplayer/mod/scripts/mp/global.lua
+index a786406..d31968f 100644
+--- a/multiplayer/mod/scripts/mp/global.lua
++++ b/multiplayer/mod/scripts/mp/global.lua
+@@ -59,6 +59,7 @@ local lastLevel
+ local lastServerMessage = 0 -- real time of the last thing the host told us
+ local SERVER_SILENCE = 15
+ local lastWhisperFrom -- who whispered to us last (for /r)
++local resumeToken -- given by the host when we joined: lets us take our place back after a dropped connection
+ local refusedBy -- why the host turned us away: we stop retrying until the settings change
+ local botWanted = false -- test bot (menu): only while hosting
+ local hostInfo -- when hosting: { port, lan, public, error, looking }
+@@ -170,6 +171,7 @@ settings:subscribe(async:callback(function()
+     hostInfo = nil
+     hostErrorShown = false
+     refusedBy = nil
++    resumeToken = nil -- other settings (server, name...) mean a different session
+     retry = RETRY_INTERVAL
+ end))
+ 
+@@ -742,16 +744,20 @@ local function onMessage(msg)
+         log('my id is ' .. tostring(myId))
+         -- who we are, before anything else: the host checks version, password, player limit and bans
+         net.send(net.encodeJson({ t = 'join', proto = relay.PROTO, name = types.NPC.record(player()).name,
+-            password = settings:get('Password') or '' }))
++            password = settings:get('Password') or '', token = resumeToken }))
+         sendProfile()
+         sendEquipment(true)
+         return
+     end
+     if t == 'join_result' then
+         if msg.ok then
+-            if msg.motd then notice('[Host] ' .. msg.motd) end
++            resumeToken = msg.token or resumeToken
++            if msg.id then myId = msg.id end -- a resumed session keeps the id everybody knows us by
++            if msg.resumed then notice('Reconnected.', 'Menu Click') end
++            if msg.motd and not msg.resumed then notice('[Host] ' .. msg.motd) end
+         else
+             refusedBy = msg.reason or 'refused'
++            resumeToken = nil
+             notice(JOIN_REFUSALS[refusedBy] or ('The host refused you: ' .. tostring(refusedBy)))
+             net.disconnect()
+             clearRemotes()
+@@ -760,6 +766,7 @@ local function onMessage(msg)
+     end
+     if t == 'kicked' then
+         refusedBy = msg.reason or 'kicked'
++        resumeToken = nil
+         notice(msg.reason == 'banned' and 'The host banned you from this game.' or 'The host kicked you out of this game.')
+         net.disconnect()
+         clearRemotes()
+@@ -812,6 +819,17 @@ local function onMessage(msg)
+             nameOf(msg.id), msg.text, false)
+         return
+     end
++    if t == 'away' then
++        -- lost their connection: their avatar goes, their party place and everything else stays for a while
++        notice(nameOf(msg.id) .. ' lost connection. Their place is kept for ' .. tostring(msg.grace or 90) .. ' seconds.')
++        toUi('MpTrade', { t = 'trade_cancel', id = msg.id, name = nameOf(msg.id), left = true })
++        removeRemote(msg.id)
++        return
++    end
++    if t == 'back' then
++        notice(nameOf(msg.id) .. ' is back.')
++        return
++    end
+     if t == 'leave' then
+         notice(nameOf(msg.id) .. ' left.')
+         toUi('MpTrade', { t = 'trade_cancel', id = msg.id, name = nameOf(msg.id), left = true })
+diff --git a/multiplayer/mod/scripts/mp/relay.lua b/multiplayer/mod/scripts/mp/relay.lua
+index ce813ce..b30193f 100644
+--- a/multiplayer/mod/scripts/mp/relay.lua
++++ b/multiplayer/mod/scripts/mp/relay.lua
+@@ -33,6 +33,13 @@ local KICK_DELAY = 0.5 -- lets the "you were refused" message reach the client b
+ local options = { password = '', maxPlayers = 8, motd = '' }
+ local bans = {} -- lower-case character name -> true (for this session)
+ local pendingKicks = {} -- id -> clock to close at
++local conn = {} -- socket id -> player id (a player that reconnects keeps the id everybody else knows)
++local trades = {} -- 'low:high' -> { from, to, state = 'requested' | 'active', exp }
++local GRACE = 90 -- seconds a player that lost their connection keeps their name, party and place
++local TRADE_REQUEST_TTL = 60
++-- messages per second and player, by type; more is dropped (the general limit above still applies)
++local RATE = { state = 30, vitals = 5, actors = 8, equip = 3, profile = 3, shot = 8, aid = 4, dmg = 30, world = 4,
++    trade = 30 }
+ 
+ local M = {}
+ M.PROTO = PROTO
+@@ -41,7 +48,8 @@ local function enc(t) return net.encodeJson(t) end
+ local function sendRaw(id, json)
+     local c = clients[id]
+     if not c then return end
+-    if c.virtual then c.virtual(markup.decodeYaml(json)) else net.sendTo(id, json) end
++    if c.virtual then c.virtual(markup.decodeYaml(json))
++    elseif c.sock then net.sendTo(c.sock, json) end -- (no socket: the player lost their connection)
+ end
+ local function sendTo(id, msg) sendRaw(id, enc(msg)) end
+ local function remove(list, v)
+@@ -201,12 +209,122 @@ local function broadcastOthers(id, json)
+     end
+ end
+ 
++------------------------------------------------------------------ validation
++
++local function isNum(x) return type(x) == 'number' and x == x and x > -1e9 and x < 1e9 end
++local function isStr(x, max) return type(x) == 'string' and #x <= max end
++local function isVec3(v) return type(v) == 'table' and isNum(v[1]) and isNum(v[2]) and isNum(v[3]) end
++local function optNum(x) return x == nil or isNum(x) end
++
++-- key -> count maps of a trade (item ids and counts), bounded in size
++local function isCountMap(m, maxEntries)
++    if m == nil then return true end
++    if type(m) ~= 'table' then return false end
++    local n = 0
++    for k, v in pairs(m) do
++        n = n + 1
++        if n > maxEntries or not isStr(k, 200) or not isNum(v) or v < 0 then return false end
++    end
++    return true
++end
++
++-- Shape checks for what clients send. A message that does not fit is dropped: a broken or hostile client must not be
++-- able to push nonsense (huge lists, NaN positions, absurd damage) into everyone else's game.
++local VALID = {
++    state = function(m) return isVec3(m.pos) and (m.cell == nil or isStr(m.cell, 200)) and (m.vel == nil or isVec3(m.vel))
++        and optNum(m.yaw) and optNum(m.pitch) end,
++    vitals = function(m)
++        for _, k in ipairs({ 'h', 'hm', 'm', 'mm', 'f', 'fm' }) do if not optNum(m[k]) then return false end end
++        return m.bad == nil or (type(m.bad) == 'table' and #m.bad <= 8)
++    end,
++    actors = function(m) return type(m.list) == 'table' and #m.list <= 80
++        and (m.dead == nil or (type(m.dead) == 'table' and #m.dead <= 200)) end,
++    dmg = function(m) return isNum(m.to) and isStr(m.nid or '', 100) and (m.frac == nil or (isNum(m.frac) and m.frac >= 0 and m.frac <= 10)) end,
++    aid = function(m) return isNum(m.to) and isStr(m.spell, 120) end,
++    shot = function(m) return isStr(m.k, 8) and (m.rec == nil or isStr(m.rec, 120)) and (m.from == nil or isVec3(m.from))
++        and (m.to == nil or isVec3(m.to)) and optNum(m.spd) end,
++    equip = function(m) return type(m.slots) == 'table' end,
++    trade_inv = function(m) return isCountMap(m.items, 2000) and (m.gens == nil or (type(m.gens) == 'table')) end,
++    trade_deal = function(m) return isNum(m.rev) and isCountMap(m.a, 200) and isCountMap(m.b, 200) end,
++    trade_ok = function(m) return isNum(m.rev) end,
++}
++
++local function withinRate(c, t)
++    local key = t:sub(1, 6) == 'trade_' and 'trade' or t
++    local limit = RATE[key]
++    if not limit then return true end
++    c.rate = c.rate or {}
++    local r = c.rate[key]
++    local second = math.floor(clock)
++    if not r or r.second ~= second then r = { second = second, n = 0 } c.rate[key] = r end
++    r.n = r.n + 1
++    return r.n <= limit
++end
++
++------------------------------------------------------------------ trades (the relay only passes on what fits a real deal)
++
++local function tradeKey(a, b) return math.min(a, b) .. ':' .. math.max(a, b) end
++
++local function tradeBusy(id)
++    for _, tr in pairs(trades) do
++        if tr.from == id or tr.to == id then return true end
++    end
++    return false
++end
++
++-- Ends every trade a player is part of and tells the partners.
++local function endTrades(id, left)
++    for key, tr in pairs(trades) do
++        if tr.from == id or tr.to == id then
++            trades[key] = nil
++            local other = tr.from == id and tr.to or tr.from
++            if clients[other] then sendTo(other, { t = 'trade_cancel', id = id, left = left or nil }) end
++        end
++    end
++end
++
++-- Returns true if the message was a trade message (handled here).
++local function handleTrade(id, c, t, msg)
++    local other = msg.to
++    if type(other) ~= 'number' or other == id or not clients[other] or not clients[other].authed
++        or not (clients[other].sock or clients[other].virtual) then
++        return true
++    end
++    local key = tradeKey(id, other)
++    local tr = trades[key]
++    if t == 'trade_request' then
++        if tr or tradeBusy(id) or tradeBusy(other) then
++            sendTo(id, { t = 'trade_decline', id = other }) -- one trade at a time
++            return true
++        end
++        trades[key] = { from = id, to = other, state = 'requested', exp = clock + TRADE_REQUEST_TTL }
++    elseif t == 'trade_accept' then
++        if not tr or tr.state ~= 'requested' or tr.to ~= id then return true end
++        tr.state, tr.exp = 'active', nil
++    elseif t == 'trade_decline' then
++        if not tr or tr.state ~= 'requested' or tr.to ~= id then return true end
++        trades[key] = nil
++    elseif t == 'trade_cancel' then
++        if not tr then return true end
++        trades[key] = nil
++    elseif t == 'trade_inv' or t == 'trade_deal' or t == 'trade_ok' or t == 'trade_done' then
++        if not tr or tr.state ~= 'active' then return true end -- nothing is being traded
++        if t == 'trade_done' then trades[key] = nil end
++    else
++        return true -- unknown trade message
++    end
++    msg.to = nil
++    sendTo(other, msg)
++    return true
++end
++
+ ------------------------------------------------------------------ engine events
+ 
+ function M.onClientConnected(id)
+     if not running then return end
++    conn[id] = id
+     clients[id] = { last = {}, tokens = 5.0, tokenTime = clock, pings = {}, authed = false, joinBy = clock + JOIN_TIMEOUT,
+-        lastSeen = clock }
++        lastSeen = clock, sock = id }
+     if not hostId then hostId = id end
+     print('[mp-relay]', '+ client', id, id == hostId and '(host)' or '')
+     sendTo(id, { t = 'hello', id = id, host = id == hostId, proto = PROTO, needPassword = options.password ~= '' })
+@@ -260,22 +378,77 @@ local function refuse(id, reason)
+     pendingKicks[id] = clock + KICK_DELAY
+ end
+ 
++local tokenSeq = 0
++local function newToken()
++    tokenSeq = tokenSeq + 1
++    return string.format('%06x%06x%06x%x', math.random(0, 0xffffff), math.random(0, 0xffffff),
++        math.floor(core.getRealTime() * 1000) % 0xffffff, tokenSeq)
++end
++
++local function findByToken(token)
++    if type(token) ~= 'string' or token == '' then return nil end
++    for id, c in pairs(clients) do
++        if c.token == token and c.authed and not c.virtual and not c.refused and id ~= hostId then return id end
++    end
++    return nil
++end
++
++-- A player whose connection was lost (or is half dead) comes back with their token: they get their old id, name and
++-- party back, and everyone is told they are back.
++local function resume(sock, old, msg)
++    local c0 = clients[old]
++    if c0.sock and c0.sock ~= sock then
++        conn[c0.sock] = nil
++        net.kick(c0.sock) -- the old socket is dead to us from now on
++    end
++    c0.sock, c0.awayUntil, c0.dropped, c0.lastSeen, c0.pings = sock, nil, nil, clock, {}
++    conn[sock] = old
++    clients[sock] = nil
++    print('[mp-relay]', 'client', old, 'is back')
++    sendTo(old, { t = 'join_result', ok = true, name = c0.name, id = old, token = c0.token, resumed = true,
++        motd = options.motd ~= '' and options.motd or nil })
++    admit(old)
++    if c0.party and parties[c0.party] then
++        announceParty(c0.party)
++        for _, m in ipairs(parties[c0.party].members) do
++            for _, t in ipairs({ 'actors', 'vitals' }) do
++                if m ~= old and clients[m].last[t] then sendRaw(old, clients[m].last[t]) end
++            end
++        end
++    end
++    local json = enc({ t = 'back', id = old, name = c0.name })
++    for o, oc in pairs(clients) do
++        if o ~= old and oc.authed then
++            sendRaw(o, json)
++            for _, t in ipairs(GLOBAL_ORDER) do
++                if c0.last[t] then sendRaw(o, c0.last[t]) end
++            end
++        end
++    end
++end
++
+ local function handleJoin(id, msg)
+     local c = clients[id]
+     if c.authed or c.refused then return end
+     if msg.proto ~= PROTO then return refuse(id, 'version') end
+     if options.password ~= '' and msg.password ~= options.password then return refuse(id, 'password') end
+-    local name = uniqueName(msg.name, id)
+     if bans[tostring(msg.name or ''):lower()] then return refuse(id, 'banned') end
++    local old = findByToken(msg.token)
++    if old then return resume(id, old, msg) end
++    local name = uniqueName(msg.name, id)
+     if playerCount() >= options.maxPlayers then return refuse(id, 'full') end
+     c.name = name
+-    sendTo(id, { t = 'join_result', ok = true, name = name, motd = options.motd ~= '' and options.motd or nil })
++    c.token = newToken()
++    sendTo(id, { t = 'join_result', ok = true, name = name, token = c.token,
++        motd = options.motd ~= '' and options.motd or nil })
+     admit(id)
+ end
+ 
+-function M.onClientDisconnected(id)
++-- The player is gone for good: out of their party, invites and trades, and everyone is told.
++local function removeClient(id)
+     if not clients[id] then return end
+     pendingKicks[id] = nil
++    endTrades(id, true)
+     removeFromParty(id)
+     for k, inv in pairs(invites) do
+         if inv.from == id or inv.to == id then invites[k] = nil end
+@@ -289,6 +462,25 @@ function M.onClientDisconnected(id)
+     for o, c in pairs(clients) do if c.authed then sendRaw(o, json) end end
+ end
+ 
++function M.onClientDisconnected(sock)
++    local id = conn[sock]
++    conn[sock] = nil
++    if not id then return end -- unknown, or the socket of a player who already came back on another one
++    local c = clients[id]
++    if not c or c.sock ~= sock then return end
++    pendingKicks[id] = nil
++    if c.authed and not c.virtual and not c.refused and id ~= hostId and c.token then
++        -- connection lost: keep their name, party and place for a while so they can come back
++        c.sock, c.awayUntil, c.pings = nil, clock + GRACE, {}
++        print('[mp-relay]', 'client', id, 'lost connection, place kept for', GRACE, 's')
++        endTrades(id, true)
++        local json = enc({ t = 'away', id = id, name = c.name, grace = GRACE })
++        for o, oc in pairs(clients) do if o ~= id and oc.authed then sendRaw(o, json) end end
++        return
++    end
++    removeClient(id)
++end
++
+ local function findByName(name)
+     name = tostring(name or ''):lower()
+     for id, c in pairs(clients) do
+@@ -319,6 +511,10 @@ local function handleAdmin(id, msg)
+     if target == hostId then return reply('You cannot do that to yourself.') end
+     if cmd == 'kick' or cmd == 'ban' then
+         if cmd == 'ban' then bans[c.name:lower()] = true end
++        if not c.sock then -- (lost their connection: there is nobody to tell)
++            removeClient(target)
++            return reply(c.name .. (cmd == 'ban' and ' was banned.' or ' was kicked.'))
++        end
+         sendTo(target, { t = 'kicked', reason = cmd == 'ban' and 'banned' or 'kicked' })
+         pendingKicks[target] = clock + KICK_DELAY
+         c.refused = true
+@@ -332,8 +528,9 @@ end
+ 
+ local process
+ 
+-function M.onClientMessage(id, line)
+-    if not clients[id] then return end
++function M.onClientMessage(sock, line)
++    local id = conn[sock]
++    if not id or not clients[id] or clients[id].sock ~= sock then return end
+     local ok, msg = pcall(markup.decodeYaml, line)
+     if not ok or type(msg) ~= 'table' then return end
+     process(id, msg)
+@@ -373,7 +570,10 @@ process = function(id, msg)
+         return
+     end
+     msg.id = id
+-    if type(t) ~= 'string' then return end
++    if type(t) ~= 'string' or #t > 16 then return end
++    if not withinRate(c, t) then return end
++    local valid = VALID[t]
++    if valid and not valid(msg) then return end
+     if t == 'world' then -- time and weather: only the host is the clock
+         if id == hostId then
+             c.last.world = enc(msg)
+@@ -387,9 +587,8 @@ process = function(id, msg)
+         c.level = tonumber(msg.level)
+     end
+     if t:sub(1, 6) == 'trade_' then -- trades are between two players, party or not
+-        local target = msg.to
+-        if type(target) == 'number' and clients[target] and target ~= id then sendTo(target, msg) end
+-        return
++        if #t > 16 then return end
++        return handleTrade(id, c, t, msg)
+     end
+     if t == 'chat' then
+         local text = tostring(msg.text or ''):sub(1, CHAT_MAX):match('^%s*(.-)%s*$')
+@@ -447,7 +646,7 @@ function M.stop()
+     pendingKicks = {}
+     if running or net.isListening() then net.stopListening() end
+     running = false
+-    clients, parties, invites = {}, {}, {}
++    clients, parties, invites, conn, trades = {}, {}, {}, {}, {}
+ end
+ 
+ function M.isRunning() return running end
+@@ -475,18 +674,26 @@ function M.addVirtual(handler)
+     return id
+ end
+ function M.virtualSend(id, msg) process(id, msg) end
+-function M.removeVirtual(id) M.onClientDisconnected(id) end
++function M.removeVirtual(id) removeClient(id) end
+ function M.generation() return generation end
+ 
+ function M.update(dt)
+     clock = clock + dt
+     if not running then return end
+     for id, c in pairs(clients) do
+-        if c.authed and not c.virtual and not c.refused and clock - (c.lastSeen or clock) > SILENCE_LIMIT then
+-            c.refused = true
++        if c.authed and not c.virtual and not c.refused and c.sock and not c.dropped
++            and clock - (c.lastSeen or clock) > SILENCE_LIMIT then
++            c.dropped = true -- (not refused: they may come back)
+             print('[mp-relay]', 'client', id, 'went silent')
+             pendingKicks[id] = clock
+         end
++        if c.awayUntil and clock > c.awayUntil then
++            print('[mp-relay]', 'client', id, 'did not come back')
++            removeClient(id)
++        end
++    end
++    for key, tr in pairs(trades) do
++        if tr.exp and clock > tr.exp then trades[key] = nil end -- nobody answered the request
+     end
+     for id, c in pairs(clients) do
+         if not c.authed and not c.refused and clock > c.joinBy then
+@@ -498,7 +705,9 @@ function M.update(dt)
+         if clock >= at then
+             pendingKicks[id] = nil
+             local c = clients[id]
+-            if c and c.virtual then M.removeVirtual(id) elseif c then net.kick(id) M.onClientDisconnected(id) end
++            if c and c.virtual then M.removeVirtual(id)
++            elseif c and c.sock then local sock = c.sock net.kick(sock) M.onClientDisconnected(sock)
++            elseif c then removeClient(id) end
+         end
+     end
+     pingTimer = pingTimer + dt
+@@ -511,7 +720,8 @@ function M.update(dt)
+     for _, id in ipairs(ids) do
+         local c = clients[id]
+         list[#list + 1] = { id = id, name = c.name or ('Player ' .. id), ping = c.ping and math.floor(c.ping + 0.5) or false,
+-            host = id == hostId, level = c.level, muted = c.muted or nil }
++            host = id == hostId, level = c.level, muted = c.muted or nil, away = (not c.sock and not c.virtual) or nil }
++        if c.sock or c.virtual then
+         pingSeq = pingSeq + 1
+         local now = core.getRealTime()
+         for n, sent in pairs(c.pings) do
+@@ -519,6 +729,7 @@ function M.update(dt)
+         end
+         c.pings[pingSeq] = now
+         sendTo(id, { t = 'ping', n = pingSeq })
++        end
+     end
+     local json = enc({ t = 'players', list = list })
+     for _, id in ipairs(ids) do sendRaw(id, json) end
+diff --git a/multiplayer/test/relay_test.lua b/multiplayer/test/relay_test.lua
+index d5ac87e..02a0794 100644
+--- a/multiplayer/test/relay_test.lua
++++ b/multiplayer/test/relay_test.lua
+@@ -133,4 +133,85 @@ check(last(1, 'state') and last(1, 'state').pos[1] <= 400, 'a flood of messages
+ tick(30)
+ check(kicked[4], 'a player that goes silent is dropped')
+ 
++-- ---------------------------------------------------------------- reconnect, rate limits, validation, trades
++sent, kicked = {}, {}
++check(relay.start(25566, { password = '', maxPlayers = 8, motd = '' }) == nil, 'restart')
++join(11, 'Host'); join(12, 'Alice'); join(13, 'Bob'); join(14, 'Carol')
++local token = last(12, 'join_result').token
++check(type(token) == 'string' and #token > 10, 'a joining player gets a token')
++say(12, { t = 'invite', to = 13 }); tick(1.1); say(13, { t = 'accept', from = 12 })
++check(last(12, 'party') and #last(12, 'party').members == 2, 'party formed')
++
++relay.onClientDisconnected(12) -- Alice loses her connection
++check(count(13, 'away') == 1 and count(13, 'leave') == 0, 'others hear that she is away, not that she left')
++tick(2.1)
++local away = false
++for _, e in ipairs(last(13, 'players').list) do if e.id == 12 and e.away then away = true end end
++check(away, 'the player list marks her as away')
++
++say(12, { t = 'chat', scope = 'global', text = 'ghost' })
++check(not last(13, 'chat'), 'a closed socket cannot talk any more')
++
++join(15, 'Alice', '', 2) -- no token: a different player, the name is reserved
++check(last(15, 'join_result').name == 'Alice (2)' and not last(15, 'join_result').resumed, 'without the token the name is taken')
++relay.onClientDisconnected(15)
++
++relay.onClientConnected(16)
++say(16, { t = 'join', proto = 2, name = 'Alice', token = token })
++local jr = last(16, 'join_result')
++check(jr and jr.ok and jr.resumed and jr.id == 12 and jr.name == 'Alice', 'the token gives her old id and name back')
++check(count(13, 'back') == 1, 'others hear that she is back')
++check(last(16, 'party') and #last(16, 'party').members == 2, 'her party is intact')
++say(16, { t = 'chat', scope = 'party', text = 'hello again' })
++check(last(13, 'chat') and last(13, 'chat').id == 12, 'she can talk with the new connection')
++
++relay.onClientConnected(17) -- a second connection with the same token takes over, the old one is cut
++say(17, { t = 'join', proto = 2, name = 'Alice', token = token })
++check(kicked[16], 'taking the place over closes the old socket')
++say(16, { t = 'chat', scope = 'global', text = 'old socket' })
++check(count(13, 'chat') == 1, 'the old socket is ignored')
++
++relay.onClientDisconnected(13) -- Bob drops and does not come back
++for _ = 1, 10 do tick(10); for _, sock in ipairs({ 11, 14, 17 }) do say(sock, { t = 'pong', n = 0 }) end end
++local function leaves(sock, who) local n = 0 for _, m in ipairs(sent[sock] or {}) do if m.t == 'leave' and m.id == who then n = n + 1 end end return n end
++check(leaves(17, 13) == 1, 'after the grace period the place is given up')
++check(last(17, 'party') and #last(17, 'party').members == 0, 'and the party is gone')
++
++local n0 = count(11, 'shot')
++for i = 1, 100 do say(17, { t = 'shot', k = 'arrow', from = { 0, 0, 0 }, to = { 1, 0, 0 } }) end
++check(count(11, 'shot') - n0 <= 8, 'shots are rate limited')
++tick(1)
++local st = count(11, 'state')
++say(17, { t = 'state', pos = { 'x', 0, 0 } })
++say(17, { t = 'state', pos = { 1e12, 0, 0 } })
++check(count(11, 'state') == st, 'a position that is not a position is dropped')
++local big = {}
++for i = 1, 100 do big[i] = { n = i } end
++tick(1)
++local ac = count(11, 'actors')
++say(17, { t = 'actors', list = big })
++check(count(11, 'actors') == ac, 'an oversized actor list is dropped')
++say(17, { t = 'dmg', to = 11, nid = 'x', frac = 1e9 })
++check(count(11, 'dmg') == 0, 'absurd damage is dropped')
++
++-- trades: only between two players who agreed
++join(18, 'Dora')
++say(17, { t = 'trade_deal', to = 18, rev = 1, a = { sword = 1 }, b = {} })
++check(count(18, 'trade_deal') == 0, 'a deal without a request goes nowhere')
++say(17, { t = 'trade_request', to = 18 })
++check(count(18, 'trade_request') == 1 and last(18, 'trade_request').id == 12, 'a request is delivered')
++say(17, { t = 'trade_deal', to = 18, rev = 1, a = {}, b = {} })
++check(count(18, 'trade_deal') == 0, 'no deal before the request is accepted')
++say(18, { t = 'trade_accept', to = 12 })
++check(count(17, 'trade_accept') == 1, 'the answer is delivered')
++say(17, { t = 'trade_deal', to = 18, rev = 1, a = { sword = 1 }, b = {} })
++check(count(18, 'trade_deal') == 1, 'a deal passes once accepted')
++join(19, 'Eve')
++say(19, { t = 'trade_deal', to = 18, rev = 2, a = { sword = 100 }, b = {} })
++check(count(18, 'trade_deal') == 1, 'an outsider cannot inject into a trade')
++say(17, { t = 'trade_deal', to = 18, rev = 3, a = { sword = -5 }, b = {} })
++check(count(18, 'trade_deal') == 1, 'a negative count is dropped')
++relay.onClientDisconnected(18) -- Dora loses her connection mid-trade
++check(count(17, 'trade_cancel') == 1, 'a dropped partner cancels the trade')
++
+ if failures == 0 then print('relay tests: all passed') else print(failures .. ' failed') os.exit(1) end

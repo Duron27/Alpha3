@@ -1,0 +1,2 @@
+GLOBAL: scripts/mp_debug/give.lua
+PLAYER: scripts/mp_debug/maxstats.lua

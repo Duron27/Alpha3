@@ -1,0 +1,255 @@
+From: Duron27 <duron27@gmail.com>
+Subject: [PATCH] Luau and Android fixes: multiplayer only when started from its screen, Escape closes it
+
+- global.lua: no goto (Luau), setMapMarkers goes through addAction with a name
+- menu.lua: panel centred in GUI units (ui.screenSize is pixels), Escape closes it, 'Active' is set only by the
+  screen's New/Load and cleared on startup, on returning to the menu and on the main menu's own New/Load
+- global.lua only connects, hosts or retries after the player script's 'configure' (a plain game stays silent)
+- player.lua / trade.lua: UI in GUI units; the player script stays dormant unless 'Active'
+- main menu: New/Load clicks are reported to menu scripts
+
+---
+diff --git a/apps/openmw/mwgui/mainmenu.cpp b/apps/openmw/mwgui/mainmenu.cpp
+--- a/apps/openmw/mwgui/mainmenu.cpp
++++ b/apps/openmw/mwgui/mainmenu.cpp
+@@ -171,6 +171,9 @@
+ 
+         const std::string& name = *sender->getUserData<std::string>();
+         winMgr->playSound(ESM::RefId::stringRefId("Menu Click"));
++        // Menu scripts hear about every start of a game from the main menu (the multiplayer mod drops its session)
++        if (name == "newgame" || name == "loadgame")
++            MWBase::Environment::get().getLuaManager()->mainMenuButton(name);
+         if (name == "return")
+             winMgr->removeGuiMode(GM_MainMenu);
+         else if (name == "multiplayer")
+diff --git a/apps/openmw/mwlua/uibindings.cpp b/apps/openmw/mwlua/uibindings.cpp
+--- a/apps/openmw/mwlua/uibindings.cpp
++++ b/apps/openmw/mwlua/uibindings.cpp
+@@ -417,7 +417,7 @@
+             // GUI widgets may only be touched from the main thread
+             luaManager->addAction([markers = std::move(markers)]() mutable {
+                 MWBase::Environment::get().getWindowManager()->setMapMarkers(std::move(markers));
+-            });
++            }, "openmw.ui.setMapMarkers");
+         });
+         api.function("showMessage",
+             [luaManager = context.mLuaManager](std::string_view message, std::optional<Lua::TableView> options) {
+diff --git a/multiplayer/mod/scripts/mp/global.lua b/multiplayer/mod/scripts/mp/global.lua
+--- a/multiplayer/mod/scripts/mp/global.lua
++++ b/multiplayer/mod/scripts/mp/global.lua
+@@ -111,8 +111,12 @@
+ -- (relay.lua) and plays through a loopback connection to it. Either way there is exactly one connection.
+ local function hosting() return settings:get('Mode') == 'host' end
+ 
++-- Only a game started from the Multiplayer screen is a session: the player script sends 'configure' then. A plain
++-- single-player game never connects, hosts or retries.
++local sessionActive = false
++
+ local function connect()
+-    if not settings:get('Enabled') then return end
++    if not sessionActive or not settings:get('Enabled') then return end
+     local port = settings:get('Port')
+     if hosting() then
+         if not relay.isRunning() then
+@@ -342,13 +346,13 @@
+     for slotStr, recordId in pairs(r.equip or {}) do
+         local gen = r.gen and r.gen[slotStr]
+         if gen then recordId = resolveGenerated(gen) end
+-        if recordId == nil then goto continue end
+-        if inv:countOf(recordId) == 0 then
+-            local ok, item = pcall(world.createObject, recordId, 1)
+-            if ok then item:moveInto(inv) else log('cannot create item ' .. recordId) end
++        if recordId ~= nil then -- (Luau has no goto)
++            if inv:countOf(recordId) == 0 then
++                local ok, item = pcall(world.createObject, recordId, 1)
++                if ok then item:moveInto(inv) else log('cannot create item ' .. recordId) end
++            end
++            slots[tonumber(slotStr)] = recordId
+         end
+-        slots[tonumber(slotStr)] = recordId
+-        ::continue::
+     end
+     r.obj:sendEvent('MpEquip', { slots = slots })
+     r.equipSent = true
+@@ -648,6 +652,7 @@
+     elseif cmd == 'sync' then
+         pushUi()
+     elseif cmd == 'configure' then
++        sessionActive = true
+         if d.bot ~= nil then
+             botWanted = d.bot and true or false
+             if not botWanted then bot.stop() end
+@@ -937,7 +942,7 @@
+                         if v then net.send(net.encodeJson(v)) end
+                     end
+                 end
+-            elseif player() and settings:get('Enabled') and not refusedBy then
++            elseif sessionActive and player() and settings:get('Enabled') and not refusedBy then
+                 retry = retry + dt
+                 if retry >= RETRY_INTERVAL then
+                     retry = 0
+diff --git a/multiplayer/mod/scripts/mp/menu.lua b/multiplayer/mod/scripts/mp/menu.lua
+--- a/multiplayer/mod/scripts/mp/menu.lua
++++ b/multiplayer/mod/scripts/mp/menu.lua
+@@ -5,6 +5,7 @@
+ local ui = require('openmw.ui')
+ local util = require('openmw.util')
+ local menu = require('openmw.menu')
++local input = require('openmw.input')
+ local storage = require('openmw.storage')
+ local async = require('openmw.async')
+ local I = require('openmw.interfaces')
+@@ -12,6 +13,8 @@
+ local V2, rgb = util.vector2, util.color.rgb
+ local WHITE = ui.texture { path = 'white' }
+ local section = storage.playerSection('MpConnect')
++-- 'Active' means: the game being loaded was started from this screen. Never carry it over from an earlier run.
++section:set('Active', false)
+ 
+ local W, H = 640, 590
+ local TEXT_SIZE = 18
+@@ -181,7 +184,7 @@
+             end)
+         else
+             content[#content + 1] = button(24, 395, 'New character', function()
+-                if apply() then close() menu.newGame() end
++                if apply() then section:set('Active', true) close() menu.newGame() end
+             end)
+             content[#content + 1] = button(24, 435, 'Load character', function()
+                 if apply() then view = 'load' render() end
+@@ -212,15 +215,15 @@
+             local label = tostring(s.info.playerName or s.dir) .. '  (level ' .. tostring(s.info.playerLevel or '?') .. ')  '
+                 .. tostring(s.info.description or s.slot)
+             content[#content + 1] = text({ position = V2(32, 94 + (i - 1) * 28), text = label, textColor = C.text },
+-                { mouseClick = async:callback(function() close() menu.loadGame(s.dir, s.slot) end) })
++                { mouseClick = async:callback(function() section:set('Active', true) close() menu.loadGame(s.dir, s.slot) end) })
+         end
+         content[#content + 1] = button(24, H - 50, 'Back', function() view = 'main' render() end)
+     end
+ 
+-    local scr = ui.screenSize()
+     local layout = {
+         layer = 'Modal', type = ui.TYPE.Widget,
+-        props = { position = V2(math.max(0, (scr.x - W) / 2), math.max(0, (scr.y - H) / 2)), size = V2(W, H) },
++        -- centred in the GUI's own units (ui.screenSize is in pixels, which differs when the GUI is scaled)
++        props = { relativePosition = V2(0.5, 0.5), anchor = V2(0.5, 0.5), size = V2(W, H) },
+         content = ui.content(content),
+     }
+     if el then
+@@ -245,8 +248,22 @@
+     interface = { version = 1, open = open },
+     engineHandlers = {
+         onMainMenuButton = function(id)
+-            if id == 'multiplayer' then open() end
++            if id == 'multiplayer' then
++                open()
++            else
++                -- New or Load from the main menu itself: a plain single-player game, no multiplayer session
++                section:set('Active', false)
++                close()
++            end
++        end,
++        onStateChanged = function()
++            close()
++            -- back at the main menu: whatever game starts next is single-player unless this screen starts it
++            if menu.getState() == menu.STATE.NoGame then section:set('Active', false) end
++        end,
++        -- Escape closes the screen like the engine's own windows
++        onKeyPress = function(key)
++            if el and key.code == input.KEY.Escape then close() end
+         end,
+-        onStateChanged = function() close() end,
+     },
+ }
+diff --git a/multiplayer/mod/scripts/mp/player.lua b/multiplayer/mod/scripts/mp/player.lua
+--- a/multiplayer/mod/scripts/mp/player.lua
++++ b/multiplayer/mod/scripts/mp/player.lua
+@@ -81,7 +81,22 @@
+ local logEl, inputEl, partyEl, inviteEl, menuEl
+ 
+ local function now() return core.getRealTime() end
+-local function screen() return ui.screenSize() end
++-- The GUI's own units (ui.screenSize is in pixels, which differs when the GUI is scaled)
++local function screen()
++    local ok, size = pcall(function() return ui.layers[ui.layers.indexOf('HUD')].size end)
++    return ok and size or ui.screenSize()
++end
++
++-- Multiplayer is only on in a game started from the Multiplayer screen (menu.lua sets 'Active'); a game started
++-- with the main menu's own New/Load stays plain single-player: no UI, no connection.
++local mpActive
++local function active()
++    if mpActive == nil then
++        local conn = storage.playerSection('MpConnect')
++        mpActive = conn:get('Active') == true
++    end
++    return mpActive
++end
+ 
+ local function destroy(el) if el then el:destroy() end return nil end
+ 
+@@ -230,6 +245,8 @@
+ -- scenery never hide it.
+ function updateMarkers()
+     local scr = ui.screenSize()
++    local gui = screen()
++    local k = gui.x / scr.x
+     local seen = {}
+     local camPos = camera.getPosition()
+     local forward = camera.viewportToWorldVector(V2(scr.x / 2, scr.y / 2))
+@@ -243,7 +260,7 @@
+                 local m = markers[key]
+                 local layout = {
+                     layer = 'HUD', type = ui.TYPE.Widget,
+-                    props = { position = V2(v.x - 60, v.y - ARROW_SIZE - 24), size = V2(120, ARROW_SIZE + 22) },
++                    props = { position = V2(v.x * k - 60, v.y * k - ARROW_SIZE - 24), size = V2(120, ARROW_SIZE + 22) },
+                     content = ui.content {
+                         { template = I.MWUI.templates.textNormal,
+                           props = { text = a.name, textColor = rgb(0.5, 1, 0.5), textSize = 16,
+@@ -518,6 +535,7 @@
+         -- What the other players need to animate our avatar: sneaking, jumping, attacking and casting, whether we
+         -- have a menu open, and where we are looking. Attacks and jumps carry a counter so each is shown exactly once.
+         onUpdate = function(dt)
++            if not active() then return end
+             local using = I.UI.getMode() == nil and input.isActionPressed(input.ACTION.Use)
+             local function attackKind()
+                 local fwd = input.isActionPressed(input.ACTION.MoveForward) or input.isActionPressed(input.ACTION.MoveBackward)
+@@ -554,6 +572,7 @@
+             pushInput(false)
+         end,
+         onFrame = function()
++            if not active() then return end
+             updateMarkers()
+             updateStatus()
+             -- onFrame also runs while the game is paused, which is exactly when a menu is open
+@@ -584,6 +603,7 @@
+             if dirty.invites then dirty.invites = false; renderInvites() end
+         end,
+         onKeyPress = function(key)
++            if not active() then return end
+             if I.UI.getMode() ~= nil or chatOpen then return end
+             if key.code == input.KEY.Enter or key.code == input.KEY.NP_Enter or key.code == input.KEY.Y then
+                 openChat()
+@@ -655,6 +675,7 @@
+         -- Another window opened, or Escape closed our menu's Interface mode: drop our widgets.
+         -- (I.UI.getMode() lags a frame behind setMode, so it can't be polled for this.)
+         UiModeChanged = function(d)
++            if not active() then return end
+             print('[mp-ui] mode ' .. tostring(d.oldMode) .. ' -> ' .. tostring(d.newMode) .. ' chatOpen=' .. tostring(chatOpen) .. ' menuOpen=' .. tostring(menuOpen))
+             -- Escape ended our Interface mode, or another window replaced it
+             if d.newMode ~= 'Interface' then
+diff --git a/multiplayer/mod/scripts/mp/trade.lua b/multiplayer/mod/scripts/mp/trade.lua
+--- a/multiplayer/mod/scripts/mp/trade.lua
++++ b/multiplayer/mod/scripts/mp/trade.lua
+@@ -176,10 +176,9 @@
+         position = V2(W - 130, H - 40), textSize = 17, textColor = C.button, text = '[ Cancel ]',
+     }, { mouseClick = async:callback(function() close(true, 'Trade cancelled.') end) })
+ 
+-    local scr = ui.screenSize()
+     local layout = {
+         layer = 'Windows', type = ui.TYPE.Widget,
+-        props = { position = V2(math.max(0, (scr.x - W) / 2), math.max(0, (scr.y - H) / 2)), size = V2(W, H) },
++        props = { relativePosition = V2(0.5, 0.5), anchor = V2(0.5, 0.5), size = V2(W, H) },
+         content = ui.content(content),
+     }
+     if window then

@@ -1,0 +1,108 @@
+diff --git a/docs/source/reference/lua-scripting/engine_handlers.rst b/docs/source/reference/lua-scripting/engine_handlers.rst
+index 5e21b6e461..652c15203c 100644
+--- a/docs/source/reference/lua-scripting/engine_handlers.rst
++++ b/docs/source/reference/lua-scripting/engine_handlers.rst
+@@ -53,6 +53,9 @@ Engine handler is a function defined by a script, that can be called by the engi
+   * - onPlayerAdded(player)
+     - | Player added to the game world. The argument is a `Game object`. 
+       | Note that this is triggered at the start of a game, and when a game is loaded.
++  * - onNetEvent(type, id, data, listener)
++    - | Something happened on a socket opened with ``openmw.net``. ``type`` is ``"connected"``, ``"accepted"``,
++        ``"line"`` or ``"closed"``; see the ``openmw.net`` documentation for the meaning of the other arguments.
+   * - onObjectActive(object)
+     - Object becomes active.
+   * - onActorActive(actor)
+diff --git a/docs/source/reference/lua-scripting/index_packages.rst b/docs/source/reference/lua-scripting/index_packages.rst
+index d73865e7db..3885f69b7c 100644
+--- a/docs/source/reference/lua-scripting/index_packages.rst
++++ b/docs/source/reference/lua-scripting/index_packages.rst
+@@ -18,6 +18,7 @@ Packages
+     markup <openmw_markup>
+     menu <openmw_menu>
+     nearby <openmw_nearby>
++    net <openmw_net>
+     postprocessing <openmw_postprocessing>
+     self <openmw_self>
+     storage <openmw_storage>
+diff --git a/docs/source/reference/lua-scripting/tables/packages.rst b/docs/source/reference/lua-scripting/tables/packages.rst
+index e0d2bbd52e..4255130adf 100644
+--- a/docs/source/reference/lua-scripting/tables/packages.rst
++++ b/docs/source/reference/lua-scripting/tables/packages.rst
+@@ -41,6 +41,9 @@
+    * - :doc:`nearby </reference/lua-scripting/openmw_nearby>`
+      - |bdg-ctx-local|
+      - Read-only access to the nearest area of the game world.
++   * - :doc:`net </reference/lua-scripting/openmw_net>`
++     - |bdg-ctx-global|
++     - TCP connection to an external server (multiplayer).
+    * - :doc:`postprocessing </reference/lua-scripting/openmw_postprocessing>`
+      - |bdg-ctx-player|
+      - Controls post-process shaders.
+diff --git a/docs/source/reference/lua-scripting/widgets/textedit.rst b/docs/source/reference/lua-scripting/widgets/textedit.rst
+index c76ef0c337..d99f97e411 100644
+--- a/docs/source/reference/lua-scripting/widgets/textedit.rst
++++ b/docs/source/reference/lua-scripting/widgets/textedit.rst
+@@ -79,6 +79,10 @@ Properties
+     - boolean (false)
+     - | Automatically changes widget height to fix all the text.
+       | Only applies when readOnly = true or multiline = false.
++  * - autoFocus
++    - boolean (false)
++    - | Gives the widget keyboard focus when it is set to true (once per false-to-true change).
++      | Lets scripts open a text input without the user clicking it first.
+ 
+ Events
+ ------
+diff --git a/files/lua_api/CMakeLists.txt b/files/lua_api/CMakeLists.txt
+index 2327e89de1..0a72afa537 100644
+--- a/files/lua_api/CMakeLists.txt
++++ b/files/lua_api/CMakeLists.txt
+@@ -21,6 +21,8 @@ set(LUA_API_FILES
+     openmw/markup.lua
+     openmw/menu.lua
+     openmw/nearby.lua
++    openmw/modstore.lua
++    openmw/net.lua
+     openmw/postprocessing.lua
+     openmw/self.lua
+     openmw/storage.lua
+diff --git a/files/lua_api/openmw/animation.lua b/files/lua_api/openmw/animation.lua
+index 05948421f6..6a2bb7fea4 100644
+--- a/files/lua_api/openmw/animation.lua
++++ b/files/lua_api/openmw/animation.lua
+@@ -68,6 +68,14 @@
+ -- @param #string text key
+ -- @return #number
+ 
++---
++-- Aim the actor's head up or down, replacing the default head tracking. The angle is limited to about 40 degrees.
++-- Can only be used on self.
++-- @function [parent=#animation] setHeadPitch
++-- @param openmw.core#GameObject actor
++-- @param #number pitch Radians; positive looks down. Pass `nil` to go back to the default behaviour.
++-- @param #number spinePitch Optional. Radians to tilt the upper body the same way (default 0).
++
+ ---
+ -- Check if the given animation group is currently playing
+ -- @function [parent=#animation] isPlaying
+diff --git a/files/lua_api/openmw/ui.lua b/files/lua_api/openmw/ui.lua
+index 3789daf387..bbad947231 100644
+--- a/files/lua_api/openmw/ui.lua
++++ b/files/lua_api/openmw/ui.lua
+@@ -76,6 +76,16 @@
+ -- @field Flex Aligns widgets in a row or column
+ -- @field Container Automatically wraps around its contents
+ 
++---
++-- Shows extra markers on the map window and the minimap (for example other players), replacing the previous ones.
++-- They are not saved and can not be edited. Pass an empty list to remove them.
++-- @function [parent=#ui] setMapMarkers
++-- @param #list<#table> markers Each entry is a table `{ cell = "", x = 0, y = 0, name = "", group = false, info = "" }`: `cell` is empty for the
++-- exterior or the name of an interior cell, `x` and `y` are world coordinates, `name` is shown as the tooltip and must be
++-- unique, `info` is optional text shown after the name in the tooltip (for example how far above or below the player is),
++-- `group` makes the marker orange (green otherwise). They are also shown on the global map when `cell` is empty.
++-- Call it as often as you like: while the same names stay in the same cells only the positions are updated.
++
+ ---
+ -- Shows given message at the bottom of the screen.
+ -- @function [parent=#ui] showMessage

@@ -1,0 +1,334 @@
+From 21687b1ad4f0cbb03d7e94668337276e2ea3228f Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Thu, 15 Oct 2026 15:42:27 -0400
+Subject: [PATCH] mp.omwscripts is a built-in script list of its own, so a
+ synced copy replaces it (scripts can be added, removed, changed)
+
+- the engine loads every resources/vfs/*.omwscripts after builtin.omwscripts; the multiplayer mod's list ships as
+  resources/vfs/mp.omwscripts instead of being merged into builtin.omwscripts (CMake, both packagers)
+- a file of the same name in a client mod folder comes later in the data directories and replaces it
+- the server hands out mp.omwscripts as a real file of the "multiplayer" mod (no empty stand-in list)
+- README and unit test
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ apps/components_tests/misc/testclientmods.cpp | 19 ++++-----
+ apps/mpserver/servercore.cpp                  |  2 +-
+ apps/openmw/main.cpp                          | 27 ++++++++++++-
+ components/misc/clientmods.cpp                | 39 ++++++++++++-------
+ components/misc/clientmods.hpp                |  7 ++--
+ files/data-mw/CMakeLists.txt                  |  2 +-
+ files/data/CMakeLists.txt                     | 12 ++----
+ multiplayer/README.md                         |  6 ++-
+ multiplayer/package-client-windows.py         |  8 ++--
+ multiplayer/package-client.py                 |  6 ++-
+ 10 files changed, 81 insertions(+), 47 deletions(-)
+
+diff --git a/apps/components_tests/misc/testclientmods.cpp b/apps/components_tests/misc/testclientmods.cpp
+index 520957775b..5eada931ae 100644
+--- a/apps/components_tests/misc/testclientmods.cpp
++++ b/apps/components_tests/misc/testclientmods.cpp
+@@ -113,24 +113,25 @@ namespace
+         std::filesystem::create_directories(base / "root");
+         auto put = [](const std::filesystem::path& p, const std::string& text) { std::ofstream(p, std::ios::binary) << text; };
+         put(base / "mod" / "scripts" / "mp" / "a.lua", "print(1)");
+-        put(base / "mod" / "mp.omwscripts", "GLOBAL: scripts/mp/a.lua\n"); // must not be offered: it would load the scripts twice
++        put(base / "mod" / "mp.omwscripts", "GLOBAL: scripts/mp/a.lua\n"); // the script list: offered under its own name
++        put(base / "mod" / "other.omwscripts", "GLOBAL: scripts/mp/b.lua\n"); // anything else at the top is not
+         put(base / "mod" / "secret" / "s.lua", "x");
+         CM::setRoot(base / "root");
+-        CM::setExtraMod("multiplayer", base / "mod");
++        CM::setExtraMod("multiplayer", base / "mod", "mp.omwscripts");
+ 
+         const auto mods = CM::installed();
+         ASSERT_EQ(mods.size(), 1u);
+         EXPECT_EQ(mods[0].mId, "multiplayer");
+         ASSERT_EQ(mods[0].mFiles.size(), 2u);
+-        EXPECT_EQ(mods[0].mFiles[0].mPath, "multiplayer.omwscripts");
++        EXPECT_EQ(mods[0].mFiles[0].mPath, "mp.omwscripts");
+         EXPECT_EQ(mods[0].mFiles[1].mPath, "scripts/mp/a.lua");
+         EXPECT_EQ(mods[0].mFiles[1].mHash, Misc::sha256Hex("print(1)"));
+         EXPECT_EQ(CM::read("multiplayer", "scripts/mp/a.lua"), "print(1)");
+-        const auto stub = CM::read("multiplayer", "multiplayer.omwscripts");
+-        ASSERT_TRUE(stub);
+-        EXPECT_EQ(Misc::sha256Hex(*stub), mods[0].mFiles[0].mHash);
+-        EXPECT_EQ(stub->find("GLOBAL"), std::string::npos);
+-        EXPECT_FALSE(CM::read("multiplayer", "mp.omwscripts"));
++        const auto list = CM::read("multiplayer", "mp.omwscripts");
++        ASSERT_TRUE(list);
++        EXPECT_EQ(Misc::sha256Hex(*list), mods[0].mFiles[0].mHash);
++        EXPECT_EQ(*list, "GLOBAL: scripts/mp/a.lua\n");
++        EXPECT_FALSE(CM::read("multiplayer", "other.omwscripts"));
+         EXPECT_FALSE(CM::read("multiplayer", "secret/s.lua"));
+ 
+         // a real folder of the same name takes over
+@@ -144,7 +145,7 @@ namespace
+         EXPECT_EQ(own[0].mFiles[0].mPath, "b.lua");
+ 
+         std::filesystem::remove_all(base);
+-        CM::setExtraMod("", {});
++        CM::setExtraMod("", {}, "");
+         CM::setRoot({});
+     }
+ }
+diff --git a/apps/mpserver/servercore.cpp b/apps/mpserver/servercore.cpp
+index 8a1eff2267..56ba8d3639 100644
+--- a/apps/mpserver/servercore.cpp
++++ b/apps/mpserver/servercore.cpp
+@@ -660,7 +660,7 @@ namespace MpServer
+         mImpl->mOptions = options;
+         mImpl->mHost.mModDir = options.mMod;
+         Misc::ClientMods::setRoot(options.mClientMods);
+-        Misc::ClientMods::setExtraMod("multiplayer", options.mMod); // the mod's own client scripts, served from where the relay reads them
++        Misc::ClientMods::setExtraMod("multiplayer", options.mMod, "mp.omwscripts"); // the mod's own client scripts, served from where the relay reads them
+         gHost = &mImpl->mHost;
+     }
+ 
+diff --git a/apps/openmw/main.cpp b/apps/openmw/main.cpp
+index 8c615e1334..b2c14469d3 100644
+--- a/apps/openmw/main.cpp
++++ b/apps/openmw/main.cpp
+@@ -25,6 +25,7 @@
+ extern "C" __declspec(dllexport) DWORD AmdPowerXpressRequestHighPerformance = 0x00000001;
+ #endif
+ 
++#include <algorithm>
+ #include <filesystem>
+ 
+ #if (defined(__APPLE__) || defined(__linux) || defined(__unix) || defined(__posix))
+@@ -121,9 +122,31 @@ bool parseOptions(int argc, char** argv, OMW::Engine& engine, Files::Configurati
+         return false;
+     }
+     engine.addContentFile("builtin.omwscripts");
+-    for (const std::string& script : clientModScripts)
+-        engine.addContentFile(script);
+     std::set<std::string> contentDedupe{ "builtin.omwscripts" };
++    // Other built-in script lists (resources/vfs/*.omwscripts, e.g. the multiplayer mod's mp.omwscripts). They are separate
++    // files so that a file of the same name in a client mod folder, which comes later in the data directories, replaces them.
++    {
++        std::vector<std::string> lists;
++        std::error_code listError;
++        const std::filesystem::path vfsDir = variables["resources"].as<Files::MaybeQuotedPath>();
++        for (std::filesystem::directory_iterator it(vfsDir / "vfs", listError), end; !listError && it != end; it.increment(listError))
++        {
++            const std::string name = it->path().filename().string();
++            if (it->path().extension() == ".omwscripts" && name != "builtin.omwscripts")
++                lists.push_back(name);
++        }
++        std::sort(lists.begin(), lists.end());
++        for (const std::string& list : lists)
++        {
++            engine.addContentFile(list);
++            contentDedupe.insert(list);
++        }
++    }
++    for (const std::string& script : clientModScripts)
++    {
++        if (contentDedupe.insert(script).second)
++            engine.addContentFile(script);
++    }
+     for (const auto& contentFile : content)
+     {
+         if (!contentDedupe.insert(contentFile).second)
+diff --git a/components/misc/clientmods.cpp b/components/misc/clientmods.cpp
+index ddede1662f..cbc3444d7a 100644
+--- a/components/misc/clientmods.cpp
++++ b/components/misc/clientmods.cpp
+@@ -27,6 +27,7 @@ namespace Misc::ClientMods
+         fs::path sRoot;
+         std::string sExtraId;
+         fs::path sExtraDir;
++        std::string sExtraList;
+         const std::vector<std::string> sExtraFolders = { "scripts", "l10n", "textures" };
+         std::atomic<bool> sRestart{ false };
+ 
+@@ -138,21 +139,22 @@ namespace Misc::ClientMods
+             return !sExtraId.empty() && id == sExtraId && !fs::is_directory(sRoot / std::string(id), ec);
+         }
+ 
+-        std::string extraStub()
+-        {
+-            return "# The client scripts of this server's own mod, kept in step with the server. They replace the copies built into the\n"
+-                   "# game, which already registers them, so nothing is listed here.\n";
+-        }
+-
+         std::vector<File> extraFiles(bool withHashes)
+         {
+             std::vector<File> files = filesOf(sExtraDir, withHashes, sExtraFolders);
+-            File stub;
+-            stub.mPath = sExtraId + ".omwscripts";
+-            stub.mSize = extraStub().size();
+-            if (withHashes)
+-                stub.mHash = sha256Hex(extraStub());
+-            files.push_back(std::move(stub));
++            // the script list, as the plain file it is (a client that has it built in replaces it by this one)
++            std::error_code ec;
++            const fs::path list = sExtraDir / sExtraList;
++            if (validPath(sExtraList) && fs::is_regular_file(list, ec) && !fs::is_symlink(list, ec))
++            {
++                File file;
++                file.mPath = sExtraList;
++                file.mSize = fs::file_size(list, ec);
++                if (withHashes)
++                    file.mHash = hashOf(list, file.mSize);
++                if (!ec && file.mSize <= sMaxFileSize)
++                    files.push_back(std::move(file));
++            }
+             std::sort(files.begin(), files.end(), [](const File& a, const File& b) { return a.mPath < b.mPath; });
+             return files;
+         }
+@@ -189,10 +191,11 @@ namespace Misc::ClientMods
+         sRoot = root;
+     }
+ 
+-    void setExtraMod(const std::string& id, const fs::path& dir)
++    void setExtraMod(const std::string& id, const fs::path& dir, const std::string& scriptList)
+     {
+         sExtraId = validId(id) ? id : std::string();
+         sExtraDir = dir;
++        sExtraList = scriptList;
+     }
+ 
+     const fs::path& root()
+@@ -274,9 +277,15 @@ namespace Misc::ClientMods
+             return std::nullopt;
+         if (isExtra(id))
+         {
+-            if (path == sExtraId + ".omwscripts")
+-                return extraStub();
+             const std::size_t slash = path.find('/');
++            if (path == sExtraList)
++            {
++                const fs::path list = sExtraDir / sExtraList;
++                std::error_code ec;
++                if (!fs::is_regular_file(list, ec) || fs::is_symlink(list, ec))
++                    return std::nullopt;
++                return readWhole(list, sMaxFileSize);
++            }
+             if (slash == std::string_view::npos
+                 || std::find(sExtraFolders.begin(), sExtraFolders.end(), std::string(path.substr(0, slash))) == sExtraFolders.end())
+                 return std::nullopt;
+diff --git a/components/misc/clientmods.hpp b/components/misc/clientmods.hpp
+index 4b2161df9e..ee4093c31a 100644
+--- a/components/misc/clientmods.hpp
++++ b/components/misc/clientmods.hpp
+@@ -33,9 +33,10 @@ namespace Misc::ClientMods
+     };
+ 
+     // A server can also hand out a folder it already has as one more mod (the multiplayer mod's own client scripts, so they are
+-    // not stored twice): only its scripts, l10n and textures folders are offered, plus an empty <id>.omwscripts so that the
+-    // client adds the folder to its data directories without loading anything twice. A folder <root>/<id> wins over it.
+-    void setExtraMod(const std::string& id, const std::filesystem::path& dir);
++    // not stored twice): only its scripts, l10n and textures folders are offered, plus the script list scriptList (a file in the
++    // folder, e.g. mp.omwscripts). A game that has the same file name built in as a list of its own (the multiplayer mod's
++    // mp.omwscripts) uses the synced one instead, so scripts can be added, removed and changed. A folder <root>/<id> wins.
++    void setExtraMod(const std::string& id, const std::filesystem::path& dir, const std::string& scriptList);
+ 
+     // The folder everything lives in. Set once at startup; empty means the feature is off.
+     void setRoot(const std::filesystem::path& root);
+diff --git a/files/data-mw/CMakeLists.txt b/files/data-mw/CMakeLists.txt
+index a1b4790276..10d9408192 100644
+--- a/files/data-mw/CMakeLists.txt
++++ b/files/data-mw/CMakeLists.txt
+@@ -46,7 +46,7 @@ endforeach (f)
+ 
+ # Concat data/builtin.omwscripts and data-mw/builtin.omwscripts.in to create vfs-mw/builtin.omwscripts
+ set(builtinBase "${CMAKE_CURRENT_SOURCE_DIR}/../data/builtin.omwscripts")
+-if (OPENMW_BUILTIN_OMWSCRIPTS) # (files/data: builtin.omwscripts with the multiplayer scripts added, when they are built in)
++if (OPENMW_BUILTIN_OMWSCRIPTS)
+     set(builtinBase "${OPENMW_BUILTIN_OMWSCRIPTS}")
+ endif ()
+ 
+diff --git a/files/data/CMakeLists.txt b/files/data/CMakeLists.txt
+index 4554894894..cf1236d98c 100644
+--- a/files/data/CMakeLists.txt
++++ b/files/data/CMakeLists.txt
+@@ -272,8 +272,9 @@ foreach (f ${BUILTIN_DATA_FILES})
+     copy_resource_file("${CMAKE_CURRENT_SOURCE_DIR}/${f}" "${OPENMW_RESOURCES_ROOT}" "resources/vfs/${f}")
+ endforeach (f)
+ 
+-# The multiplayer mod (multiplayer/mod) ships with the engine: its scripts are appended to builtin.omwscripts, so the
+-# Multiplayer button on the main menu works without editing openmw.cfg. They do nothing until a game is started from the
++# The multiplayer mod (multiplayer/mod) ships with the engine: its script list is a built-in list of its own
++# (resources/vfs/mp.omwscripts, loaded after builtin.omwscripts), so the Multiplayer button on the main menu works without
++# editing openmw.cfg, and a synced copy of the file (a server's client mods) replaces it. They do nothing until a game is started from the
+ # Multiplayer screen. Phone builds (Android, iOS) package the mod themselves and leave this off.
+ if (ANDROID OR IOS)
+     set(OPENMW_BUILTIN_MULTIPLAYER_DEFAULT OFF)
+@@ -293,12 +294,7 @@ if (OPENMW_BUILTIN_MULTIPLAYER AND EXISTS "${MULTIPLAYER_MOD_DIR}/mp.omwscripts"
+     foreach (f ${MULTIPLAYER_MOD_FILES})
+         copy_resource_file("${MULTIPLAYER_MOD_DIR}/${f}" "${OPENMW_RESOURCES_ROOT}" "resources/vfs/${f}")
+     endforeach (f)
+-    # builtin.omwscripts + the mod's script list. (files/data-mw builds its own copy from this one, so Morrowind games get it too.)
+-    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${builtinScripts}" "${MULTIPLAYER_MOD_DIR}/mp.omwscripts")
+-    file(READ "${builtinScripts}" BUILTIN_SCRIPTS_BASE)
+-    file(READ "${MULTIPLAYER_MOD_DIR}/mp.omwscripts" MULTIPLAYER_SCRIPTS)
+-    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/builtin.omwscripts" "${BUILTIN_SCRIPTS_BASE}\n# Multiplayer (multiplayer/mod)\n${MULTIPLAYER_SCRIPTS}\n")
+-    set(builtinScripts "${CMAKE_CURRENT_BINARY_DIR}/builtin.omwscripts")
++    copy_resource_file("${MULTIPLAYER_MOD_DIR}/mp.omwscripts" "${OPENMW_RESOURCES_ROOT}" "resources/vfs/mp.omwscripts")
+     message(STATUS "Multiplayer mod: built in (OPENMW_BUILTIN_MULTIPLAYER)")
+ endif ()
+ set(OPENMW_BUILTIN_OMWSCRIPTS "${builtinScripts}" CACHE INTERNAL "builtin.omwscripts to ship (data-mw adds to it)")
+diff --git a/multiplayer/README.md b/multiplayer/README.md
+index f2592e8c6d..c80e1c0e61 100644
+--- a/multiplayer/README.md
++++ b/multiplayer/README.md
+@@ -164,8 +164,10 @@ installing anything by hand.
+   jpg, nif, kf, wav, mp3, ogg; at most 8 MB a file, 64 MB and 500 files a mod, 32 mods). Then the game restarts (Linux and
+   Windows; elsewhere the player starts it again) and the new scripts load at startup. The player joins again.
+ 
+-The multiplayer mod's own client scripts (`multiplayer/mod/scripts`, `l10n`, `textures`) are always handed out too, as the mod
+-  `multiplayer`: change a script on the server and the players' copy follows without a new build.
++The multiplayer mod's own client scripts (`multiplayer/mod/scripts`, `l10n`, `textures` and its script list `mp.omwscripts`)
++  are always handed out too, as the mod `multiplayer`. The game keeps `mp.omwscripts` as a built-in list of its own, and the
++  synced copy replaces it, so you can change scripts, add them to the list, remove them or change their kind on the server and
++  the players' game follows without a new build.
+ 
+ A player trusts the server's owner with this: the scripts run in their game like any mod. They are only ever asked first.
+ 
+diff --git a/multiplayer/package-client-windows.py b/multiplayer/package-client-windows.py
+index 476bba984d..eb96ce86c0 100644
+--- a/multiplayer/package-client-windows.py
++++ b/multiplayer/package-client-windows.py
+@@ -8,7 +8,7 @@ Makes openmw-multiplayer-client-Windows-<cpu>.zip in --out (default: the build f
+ script (CI/before_script.msvc.sh) put next to them, the Qt and OpenSceneGraph plugins, resources/, the Visual C++ runtime DLLs
+ (from Visual Studio's redistributable folder, so a clean machine needs nothing installed), the license and a README.
+ The build must have been configured with OPENMW_BUILTIN_MULTIPLAYER=ON (the default), which puts the mod into
+-resources/vfs/builtin.omwscripts. Nothing in the build folder is changed.
++resources/vfs/mp.omwscripts. Nothing in the build folder is changed.
+ """
+ import argparse, glob, os, platform, re, shutil, subprocess, sys, tempfile, zipfile
+ 
+@@ -89,9 +89,9 @@ def main():
+     for need in REQUIRED:
+         if not os.path.isfile(os.path.join(exe_dir, need)):
+             sys.exit('missing in %s: %s (build it first: cmake --build . --config %s)' % (exe_dir, need, a.config))
+-    scripts = os.path.join(exe_dir, 'resources', 'vfs', 'builtin.omwscripts')
+-    if 'mp/' not in open(scripts, errors='replace').read() and 'scripts/mp' not in open(scripts, errors='replace').read():
+-        sys.exit('%s has no multiplayer scripts: configure with -DOPENMW_BUILTIN_MULTIPLAYER=ON' % scripts)
++    scripts = os.path.join(exe_dir, 'resources', 'vfs', 'mp.omwscripts')
++    if not os.path.isfile(scripts):
++        sys.exit('%s is missing (the multiplayer scripts): configure with -DOPENMW_BUILTIN_MULTIPLAYER=ON' % scripts)
+     crt = find_crt()
+     if not crt:
+         sys.exit('cannot find the Visual C++ runtime DLLs (install the Build Tools with the C++ workload)')
+diff --git a/multiplayer/package-client.py b/multiplayer/package-client.py
+index 3b163b5d1d..138e07a2e7 100755
+--- a/multiplayer/package-client.py
++++ b/multiplayer/package-client.py
+@@ -170,8 +170,10 @@ def main():
+         for sub in ('scripts/mp', 'l10n', 'textures'):  # what files/data/CMakeLists.txt copies into resources/vfs
+             if os.path.isdir(os.path.join(mod, sub)):
+                 copy_tree(os.path.join(mod, sub), os.path.join(res, 'vfs', sub))
+-        mp = open(os.path.join(mod, 'mp.omwscripts')).read()
+-        builtin = open(builtin_base).read() + '\n# Multiplayer (multiplayer/mod)\n' + mp + '\n'
++        # the mod's script list is a built-in list of its own (the engine loads every resources/vfs/*.omwscripts), so a
++        # synced copy from a server can replace it
++        shutil.copy2(os.path.join(mod, 'mp.omwscripts'), os.path.join(res, 'vfs', 'mp.omwscripts'))
++        builtin = open(builtin_base).read()
+         open(os.path.join(res, 'vfs', 'builtin.omwscripts'), 'w').write(builtin)
+         # vfs-mw/builtin.omwscripts is files/data-mw/builtin.omwscripts.in with the base list put in
+         os.makedirs(os.path.join(res, 'vfs-mw'), exist_ok=True)
+-- 
+2.55.0
+

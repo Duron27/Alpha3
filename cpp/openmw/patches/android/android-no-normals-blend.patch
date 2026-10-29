@@ -1,0 +1,16 @@
+--- a/components/terrain/material.cpp
++++ b/components/terrain/material.cpp
+@@ -211,8 +211,12 @@
+             if (!blendmaps.empty())
+             {
+                 stateset->setMode(GL_BLEND, osg::StateAttribute::ON);
+-                // This pass needs normals-buffer blending.
++#ifndef ANDROID
++                // This pass needs normals-buffer blending. Android has no normals buffer (the post-processor switches
++                // glDisablei off there), and OSG warns on every application of Enablei without the driver function: every
++                // terrain pass, every frame.
+                 stateset->setAttribute(new osg::Enablei(GL_BLEND, 1));
++#endif
+                 stateset->setRenderBinDetails(firstLayer ? 0 : 1, "RenderBin");
+                 if (!firstLayer)
+                 {

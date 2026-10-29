@@ -1,0 +1,316 @@
+From 94e4964271e2b8b53d8cf57288fbdbfd36e56d5e Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Fri, 9 Oct 2026 09:20:13 -0400
+Subject: [PATCH] /r, /pkick, levels in the player list, recent servers, README
+ rewrite
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ multiplayer/README.md                 | 106 +++++++++++++++-----------
+ multiplayer/mod/scripts/mp/global.lua |  14 +++-
+ multiplayer/mod/scripts/mp/menu.lua   |  19 ++++-
+ multiplayer/mod/scripts/mp/player.lua |  10 ++-
+ multiplayer/mod/scripts/mp/relay.lua  |  12 ++-
+ multiplayer/test/relay_test.lua       |   6 ++
+ 6 files changed, 115 insertions(+), 52 deletions(-)
+
+diff --git a/multiplayer/README.md b/multiplayer/README.md
+index 1c8bf1d9d9..7536be1205 100644
+--- a/multiplayer/README.md
++++ b/multiplayer/README.md
+@@ -1,50 +1,64 @@
+-# OpenMW multiplayer test harness
++# OpenMW multiplayer (a Lua mod)
+ 
+-- `server/relay.py` — newline-delimited JSON relay (`--mirror` echoes you back as a ghost 300 units east).
+-- `server/bot.py` — fake second player walking in a circle.
+-- `mod/` — `mp.omwscripts` + `scripts/mp/global.lua`, a global script using `openmw.net`:
+-  streams the player's cell/position/yaw 5x/second and shows each remote player as a `com_chest_01`.
++Everything here is a mod. The engine only offers generic pieces: TCP sockets (`openmw.net`), animation head/spine tilt
++(`animation.setHeadPitch`), map markers (`ui.setMapMarkers`) and a main-menu button hook. The networking itself (client,
++server, JSON, internet-address lookup), the relay, parties, trade, chat, avatars and all UI are Lua.
+ 
+-Run: `multiplayer/run-test.sh [path/to/openmw]`, then load a save. Watch `openmw.log` for `[mp]` lines.
+-Protocol: one JSON object per line, `{"t":"state","name","cell","pos":[x,y,z],"yaw"}`; the server adds `id`.
++```
++mod/mp.omwscripts        what the mod loads
++mod/scripts/mp/
++  netlib.lua             client + server + JSON + public-address lookup on top of openmw.net sockets
++  relay.lua              the server logic that runs inside the host's game
++  bot.lua                a fake player living inside the relay (for testing the UI with one game)
++  global.lua             the client: sync, avatars, parties, commands, time/weather
++  player.lua             UI: chat, party panel, invites, arrows over players, status line, avatar menu
++  menu.lua               main-menu screen (host/join, port, password, test player) and settings renderers
++  remote.lua             runs on avatars/stand-ins: movement, attacks, head tilt, death pose, reading pose
++  proxies.lua            stand-ins for party members' actors, shared kills, no duplicate NPCs
++  trade.lua, damage.lua  trade window, damage/kill delivery to real actors
++server/                  old standalone Python relay (no password/admin/ping list), bots for it
++test/relay_test.lua      runs the relay logic without the game:  luajit multiplayer/test/relay_test.lua
++run-two.sh               two real instances on one machine (host + joiner)
++```
+ 
+ ## Hosting and joining
+-From the main menu's Multiplayer screen choose **Join a server** (address + port) or **Host a game** (port), then start or
+-load a character. Hosting runs the relay inside your game (`mod/scripts/mp/relay.lua`, on top of `net.listen`) and you play
+-through a loopback connection to it, so any number of players can join you. You are connected to exactly one host at a
+-time, and while hosting you cannot join another server; to switch, return to the main menu and load again.
+-`server/relay.py` is still there for a dedicated server.
+-
+-## Testing with two real instances
+-`multiplayer/run-two.sh <openmw> <save.omwsave>` starts one instance that hosts and a second that joins it (the "fake second
+-player"), each with its own user-data dir, and logs to `$TMPDIR/mp-two/{host,join}.log`. The joiner also fakes attacks,
+-jumps and sneaking so the host can check the avatar animations. Note both share `~/.config/openmw` settings.
+-
+-## How it works
+-Every player keeps their **own** world; nothing a group member does changes yours.
+-- **Presence:** everyone online appears as a stand-in NPC (look + gear) when you share a cell. Activate one for a menu:
+-  invite to party, accept/decline, leave party, **trade**.
+-- **Parties (max 3):** shared party chat, health/magicka/fatigue panel, and *proxies*: if a member has an NPC/creature
+-  alive that is dead or missing in your world you get a marked copy `Name [Alice's world]` (own record, no script, no AI).
+-  Damage you do to it is applied to the owner's real actor, so they can finish their quest. Your world is untouched.
+-- **Chat:** Enter or Y opens the input (the game keeps running); Enter sends, Tab switches Global/Party.
+-  `/accept [name]`, `/decline [name]`, `/leave`, `/g text`, `/p text`.
+-- **Trade:** both inventories are shown (like a merchant's goods). Click to add an item to the deal, right-click adds
+-  the whole stack; both players must accept the same revision. Items are recreated from their record id on the receiving
+-  side (condition/enchant charge reset; runtime-generated items can't be traded). It is not atomic across a crash.
+-
+-Test with one client: `run-test.sh [--cheat]` starts the relay, a "Bot" player (auto-accepts party invites and trades,
+-owns a scrib that doesn't exist in your world) and OpenMW. `server/owner_bot.py --help` lists bot options.
+-
+-Combat is two-way: hitting a proxy turns on its AI so it fights you in your world, the owner's real actor takes the damage
+-and turns on its owner, and other players' avatars can't be hurt (and hitting one gives no bounty).
+-
+-Quest safety: a guest hitting a proxy only ever *wounds* the owner's real actor (it never drops below 1 health and
+-then stands down), so nobody can kill an NPC another player still needs. The guest's own copy dies in their world.
+-Players list: Esc > Options > Scripts > Multiplayer shows everyone online with latency (also `/players`, whisper with
+-`/w name text`). The host's clock and the weather in the host's region are shared with joiners.
+-Avatars mirror sneaking, jumping, attacks and spell casts (animation only, they never deal damage in your world) and are
+-moved with velocity extrapolation at 20 updates/s.
+-
+-Not done: shared fights where both worlds have the actor alive, container contents,
+-weather/time, proxies for actors that are alive-but-unloaded in your world, trade of enchanted/generated items.
++Main menu → **Multiplayer**: choose **Join a server** (address, port, password) or **Host a game** (port, optional
++password), then start or load a character. Hosting starts with your game: the relay runs inside it and you play through a
++loopback connection, so host and joiner share the same client code. You are connected to exactly one host at a time and
++while hosting you cannot join another server; to switch, return to the main menu and load again.
++
++When hosting the game looks up your internet address (one request to `api.ipify.org`) and shows it in chat, in the status
++line and on *Options → Scripts → Multiplayer*, together with your LAN address. Friends outside your network need that address
++and the TCP port forwarded on your router to your computer. Joiners also get a list of servers they joined before.
++
++Safety: protocol version check (both sides must run the same mod), optional password, player limit (default 8), unique
++names (a second "Alice" becomes "Alice (2)"), a message of the day, and a 10 second limit to say who you are.
++
++## Playing together
++Every player keeps their **own** world; nothing a group member does changes yours, except the shared things below.
++- **Presence:** everyone appears as a stand-in NPC (look and gear) when you share a cell, with a green arrow and name that
++  shows through walls, and a marker on the map and minimap. Activate someone for a menu: invite to party, trade, ...
++- **Animation:** walking, running, strafing and backing up relative to where they face, jumping (once per jump), sneaking,
++  swimming, attacks (wind-up on press, swing size by how long it was charged, chop/slash/thrust), spells, head and body tilt
++  following their aim, a death pose, and a "reading a book" pose while they have a menu open (their game is paused).
++  Attacks are animation only: an avatar never damages anything in your world.
++- **Parties (max 3):** shared party chat, vitals panel, and stand-ins for actors that are alive in a member's world but dead
++  or missing in yours (one per actor, never next to a living twin). **Kills are shared** (setting, on by default): if a member
++  kills an NPC or creature it dies for everybody in the group (essential NPCs excepted).
++- **Time and weather:** the host's clock and the weather in the host's region.
++- **Chat:** Enter or Y opens the input (the game keeps running); Tab switches Global/Party.
++
++### Commands
++`/players`, `/me text`, `/w name text`, `/r text`, `/g text`, `/p text`, `/goto name`, `/ip` (look up your address again),
++`/accept [name]`, `/decline [name]`, `/leave`, `/pkick name` (party leader).
++Host only: `/kick name`, `/ban name`, `/unban name`, `/mute name`, `/unmute name`, `/announce text`.
++
++### Testing
++`run-two.sh <openmw> <save.omwsave>` starts a host and a joiner (own user-data dirs, logs in `$TMPDIR/mp-two/`). The
++**Test: load a save with a test player** button on the multiplayer screen (or **Add a test player** in a running hosted game)
++puts a fake player next to you that accepts invites, chats, trades and shows vitals. `debug/` has helper scripts for the
++automated runs (auto-host, auto-join with a walking character, auto-bot, kill test).
++
++## Not done
++Shared fights where both worlds have the actor alive, container contents, stand-ins for actors that are alive but unloaded in
++your world, trade of enchanted/generated items, projectiles and spell effects of other players.
+diff --git a/multiplayer/mod/scripts/mp/global.lua b/multiplayer/mod/scripts/mp/global.lua
+index 6e22507f86..244a0d7fb0 100644
+--- a/multiplayer/mod/scripts/mp/global.lua
++++ b/multiplayer/mod/scripts/mp/global.lua
+@@ -53,6 +53,7 @@ local worldTimer = 0
+ local lastReal
+ local lastFailure = {} -- invite failure text -> clock, so a repeated failure is not spammed
+ local lastLevel
++local lastWhisperFrom -- who whispered to us last (for /r)
+ local refusedBy -- why the host turned us away: we stop retrying until the settings change
+ local botWanted = false -- test bot (menu): only while hosting
+ local hostInfo -- when hosting: { port, lan, public, error, looking }
+@@ -599,11 +600,21 @@ local function onCommand(d)
+             if r.profile and nameOf(id):lower() == tostring(d.name):lower() then target = id end
+         end
+         if not target then notice('No player named ' .. tostring(d.name) .. ' is online.') return end
+-        if not isMember(target) then notice('You can only join the side of someone in your party.') return end
+         local s = remotes[target].state
+         if not s then notice(nameOf(target) .. ' has not told us where they are yet.') return end
+         player():teleport(s.cell, util.vector3(s.pos[1] + 90, s.pos[2], s.pos[3]))
+         notice('You joined ' .. nameOf(target) .. '.')
++    elseif cmd == 'reply' then
++        if not lastWhisperFrom or not remotes[lastWhisperFrom] then notice('Nobody has whispered to you yet.') return end
++        net.send(net.encodeJson({ t = 'chat', scope = 'whisper', to = lastWhisperFrom, text = d.text }))
++        chatLine('whisper', 'To ' .. nameOf(lastWhisperFrom), d.text, true)
++    elseif cmd == 'party_kick' then
++        local target
++        for id, r in pairs(remotes) do
++            if r.profile and nameOf(id):lower() == tostring(d.name):lower() then target = id end
++        end
++        if not target then notice('No player named ' .. tostring(d.name) .. ' is online.') return end
++        net.send(net.encodeJson({ t = 'party_kick', id = target }))
+     elseif cmd == 'whisper' then
+         local target
+         for _, pl in ipairs(players) do
+@@ -747,6 +758,7 @@ local function onMessage(msg)
+         return
+     end
+     if t == 'chat' then
++        if msg.scope == 'whisper' then lastWhisperFrom = msg.id end
+         chatLine(msg.scope == 'party' and 'party' or msg.scope == 'whisper' and 'whisper' or msg.scope == 'emote' and 'emote' or 'global',
+             nameOf(msg.id), msg.text, false)
+         return
+diff --git a/multiplayer/mod/scripts/mp/menu.lua b/multiplayer/mod/scripts/mp/menu.lua
+index 92965a4e01..6e061046ea 100644
+--- a/multiplayer/mod/scripts/mp/menu.lua
++++ b/multiplayer/mod/scripts/mp/menu.lua
+@@ -40,7 +40,7 @@ I.Settings.registerRenderer('mpPlayers', function(list)
+         for _, pl in ipairs(list) do
+             rows[#rows + 1] = {
+                 template = I.MWUI.templates.textNormal,
+-                props = { text = pl.name .. (pl.host and ' (host)' or '') .. '    ' .. (pl.ping and (pl.ping .. ' ms') or '-') },
++                props = { text = pl.name .. (pl.level and (' (level ' .. pl.level .. ')') or '') .. (pl.host and ' (host)' or '') .. (pl.muted and ' (muted)' or '') .. '    ' .. (pl.ping and (pl.ping .. ' ms') or '-') },
+             }
+         end
+     end
+@@ -72,6 +72,13 @@ local function apply(bot)
+     if not port or port < 1 or port > 65535 or port ~= math.floor(port) then
+         message, messageColor = 'The port must be a number from 1 to 65535.', C.err render() return false
+     end
++    if mode == 'join' then -- remember the servers we connect to
++        local list = { { host = host, port = port } }
++        for _, e in ipairs(section:get('Recent') or {}) do
++            if #list < 6 and not (e.host == host and e.port == port) then list[#list + 1] = { host = e.host, port = e.port } end
++        end
++        section:set('Recent', list)
++    end
+     section:set('Mode', mode)
+     section:set('Password', passBuf or '')
+     section:set('Bot', bot and true or false)
+@@ -138,6 +145,7 @@ render = function()
+         if mode == 'join' then
+             content[#content + 1] = text({ position = V2(24, 118), text = 'Server', textColor = C.text })
+             content[#content + 1] = field(140, 114, 300, hostBuf, function(t) hostBuf = t end)
++            content[#content + 1] = button(450, 112, 'Recent', function() view = 'recent' render() end, C.dim)
+         end
+         content[#content + 1] = text({ position = V2(24, 160), text = 'Port', textColor = C.text })
+         content[#content + 1] = field(140, 156, 120, portBuf, function(t) portBuf = t end)
+@@ -184,6 +192,15 @@ render = function()
+             end, C.ok)
+         end
+         content[#content + 1] = button(24, H - 50, 'Close', close)
++    elseif view == 'recent' then
++        content[#content + 1] = text({ position = V2(24, 64), text = 'Servers you joined before', textColor = C.text })
++        local list = section:get('Recent') or {}
++        if #list == 0 then content[#content + 1] = text({ position = V2(24, 110), text = 'None yet.', textColor = C.dim }) end
++        for i, e in ipairs(list) do
++            content[#content + 1] = text({ position = V2(32, 94 + (i - 1) * 28), text = e.host .. ':' .. tostring(e.port), textColor = C.text },
++                { mouseClick = async:callback(function() hostBuf, portBuf = e.host, tostring(e.port) view = 'main' render() end) })
++        end
++        content[#content + 1] = button(24, H - 50, 'Back', function() view = 'main' render() end)
+     else
+         content[#content + 1] = text({ position = V2(24, 64), text = 'Choose a save to join with', textColor = C.text })
+         local list = saveList()
+diff --git a/multiplayer/mod/scripts/mp/player.lua b/multiplayer/mod/scripts/mp/player.lua
+index 71a04dcc67..3df42bdc7a 100644
+--- a/multiplayer/mod/scripts/mp/player.lua
++++ b/multiplayer/mod/scripts/mp/player.lua
+@@ -279,8 +279,12 @@ local function sendChat(str)
+             core.sendGlobalEvent('MpCmd', { cmd = 'leave' })
+         elseif cmd == 'me' then
+             if arg then core.sendGlobalEvent('MpCmd', { cmd = 'emote', text = arg }) else addLine('system', 'Usage: /me <text>') end
++        elseif cmd == 'r' or cmd == 'reply' then
++            if arg then core.sendGlobalEvent('MpCmd', { cmd = 'reply', text = arg }) else addLine('system', 'Usage: /r <text>') end
++        elseif cmd == 'pkick' then
++            if arg then core.sendGlobalEvent('MpCmd', { cmd = 'party_kick', name = arg }) else addLine('system', 'Usage: /pkick <party member> (leader only)') end
+         elseif cmd == 'goto' then
+-            if arg then core.sendGlobalEvent('MpCmd', { cmd = 'goto', name = arg }) else addLine('system', 'Usage: /goto <party member>') end
++            if arg then core.sendGlobalEvent('MpCmd', { cmd = 'goto', name = arg }) else addLine('system', 'Usage: /goto <player>') end
+         elseif cmd == 'kick' or cmd == 'ban' or cmd == 'unban' or cmd == 'mute' or cmd == 'unmute' then
+             if arg then core.sendGlobalEvent('MpCmd', { cmd = 'admin', sub = cmd, name = arg })
+             else addLine('system', 'Usage: /' .. cmd .. ' <player> (host only)') end
+@@ -296,13 +300,13 @@ local function sendChat(str)
+         elseif cmd == 'players' or cmd == 'who' then
+             if #playerList == 0 then addLine('system', 'Not connected.') end
+             for _, pl in ipairs(playerList) do
+-                addLine('system', pl.name .. (pl.host and ' (host)' or '') .. (pl.id == myPlayerId and ' (you)' or '')
++                addLine('system', pl.name .. (pl.level and (' (level ' .. pl.level .. ')') or '') .. (pl.host and ' (host)' or '') .. (pl.id == myPlayerId and ' (you)' or '')
+                     .. '  ' .. (pl.ping and (pl.ping .. ' ms') or '-'))
+             end
+         elseif cmd == 'g' or cmd == 'p' then
+             if arg then core.sendGlobalEvent('MpCmd', { cmd = 'chat', scope = cmd == 'g' and 'global' or 'party', text = arg }) end
+         else
+-            addLine('system', 'Commands: /players, /me, /goto, /ip, /w <player> <text>, host: /kick /ban /unban /mute /unmute /announce, /accept [name], /decline [name], /leave, /g <text>, /p <text>')
++            addLine('system', 'Commands: /players, /me, /goto, /ip, /w, /r, /pkick (party leader), host: /kick /ban /unban /mute /unmute /announce, /accept [name], /decline [name], /leave, /g <text>, /p <text>')
+         end
+         return
+     end
+diff --git a/multiplayer/mod/scripts/mp/relay.lua b/multiplayer/mod/scripts/mp/relay.lua
+index c396ce29cb..1148fff23c 100644
+--- a/multiplayer/mod/scripts/mp/relay.lua
++++ b/multiplayer/mod/scripts/mp/relay.lua
+@@ -346,6 +346,15 @@ process = function(id, msg)
+     if t == 'accept' then return handleAccept(id, msg) end
+     if t == 'decline' then return handleDecline(id, msg) end
+     if t == 'leave_party' then return removeFromParty(id) end
++    if t == 'party_kick' then -- the leader sends a member away
++        local pid = c.party
++        local target = msg.id
++        if not pid or parties[pid].leader ~= id then return sendTo(id, { t = 'notice', text = 'Only the party leader can do that.' }) end
++        if type(target) ~= 'number' or target == id or not clients[target] or clients[target].party ~= pid then return end
++        removeFromParty(target)
++        sendTo(target, { t = 'notice', text = 'You were removed from the party.' })
++        return
++    end
+     if t == 'pong' then
+         local sent = c.pings[msg.n]
+         if sent then
+@@ -367,6 +376,7 @@ process = function(id, msg)
+     if t == 'profile' then
+         msg.name = c.name or uniqueName(msg.name, id) -- the name the relay gave us
+         c.name = msg.name
++        c.level = tonumber(msg.level)
+     end
+     if t:sub(1, 6) == 'trade_' then -- trades are between two players, party or not
+         local target = msg.to
+@@ -482,7 +492,7 @@ function M.update(dt)
+     for _, id in ipairs(ids) do
+         local c = clients[id]
+         list[#list + 1] = { id = id, name = c.name or ('Player ' .. id), ping = c.ping and math.floor(c.ping + 0.5) or false,
+-            host = id == hostId }
++            host = id == hostId, level = c.level, muted = c.muted or nil }
+         pingSeq = pingSeq + 1
+         local now = core.getRealTime()
+         for n, sent in pairs(c.pings) do
+diff --git a/multiplayer/test/relay_test.lua b/multiplayer/test/relay_test.lua
+index 6b7de1f00f..c3e6632750 100644
+--- a/multiplayer/test/relay_test.lua
++++ b/multiplayer/test/relay_test.lua
+@@ -68,6 +68,12 @@ say(4, { t = 'invite', to = 5 })
+ check(count(5, 'invite') == 1, 'a pending invite is not repeated')
+ say(5, { t = 'accept', from = 4 })
+ check(last(4, 'party') and #last(4, 'party').members == 2, 'party formed')
++say(5, { t = 'party_kick', id = 4 })
++check(last(5, 'notice') and last(5, 'notice').text:find('leader'), 'only the leader can remove members')
++say(4, { t = 'party_kick', id = 5 })
++check(last(5, 'party') and #last(5, 'party').members == 0, 'the leader can remove a member')
++tick(2); say(4, { t = 'invite', to = 5 }); say(5, { t = 'accept', from = 4 })
++check(last(4, 'party') and #last(4, 'party').members == 2, 'they can party up again')
+ tick(2)
+ say(4, { t = 'invite', to = 5 })
+ check(last(4, 'invite_result') and last(4, 'invite_result').reason == 'already', 'cannot invite a party member')
+-- 
+2.55.0
+

@@ -1,0 +1,138 @@
+From 0799154b2f7393659b7daa6e6c597169ed355361 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Fri, 9 Oct 2026 09:30:35 -0400
+Subject: [PATCH] Detect dead connections (host and clients), flood limit,
+ relay tests for both
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ multiplayer/mod/scripts/mp/global.lua | 13 ++++++++++++-
+ multiplayer/mod/scripts/mp/relay.lua  | 16 +++++++++++++++-
+ multiplayer/run-two.sh                |  2 +-
+ multiplayer/test/relay_test.lua       |  6 ++++++
+ 4 files changed, 34 insertions(+), 3 deletions(-)
+
+diff --git a/multiplayer/mod/scripts/mp/global.lua b/multiplayer/mod/scripts/mp/global.lua
+index dcd1c561c4..075ffd6c16 100644
+--- a/multiplayer/mod/scripts/mp/global.lua
++++ b/multiplayer/mod/scripts/mp/global.lua
+@@ -53,6 +53,8 @@ local worldTimer = 0
+ local lastReal
+ local lastFailure = {} -- invite failure text -> clock, so a repeated failure is not spammed
+ local lastLevel
++local lastServerMessage = 0 -- real time of the last thing the host told us
++local SERVER_SILENCE = 15
+ local lastWhisperFrom -- who whispered to us last (for /r)
+ local refusedBy -- why the host turned us away: we stop retrying until the settings change
+ local botWanted = false -- test bot (menu): only while hosting
+@@ -688,6 +690,7 @@ end
+ ------------------------------------------------------------------ messages
+ 
+ local function onMessage(msg)
++    lastServerMessage = core.getRealTime()
+     local t = msg.t
+     if t == 'hello' then
+         myId = msg.id
+@@ -811,7 +814,7 @@ end
+ ------------------------------------------------------------------ network callbacks (see netlib.lua)
+ 
+ net.callbacks = {
+-    onConnected = function() log('connected'); retry = 0; pushUi() end,
++    onConnected = function() log('connected'); retry = 0; lastServerMessage = core.getRealTime(); pushUi() end,
+     onDisconnected = function(reason)
+         log('disconnected: ' .. tostring(reason))
+         clearRemotes()
+@@ -904,6 +907,14 @@ return {
+             end
+             proxies.onUpdate(gameDt)
+             for _, r in pairs(remotes) do updateRemote(r, gameDt) end
++            if net.isConnected() and core.getRealTime() - lastServerMessage > SERVER_SILENCE then
++                -- the host stopped answering (crash, cable, router): do not stay "connected" to nothing
++                log('host went silent, reconnecting')
++                notice('Lost contact with the host. Reconnecting...')
++                clearRemotes()
++                net.disconnect()
++                retry = RETRY_INTERVAL
++            end
+             if net.isConnected() then
+                 sendTimer = sendTimer + dt
+                 equipTimer = equipTimer + dt
+diff --git a/multiplayer/mod/scripts/mp/relay.lua b/multiplayer/mod/scripts/mp/relay.lua
+index 1148fff23c..43dfe72dde 100644
+--- a/multiplayer/mod/scripts/mp/relay.lua
++++ b/multiplayer/mod/scripts/mp/relay.lua
+@@ -26,6 +26,8 @@ local pingTimer, pingSeq = 0, 0
+ local PING_INTERVAL = 2
+ local PROTO = 2 -- bumped whenever the messages change incompatibly; clients with another version are refused
+ local JOIN_TIMEOUT = 10
++local SILENCE_LIMIT = 25 -- a player that sends nothing (not even ping replies) for this long is gone
++local MESSAGE_LIMIT = 400 -- messages per second per player; more is dropped
+ local KICK_DELAY = 0.5 -- lets the "you were refused" message reach the client before the socket closes
+ local options = { password = '', maxPlayers = 8, motd = '' }
+ local bans = {} -- lower-case character name -> true (for this session)
+@@ -202,7 +204,8 @@ end
+ 
+ function M.onClientConnected(id)
+     if not running then return end
+-    clients[id] = { last = {}, tokens = 5.0, tokenTime = clock, pings = {}, authed = false, joinBy = clock + JOIN_TIMEOUT }
++    clients[id] = { last = {}, tokens = 5.0, tokenTime = clock, pings = {}, authed = false, joinBy = clock + JOIN_TIMEOUT,
++        lastSeen = clock }
+     if not hostId then hostId = id end
+     print('[mp-relay]', '+ client', id, id == hostId and '(host)' or '')
+     sendTo(id, { t = 'hello', id = id, host = id == hostId, proto = PROTO, needPassword = options.password ~= '' })
+@@ -338,6 +341,10 @@ end
+ process = function(id, msg)
+     local c = clients[id]
+     if not c or c.refused then return end
++    c.lastSeen = clock
++    if c.windowStart ~= math.floor(clock) then c.windowStart, c.windowCount = math.floor(clock), 0 end
++    c.windowCount = c.windowCount + 1
++    if c.windowCount > MESSAGE_LIMIT then return end -- flooding
+     local t = msg.t
+     if t == 'join' then return handleJoin(id, msg) end
+     if not c.authed then return end -- nothing counts before the join check
+@@ -469,6 +476,13 @@ function M.generation() return generation end
+ function M.update(dt)
+     clock = clock + dt
+     if not running then return end
++    for id, c in pairs(clients) do
++        if c.authed and not c.virtual and not c.refused and clock - (c.lastSeen or clock) > SILENCE_LIMIT then
++            c.refused = true
++            print('[mp-relay]', 'client', id, 'went silent')
++            pendingKicks[id] = clock
++        end
++    end
+     for id, c in pairs(clients) do
+         if not c.authed and not c.refused and clock > c.joinBy then
+             c.refused = true
+diff --git a/multiplayer/run-two.sh b/multiplayer/run-two.sh
+index b4358d6ced..947107c60a 100755
+--- a/multiplayer/run-two.sh
++++ b/multiplayer/run-two.sh
+@@ -8,7 +8,7 @@ OPENMW="${1:?path to openmw}"; SAVE="${2:?path to a .omwsave}"; shift 2
+ [ "${1:-}" = "--" ] && shift
+ OUT="${TMPDIR:-/tmp}/mp-two"; mkdir -p "$OUT/host" "$OUT/join"
+ common=(--data "$HERE/mod" --data "$HERE/debug" --load-savegame "$SAVE")
+-"$OPENMW" "${common[@]}" --content mp.omwscripts --content autohost.omwscripts --content autokill.omwscripts --user-data "$OUT/host" "$@" > "$OUT/host.log" 2>&1 &
++"$OPENMW" "${common[@]}" --content mp.omwscripts --content autohost.omwscripts --user-data "$OUT/host" "$@" > "$OUT/host.log" 2>&1 &
+ HOST=$!
+ trap 'kill $HOST ${JOIN:-} 2>/dev/null' EXIT
+ sleep 25   # let the host load and start listening
+diff --git a/multiplayer/test/relay_test.lua b/multiplayer/test/relay_test.lua
+index c3e6632750..d2b3d2e70d 100644
+--- a/multiplayer/test/relay_test.lua
++++ b/multiplayer/test/relay_test.lua
+@@ -112,4 +112,10 @@ tick(3)
+ local list = last(1, 'players')
+ check(list and #list.list >= 2, 'player list is broadcast')
+ 
++-- ---------------------------------------------------------------- silence and flooding
++for i = 1, 600 do say(4, { t = 'state', cell = '', pos = { i, 0, 0 } }) end
++check(last(1, 'state') and last(1, 'state').pos[1] <= 400, 'a flood of messages is cut off')
++tick(30)
++check(kicked[4], 'a player that goes silent is dropped')
++
+ if failures == 0 then print('relay tests: all passed') else print(failures .. ' failed') os.exit(1) end
+-- 
+2.55.0
+

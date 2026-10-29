@@ -1,0 +1,834 @@
+From 1ecd13f3dabccd0f17412a3c82abb07b146a0f81 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Fri, 9 Oct 2026 08:43:57 -0400
+Subject: [PATCH] Show host addresses (LAN + on-request internet lookup via
+ /ip), in-game test bot with menu buttons
+
+- net.localAddress / lookupPublicAddress / getPublicAddress
+- relay virtual clients; bot.lua accepts invites, chats, trades, shows vitals
+- main menu: 'Test: load a save with a test player', in-game 'Add a test player'
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ apps/openmw/mwlua/luabindings.cpp             |   2 +-
+ apps/openmw/mwlua/luamanagerimp.hpp           |   3 +
+ apps/openmw/mwlua/netbindings.cpp             |  28 ++++-
+ apps/openmw/mwlua/netbindings.hpp             |   3 +-
+ components/CMakeLists.txt                     |   1 +
+ components/net/address.cpp                    | 119 ++++++++++++++++++
+ components/net/address.hpp                    |  45 +++++++
+ files/lua_api/openmw/net.lua                  |  16 +++
+ multiplayer/debug/autobot.omwscripts          |   1 +
+ .../debug/scripts/mp_debug/autobot.lua        |  12 ++
+ multiplayer/mod/scripts/mp/bot.lua            |  89 +++++++++++++
+ multiplayer/mod/scripts/mp/global.lua         |  47 ++++++-
+ multiplayer/mod/scripts/mp/menu.lua           |  31 ++++-
+ multiplayer/mod/scripts/mp/player.lua         |  32 ++++-
+ multiplayer/mod/scripts/mp/relay.lua          |  40 +++++-
+ 15 files changed, 453 insertions(+), 16 deletions(-)
+ create mode 100644 components/net/address.cpp
+ create mode 100644 components/net/address.hpp
+ create mode 100644 multiplayer/debug/autobot.omwscripts
+ create mode 100644 multiplayer/debug/scripts/mp_debug/autobot.lua
+ create mode 100644 multiplayer/mod/scripts/mp/bot.lua
+
+diff --git a/apps/openmw/mwlua/luabindings.cpp b/apps/openmw/mwlua/luabindings.cpp
+index fbabdabc4b..003bd053a4 100644
+--- a/apps/openmw/mwlua/luabindings.cpp
++++ b/apps/openmw/mwlua/luabindings.cpp
+@@ -58,7 +58,7 @@ namespace MWLua
+         initObjectBindingsForGlobalScripts(context);
+         initCellBindingsForGlobalScripts(context);
+         return {
+-            { "openmw.net", initNetPackage(context, context.mLuaManager->netClient(), context.mLuaManager->netServer()) },
++            { "openmw.net", initNetPackage(context, context.mLuaManager->netClient(), context.mLuaManager->netServer(), context.mLuaManager->publicAddressLookup()) },
+             { "openmw.types", initTypesPackage(context) },
+             { "openmw.core", initCorePackage(context) },
+             { "openmw.world", initWorldPackage(context) },
+diff --git a/apps/openmw/mwlua/luamanagerimp.hpp b/apps/openmw/mwlua/luamanagerimp.hpp
+index f1e11561d6..84e5432227 100644
+--- a/apps/openmw/mwlua/luamanagerimp.hpp
++++ b/apps/openmw/mwlua/luamanagerimp.hpp
+@@ -15,6 +15,7 @@
+ #include <components/lua/scripttracker.hpp>
+ #include <components/lua/storage.hpp>
+ #include <components/lua_ui/resources.hpp>
++#include <components/net/address.hpp>
+ #include <components/net/client.hpp>
+ #include <components/net/server.hpp>
+ #include <components/misc/color.hpp>
+@@ -85,6 +86,7 @@ namespace MWLua
+ 
+         Net::Client& netClient() { return mNetClient; }
+         Net::Server& netServer() { return mNetServer; }
++        Net::PublicAddressLookup& publicAddressLookup() { return mPublicAddress; }
+ 
+         void loadPermanentStorage(const std::filesystem::path& userConfigPath);
+         void savePermanentStorage(const std::filesystem::path& userConfigPath) override;
+@@ -374,6 +376,7 @@ namespace MWLua
+         EngineEvents mEngineEvents{ mGlobalScripts };
+         Net::Client mNetClient;
+         Net::Server mNetServer;
++        Net::PublicAddressLookup mPublicAddress;
+         std::vector<MWBase::LuaManager::InputEvent> mInputEvents;
+         std::vector<MWBase::LuaManager::InputEvent> mMenuInputEvents;
+ 
+diff --git a/apps/openmw/mwlua/netbindings.cpp b/apps/openmw/mwlua/netbindings.cpp
+index 85c0e8ca21..21dbfb09f1 100644
+--- a/apps/openmw/mwlua/netbindings.cpp
++++ b/apps/openmw/mwlua/netbindings.cpp
+@@ -6,6 +6,7 @@
+ #include <stdexcept>
+ 
+ #include <components/lua/luastate.hpp>
++#include <components/net/address.hpp>
+ #include <components/net/client.hpp>
+ #include <components/net/server.hpp>
+ 
+@@ -136,7 +137,7 @@ namespace MWLua
+         }
+     }
+ 
+-    sol::table initNetPackage(const Context& context, Net::Client& client, Net::Server& server)
++    sol::table initNetPackage(const Context& context, Net::Client& client, Net::Server& server, Net::PublicAddressLookup& lookup)
+     {
+         sol::state_view lua = context.sol();
+         sol::table api(lua, sol::create);
+@@ -165,6 +166,31 @@ namespace MWLua
+         api["isListening"] = [&server]() { return server.isListening(); };
+         api["sendTo"] = [&server](std::uint32_t id, std::string_view message) { return server.send(id, message); };
+         api["kick"] = [&server](std::uint32_t id) { server.kick(id); };
++        // This machine's address on the network that reaches the internet (nil if none). Sends nothing.
++        api["localAddress"] = []() -> sol::optional<std::string> {
++            std::string address = Net::localAddress();
++            if (address.empty())
++                return sol::nullopt;
++            return address;
++        };
++        // Asks api.ipify.org for the public address (an outside request: call it only when the user asks for it).
++        // The answer is read with getPublicAddress.
++        api["lookupPublicAddress"] = [&lookup]() { lookup.start(); };
++        // Returns nil while the lookup is running or was never started; otherwise once: address, error (one is nil).
++        api["getPublicAddress"] = [&lookup](sol::this_state state) -> sol::variadic_results {
++            sol::variadic_results out;
++            if (const auto result = lookup.poll())
++            {
++                if (result->mAddress.empty())
++                {
++                    out.push_back(sol::make_object(state, sol::nil));
++                    out.push_back(sol::make_object(state, result->mError));
++                }
++                else
++                    out.push_back(sol::make_object(state, result->mAddress));
++            }
++            return out;
++        };
+         api["encodeJson"] = [](const sol::object& value) {
+             std::string out;
+             appendJson(out, value, 0);
+diff --git a/apps/openmw/mwlua/netbindings.hpp b/apps/openmw/mwlua/netbindings.hpp
+index 97d08baf67..4111ce14a1 100644
+--- a/apps/openmw/mwlua/netbindings.hpp
++++ b/apps/openmw/mwlua/netbindings.hpp
+@@ -7,13 +7,14 @@ namespace Net
+ {
+     class Client;
+     class Server;
++    class PublicAddressLookup;
+ }
+ 
+ namespace MWLua
+ {
+     struct Context;
+ 
+-    sol::table initNetPackage(const Context& context, Net::Client& client, Net::Server& server);
++    sol::table initNetPackage(const Context& context, Net::Client& client, Net::Server& server, Net::PublicAddressLookup& lookup);
+ }
+ 
+ #endif // MWLUA_NETBINDINGS_H
+diff --git a/components/CMakeLists.txt b/components/CMakeLists.txt
+index 1a5684d35f..ab12626665 100644
+--- a/components/CMakeLists.txt
++++ b/components/CMakeLists.txt
+@@ -504,6 +504,7 @@ add_component_dir(serialization
+     )
+ 
+ add_component_dir(net
++    address
+     client
+     server
+     )
+diff --git a/components/net/address.cpp b/components/net/address.cpp
+new file mode 100644
+index 0000000000..821e6b4afe
+--- /dev/null
++++ b/components/net/address.cpp
+@@ -0,0 +1,119 @@
++#include "address.hpp"
++
++#include <algorithm>
++#include <chrono>
++
++#include <boost/asio.hpp>
++
++namespace Net
++{
++    namespace asio = boost::asio;
++    using asio::ip::tcp;
++    using asio::ip::udp;
++
++    std::string localAddress()
++    {
++        try
++        {
++            asio::io_context io;
++            udp::socket socket(io);
++            // Connecting a UDP socket sends nothing; it only makes the OS pick the outgoing interface.
++            socket.connect(udp::endpoint(asio::ip::make_address("8.8.8.8"), 80));
++            return socket.local_endpoint().address().to_string();
++        }
++        catch (const std::exception&)
++        {
++            return {};
++        }
++    }
++
++    namespace
++    {
++        PublicAddressLookup::Result fetch()
++        {
++            using namespace std::chrono_literals;
++            try
++            {
++                asio::io_context io;
++                tcp::resolver resolver(io);
++                tcp::socket socket(io);
++                asio::steady_timer deadline(io, 8s);
++                deadline.async_wait([&socket](const boost::system::error_code& ec) {
++                    if (!ec)
++                    {
++                        boost::system::error_code ignored;
++                        socket.close(ignored);
++                    }
++                });
++                boost::system::error_code ec;
++                const auto endpoints = resolver.resolve("api.ipify.org", "80", ec);
++                if (ec)
++                    return { {}, "could not resolve api.ipify.org: " + ec.message() };
++                asio::connect(socket, endpoints, ec);
++                if (ec)
++                    return { {}, "could not connect: " + ec.message() };
++                const std::string request = "GET / HTTP/1.1\r\nHost: api.ipify.org\r\nConnection: close\r\n"
++                                            "User-Agent: openmw-multiplayer\r\n\r\n";
++                asio::write(socket, asio::buffer(request), ec);
++                if (ec)
++                    return { {}, "request failed: " + ec.message() };
++                std::string response;
++                asio::read(socket, asio::dynamic_buffer(response, 16384), ec); // until the server closes
++                deadline.cancel();
++                const std::size_t bodyStart = response.find("\r\n\r\n");
++                if (response.compare(0, 12, "HTTP/1.1 200") != 0 || bodyStart == std::string::npos)
++                    return { {}, "unexpected reply" };
++                std::string body = response.substr(bodyStart + 4);
++                body.erase(std::remove_if(body.begin(), body.end(), [](unsigned char c) { return c <= ' '; }), body.end());
++                // a bare address: digits, dots, colons and hex letters
++                if (body.empty() || body.size() > 45
++                    || !std::all_of(body.begin(), body.end(), [](unsigned char c) { return std::isxdigit(c) || c == '.' || c == ':'; }))
++                    return { {}, "unexpected reply" };
++                return { std::move(body), {} };
++            }
++            catch (const std::exception& e)
++            {
++                return { {}, e.what() };
++            }
++        }
++    }
++
++    PublicAddressLookup::~PublicAddressLookup()
++    {
++        if (mThread.joinable())
++            mThread.join(); // bounded by the 8 second deadline
++    }
++
++    void PublicAddressLookup::start()
++    {
++        {
++            const std::lock_guard lock(mMutex);
++            if (mRunning)
++                return;
++            mRunning = true;
++            mResult.reset();
++        }
++        if (mThread.joinable())
++            mThread.join();
++        mThread = std::thread([this] {
++            Result result = fetch();
++            const std::lock_guard lock(mMutex);
++            mResult = std::move(result);
++            mRunning = false;
++        });
++    }
++
++    bool PublicAddressLookup::isRunning() const
++    {
++        const std::lock_guard lock(mMutex);
++        return mRunning;
++    }
++
++    std::optional<PublicAddressLookup::Result> PublicAddressLookup::poll()
++    {
++        const std::lock_guard lock(mMutex);
++        std::optional<Result> result;
++        result.swap(mResult);
++        return result;
++    }
++}
+diff --git a/components/net/address.hpp b/components/net/address.hpp
+new file mode 100644
+index 0000000000..7acc13109d
+--- /dev/null
++++ b/components/net/address.hpp
+@@ -0,0 +1,45 @@
++#ifndef OPENMW_COMPONENTS_NET_ADDRESS_H
++#define OPENMW_COMPONENTS_NET_ADDRESS_H
++
++#include <memory>
++#include <mutex>
++#include <optional>
++#include <string>
++#include <thread>
++
++namespace Net
++{
++    // The address of this machine on the network used to reach the internet (usually the LAN address).
++    // Nothing is sent; returns an empty string if there is no route.
++    std::string localAddress();
++
++    // Asks an external service (api.ipify.org, plain HTTP GET) for this machine's public address.
++    // Runs on a background thread; check with poll().
++    class PublicAddressLookup
++    {
++    public:
++        struct Result
++        {
++            std::string mAddress; // empty on failure
++            std::string mError;
++        };
++
++        PublicAddressLookup() = default;
++        ~PublicAddressLookup();
++        PublicAddressLookup(const PublicAddressLookup&) = delete;
++        PublicAddressLookup& operator=(const PublicAddressLookup&) = delete;
++
++        void start();
++        bool isRunning() const;
++        // Returns the result once, after the lookup finished.
++        std::optional<Result> poll();
++
++    private:
++        mutable std::mutex mMutex;
++        std::thread mThread;
++        bool mRunning = false;
++        std::optional<Result> mResult;
++    };
++}
++
++#endif
+diff --git a/files/lua_api/openmw/net.lua b/files/lua_api/openmw/net.lua
+index ea9c346248..837814df79 100644
+--- a/files/lua_api/openmw/net.lua
++++ b/files/lua_api/openmw/net.lua
+@@ -64,6 +64,22 @@
+ -- @function [parent=#net] kick
+ -- @param #number id Client id.
+ 
++---
++-- This machine's address on the network that reaches the internet (normally its LAN address). Sends nothing.
++-- @function [parent=#net] localAddress
++-- @return #string The address, or `nil` if there is no route.
++
++---
++-- Ask an external service (api.ipify.org, plain HTTP) for this machine's public address. Only call this when the user asked
++-- for it, since it contacts a third party. The answer is read with @{#net.getPublicAddress}.
++-- @function [parent=#net] lookupPublicAddress
++
++---
++-- The result of @{#net.lookupPublicAddress}, returned once. Returns nothing while it is still running.
++-- @function [parent=#net] getPublicAddress
++-- @return #string The public address, or `nil` on failure.
++-- @return #string An error message on failure.
++
+ ---
+ -- Convert a Lua value to a JSON string, which contains no line breaks and can be passed to @{#net.send}.
+ -- Supports nil, booleans, numbers, strings and tables; a table with keys 1..n is
+diff --git a/multiplayer/debug/autobot.omwscripts b/multiplayer/debug/autobot.omwscripts
+new file mode 100644
+index 0000000000..e6550aed87
+--- /dev/null
++++ b/multiplayer/debug/autobot.omwscripts
+@@ -0,0 +1 @@
++GLOBAL: scripts/mp_debug/autobot.lua
+diff --git a/multiplayer/debug/scripts/mp_debug/autobot.lua b/multiplayer/debug/scripts/mp_debug/autobot.lua
+new file mode 100644
+index 0000000000..78f6906d59
+--- /dev/null
++++ b/multiplayer/debug/scripts/mp_debug/autobot.lua
+@@ -0,0 +1,12 @@
++-- Test helper: sets this instance to 'host' mode with the test bot without touching the menu.
++local core = require('openmw.core')
++local done = false
++return {
++    engineHandlers = {
++        onUpdate = function()
++            if done then return end
++            done = true
++            core.sendGlobalEvent('MpCmd', { cmd = 'configure', mode = 'host', bot = true, host = '127.0.0.1', port = 25565 })
++        end,
++    },
++}
+diff --git a/multiplayer/mod/scripts/mp/bot.lua b/multiplayer/mod/scripts/mp/bot.lua
+new file mode 100644
+index 0000000000..50f70642a4
+--- /dev/null
++++ b/multiplayer/mod/scripts/mp/bot.lua
+@@ -0,0 +1,89 @@
++-- A fake second player that lives inside the host's relay, for trying the multiplayer UI with one game:
++-- it stands near you, accepts party invites, answers chat, trades, and shows vitals once in a party.
++local relay = require('scripts/mp/relay')
++local util = require('openmw.util')
++local core = require('openmw.core')
++
++local NAME = 'Test Bot'
++local BOT_ITEMS = { ['gold_001'] = 500, ['iron dagger'] = 2, ['ingred_bread_01'] = 5, ['p_restore_health_c'] = 3,
++    ['misc_com_bottle_01'] = 4 }
++local OFFSET = util.vector3(220, 160, 0)
++
++local M = {}
++local id, generation
++local anchorCell, anchor
++local sendTimer, vitalsTimer, t = 0, 0, 0
++local party = {}
++local ctx
++
++local function send(msg) relay.virtualSend(id, msg) end
++
++local function say(scope, text, to)
++    send({ t = 'chat', scope = scope, text = text, to = to })
++end
++
++local function onMessage(msg)
++    local mt = msg.t
++    if mt == 'invite' then
++        send({ t = 'accept', from = msg.from })
++    elseif mt == 'party' then
++        party = type(msg.members) == 'table' and msg.members or {}
++    elseif mt == 'chat' then
++        local reply = 'I heard "' .. tostring(msg.text) .. '".'
++        if msg.scope == 'whisper' then say('whisper', reply, msg.id)
++        elseif msg.scope == 'party' then say('party', reply)
++        else say('global', reply) end
++    elseif mt == 'trade_request' then
++        send({ t = 'trade_accept', to = msg.id })
++        send({ t = 'trade_inv', to = msg.id, items = BOT_ITEMS })
++    elseif mt == 'trade_deal' then
++        send({ t = 'trade_ok', to = msg.id, rev = msg.rev })
++    end
++end
++
++function M.isRunning() return id ~= nil and generation == relay.generation() end
++
++function M.start(context)
++    if M.isRunning() then return end
++    ctx = context
++    id, generation = relay.addVirtual(onMessage), relay.generation()
++    anchor, anchorCell, party = nil, nil, {}
++    send({ t = 'profile', name = NAME, race = 'dark elf', class = 'acrobat', head = 'b_n_dark elf_m_head_01',
++        hair = 'b_n_dark elf_m_hair_01', isMale = true, content = {} })
++    send({ t = 'equip', slots = {}, gen = {} })
++    say('global', 'Hello! I am a test player. Activate me to invite me to a party or trade, or just chat.')
++end
++
++function M.stop()
++    if id and generation == relay.generation() then relay.removeVirtual(id) end
++    id = nil
++end
++
++function M.update(dt)
++    if not id then return end
++    if generation ~= relay.generation() then id = nil return end -- the relay was reset
++    local p = ctx.player()
++    if not p then return end
++    t = t + dt
++    sendTimer = sendTimer + dt
++    if sendTimer < 0.1 then return end
++    sendTimer = 0
++    local cell = ctx.cellKey(p.cell)
++    -- stay put near where you were when we saw you, but come along if you wander off or change cell
++    if cell ~= anchorCell or not anchor or (p.position - anchor):length() > 900 then
++        anchorCell, anchor = cell, p.position + OFFSET
++    end
++    local to = p.position - anchor
++    send({ t = 'state', cell = cell, pos = { anchor.x, anchor.y, anchor.z }, vel = { 0, 0, 0 },
++        yaw = math.atan2(to.x, to.y), pitch = 0, stance = 0 })
++    if #party > 1 then
++        vitalsTimer = vitalsTimer + 0.1
++        if vitalsTimer >= 0.5 then
++            vitalsTimer = 0
++            send({ t = 'vitals', h = 80, hm = 80, m = 30 + math.floor(20 * (1 + math.sin(t / 4))), mm = 70,
++                f = 70 + math.floor(25 * (1 + math.sin(t / 6))), fm = 120 })
++        end
++    end
++end
++
++return M
+diff --git a/multiplayer/mod/scripts/mp/global.lua b/multiplayer/mod/scripts/mp/global.lua
+index 9085c48a01..958bc20bd9 100644
+--- a/multiplayer/mod/scripts/mp/global.lua
++++ b/multiplayer/mod/scripts/mp/global.lua
+@@ -13,6 +13,7 @@ local markup = require('openmw.markup')
+ local I = require('openmw.interfaces')
+ local proxies = require('scripts/mp/proxies')
+ local relay = require('scripts/mp/relay')
++local bot = require('scripts/mp/bot')
+ 
+ local SETTINGS = 'SettingsGlobalMultiplayer'
+ local SEND_INTERVAL = 0.05
+@@ -45,6 +46,8 @@ local hostErrorShown = false
+ local players = {} -- latest list from the relay: { id, name, ping, host }
+ local worldTimer = 0
+ local lastReal
++local botWanted = false -- test bot (menu): only while hosting
++local hostInfo -- when hosting: { port, lan, public, error, looking }
+ local savedTimeScale -- our game time scale while we wait for the host's clock to catch up
+ local WORLD_INTERVAL = 5
+ local lastEquipJson
+@@ -112,11 +115,15 @@ local function connect()
+             end
+             hostErrorShown = false
+             log('hosting on port ' .. tostring(port))
+-            notice('Hosting on port ' .. tostring(port) .. '. Others can join with your address.')
++            hostInfo = { port = port, lan = net.localAddress() }
++            notice('Hosting on port ' .. tostring(port) .. '. Players on your network join at '
++                .. tostring(hostInfo.lan or 'your LAN address') .. ':' .. tostring(port)
++                .. '. Type /ip to look up the internet address friends outside your network need.')
+         end
+         net.connect('127.0.0.1', port)
+     else
+         if relay.isRunning() then relay.stop() end
++        hostInfo = nil
+         log('connecting to ' .. settings:get('Host') .. ':' .. tostring(port))
+         net.connect(settings:get('Host'), port)
+     end
+@@ -129,6 +136,7 @@ settings:subscribe(async:callback(function()
+     clearRemotes()
+     net.disconnect()
+     relay.stop() -- reconnecting starts it again if still hosting
++    hostInfo = nil
+     hostErrorShown = false
+     retry = RETRY_INTERVAL
+ end))
+@@ -538,6 +546,16 @@ local function onCommand(d)
+         if d.scope == 'party' and not inParty() then notice('You are not in a party.') return end
+         net.send(net.encodeJson({ t = 'chat', scope = d.scope, text = d.text }))
+         chatLine(d.scope, 'You', d.text, true)
++    elseif cmd == 'ip' then
++        if not hostInfo then
++            notice('You are not hosting. To join someone, enter their address in the Multiplayer menu.')
++        elseif hostInfo.looking then
++            notice('Still looking up your address...')
++        else
++            hostInfo.looking = true
++            net.lookupPublicAddress() -- contacts api.ipify.org; only done because the player asked
++            notice('Asking api.ipify.org for your internet address...')
++        end
+     elseif cmd == 'whisper' then
+         local target
+         for _, pl in ipairs(players) do
+@@ -560,6 +578,10 @@ local function onCommand(d)
+     elseif cmd == 'sync' then
+         pushUi()
+     elseif cmd == 'configure' then
++        if d.bot ~= nil then
++            botWanted = d.bot and true or false
++            if not botWanted then bot.stop() end
++        end
+         if d.mode and d.mode ~= settings:get('Mode') then settings:set('Mode', d.mode) end
+         if d.host and d.host ~= settings:get('Host') then settings:set('Host', d.host) end
+         if d.port and d.port ~= settings:get('Port') then settings:set('Port', d.port) end
+@@ -713,6 +735,28 @@ return {
+             lastReal = realNow
+             clock = clock + dt
+             relay.update(dt)
++            if botWanted and hosting() and relay.isRunning() and net.isConnected() then
++                if not bot.isRunning() then
++                    bot.start({ player = player, cellKey = cellKey })
++                    notice('A test player has joined: look for the green arrow near you.')
++                end
++                bot.update(dt)
++            end
++            if hostInfo and hostInfo.looking then
++                local address, err = net.getPublicAddress()
++                if address or err then
++                    hostInfo.looking = false
++                    if address then
++                        hostInfo.public, hostInfo.error = address, nil
++                        notice('Your internet address is ' .. address .. ':' .. tostring(hostInfo.port)
++                            .. '. Friends join with that; forward TCP port ' .. tostring(hostInfo.port) .. ' on your router to this computer ('
++                            .. tostring(hostInfo.lan or '?') .. ').')
++                    else
++                        hostInfo.error = err
++                        notice('Could not look up your internet address: ' .. tostring(err))
++                    end
++                end
++            end
+             if hosting() and net.isConnected() then
+                 worldTimer = worldTimer + dt
+                 if worldTimer >= WORLD_INTERVAL then worldTimer = 0; sendWorld() end
+@@ -764,6 +808,7 @@ return {
+                     end
+                 end
+                 toUi('MpMarkers', { list = markers })
++                toUi('MpHostInfo', hostInfo or {})
+ 
+                 for id, exp in pairs(invitesIn) do if exp <= clock then invitesIn[id] = nil end end
+                 for id, exp in pairs(invitesOut) do if exp <= clock then invitesOut[id] = nil end end
+diff --git a/multiplayer/mod/scripts/mp/menu.lua b/multiplayer/mod/scripts/mp/menu.lua
+index 885ec274a9..89007b2f7c 100644
+--- a/multiplayer/mod/scripts/mp/menu.lua
++++ b/multiplayer/mod/scripts/mp/menu.lua
+@@ -13,7 +13,7 @@ local V2, rgb = util.vector2, util.color.rgb
+ local WHITE = ui.texture { path = 'white' }
+ local section = storage.playerSection('MpConnect')
+ 
+-local W, H = 640, 500
++local W, H = 640, 540
+ local TEXT_SIZE = 18
+ local C = {
+     text = rgb(0.92, 0.92, 0.92), head = rgb(1, 0.85, 0.35), dim = rgb(0.65, 0.65, 0.65),
+@@ -22,6 +22,16 @@ local C = {
+ }
+ 
+ -- Settings page: live list of connected players with their latency. Filled by player.lua.
++-- Settings page: how to reach this game when hosting (set by player.lua from the host's addresses).
++I.Settings.registerRenderer('mpAddress', function(text)
++    local rows = {}
++    for line in tostring(text or ''):gmatch('[^\n]+') do
++        rows[#rows + 1] = { template = I.MWUI.templates.textNormal, props = { text = line } }
++    end
++    if #rows == 0 then rows[1] = { template = I.MWUI.templates.textNormal, props = { text = 'Not hosting.', textColor = C.dim } } end
++    return { type = ui.TYPE.Flex, content = ui.content(rows) }
++end)
++
+ I.Settings.registerRenderer('mpPlayers', function(list)
+     local rows = {}
+     if type(list) ~= 'table' or #list == 0 then
+@@ -55,7 +65,7 @@ end
+ 
+ local render
+ 
+-local function apply()
++local function apply(bot)
+     local host = (hostBuf or ''):gsub('^%s+', ''):gsub('%s+$', '')
+     local port = tonumber(portBuf)
+     if mode == 'join' and host == '' then message, messageColor = 'Enter the server address.', C.err render() return false end
+@@ -63,6 +73,7 @@ local function apply()
+         message, messageColor = 'The port must be a number from 1 to 65535.', C.err render() return false
+     end
+     section:set('Mode', mode)
++    section:set('Bot', bot and true or false)
+     if mode == 'join' then section:set('Host', host) end
+     section:set('Port', port)
+     return true
+@@ -134,8 +145,8 @@ render = function()
+             'Everyone keeps their own world; you only share a world state inside a party.',
+         }
+         if mode == 'host' then
+-            info[#info + 1] = 'Hosting starts when your game does, and others can then join you at your'
+-            info[#info + 1] = 'address and this port (forward it on your router if they are not on your network).'
++            info[#info + 1] = 'Hosting starts when your game does. In the game, type /ip to see your internet address:'
++            info[#info + 1] = 'friends outside your network join with it (forward the TCP port on your router).'
+             info[#info + 1] = 'While hosting you cannot join another server.'
+         else
+             info[#info + 1] = 'You can be connected to one host at a time.'
+@@ -148,6 +159,14 @@ render = function()
+             content[#content + 1] = button(24, 330, 'Apply and reconnect', function()
+                 if apply() then message, messageColor = 'Saved. Reconnecting in the game.', C.ok render() end
+             end)
++            content[#content + 1] = button(24, 370, 'Add a test player', function()
++                if mode ~= 'host' then
++                    message, messageColor = 'The test player needs hosting: return to the main menu and choose Host a game.', C.err
++                    render()
++                elseif apply(true) then
++                    message, messageColor = 'A test player will appear near you.', C.ok render()
++                end
++            end)
+         else
+             content[#content + 1] = button(24, 330, 'New character', function()
+                 if apply() then close() menu.newGame() end
+@@ -155,6 +174,10 @@ render = function()
+             content[#content + 1] = button(24, 370, 'Load character', function()
+                 if apply() then view = 'load' render() end
+             end)
++            content[#content + 1] = button(24, 410, 'Test: load a save with a test player', function()
++                mode = 'host'
++                if apply(true) then view = 'load' render() end
++            end, C.ok)
+         end
+         content[#content + 1] = button(24, H - 50, 'Close', close)
+     else
+diff --git a/multiplayer/mod/scripts/mp/player.lua b/multiplayer/mod/scripts/mp/player.lua
+index 0f9221b894..aac4c2d69c 100644
+--- a/multiplayer/mod/scripts/mp/player.lua
++++ b/multiplayer/mod/scripts/mp/player.lua
+@@ -17,7 +17,10 @@ I.Settings.registerPage {
+ I.Settings.registerGroup {
+     key = 'SettingsMpPlayers', page = 'MultiplayerPage', l10n = 'Multiplayer', name = 'Connected players',
+     permanentStorage = false,
+-    settings = { { key = 'List', renderer = 'mpPlayers', name = 'Players', default = {} } },
++    settings = {
++        { key = 'Address', renderer = 'mpAddress', name = 'Your address', default = '' },
++        { key = 'List', renderer = 'mpPlayers', name = 'Players', default = {} },
++    },
+ }
+ local playersSection = storage.playerSection('SettingsMpPlayers')
+ 
+@@ -244,6 +247,8 @@ local function sendChat(str)
+             local to, text = (arg or ''):match('^(%S+)%s+(.+)$')
+             if to then core.sendGlobalEvent('MpCmd', { cmd = 'whisper', to = to, text = text })
+             else addLine('system', 'Usage: /w <player> <text>') end
++        elseif cmd == 'ip' then
++            core.sendGlobalEvent('MpCmd', { cmd = 'ip' })
+         elseif cmd == 'players' or cmd == 'who' then
+             if #playerList == 0 then addLine('system', 'Not connected.') end
+             for _, pl in ipairs(playerList) do
+@@ -253,7 +258,7 @@ local function sendChat(str)
+         elseif cmd == 'g' or cmd == 'p' then
+             if arg then core.sendGlobalEvent('MpCmd', { cmd = 'chat', scope = cmd == 'g' and 'global' or 'party', text = arg }) end
+         else
+-            addLine('system', 'Commands: /players, /w <player> <text>, /accept [name], /decline [name], /leave, /g <text>, /p <text>')
++            addLine('system', 'Commands: /players, /ip (host: show your address), /w <player> <text>, /accept [name], /decline [name], /leave, /g <text>, /p <text>')
+         end
+         return
+     end
+@@ -511,10 +516,16 @@ return {
+                 core.sendGlobalEvent('MpCmd', { cmd = 'sync' })
+                 -- server chosen on the main menu screen (menu.lua) -> global script
+                 local conn = storage.playerSection('MpConnect')
+-                if conn:get('Mode') then
+-                    core.sendGlobalEvent('MpCmd', {
+-                        cmd = 'configure', mode = conn:get('Mode'), host = conn:get('Host'), port = conn:get('Port') })
++                local function sendConfig()
++                    if conn:get('Mode') then
++                        core.sendGlobalEvent('MpCmd', {
++                            cmd = 'configure', mode = conn:get('Mode'), host = conn:get('Host'), port = conn:get('Port'),
++                            bot = conn:get('Bot') and true or false })
++                    end
+                 end
++                sendConfig()
++                -- the main menu screen can change the settings while the game runs (e.g. "add test bot")
++                conn:subscribe(async:callback(sendConfig))
+             end
+             local shouldShow = chatOpen or (now() - lastMsgTime < FADE_AFTER)
+             if shouldShow ~= logVisible then dirty.chat = true end
+@@ -558,6 +569,17 @@ return {
+                 releaseSeq = releaseSeq + 1; releaseKind = d.kind; releaseStrength = d.str or 0
+             end)
+         end,
++        MpHostInfo = function(d)
++            local text = ''
++            if d.port then
++                text = 'Hosting on port ' .. d.port .. '\nOn your network: ' .. tostring(d.lan or '?') .. ':' .. d.port
++                if d.public then text = text .. '\nFrom the internet: ' .. d.public .. ':' .. d.port
++                    .. '  (forward TCP port ' .. d.port .. ' on your router)'
++                elseif d.looking then text = text .. '\nLooking up your internet address...'
++                else text = text .. '\nInternet address: type /ip in chat to look it up' end
++            end
++            pcall(function() playersSection:set('Address', text) end)
++        end,
+         MpAvatars = function(d) avatarList = d.list or {} end,
+         MpMarkers = function(d) pcall(ui.setPlayerMarkers, d.list or {}) end,
+         MpPlayers = function(d)
+diff --git a/multiplayer/mod/scripts/mp/relay.lua b/multiplayer/mod/scripts/mp/relay.lua
+index f00f615a59..26106cca49 100644
+--- a/multiplayer/mod/scripts/mp/relay.lua
++++ b/multiplayer/mod/scripts/mp/relay.lua
+@@ -21,13 +21,18 @@ local nextParty = 1
+ local clock = 0
+ local running = false
+ local hostId -- the first client after start() is the host's own loopback connection
++local generation = 0 -- bumped whenever the relay is reset, so the bot knows it is gone
+ local pingTimer, pingSeq = 0, 0
+ local PING_INTERVAL = 2
+ 
+ local M = {}
+ 
+ local function enc(t) return net.encodeJson(t) end
+-local function sendRaw(id, json) if clients[id] then net.sendTo(id, json) end end
++local function sendRaw(id, json)
++    local c = clients[id]
++    if not c then return end
++    if c.virtual then c.virtual(markup.decodeYaml(json)) else net.sendTo(id, json) end
++end
+ local function sendTo(id, msg) sendRaw(id, enc(msg)) end
+ local function remove(list, v)
+     for i, x in ipairs(list) do if x == v then table.remove(list, i) return end end
+@@ -200,11 +205,18 @@ function M.onClientDisconnected(id)
+     for o in pairs(clients) do sendRaw(o, json) end
+ end
+ 
++local process
++
+ function M.onClientMessage(id, line)
+-    local c = clients[id]
+-    if not c then return end
++    if not clients[id] then return end
+     local ok, msg = pcall(markup.decodeYaml, line)
+     if not ok or type(msg) ~= 'table' then return end
++    process(id, msg)
++end
++
++process = function(id, msg)
++    local c = clients[id]
++    if not c then return end
+     local t = msg.t
+     if t == 'invite' then return handleInvite(id, msg) end
+     if t == 'accept' then return handleAccept(id, msg) end
+@@ -278,6 +290,7 @@ function M.start(port)
+ end
+ 
+ function M.stop()
++    generation = generation + 1
+     if running or net.isListening() then net.stopListening() end
+     running = false
+     clients, parties, invites = {}, {}, {}
+@@ -290,6 +303,27 @@ function M.clientCount()
+     return n
+ end
+ -- Pings everyone every PING_INTERVAL seconds and tells everyone the resulting player list.
++-- Virtual clients live inside this process (the test bot): `handler(msg)` receives what a real client would be sent,
++-- and virtualSend(id, msg) is what a real client would send.
++local nextVirtual = 1000
++function M.addVirtual(handler)
++    local id = nextVirtual
++    nextVirtual = nextVirtual + 1
++    clients[id] = { last = {}, tokens = 5.0, tokenTime = clock, pings = {}, virtual = handler, ping = 1 }
++    for other, oc in pairs(clients) do -- replay global presence, like for a real client
++        if other ~= id and not oc.virtual then
++            for _, t in ipairs(GLOBAL_ORDER) do
++                if oc.last[t] then sendRaw(id, oc.last[t]) end
++            end
++        end
++    end
++    sendTo(id, { t = 'hello', id = id })
++    return id
++end
++function M.virtualSend(id, msg) process(id, msg) end
++function M.removeVirtual(id) M.onClientDisconnected(id) end
++function M.generation() return generation end
++
+ function M.update(dt)
+     clock = clock + dt
+     if not running then return end
+-- 
+2.55.0
+

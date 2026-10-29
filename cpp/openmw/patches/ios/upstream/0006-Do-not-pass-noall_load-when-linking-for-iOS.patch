@@ -1,0 +1,30 @@
+From c2acc0974a8eb44d0a5314bb9c673cca0fb29094 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Fri, 9 Oct 2026 17:57:43 -0400
+Subject: [PATCH] Do not pass -noall_load when linking for iOS
+
+---
+ cmake/WholeArchive.cmake | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/cmake/WholeArchive.cmake b/cmake/WholeArchive.cmake
+index 0e4a09c796..ce42dfa99d 100644
+--- a/cmake/WholeArchive.cmake
++++ b/cmake/WholeArchive.cmake
+@@ -3,7 +3,12 @@ function (get_whole_archive_options OUT_VAR)
+     if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+         set(${OUT_VAR} -Wl,--whole-archive ${ARGN} -Wl,--no-whole-archive PARENT_SCOPE)
+     elseif (CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
+-        set(${OUT_VAR} -Wl,-all_load ${ARGN} -Wl,-noall_load PARENT_SCOPE)
++        if (IOS)
++            # The iOS linker setup this is built with fails when -noall_load follows the archives.
++            set(${OUT_VAR} -Wl,-all_load ${ARGN} PARENT_SCOPE)
++        else()
++            set(${OUT_VAR} -Wl,-all_load ${ARGN} -Wl,-noall_load PARENT_SCOPE)
++        endif()
+     else ()
+         message(FATAL_ERROR "get_whole_archive_options not implemented for CMAKE_CXX_COMPILER_ID ${CMAKE_CXX_COMPILER_ID}")
+     endif()
+-- 
+2.55.0
+

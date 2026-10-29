@@ -1,0 +1,312 @@
+From ee93ad1bcbc9c146697c71b7edd1e9823e0a5c28 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Thu, 15 Oct 2026 15:16:03 -0400
+Subject: [PATCH] Generic main menu button hook: ui.addMainMenuButton; the
+ multiplayer button is the mod's own
+
+- ui.addMainMenuButton{ id, normal, highlighted, pushed, after } (menu scripts): an extra button on the main menu, placed
+  after the button it names (before Options by default). A click calls onMainMenuButton(id). Built-in ids are refused.
+- mainmenu.cpp no longer knows about multiplayer: its buttons come from what the scripts registered
+- menu.lua registers the Multiplayer button; its three textures moved from files/data to multiplayer/mod/textures
+- TODO.md: item done
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ apps/openmw/mwbase/luamanager.hpp             |   9 +++
+ apps/openmw/mwgui/mainmenu.cpp                |  55 ++++++++++++++----
+ apps/openmw/mwgui/mainmenu.hpp                |   1 +
+ apps/openmw/mwlua/luamanagerimp.cpp           |  14 +++++
+ apps/openmw/mwlua/luamanagerimp.hpp           |   3 +
+ apps/openmw/mwlua/uibindings.cpp              |  20 +++++++
+ files/data/CMakeLists.txt                     |   3 -
+ multiplayer/TODO.md                           |   2 -
+ multiplayer/mod/scripts/mp/menu.lua           |  10 ++++
+ .../mod}/textures/menu_multiplayer.tga        | Bin
+ .../mod}/textures/menu_multiplayer_over.tga   | Bin
+ .../textures/menu_multiplayer_pressed.tga     | Bin
+ 12 files changed, 100 insertions(+), 17 deletions(-)
+ rename {files/data => multiplayer/mod}/textures/menu_multiplayer.tga (100%)
+ rename {files/data => multiplayer/mod}/textures/menu_multiplayer_over.tga (100%)
+ rename {files/data => multiplayer/mod}/textures/menu_multiplayer_pressed.tga (100%)
+
+diff --git a/apps/openmw/mwbase/luamanager.hpp b/apps/openmw/mwbase/luamanager.hpp
+index e1f0ee5043..3ad2dab5e4 100644
+--- a/apps/openmw/mwbase/luamanager.hpp
++++ b/apps/openmw/mwbase/luamanager.hpp
+@@ -111,6 +111,15 @@ namespace MWBase
+         virtual void uiModeChanged(const MWWorld::Ptr& arg) = 0;
+         // A main menu button without built-in behaviour was clicked. Returns false if no script handles it.
+         virtual bool mainMenuButton(const std::string& id) = 0;
++        // Extra main menu buttons registered by menu scripts (ui.addMainMenuButton), in registration order.
++        struct MainMenuButton
++        {
++            std::string mId;
++            std::string mNormal, mHighlighted, mPushed; // texture paths
++            std::string mAfter; // id of the button it goes after; empty: before "options"
++        };
++        virtual void addMainMenuButton(MainMenuButton button) = 0;
++        virtual const std::vector<MainMenuButton>& mainMenuButtons() const = 0;
+         virtual void viewportResized(int width, int height) = 0;
+         virtual void savePermanentStorage(const std::filesystem::path& userConfigPath) = 0;
+         virtual void applyMagicEffects(ESM::RefId id, const MWWorld::Ptr& caster, ESM::RefNum item,
+diff --git a/apps/openmw/mwgui/mainmenu.cpp b/apps/openmw/mwgui/mainmenu.cpp
+index 3388efdc37..f6f26abc9c 100644
+--- a/apps/openmw/mwgui/mainmenu.cpp
++++ b/apps/openmw/mwgui/mainmenu.cpp
+@@ -1,5 +1,7 @@
+ #include "mainmenu.hpp"
+ 
++#include <algorithm>
++
+ #include <MyGUI_Gui.h>
+ #include <MyGUI_InputManager.h>
+ #include <MyGUI_RenderManager.h>
+@@ -165,6 +167,14 @@ namespace MWGui
+         MWBase::Environment::get().getStateManager()->requestQuit();
+     }
+ 
++    bool MainMenu::isExtraButton(const std::string& id) const
++    {
++        for (const MWBase::LuaManager::MainMenuButton& extra : MWBase::Environment::get().getLuaManager()->mainMenuButtons())
++            if (extra.mId == id)
++                return true;
++        return false;
++    }
++
+     void MainMenu::onButtonClicked(MyGUI::Widget* sender)
+     {
+         MWBase::WindowManager* winMgr = MWBase::Environment::get().getWindowManager();
+@@ -176,11 +186,11 @@ namespace MWGui
+             MWBase::Environment::get().getLuaManager()->mainMenuButton(name);
+         if (name == "return")
+             winMgr->removeGuiMode(GM_MainMenu);
+-        else if (name == "multiplayer")
++        else if (mButtons.find(name) != mButtons.end() && isExtraButton(name))
+         {
+-            // Provided by a menu script (the multiplayer mod); without one the button explains itself.
++            // A button added by a menu script (ui.addMainMenuButton); without a script to answer it, say so.
+             if (!MWBase::Environment::get().getLuaManager()->mainMenuButton(name))
+-                winMgr->messageBox("Multiplayer is not available: the multiplayer mod is not enabled.");
++                winMgr->messageBox("Nothing handles this button: its script is not running.");
+         }
+         else if (name == "credits")
+             winMgr->playVideo("mw_credits.bik", true);
+@@ -336,8 +346,6 @@ namespace MWGui
+             != MWBase::Environment::get().getStateManager()->characterEnd())
+             buttons.emplace_back("loadgame");
+ 
+-        buttons.emplace_back("multiplayer");
+-
+         buttons.emplace_back("options");
+ 
+         if (state == MWBase::StateManager::State_NoGame)
+@@ -345,20 +353,43 @@ namespace MWGui
+ 
+         buttons.emplace_back("exitgame");
+ 
++        // Buttons added by menu scripts go after the one they ask for (before Options by default)
++        const auto& extras = MWBase::Environment::get().getLuaManager()->mainMenuButtons();
++        for (const MWBase::LuaManager::MainMenuButton& extra : extras)
++        {
++            auto at = std::find(buttons.begin(), buttons.end(), extra.mAfter);
++            if (at != buttons.end())
++                ++at;
++            else
++                at = std::find(buttons.begin(), buttons.end(), "options");
++            buttons.insert(at, extra.mId);
++        }
++
+         // Create new buttons if needed
+-        for (std::string_view id :
+-            { "return", "newgame", "savegame", "loadgame", "multiplayer", "options", "credits", "exitgame" })
++        std::vector<std::pair<std::string_view, const MWBase::LuaManager::MainMenuButton*>> wanted;
++        for (std::string_view id : { "return", "newgame", "savegame", "loadgame", "options", "credits", "exitgame" })
++            wanted.emplace_back(id, nullptr);
++        for (const MWBase::LuaManager::MainMenuButton& extra : extras)
++            wanted.emplace_back(extra.mId, &extra);
++        for (const auto& [id, extra] : wanted)
+         {
+             if (mButtons.find(id) == mButtons.end())
+             {
+                 Gui::ImageButton* button = mButtonBox->createWidget<Gui::ImageButton>(
+                     "ImageBox", MyGUI::IntCoord(0, curH, 0, 0), MyGUI::Align::Default);
+                 const std::string& buttonId = mButtons.emplace(id, button).first->first;
+-                // The multiplayer button's textures ship with OpenMW (TGA); the others come from the game data.
+-                const std::string ext = buttonId == "multiplayer" ? ".tga" : ".dds";
+-                button->setProperty("ImageHighlighted", "textures\\menu_" + buttonId + "_over" + ext);
+-                button->setProperty("ImageNormal", "textures\\menu_" + buttonId + ext);
+-                button->setProperty("ImagePushed", "textures\\menu_" + buttonId + "_pressed" + ext);
++                if (extra)
++                {
++                    button->setProperty("ImageHighlighted", extra->mHighlighted);
++                    button->setProperty("ImageNormal", extra->mNormal);
++                    button->setProperty("ImagePushed", extra->mPushed);
++                }
++                else
++                {
++                    button->setProperty("ImageHighlighted", "textures\\menu_" + buttonId + "_over.dds");
++                    button->setProperty("ImageNormal", "textures\\menu_" + buttonId + ".dds");
++                    button->setProperty("ImagePushed", "textures\\menu_" + buttonId + "_pressed.dds");
++                }
+                 button->eventMouseButtonClick += MyGUI::newDelegate(this, &MainMenu::onButtonClicked);
+                 button->setUserData(buttonId);
+             }
+diff --git a/apps/openmw/mwgui/mainmenu.hpp b/apps/openmw/mwgui/mainmenu.hpp
+index 29270e42db..fc4ab026eb 100644
+--- a/apps/openmw/mwgui/mainmenu.hpp
++++ b/apps/openmw/mwgui/mainmenu.hpp
+@@ -71,6 +71,7 @@ namespace MWGui
+         std::map<std::string, Gui::ImageButton*, std::less<>> mButtons;
+ 
+         void onButtonClicked(MyGUI::Widget* sender);
++        bool isExtraButton(const std::string& id) const;
+         void onNewGameConfirmed();
+         void onExitConfirmed();
+ 
+diff --git a/apps/openmw/mwlua/luamanagerimp.cpp b/apps/openmw/mwlua/luamanagerimp.cpp
+index 9303ef9a20..dbe944b9d6 100644
+--- a/apps/openmw/mwlua/luamanagerimp.cpp
++++ b/apps/openmw/mwlua/luamanagerimp.cpp
+@@ -826,6 +826,20 @@ namespace MWLua
+         mMenuScripts.stateChanged();
+     }
+ 
++    void LuaManager::addMainMenuButton(MainMenuButton button)
++    {
++        // registering the same id again replaces it (a menu script that is reloaded)
++        for (MainMenuButton& existing : mMainMenuButtons)
++        {
++            if (existing.mId == button.mId)
++            {
++                existing = std::move(button);
++                return;
++            }
++        }
++        mMainMenuButtons.push_back(std::move(button));
++    }
++
+     void LuaManager::noGame()
+     {
+         clear();
+diff --git a/apps/openmw/mwlua/luamanagerimp.hpp b/apps/openmw/mwlua/luamanagerimp.hpp
+index fa6cdf93c0..e746fdb01e 100644
+--- a/apps/openmw/mwlua/luamanagerimp.hpp
++++ b/apps/openmw/mwlua/luamanagerimp.hpp
+@@ -169,6 +169,8 @@ namespace MWLua
+         void questUpdated(const ESM::RefId& questId, int stage) override;
+         void uiModeChanged(const MWWorld::Ptr& arg) override;
+         bool mainMenuButton(const std::string& id) override { return mMenuScripts.mainMenuButton(id); }
++        void addMainMenuButton(MainMenuButton button) override;
++        const std::vector<MainMenuButton>& mainMenuButtons() const override { return mMainMenuButtons; }
+         void viewportResized(int width, int height) override;
+         void actorDied(const MWWorld::Ptr& actor) override;
+         void onDialogueResponse(
+@@ -271,6 +273,7 @@ namespace MWLua
+         bool isSynchronizedUpdateRunning() const { return mRunningSynchronizedUpdates; }
+ 
+     private:
++        std::vector<MainMenuButton> mMainMenuButtons;
+         void initConfiguration(bool reload);
+         LocalScripts* createLocalScripts(
+             const MWWorld::Ptr& ptr, std::optional<Lua::ScriptIdsWithInitializationData> autoStartConf = std::nullopt);
+diff --git a/apps/openmw/mwlua/uibindings.cpp b/apps/openmw/mwlua/uibindings.cpp
+index ea65d68cb7..6d0b9b5f5d 100644
+--- a/apps/openmw/mwlua/uibindings.cpp
++++ b/apps/openmw/mwlua/uibindings.cpp
+@@ -29,6 +29,8 @@
+ 
+ #include <cmath>
+ #include <numbers>
++#include <set>
++#include <stdexcept>
+ 
+ #include "context.hpp"
+ #include "luamanagerimp.hpp"
+@@ -423,6 +425,24 @@ namespace MWLua
+                 MWBase::Environment::get().getWindowManager()->setMapMarkers(std::move(markers));
+             }, "openmw.ui.setMapMarkers");
+         });
++        if (menu)
++        {
++            // An extra button on the main menu. Clicking it calls onMainMenuButton(id) of the menu scripts.
++            // { id, normal, highlighted, pushed (texture paths), after = id of the button it goes after }
++            api.function("addMainMenuButton", [luaManager = context.mLuaManager](const Lua::TableView& options) {
++                MWBase::LuaManager::MainMenuButton button;
++                button.mId = options.getOptional<std::string>("id").value_or(std::string());
++                button.mNormal = options.getOptional<std::string>("normal").value_or(std::string());
++                button.mHighlighted = options.getOptional<std::string>("highlighted").value_or(button.mNormal);
++                button.mPushed = options.getOptional<std::string>("pushed").value_or(button.mNormal);
++                button.mAfter = options.getOptional<std::string>("after").value_or(std::string());
++                static const std::set<std::string, std::less<>> builtin
++                    = { "return", "newgame", "savegame", "loadgame", "options", "credits", "exitgame" };
++                if (button.mId.empty() || button.mNormal.empty() || builtin.count(button.mId))
++                    throw std::invalid_argument("ui.addMainMenuButton: needs an id (not a built-in button's) and a texture");
++                luaManager->addMainMenuButton(std::move(button));
++            });
++        }
+         api.function("showMessage",
+             [luaManager = context.mLuaManager](std::string_view message, std::optional<Lua::TableView> options) {
+                 MWGui::ShowInDialogueMode mode = MWGui::ShowInDialogueMode_IfPossible;
+diff --git a/files/data/CMakeLists.txt b/files/data/CMakeLists.txt
+index db0d472453..4554894894 100644
+--- a/files/data/CMakeLists.txt
++++ b/files/data/CMakeLists.txt
+@@ -4,9 +4,6 @@ endif()
+ 
+ set(BUILTIN_DATA_FILES
+     textures/omw_map_color_palette.dds
+-    textures/menu_multiplayer.tga
+-    textures/menu_multiplayer_over.tga
+-    textures/menu_multiplayer_pressed.tga
+     textures/omw_menu_scroll_down.dds
+     textures/omw_menu_scroll_up.dds
+     textures/omw_menu_scroll_left.dds
+diff --git a/multiplayer/TODO.md b/multiplayer/TODO.md
+index 85963f5252..2668d17b42 100644
+--- a/multiplayer/TODO.md
++++ b/multiplayer/TODO.md
+@@ -7,8 +7,6 @@ features to players without a new build. Client side only: the server stays as i
+ Today: about 60% of what was written is Luau (the whole mod), 3% is C++ engine hooks (~280 lines), 7% generic sockets, and
+ 19% is the standalone server program.
+ 
+-1. **Generic main-menu button hook** (`ui.addMainMenuButton{...}`): the mod registers its own button and textures. Removes
+-   the last multiplayer-specific C++ in the engine (the hardcoded `"multiplayer"` button in `mwgui/mainmenu.cpp`).
+ 2. **Split the mod into a core and feature packs.**
+    - Core (small, built in): `netlib`, session/handshake, the pack manager, an extension bus.
+    - Packs: avatars + animation (`remote`), party/chat UI (`player`), `trade`, `shots`, `proxies` (shared fights), ailments,
+diff --git a/multiplayer/mod/scripts/mp/menu.lua b/multiplayer/mod/scripts/mp/menu.lua
+index 891678236d..5ada865af6 100644
+--- a/multiplayer/mod/scripts/mp/menu.lua
++++ b/multiplayer/mod/scripts/mp/menu.lua
+@@ -244,6 +244,16 @@ local function open()
+     render()
+ end
+ 
++-- Our button on the main menu (an engine hook, generic: the engine knows nothing about multiplayer). Its textures are the
++-- mod's own. A click arrives in onMainMenuButton below.
++local ok, err = pcall(ui.addMainMenuButton, {
++    id = 'multiplayer', after = 'loadgame',
++    normal = 'textures/menu_multiplayer.tga',
++    highlighted = 'textures/menu_multiplayer_over.tga',
++    pushed = 'textures/menu_multiplayer_pressed.tga',
++})
++if not ok then print('[mp-menu] could not add the main menu button: ' .. tostring(err)) end
++
+ return {
+     interfaceName = 'MultiplayerMenu',
+     interface = { version = 1, open = open },
+diff --git a/files/data/textures/menu_multiplayer.tga b/multiplayer/mod/textures/menu_multiplayer.tga
+similarity index 100%
+rename from files/data/textures/menu_multiplayer.tga
+rename to multiplayer/mod/textures/menu_multiplayer.tga
+diff --git a/files/data/textures/menu_multiplayer_over.tga b/multiplayer/mod/textures/menu_multiplayer_over.tga
+similarity index 100%
+rename from files/data/textures/menu_multiplayer_over.tga
+rename to multiplayer/mod/textures/menu_multiplayer_over.tga
+diff --git a/files/data/textures/menu_multiplayer_pressed.tga b/multiplayer/mod/textures/menu_multiplayer_pressed.tga
+similarity index 100%
+rename from files/data/textures/menu_multiplayer_pressed.tga
+rename to multiplayer/mod/textures/menu_multiplayer_pressed.tga
+-- 
+2.55.0
+

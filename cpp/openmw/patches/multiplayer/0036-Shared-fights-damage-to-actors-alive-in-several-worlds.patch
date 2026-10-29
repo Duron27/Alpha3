@@ -1,0 +1,91 @@
+From: Duron27 <duron27@gmail.com>
+Subject: [PATCH] Shared fights: damage to an actor alive in several worlds is shared (setting SharedFights)
+
+Each client lowers its own copy of an actor to the lowest health any group member in the same cell reports, never
+raising it, so two clients cannot echo damage. Delivered through damage.lua (never kills; kills stay shared separately)
+so the actor also turns on the local player.
+
+---
+diff --git a/multiplayer/mod/scripts/mp/global.lua b/multiplayer/mod/scripts/mp/global.lua
+index 8f02620..8d8ea00 100644
+--- a/multiplayer/mod/scripts/mp/global.lua
++++ b/multiplayer/mod/scripts/mp/global.lua
+@@ -40,6 +40,7 @@ I.Settings.registerGroup {
+           argument = { integer = true, min = 2, max = 32 } },
+         { key = 'Motd', renderer = 'textLine', name = 'Message of the day when hosting', default = '' },
+         { key = 'SharedKills', renderer = 'checkbox', name = 'Kills are shared with your group', default = true },
++        { key = 'SharedFights', renderer = 'checkbox', name = 'Damage to actors is shared with your group', default = true },
+         { key = 'Port', renderer = 'number', name = 'Server port', default = 25565,
+           argument = { integer = true, min = 1, max = 65535 } },
+     },
+@@ -103,6 +104,7 @@ proxies.init({
+     isAvatar = function(obj) return avatarIds[obj.id] ~= nil end,
+     ownerName = nameOf,
+     sharedKills = function() return settings:get('SharedKills') ~= false end,
++    sharedFights = function() return settings:get('SharedFights') ~= false end,
+ })
+ 
+ ------------------------------------------------------------------ connection / group
+diff --git a/multiplayer/mod/scripts/mp/proxies.lua b/multiplayer/mod/scripts/mp/proxies.lua
+index adbbea3..c35bc33 100644
+--- a/multiplayer/mod/scripts/mp/proxies.lua
++++ b/multiplayer/mod/scripts/mp/proxies.lua
+@@ -32,6 +32,9 @@ local previousRoster = {} -- nid -> true
+ local damageQueue = {} -- { obj, frac, wait, kill }
+ local pendingKills = {} -- nid -> true: actors a group member killed that we have not been able to kill yet
+ local killTimer = 0
++local fightSync = {} -- nid -> seconds until a group member's damage may be applied to our copy again
++local FIGHT_MIN_DROP = 0.02 -- health ratio difference worth syncing
++local FIGHT_COOLDOWN = 1.0 -- the damage is delivered within ~0.2 s; roster messages must not apply it twice
+ local crimeSamples = {} -- { t, level }
+ local crimeBase
+ local crimeGuard = 0
+@@ -43,7 +46,7 @@ function M.reset()
+         if px.obj and px.obj:isValid() then pcall(function() px.obj:remove() end) end
+     end
+     proxies, proxyById, ownerCells, previousRoster, recentDead, damageQueue = {}, {}, {}, {}, {}, {}
+-    pendingKills = {}
++    pendingKills, fightSync = {}, {}
+ end
+ 
+ function M.isProxy(obj) return proxyById[obj.id] ~= nil end
+@@ -237,6 +240,7 @@ local function onRoster(msg)
+         elseif not px and sameCell and not proxies[key] and needsProxy(e.n) and not livingTwinNearby(e) then
+             px = spawn(owner, e, key)
+         end
++        if not px and sameCell and ctx.sharedFights() then M.syncFight(e) end
+         if px then
+             px.last = e
+             if sameCell and px.obj:isValid() and px.obj.enabled and not px.gone then
+@@ -253,6 +257,21 @@ local function onRoster(msg)
+     end
+ end
+ 
++-- Shared fights: both worlds have this actor alive, so each client lowers its own copy to the lowest health any
++-- group member reports (never raises it: that is idempotent, so two clients cannot echo damage back and forth).
++-- The damage goes through damage.lua, which never kills (the kill itself is shared separately) and makes the
++-- actor turn on us, so a fight one member starts is a fight for everyone.
++function M.syncFight(e)
++    if fightSync[e.n] and fightSync[e.n] > 0 then return end
++    local obj = objectById(e.n)
++    if not obj or not obj.enabled or types.Actor.isDead(obj) or M.isProxy(obj) then return end
++    local drop = healthRatio(obj) - (e.h or 1)
++    if drop < FIGHT_MIN_DROP then return end
++    fightSync[e.n] = FIGHT_COOLDOWN
++    ctx.dlog('fight', e.n, 'group member reports lower health, applying', drop)
++    damageQueue[#damageQueue + 1] = { obj = obj, frac = drop, wait = 0 }
++end
++
+ -- Another member damaged our real actor's proxy in their world.
+ local function onDamage(msg)
+     if msg.kill then -- they killed the stand-in for our actor
+@@ -325,6 +344,9 @@ function M.onUpdate(dt)
+     local p = ctx.player()
+     if not p then return end
+     updateCrime(dt, p)
++    for nid, left in pairs(fightSync) do
++        if left <= dt then fightSync[nid] = nil else fightSync[nid] = left - dt end
++    end
+ 
+     -- deliver queued damage to our real actors
+     for i = #damageQueue, 1, -1 do

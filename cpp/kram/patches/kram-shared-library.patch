@@ -1,0 +1,454 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 5a54b34..711932c 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1,4 +1,8 @@
+ cmake_minimum_required(VERSION 3.19.1 FATAL_ERROR)
++
++# Build kramc as a shared library that exports kram_main(argc, argv) instead of an executable,
++# for hosts that load kram and run commands in-process (e.g. Android apps).
++option(KRAM_BUILD_SHARED "Build kramc as a shared library exporting kram_main" OFF)
+   
+ #-----------------------------------------------------
+ 
+@@ -42,9 +46,12 @@ set(CMAKE_DEFAULT_STARTUP_PROJECT "kramc")
+ if (BUILD_LINUX)
+     set(myTargetWorkspace kramWorkspace)
+ 
+-    # don't want gcc, want clang
+-    SET (CMAKE_CXX_COMPILER "/usr/bin/clang++" CACHE STRING "C++ compiler" FORCE)
+-    SET (CMAKE_C_COMPILER "/usr/bin/clang" CACHE STRING "C compiler" FORCE)
++    # don't want gcc, want clang (but never replace the NDK's compiler when cross compiling for Android)
++    # (ANDROID is only set once the NDK toolchain file has run, ANDROID_ABI is already on the command line)
++    if (NOT ANDROID AND NOT DEFINED ANDROID_ABI)
++        SET (CMAKE_CXX_COMPILER "/usr/bin/clang++" CACHE STRING "C++ compiler" FORCE)
++        SET (CMAKE_C_COMPILER "/usr/bin/clang" CACHE STRING "C compiler" FORCE)
++    endif()
+ 
+     project(${myTargetWorkspace} LANGUAGES C CXX)
+ 
+diff --git a/kramc/CMakeLists.txt b/kramc/CMakeLists.txt
+index 7977e5d..42c4c40 100644
+--- a/kramc/CMakeLists.txt
++++ b/kramc/CMakeLists.txt
+@@ -4,7 +4,15 @@
+ # now setup the app project, and link to libkram
+ set(myTargetApp kram)
+ project(${myTargetApp})
+-add_executable(${myTargetApp})
++
++# KRAM_BUILD_SHARED (see the root CMakeLists.txt) builds a shared library instead of an executable.
++if (KRAM_BUILD_SHARED)
++    add_library(${myTargetApp} SHARED)
++    target_compile_definitions(${myTargetApp} PRIVATE KRAM_SHARED_LIBRARY=1)
++    set_target_properties(${myTargetApp} PROPERTIES POSITION_INDEPENDENT_CODE TRUE)
++else()
++    add_executable(${myTargetApp})
++endif()
+ 
+ #-----------------------------------------------------
+     
+diff --git a/kramc/KramMain.cpp b/kramc/KramMain.cpp
+index b012cb9..de1c651 100644
+--- a/kramc/KramMain.cpp
++++ b/kramc/KramMain.cpp
+@@ -348,6 +348,30 @@ void checkSimdSupport()
+ #endif
+ }
+ 
++#if KRAM_SHARED_LIBRARY
++
++// Entry point when kramc is built as a shared library (KRAM_BUILD_SHARED), for hosts that load it
++// and run commands in-process, e.g. an Android app. Unlike main(), it returns the exit code.
++extern "C" __attribute__((visibility("default")))
++int kram_main(int argc, char* argv[])
++{
++    checkSimdSupport();
++    return kram::kramAppMain(argc, argv) != 0 ? 1 : 0;
++}
++
++// Same, but everything the command prints on the calling thread is passed to `output` instead of
++// stdout/the platform log. Calls on different threads can run at the same time.
++extern "C" __attribute__((visibility("default")))
++int kram_main_output(int argc, char* argv[], void (*output)(void* user, const char* text, size_t length), void* user)
++{
++    kram::setThreadLogSink(output, user);
++    int result = kram_main(argc, argv);
++    kram::setThreadLogSink(nullptr, nullptr);
++    return result;
++}
++
++#else
++
+ int main(int argc, char* argv[])
+ {
+     // This will exit if insufficient simd support on x64.
+@@ -364,3 +388,5 @@ int main(int argc, char* argv[])
+ 
+     return 0;
+ }
++
++#endif
+diff --git a/libkram/CMakeLists.txt b/libkram/CMakeLists.txt
+index e92c892..1b3cf5d 100644
+--- a/libkram/CMakeLists.txt
++++ b/libkram/CMakeLists.txt
+@@ -59,7 +59,7 @@ set(myTargetLib libkram)
+ 
+ # **** This will create libkram.a or .so or kram.lib depending on platform.
+ # can also use OBJECT or SHARED, object cuts compile time
+-if (ANDROID)
++if (ANDROID OR KRAM_BUILD_SHARED)
+     add_library(${myTargetLib} STATIC)
+ #    add_library(${myTargetLib} SHARED)
+     set_target_properties(${myTargetLib} PROPERTIES POSITION_INDEPENDENT_CODE TRUE)
+diff --git a/libkram/kram/Kram.cpp b/libkram/kram/Kram.cpp
+index cbd0216..2a2f33b 100644
+--- a/libkram/kram/Kram.cpp
++++ b/libkram/kram/Kram.cpp
+@@ -2002,7 +2002,12 @@ static int32_t kramAppInfo(vector<const char*>& args)
+         fp = dstFileHelper.pointer();
+     }
+ 
+-    fprintf(fp, "%s", info.c_str());
++    if (fp == stdout) {
++        writeCommandOutput(info.c_str(), info.size());
++    }
++    else {
++        fprintf(fp, "%s", info.c_str());
++    }
+ 
+     return 0;
+ }
+@@ -3142,7 +3147,22 @@ static int32_t kramAppEncode(vector<const char*>& args)
+         success = SetupSourceKTX(srcImageData, srcFilename, srcImageKTX, false);
+ 
+         if (success) {
+-            if (isBlockFormat(srcImageKTX.pixelFormat)) {
++            if (isBlockFormat(srcImageKTX.pixelFormat) && !infoArgs.formatString.empty()) {
++                // A target format was requested (-f), so transcode: decode the blocks to pixels in
++                // memory, then encode those below. This avoids a separate decode run and temp file.
++                KTXImage decodedKTX;
++                KramDecoder decoder;
++                KramDecoderParams decoderParams;
++                decoderParams.isVerbose = infoArgs.isVerbose;
++                success = decoder.decode(srcImageKTX, decodedKTX, decoderParams);
++                if (success) {
++                    success = srcImage.loadImageFromKTX(decodedKTX);
++                }
++                if (!success) {
++                    KLOGE("Kram", "encode couldn't decode the block-compressed dds input");
++                }
++            }
++            else if (isBlockFormat(srcImageKTX.pixelFormat)) {
+                 // can only export to dds/ktx (KTX2 would need to supercompress in Image encode path)
+                 canEncodeInput = false;
+ 
+diff --git a/libkram/kram/KramImage.cpp b/libkram/kram/KramImage.cpp
+index db8b302..ddb0768 100644
+--- a/libkram/kram/KramImage.cpp
++++ b/libkram/kram/KramImage.cpp
+@@ -63,6 +63,74 @@ namespace kram {
+ using namespace STL_NAMESPACE;
+ using namespace SIMD_NAMESPACE;
+ 
++#if COMPILE_ASTCENC
++// Keeps one astcenc context alive across the mips of an image. Creating a context builds large
++// lookup tables, which is a noticeable cost for every small mip. The settings are the same for
++// all mips, but are compared anyway so a changed setting gets a new context.
++class AstcEncoderCache {
++public:
++    struct Key {
++        astcenc_profile profile;
++        unsigned int blockX, blockY;
++        unsigned int flags;
++        float quality;
++        float cwR, cwG, cwB, cwA;
++        unsigned int threads;
++
++        bool operator==(const Key& o) const
++        {
++            return profile == o.profile && blockX == o.blockX && blockY == o.blockY &&
++                   flags == o.flags && quality == o.quality && cwR == o.cwR && cwG == o.cwG &&
++                   cwB == o.cwB && cwA == o.cwA && threads == o.threads;
++        }
++    };
++
++    AstcEncoderCache() = default;
++    AstcEncoderCache(const AstcEncoderCache&) = delete;
++    AstcEncoderCache& operator=(const AstcEncoderCache&) = delete;
++    ~AstcEncoderCache() { release(); }
++
++    astcenc_context* acquire(const Key& key, const astcenc_config& config, astcenc_error& error)
++    {
++        if (_context && _key == key) {
++            // reset so the next image can be compressed with the same context
++            astcenc_compress_reset(_context);
++            error = ASTCENC_SUCCESS;
++            return _context;
++        }
++        release();
++        error = astcenc_context_alloc(&config, key.threads, &_context);
++        if (error != ASTCENC_SUCCESS) {
++            _context = nullptr;
++            return nullptr;
++        }
++        _key = key;
++        return _context;
++    }
++
++private:
++    void release()
++    {
++        if (_context) {
++            astcenc_context_free(_context);
++            _context = nullptr;
++        }
++    }
++
++    astcenc_context* _context = nullptr;
++    Key _key = {};
++};
++
++// Use every core the OS reports. astcenc hands out work in small tasks, so slower cores just do less.
++static unsigned int astcThreadCount()
++{
++    unsigned int count = std::thread::hardware_concurrency();
++    return count > 0 ? count : 4;
++}
++#else
++class AstcEncoderCache {};
++#endif
++
+ template <typename T>
+ void pointFilterImage(int32_t w, int32_t h, const T* srcImage,
+                       int32_t dstW, int32_t dstH, T* dstImage)
+@@ -2050,6 +2118,9 @@ bool KramEncoder::createMipsFromChunks(
+     outputTexture.height = dstImage.height;
+     outputTexture.data.resize(dstImage.mipLengthLargest());
+ 
++    // shared by all mips and chunks of this image
++    AstcEncoderCache astcCache;
++
+     // This is for 8-bit data (pixelsFloat used for in-place mipgen)
+     ImageData srcImage;
+     srcImage.width = data.chunkWidth;
+@@ -2370,7 +2441,7 @@ bool KramEncoder::createMipsFromChunks(
+             Timer timerEncodeMips;
+             bool success =
+                 compressMipLevel(info, dstImage,
+-                                 dstImageData, outputTexture, mipStorageSize);
++                                 dstImageData, outputTexture, mipStorageSize, &astcCache);
+             assert(success);
+ 
+             if (success) {
+@@ -2430,7 +2501,7 @@ bool KramEncoder::createMipsFromChunks(
+ 
+ bool KramEncoder::compressMipLevel(const ImageInfo& info, KTXImage& image,
+                                    ImageData& mipImage, TextureData& outputTexture,
+-                                   int32_t mipStorageSize) const
++                                   int32_t mipStorageSize, AstcEncoderCache* astcCache) const
+ {
+     int32_t w = mipImage.width;
+     int32_t h = mipImage.height;
+@@ -3143,11 +3214,25 @@ bool KramEncoder::compressMipLevel(const ImageInfo& info, KTXImage& image,
+             astcenc_swizzle swizzleEncode = {ASTCENC_SWZ_R, ASTCENC_SWZ_G,
+                                              ASTCENC_SWZ_B, ASTCENC_SWZ_A};
+ 
+-            // could this be built once, and reused across all mips
+-            // Use multiple threads for ASTC encoding, targeting quad-core systems
+-            constexpr int thread_count = 4;
+-            astcenc_context* codec_context = nullptr;
+-            error = astcenc_context_alloc(&config, thread_count, &codec_context);
++            // One context per image (shared across its mips through astcCache). Allocate it for every
++            // core, then use only as many threads per mip as there are tasks to hand out.
++            AstcEncoderCache localCache;
++            AstcEncoderCache& cache = astcCache ? *astcCache : localCache;
++
++            AstcEncoderCache::Key key = {};
++            key.profile = profile;
++            key.blockX = config.block_x;
++            key.blockY = config.block_y;
++            key.flags = flags;
++            key.quality = quality;
++            key.cwR = config.cw_r_weight;
++            key.cwG = config.cw_g_weight;
++            key.cwB = config.cw_b_weight;
++            key.cwA = config.cw_a_weight;
++            key.threads = astcThreadCount();
++
++            const int thread_count = (int)key.threads;
++            astcenc_context* codec_context = cache.acquire(key, config, error);
+             if (error != ASTCENC_SUCCESS) {
+                 return false;
+             }
+@@ -3186,10 +3271,14 @@ bool KramEncoder::compressMipLevel(const ImageInfo& info, KTXImage& image,
+                 gAstcenc_UniqueChannelsInPartitioning = 4;
+             }
+ #else
+-            // Use multithreaded compression with worker threads
+-            std::vector<std::thread> workers;
++            // astcenc hands out work in tasks of 16 blocks, so more threads than tasks would only idle.
++            const unsigned int blocksX = (w + config.block_x - 1) / config.block_x;
++            const unsigned int blocksY = (h + config.block_y - 1) / config.block_y;
++            const unsigned int taskCount = (blocksX * blocksY + 15) / 16;
++            const int workerCount = (int)std::max(1u, std::min((unsigned int)thread_count, taskCount));
++
+             std::atomic<astcenc_error> compression_error(ASTCENC_SUCCESS);
+-            
++
+             auto compressBlock = [&](int thread_id) {
+                 astcenc_error thread_error = astcenc_compress_image(
+                     codec_context, &srcImage, &swizzleEncode,
+@@ -3199,23 +3288,28 @@ bool KramEncoder::compressMipLevel(const ImageInfo& info, KTXImage& image,
+                     compression_error.store(thread_error);
+                 }
+             };
+-            
+-            for (int i = 0; i < thread_count; ++i) {
+-                workers.emplace_back(compressBlock, i);
++
++            if (workerCount == 1) {
++                // small mips: no point paying for thread creation
++                compressBlock(0);
+             }
+-            
+-            for (auto& worker : workers) {
+-                worker.join();
++            else {
++                vector<std::thread> workers;
++                workers.reserve(workerCount - 1);
++                for (int i = 1; i < workerCount; ++i) {
++                    workers.emplace_back(compressBlock, i);
++                }
++                compressBlock(0); // this thread works too
++                for (auto& worker : workers) {
++                    worker.join();
++                }
+             }
+-            
++
+             error = compression_error.load();
+-#endif
+ 
+-            // Reset context for potential reuse with next mip level
+-            astcenc_compress_reset(codec_context);
++#endif
+ 
+-            // Or should this context only be freed after all mips?
+-            astcenc_context_free(codec_context);
++            // The context stays in the cache for the next mip (it is reset when acquired again).
+ 
+             if (error != ASTCENC_SUCCESS) {
+                 return false;
+diff --git a/libkram/kram/KramImage.h b/libkram/kram/KramImage.h
+index 1b24847..27aab51 100644
+--- a/libkram/kram/KramImage.h
++++ b/libkram/kram/KramImage.h
+@@ -20,6 +20,7 @@ using namespace SIMD_NAMESPACE;
+ class Mipper;
+ class KTXHeader;
+ class TextureData;
++class AstcEncoderCache;
+ 
+ enum ImageResizeFilter {
+     kImageResizeFilterPoint,
+@@ -168,9 +169,10 @@ private:
+                            vector<KTXImageLevel>& dstMipLevels) const;
+ 
+     // ugh, reduce the params into this
++    // astcCache lets all mips of an image share one astcenc context (optional)
+     bool compressMipLevel(const ImageInfo& info, KTXImage& image,
+                           ImageData& mipImage, TextureData& outputTexture,
+-                          int32_t mipStorageSize) const;
++                          int32_t mipStorageSize, AstcEncoderCache* astcCache = nullptr) const;
+ 
+     // can pass in which channels to average
+     void averageChannelsInBlock(const char* averageChannels,
+diff --git a/libkram/kram/KramLog.cpp b/libkram/kram/KramLog.cpp
+index ad912e6..6589551 100644
+--- a/libkram/kram/KramLog.cpp
++++ b/libkram/kram/KramLog.cpp
+@@ -838,10 +838,43 @@ void setMessageFields(LogMessage& msg, char threadName[kMaxThreadName])
+     msg.timestamp = currentTimestamp();
+ }
+ 
++struct ThreadLogSink {
++    LogSinkFunc func = nullptr;
++    void* user = nullptr;
++};
++static thread_local ThreadLogSink gThreadLogSink;
++
++void setThreadLogSink(LogSinkFunc sink, void* user)
++{
++    gThreadLogSink.func = sink;
++    gThreadLogSink.user = user;
++}
++
++void writeCommandOutput(const char* text, size_t length)
++{
++    if (gThreadLogSink.func) {
++        gThreadLogSink.func(gThreadLogSink.user, text, length);
++    }
++    else {
++        fwrite(text, 1, length, stdout);
++    }
++}
++
+ static int32_t logMessageImpl(const LogMessage& msg)
+ {
+     // TODO: add any filtering up here, or before msg is built
+ 
++    // a host capturing this thread's output gets the message instead of the platform log
++    if (gThreadLogSink.func) {
++        char tokens[kMaxTokens] = {};
++        getFormatTokens(tokens, msg, Debugger);
++
++        string text;
++        formatMessage(text, msg, tokens);
++        gThreadLogSink.func(gThreadLogSink.user, text.c_str(), text.size());
++        return (msg.logLevel == LogLevelError) ? 1 : 0;
++    }
++
+     mylock lock(gLogState.lock);
+ 
+     // this means caller needs to know all errors to display in the hud
+diff --git a/libkram/kram/KramLog.h b/libkram/kram/KramLog.h
+index 7f3a0e2..f4ea602 100644
+--- a/libkram/kram/KramLog.h
++++ b/libkram/kram/KramLog.h
+@@ -56,6 +56,15 @@ extern int32_t logMessage(const char* group, int32_t logLevel,
+ // TODO: move to Strings.h
+ using namespace STL_NAMESPACE;
+ 
++// Optional per-thread output sink. While set, log messages and command output produced on the calling
++// thread go to the sink instead of stdout/the platform log, so a host that runs kram in-process can
++// capture the output of several runs on different threads at once. Pass nullptr to restore the default.
++typedef void (*LogSinkFunc)(void* user, const char* text, size_t length);
++void setThreadLogSink(LogSinkFunc sink, void* user);
++
++// Writes command output (as opposed to log messages) to stdout, or to the thread's sink when one is set.
++void writeCommandOutput(const char* text, size_t length);
++
+ // when set true, the internal string is cleared
+ void setErrorLogCapture(bool enable);
+ 
+diff --git a/libkram/tmpfileplus/tmpfileplus.cpp b/libkram/tmpfileplus/tmpfileplus.cpp
+index ece6707..cf6077d 100644
+--- a/libkram/tmpfileplus/tmpfileplus.cpp
++++ b/libkram/tmpfileplus/tmpfileplus.cpp
+@@ -219,6 +219,14 @@ static FILE *mktempfile_internal(const char *tmpdir, const char *pfx, const char
+     // Win doesn't end TMP or TEMP with a slash, so it has to be added
+     // but Mac does.
+     addseperator = 1;
++#else
++    // The "/tmp/" passed by kram ends in a slash, but TMPDIR (and P_tmpdir on some systems) usually does not,
++    // for example "/data/user/0/<app>/cache" on Android. Without a separator the file name would be glued
++    // onto the folder name and created in its parent folder.
++    {
++        size_t dirLength = strlen(tmpdir);
++        addseperator = (dirLength > 0 && tmpdir[dirLength - 1] != '/');
++    }
+ #endif
+     
+     const char* separator = "";

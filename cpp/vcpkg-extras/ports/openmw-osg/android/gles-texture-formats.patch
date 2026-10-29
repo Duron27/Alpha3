@@ -1,0 +1,144 @@
+diff --git a/src/osg/Texture2D.cpp b/src/osg/Texture2D.cpp
+index 558c0eb..a75edcc 100644
+--- a/src/osg/Texture2D.cpp
++++ b/src/osg/Texture2D.cpp
+@@ -16,6 +16,7 @@
+ #include <osg/State>
+ #include <osg/ContextData>
+ #include <osg/Notify>
++#include <osg/RuntimeHooks>
+ 
+ using namespace osg;
+ 
+@@ -43,6 +44,36 @@ namespace
+     }
+ }
+ 
++namespace
++{
++    // Alpha3: OpenGL ES 3 takes only sized depth formats, with a matching source format and type, and no mipmaps of them
++    bool isDepthFormat(GLenum format)
++    {
++        switch (format)
++        {
++            case GL_DEPTH_COMPONENT: case 0x81A5 /*GL_DEPTH_COMPONENT16*/: case 0x81A6 /*GL_DEPTH_COMPONENT24*/:
++            case 0x8CAC /*GL_DEPTH_COMPONENT32F*/: case 0x84F9 /*GL_DEPTH_STENCIL*/: case 0x88F0 /*GL_DEPTH24_STENCIL8*/:
++            case 0x8CAD /*GL_DEPTH32F_STENCIL8*/:
++                return true;
++            default:
++                return false;
++        }
++    }
++
++    // number of channels of a sized floating point colour format, 0 for anything else
++    int floatChannels(GLenum format)
++    {
++        switch (format)
++        {
++            case 0x822D /*GL_R16F*/: case 0x822E /*GL_R32F*/: return 1;
++            case 0x822F /*GL_RG16F*/: case 0x8230 /*GL_RG32F*/: return 2;
++            case 0x881B /*GL_RGB16F*/: case 0x8815 /*GL_RGB32F*/: case 0x8C3A /*GL_R11F_G11F_B10F*/: return 3;
++            case 0x881A /*GL_RGBA16F*/: case 0x8814 /*GL_RGBA32F*/: return 4;
++            default: return 0;
++        }
++    }
++}
++
+ Texture2D::Texture2D():
+             _textureWidth(0),
+             _textureHeight(0),
+@@ -269,12 +300,38 @@ void Texture2D::apply(State& state) const
+     {
+         GLExtensions * extensions = state.get<GLExtensions>();
+ 
++        const bool glesFixes = RuntimeHooks::glesFixes(state);
++        if (glesFixes && _use_shadow_comparison && !isDepthFormat(_image->getPixelFormat()))
++        {
++            // Alpha3: OpenGL ES samples a shadow comparison texture only if it holds depth: a colour image (a fallback
++            // shadow map) becomes the farthest depth, which compares as lit
++            osg::ref_ptr<osg::Image> depth = new osg::Image;
++            depth->allocateImage(_image->s(), _image->t(), 1, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT);
++            GLuint* texels = reinterpret_cast<GLuint*>(depth->data());
++            for (int i = 0; i < _image->s() * _image->t(); ++i) texels[i] = 0xFFFFFFFFu;
++            depth->setInternalTextureFormat(0x81A6 /*GL_DEPTH_COMPONENT24*/);
++            const_cast<Texture2D*>(this)->_image = depth;
++        }
++
+         // keep the image around at least till we go out of scope.
+         osg::ref_ptr<osg::Image> image = _image;
+ 
+         // compute the internal texture format, this set the _internalFormat to an appropriate value.
+         computeInternalFormat();
+ 
++        if (glesFixes && isDepthFormat(_internalFormat))
++        {
++            // Alpha3: a sized depth format for the image's type, and no mipmaps (OpenGL ES cannot make them of depth)
++            if (_internalFormat == GL_DEPTH_COMPONENT)
++            {
++                _internalFormat = image->getDataType() == GL_FLOAT ? 0x8CAC /*GL_DEPTH_COMPONENT32F*/
++                    : image->getDataType() == GL_UNSIGNED_SHORT ? 0x81A5 /*GL_DEPTH_COMPONENT16*/
++                    : 0x81A6 /*GL_DEPTH_COMPONENT24*/;
++            }
++            if (_min_filter != LINEAR && _min_filter != NEAREST)
++                const_cast<Texture2D*>(this)->_min_filter = (_min_filter == NEAREST_MIPMAP_NEAREST) ? NEAREST : LINEAR;
++        }
++
+         // compute the dimensions of the texture.
+         computeRequiredTextureDimensions(state,*image,_textureWidth, _textureHeight, _numMipmapLevels);
+ 
+@@ -321,6 +378,55 @@ void Texture2D::apply(State& state) const
+     }
+     else if ( (_textureWidth!=0) && (_textureHeight!=0) && (_internalFormat!=0) )
+     {
++        if (RuntimeHooks::glesFixes(state))
++        {
++            // Alpha3: OpenGL ES needs a sized internal format with a source format and type that fit it
++            switch (_internalFormat)
++            {
++                case GL_DEPTH_COMPONENT:
++                    _internalFormat = _sourceType == GL_FLOAT ? 0x8CAC /*GL_DEPTH_COMPONENT32F*/ : 0x81A6 /*GL_DEPTH_COMPONENT24*/;
++                    break;
++                case 0x84F9 /*GL_DEPTH_STENCIL*/:
++                    _internalFormat = 0x88F0 /*GL_DEPTH24_STENCIL8*/;
++                    break;
++                default:
++                    break;
++            }
++            const bool anyType = _sourceType == 0 || _sourceType == GL_UNSIGNED_BYTE;
++            switch (_internalFormat)
++            {
++                case 0x81A5 /*GL_DEPTH_COMPONENT16*/:
++                    _sourceFormat = GL_DEPTH_COMPONENT;
++                    if (anyType) _sourceType = GL_UNSIGNED_SHORT;
++                    break;
++                case 0x81A6 /*GL_DEPTH_COMPONENT24*/:
++                    _sourceFormat = GL_DEPTH_COMPONENT;
++                    if (anyType) _sourceType = GL_UNSIGNED_INT;
++                    break;
++                case 0x8CAC /*GL_DEPTH_COMPONENT32F*/:
++                    _sourceFormat = GL_DEPTH_COMPONENT;
++                    _sourceType = GL_FLOAT;
++                    break;
++                case 0x88F0 /*GL_DEPTH24_STENCIL8*/:
++                    _sourceFormat = 0x84F9 /*GL_DEPTH_STENCIL*/;
++                    _sourceType = 0x84FA /*GL_UNSIGNED_INT_24_8*/;
++                    break;
++                case 0x8CAD /*GL_DEPTH32F_STENCIL8*/:
++                    _sourceFormat = 0x84F9 /*GL_DEPTH_STENCIL*/;
++                    _sourceType = 0x8DAD /*GL_FLOAT_32_UNSIGNED_INT_24_8_REV*/;
++                    break;
++                default:
++                    if (int channels = floatChannels(_internalFormat))
++                    {
++                        if (_sourceFormat == 0)
++                            _sourceFormat = channels == 1 ? GL_RED : channels == 2 ? 0x8227 /*GL_RG*/ : channels == 3 ? GL_RGB : GL_RGBA;
++                        if (anyType) _sourceType = GL_FLOAT;
++                    }
++                    break;
++            }
++            if (isDepthFormat(_internalFormat) && _min_filter != LINEAR && _min_filter != NEAREST)
++                const_cast<Texture2D*>(this)->_min_filter = (_min_filter == NEAREST_MIPMAP_NEAREST) ? NEAREST : LINEAR;
++        }
+ 
+         // no image present, but dimensions at set so lets create the texture
+          GLExtensions * extensions = state.get<GLExtensions>();

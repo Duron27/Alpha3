@@ -1,0 +1,252 @@
+--- a/components/sceneutil/mwshadowtechnique.cpp
++++ b/components/sceneutil/mwshadowtechnique.cpp
+@@ -562,7 +562,14 @@
+     }
+     else
+     {
++#ifdef ANDROID
++        // OpenGL ES refuses an unsized depth format as a render target (the framebuffer ends up without attachment)
++        _texture->setInternalFormat(GL_DEPTH_COMPONENT24);
++        _texture->setSourceFormat(GL_DEPTH_COMPONENT);
++        _texture->setSourceType(GL_UNSIGNED_INT);
++#else
+         _texture->setInternalFormat(GL_DEPTH_COMPONENT);
++#endif
+         _texture->setShadowComparison(true);
+         _texture->setShadowTextureMode(osg::Texture2D::LUMINANCE);
+     }
+@@ -1837,7 +1844,16 @@
+         _fallbackBaseTexture->setFilter(osg::Texture2D::MIN_FILTER,osg::Texture2D::NEAREST);
+         _fallbackBaseTexture->setFilter(osg::Texture2D::MAG_FILTER,osg::Texture2D::NEAREST);
+ 
++#ifdef ANDROID
++        // A comparison sampler needs a depth texture on OpenGL ES
++        _fallbackShadowMapTexture = new osg::Texture2D;
++        _fallbackShadowMapTexture->setInternalFormat(GL_DEPTH_COMPONENT24);
++        _fallbackShadowMapTexture->setSourceFormat(GL_DEPTH_COMPONENT);
++        _fallbackShadowMapTexture->setSourceType(GL_UNSIGNED_INT);
++        _fallbackShadowMapTexture->setTextureSize(1, 1);
++#else
+         _fallbackShadowMapTexture = new osg::Texture2D(image.get());
++#endif
+         _fallbackShadowMapTexture->setWrap(osg::Texture2D::WRAP_S,osg::Texture2D::REPEAT);
+         _fallbackShadowMapTexture->setWrap(osg::Texture2D::WRAP_T,osg::Texture2D::REPEAT);
+         _fallbackShadowMapTexture->setFilter(osg::Texture2D::MIN_FILTER,osg::Texture2D::NEAREST);
+--- a/components/sceneutil/shadow.cpp
++++ b/components/sceneutil/shadow.cpp
+@@ -205,10 +205,19 @@
+     {
+         osg::ref_ptr<osg::Image> fakeShadowMapImage = new osg::Image();
+         fakeShadowMapImage->allocateImage(1, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT);
++#ifdef ANDROID
++        // OpenGL ES has no unsized depth format
++        fakeShadowMapImage->setInternalTextureFormat(GL_DEPTH_COMPONENT32F);
++#endif
+         *(float*)fakeShadowMapImage->data() = std::numeric_limits<float>::infinity();
+         osg::ref_ptr<osg::Texture> fakeShadowMapTexture = new osg::Texture2D(fakeShadowMapImage);
+         fakeShadowMapTexture->setWrap(osg::Texture::WRAP_S, osg::Texture::CLAMP_TO_EDGE);
+         fakeShadowMapTexture->setWrap(osg::Texture::WRAP_T, osg::Texture::CLAMP_TO_EDGE);
++#ifdef ANDROID
++        // Depth textures cannot be mipmapped on OpenGL ES
++        fakeShadowMapTexture->setFilter(osg::Texture::MIN_FILTER, osg::Texture::LINEAR);
++        fakeShadowMapTexture->setFilter(osg::Texture::MAG_FILTER, osg::Texture::LINEAR);
++#endif
+         fakeShadowMapTexture->setShadowComparison(true);
+         fakeShadowMapTexture->setShadowCompareFunc(osg::Texture::ShadowCompareFunc::ALWAYS);
+         for (unsigned int i = mShadowSettings->getBaseShadowTextureUnit();
+--- a/components/sceneutil/color.cpp
++++ b/components/sceneutil/color.cpp
+@@ -101,7 +101,7 @@
+ 
+     void getColorFormatSourceFormatAndType(GLenum internalFormat, GLenum& sourceFormat, GLenum& sourceType)
+     {
+-        if (getColorFormatChannelCount(internalFormat == 4))
++        if (getColorFormatChannelCount(internalFormat) == 4)
+             sourceFormat = GL_RGBA;
+         else
+             sourceFormat = GL_RGB;
+--- a/components/debug/debugdraw.cpp
++++ b/components/debug/debugdraw.cpp
+@@ -336,7 +336,9 @@
+             primitive->drawImplementation(renderInfo);
+         };
+ 
+-        drawPrimitive(mLinesToDraw, { 0.f, 0.f, 0.f }, { 1.f, 1.f, 1.f }, { 1.f, 1.f, 1.f }, true);
++        // An empty line list is no draw call at all (drivers complain about a line with fewer than 2 vertices)
++        if (static_cast<const osg::DrawArrays*>(mLinesToDraw->getPrimitiveSet(0))->getCount() >= 2)
++            drawPrimitive(mLinesToDraw, { 0.f, 0.f, 0.f }, { 1.f, 1.f, 1.f }, { 1.f, 1.f, 1.f }, true);
+ 
+         for (const auto& shapeToDraw : mShapesToDraw)
+         {
+--- a/components/debug/gldebug.cpp
++++ b/components/debug/gldebug.cpp
+@@ -33,6 +33,7 @@
+ #include "gldebug.hpp"
+ 
+ #include <cstdlib>
++#include <cstring>
+ #include <memory>
+ 
+ #include <components/debug/debuglog.hpp>
+@@ -56,6 +57,11 @@
+         const GLchar* message, const void* userParam)
+     {
+ #ifdef GL_DEBUG_OUTPUT
++        // Adreno reports every draw of a triangle list with no triangle in it. OSG's text (the F3 statistics) issues
++        // them each frame and they cost nothing, so they are not worth a log line each.
++        if (message != nullptr && std::strstr(message, "unable to generate a triangle primitive") != nullptr)
++            return;
++
+         std::string srcStr;
+         switch (source)
+         {
+--- a/components/resource/imagemanager.cpp
++++ b/components/resource/imagemanager.cpp
+@@ -362,16 +362,24 @@
+ 
+             // OpenGL ES has no BGR(A) upload with an RGB(A) internal format: swap the channels once on load. Every renderer
+             // gets the swapped image, so a cached one stays usable after a live renderer switch.
+-            if (!image->isCompressed() && image->getNumMipmapLevels() <= 1 && image->getDataType() == GL_UNSIGNED_BYTE
++            if (!image->isCompressed() && image->getDataType() == GL_UNSIGNED_BYTE
+                 && (image->getPixelFormat() == GL_BGRA || image->getPixelFormat() == GL_BGR))
+             {
+                 const bool alpha = image->getPixelFormat() == GL_BGRA;
+                 const unsigned channels = alpha ? 4 : 3;
+-                for (int t = 0; t < image->t(); ++t)
++                // Every mip level is swapped, rows padded to the image's packing; a header-only load has no pixels
++                const unsigned levels = image->data() != nullptr ? std::max(1u, image->getNumMipmapLevels()) : 0u;
++                for (unsigned level = 0; level < levels; ++level)
+                 {
+-                    unsigned char* row = image->data(0, t);
+-                    for (int x = 0; x < image->s(); ++x)
+-                        std::swap(row[x * channels], row[x * channels + 2]);
++                    const int width = std::max(1, image->s() >> level);
++                    const int height = std::max(1, image->t() >> level);
++                    const unsigned rowBytes = osg::Image::computeRowWidthInBytes(
++                        width, image->getPixelFormat(), image->getDataType(), image->getPacking());
++                    unsigned char* row = image->isMipmap() ? const_cast<unsigned char*>(image->getMipmapData(level))
++                                                           : image->data();
++                    for (int t = 0; t < height; ++t, row += rowBytes)
++                        for (int x = 0; x < width; ++x)
++                            std::swap(row[x * channels], row[x * channels + 2]);
+                 }
+                 image->setPixelFormat(alpha ? GL_RGBA : GL_RGB);
+                 image->setInternalTextureFormat(alpha ? GL_RGBA : GL_RGB);
+--- a/apps/openmw/mwrender/characterpreview.cpp
++++ b/apps/openmw/mwrender/characterpreview.cpp
+@@ -279,7 +279,14 @@
+         osg::ref_ptr<osg::Texture2D> dummyTexture = new osg::Texture2D();
+         dummyTexture->setWrap(osg::Texture::WRAP_S, osg::Texture::CLAMP_TO_EDGE);
+         dummyTexture->setWrap(osg::Texture::WRAP_T, osg::Texture::CLAMP_TO_EDGE);
++#ifdef ANDROID
++        // OpenGL ES has no unsized depth format
++        dummyTexture->setInternalFormat(GL_DEPTH_COMPONENT24);
++        dummyTexture->setSourceFormat(GL_DEPTH_COMPONENT);
++        dummyTexture->setSourceType(GL_UNSIGNED_INT);
++#else
+         dummyTexture->setInternalFormat(GL_DEPTH_COMPONENT);
++#endif
+         dummyTexture->setTextureSize(1, 1);
+         // This might clash with a shadow map, so make sure it doesn't cast shadows
+         dummyTexture->setShadowComparison(true);
+--- a/apps/openmw/mwrender/water.cpp
++++ b/apps/openmw/mwrender/water.cpp
+@@ -127,7 +127,26 @@
+                 modelViewMatrix->preMultTranslate(mCullPlane->getNormal() * clipFudge);
+ 
+                 cv->pushModelViewMatrix(modelViewMatrix, osg::Transform::RELATIVE_RF);
++
++                // OSG's clip plane attribute cannot clip here (no fixed function pipeline), so the eye space plane goes
++                // to the shaders as a uniform: what glClipPlane would store, the plane through the inverse of the
++                // modelview matrix of the clip node, whose own plane is (normal, 0).
++                const osg::Matrixd inverse = osg::Matrixd::inverse(*cv->getModelViewMatrix());
++                const osg::Vec3d normal = mCullPlane->getNormal();
++                const double object[4] = { normal.x(), normal.y(), normal.z(), 0.0 };
++                osg::Vec4f eye;
++                for (int i = 0; i < 4; ++i)
++                {
++                    double sum = 0.0;
++                    for (int j = 0; j < 4; ++j)
++                        sum += inverse(i, j) * object[j];
++                    eye[i] = static_cast<float>(sum);
++                }
++                osg::ref_ptr<osg::StateSet> clipState = new osg::StateSet;
++                clipState->addUniform(new osg::Uniform("osg_ClipPlane0", eye));
++                cv->pushStateSet(clipState);
+                 traverse(node, cv);
++                cv->popStateSet();
+                 cv->popModelViewMatrix();
+             }
+ 
+--- a/apps/openmw/mwrender/waterawaretransparentbin.cpp
++++ b/apps/openmw/mwrender/waterawaretransparentbin.cpp
+@@ -154,6 +154,12 @@
+         viewPlane.transformProvidingInverse(inverseView);
+         mClipStateSet->setAttributeAndModes(new osg::ClipPlane(1, viewPlane),
+             osg::StateAttribute::ON | osg::StateAttribute::OVERRIDE | osg::StateAttribute::PROTECTED);
++        // The same plane for the shaders: where OpenGL ES has no fixed function pipeline the attribute above only
++        // switches the clip distance on
++        mClipStateSet->addUniform(new osg::Uniform("osg_ClipPlane1",
++            osg::Vec4f(static_cast<float>(viewPlane[0]), static_cast<float>(viewPlane[1]),
++                static_cast<float>(viewPlane[2]), static_cast<float>(viewPlane[3]))),
++            osg::StateAttribute::ON | osg::StateAttribute::OVERRIDE | osg::StateAttribute::PROTECTED);
+ 
+         if (previous)
+             osgUtil::StateGraph::moveToRootStateGraph(state, previous->_parent->_parent);
+--- a/files/shaders/lib/core/profile_vertex.glsl
++++ b/files/shaders/lib/core/profile_vertex.glsl
+@@ -4,6 +4,9 @@
+ #include "lib/core/profile_varyings.glsl"
+ // clockwork profile begin
+ #if defined(GL_ES)
++// Clip planes need GL_EXT_clip_cull_distance on OpenGL ES; the planes come from the two uniforms below (OSG's own clip
++// plane attribute does nothing there) and the attribute's mode enables the distances.
++#extension GL_EXT_clip_cull_distance : enable
+ // OpenGL ES 3.2. OSG binds these attribute names to its own locations when the program is linked.
+ in vec4 osg_Vertex;
+ in vec3 osg_Normal;
+@@ -16,8 +19,17 @@
+ in vec4 osg_MultiTexCoord5;
+ in vec4 osg_MultiTexCoord6;
+ in vec4 osg_MultiTexCoord7;
+-// Clip planes are not available to OpenGL ES shaders without an extension: reflections are not clipped.
++#ifdef GL_EXT_clip_cull_distance
++uniform vec4 osg_ClipPlane0;
++uniform vec4 osg_ClipPlane1;
++#define osg_ClipVertex(v) { gl_ClipDistance[0] = dot(osg_ClipPlane0, (v)); gl_ClipDistance[1] = dot(osg_ClipPlane1, (v)); }
++// For shaders drawn while a clip plane is on that must not be clipped.
++#define osg_NoClip() { gl_ClipDistance[0] = 1.0; gl_ClipDistance[1] = 1.0; }
++#else
++// Without the extension reflections are not clipped.
+ #define osg_ClipVertex(v)
++#define osg_NoClip()
++#endif
+ #define osg_Varying(type, name) out type name;
+ #define osg_VaryingCentroid(type, name) centroid out type name;
+ #define osg_Attribute(loc, type, name) in type name;
+@@ -35,6 +47,7 @@
+ #define osg_MultiTexCoord6 gl_MultiTexCoord6
+ #define osg_MultiTexCoord7 gl_MultiTexCoord7
+ #define osg_ClipVertex(v) gl_ClipVertex = (v)
++#define osg_NoClip()
+ #define osg_Varying(type, name) varying type name;
+ #define osg_VaryingCentroid(type, name) centroid varying type name;
+ #if __VERSION__ < 300
+@@ -57,6 +70,7 @@
+ layout(location = 12) in vec4 osg_MultiTexCoord6;
+ layout(location = 13) in vec4 osg_MultiTexCoord7;
+ #define osg_ClipVertex(v) gl_ClipDistance[0] = dot(osg_ClipPlane, (v))
++#define osg_NoClip()
+ #define osg_Varying(type, name) layout(location = OSG_VARYING_ ## name) out type name;
+ #define osg_VaryingCentroid(type, name) layout(location = OSG_VARYING_ ## name) centroid out type name;
+ #define osg_Attribute(loc, type, name) layout(location = loc) in type name;
+--- a/files/shaders/compatibility/sky.vert
++++ b/files/shaders/compatibility/sky.vert
+@@ -20,6 +20,7 @@
+ {
+     vec4 vertex = instanceWorld() * osg_Vertex;
+     gl_Position = modelToClip(vertex);
++    osg_NoClip();
+ #if __VERSION__ >= 450
+     // The glare and the floor give clip positions directly.
+     if (pass == PASS_SUNGLARE || pass == PASS_FLOOR)

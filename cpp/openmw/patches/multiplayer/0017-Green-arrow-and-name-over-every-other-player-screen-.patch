@@ -1,0 +1,338 @@
+From bbf565f02c0880f4e2984e9782cdd383eede419a Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Fri, 9 Oct 2026 08:11:48 -0400
+Subject: [PATCH] Green arrow and name over every other player (screen overlay,
+ visible through walls); blended upper-body attack animations; avatars match
+ the player's run speed; tighter drift snap-back; two-instance test now walks,
+ arms and attacks
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ multiplayer/debug/autojoin.omwscripts         |   2 +
+ .../debug/scripts/mp_debug/autojoin.lua       |   9 ---
+ .../debug/scripts/mp_debug/autowalk.lua       |  48 ++++++++++++++++
+ multiplayer/mod/scripts/mp/global.lua         |  19 ++++++-
+ multiplayer/mod/scripts/mp/player.lua         |  52 ++++++++++++++++++
+ multiplayer/mod/scripts/mp/remote.lua         |  42 ++++++++++++--
+ multiplayer/mod/textures/mp_arrow.tga         | Bin 0 -> 4114 bytes
+ 7 files changed, 156 insertions(+), 16 deletions(-)
+ create mode 100644 multiplayer/debug/scripts/mp_debug/autowalk.lua
+ create mode 100644 multiplayer/mod/textures/mp_arrow.tga
+
+diff --git a/multiplayer/debug/autojoin.omwscripts b/multiplayer/debug/autojoin.omwscripts
+index 025e815761..7d28411c78 100644
+--- a/multiplayer/debug/autojoin.omwscripts
++++ b/multiplayer/debug/autojoin.omwscripts
+@@ -1 +1,3 @@
+ GLOBAL: scripts/mp_debug/autojoin.lua
++PLAYER: scripts/mp_debug/autowalk.lua
++GLOBAL: scripts/mp_debug/give.lua
+diff --git a/multiplayer/debug/scripts/mp_debug/autojoin.lua b/multiplayer/debug/scripts/mp_debug/autojoin.lua
+index 55190cf1ad..0c37956de5 100644
+--- a/multiplayer/debug/scripts/mp_debug/autojoin.lua
++++ b/multiplayer/debug/scripts/mp_debug/autojoin.lua
+@@ -10,15 +10,6 @@ return {
+                 done = true
+                 core.sendGlobalEvent('MpCmd', { cmd = 'configure', mode = 'join', host = '127.0.0.1', port = 25565 })
+             end
+-            t = t + dt
+-            if t > 30 then -- give both sides time to connect
+-                local step = math.floor((t - 30) / 4)
+-                if step ~= seq then
+-                    seq = step
+-                    core.sendGlobalEvent('MpInput', { sneak = step % 2 == 1, air = step % 3 == 0,
+-                        atk = kinds[step % 3 + 1], seq = step })
+-                end
+-            end
+         end,
+     },
+ }
+diff --git a/multiplayer/debug/scripts/mp_debug/autowalk.lua b/multiplayer/debug/scripts/mp_debug/autowalk.lua
+new file mode 100644
+index 0000000000..565108bf68
+--- /dev/null
++++ b/multiplayer/debug/scripts/mp_debug/autowalk.lua
+@@ -0,0 +1,48 @@
++-- Test helper (player script): walks the character through forward/strafe/back/turn/jump so another
++-- instance can check how well the avatar follows.
++local self = require('openmw.self')
++local I = require('openmw.interfaces')
++local types = require('openmw.types')
++local t = 0
++local armed = false
++local nextAttack = 45
++local kinds = { 'chop', 'slash', 'thrust' }
++local n = 0
++local plan = { -- seconds, forward, side, run, yawRate, jump
++    { 4, 1, 0, true, 0, false }, { 3, 0, 1, true, 0, false }, { 3, -1, 0, false, 0, false },
++    { 3, 1, 0, true, 1.2, false }, { 2, 1, 0, true, 0, true }, { 3, 1, -1, true, -0.8, false },
++    { 2, 0, 0, false, 0, false },
++}
++local total = 0
++for _, s in ipairs(plan) do total = total + s[1] end
++return {
++    engineHandlers = {
++        onUpdate = function(dt)
++            t = t + dt
++            if not armed and t > 6 then -- wield the weapon give.lua added
++                local sword = types.Actor.inventory(self):find('daedric longsword')
++                if sword then
++                    armed = true
++                    types.Actor.setEquipment(self, { [types.Actor.EQUIPMENT_SLOT.CarriedRight] = sword })
++                    types.Actor.setStance(self, types.Actor.STANCE.Weapon)
++                end
++            end
++            if t > nextAttack then
++                nextAttack = t + 3
++                n = n + 1
++                self:sendEvent('MpDebugAttack', { kind = kinds[n % 3 + 1] })
++            end
++            if t < 40 then return end -- wait for the connection
++            I.Controls.overrideMovementControls(true)
++            local x = (t - 40) % total
++            for _, s in ipairs(plan) do
++                if x < s[1] then
++                    self.controls.movement, self.controls.sideMovement = s[2], s[3]
++                    self.controls.run, self.controls.yawChange, self.controls.jump = s[4], s[5] * dt, s[6]
++                    return
++                end
++                x = x - s[1]
++            end
++        end,
++    },
++}
+diff --git a/multiplayer/mod/scripts/mp/global.lua b/multiplayer/mod/scripts/mp/global.lua
+index 96289f64d4..9697dea6c6 100644
+--- a/multiplayer/mod/scripts/mp/global.lua
++++ b/multiplayer/mod/scripts/mp/global.lua
+@@ -250,6 +250,7 @@ local function sendState()
+         vel = vel,
+         yaw = p.rotation:getYaw(),
+         stance = types.Actor.getStance(p),
++        rs = types.Actor.getRunSpeed(p),
+         sneak = myInput.sneak, air = myInput.air, atk = myInput.atk, seq = myInput.seq,
+     }))
+ end
+@@ -379,13 +380,22 @@ local function setHidden(r, hidden, reason)
+     end
+ end
+ 
+-local DRIFT_NEAR, DRIFT_FAR, DRIFT_TIME = 90, 300, 0.8
++local DRIFT_NEAR, DRIFT_FAR, DRIFT_TIME = 60, 220, 0.5
+ 
+ -- Desync protection: the avatar walks toward the predicted position, but collisions, steps or a bad
+ -- connection can leave it behind. Snap it back when it is far off, or somewhat off for too long.
+ local function checkDrift(r, dt)
+     local want = predictedPosition(r)
+     local off = (r.obj.position - want):length()
++    if DEBUG then
++        local m = r.metric or { n = 0, sum = 0, max = 0, t = 0 }
++        r.metric = m
++        m.n, m.sum, m.max, m.t = m.n + 1, m.sum + off, math.max(m.max, off), m.t + dt
++        if m.t >= 1 then
++            dlog('avatar', tostring(r.id), 'drift avg ' .. math.floor(m.sum / m.n) .. ' max ' .. math.floor(m.max))
++            r.metric = nil
++        end
++    end
+     if off > DRIFT_FAR then
+         r.offTime = DRIFT_TIME
+     elseif off > DRIFT_NEAR then
+@@ -427,7 +437,7 @@ local function updateRemote(r, dt)
+     r.obj:sendEvent('MpTarget', {
+         pos = predictedPosition(r), yaw = r.state.yaw, stance = r.state.stance,
+         speed = type(v) == 'table' and math.sqrt(v[1] * v[1] + v[2] * v[2]) or 0,
+-        sneak = r.state.sneak, air = r.state.air,
++        sneak = r.state.sneak, air = r.state.air, rs = r.state.rs,
+     })
+     -- play each new attack once (the first state we ever see only sets the baseline)
+     local seq = r.state.seq
+@@ -716,6 +726,11 @@ return {
+             uiTimer = uiTimer + dt
+             if uiTimer >= UI_INTERVAL then
+                 uiTimer = 0
++                local list = {}
++                for id, r in pairs(remotes) do
++                    if r.obj and r.obj:isValid() and r.obj.enabled then list[#list + 1] = { obj = r.obj, name = nameOf(id) } end
++                end
++                toUi('MpAvatars', { list = list })
+                 for id, exp in pairs(invitesIn) do if exp <= clock then invitesIn[id] = nil end end
+                 for id, exp in pairs(invitesOut) do if exp <= clock then invitesOut[id] = nil end end
+                 pushUi()
+diff --git a/multiplayer/mod/scripts/mp/player.lua b/multiplayer/mod/scripts/mp/player.lua
+index afaff910c5..b2b24f06c9 100644
+--- a/multiplayer/mod/scripts/mp/player.lua
++++ b/multiplayer/mod/scripts/mp/player.lua
+@@ -39,6 +39,9 @@ local COLORS = {
+     bar_bg = rgb(0.08, 0.08, 0.08), tab_on = rgb(1, 1, 1), tab_off = rgb(0.55, 0.55, 0.55),
+ }
+ 
++local camera = require('openmw.camera')
++local markers = {} -- avatar object id -> { el, name }
++local avatarList = {}
+ local playerList, myPlayerId = {}, nil
+ local self = require('openmw.self')
+ local types = require('openmw.types')
+@@ -163,6 +166,52 @@ trade.init({
+ })
+ 
+ local closeChat
++local updateMarkers
++
++------------------------------------------------------------------ markers over other players
++
++local ARROW = ui.texture { path = 'textures/mp_arrow.tga' }
++local ARROW_SIZE, HEAD_HEIGHT = 28, 135
++
++-- A green arrow (and name) above every other player in this cell. It is a screen overlay, so walls and
++-- scenery never hide it.
++function updateMarkers()
++    local scr = ui.screenSize()
++    local seen = {}
++    local camPos = camera.getPosition()
++    local forward = camera.viewportToWorldVector(V2(scr.x / 2, scr.y / 2))
++    for _, a in ipairs(avatarList) do
++        local ok, pos = pcall(function() return a.obj.position end)
++        if ok and a.obj:isValid() then
++            local v = camera.worldToViewportVector(pos + util.vector3(0, 0, HEAD_HEIGHT))
++            local key = a.obj.id
++            if (pos - camPos):dot(forward) > 0 and v.x > -50 and v.x < scr.x + 50 and v.y > -50 and v.y < scr.y + 50 then
++                seen[key] = true
++                local m = markers[key]
++                local layout = {
++                    layer = 'HUD', type = ui.TYPE.Widget,
++                    props = { position = V2(v.x - 60, v.y - ARROW_SIZE - 24), size = V2(120, ARROW_SIZE + 22) },
++                    content = ui.content {
++                        { template = I.MWUI.templates.textNormal,
++                          props = { text = a.name, textColor = rgb(0.5, 1, 0.5), textSize = 16,
++                                    position = V2(60, 0), anchor = V2(0.5, 0) } },
++                        { type = ui.TYPE.Image,
++                          props = { resource = ARROW, size = V2(ARROW_SIZE, ARROW_SIZE), position = V2(60, 20), anchor = V2(0.5, 0) } },
++                    },
++                }
++                if m then
++                    m.layout = layout
++                    m:update()
++                else
++                    markers[key] = ui.create(layout)
++                end
++            end
++        end
++    end
++    for key, el in pairs(markers) do
++        if not seen[key] then el:destroy() markers[key] = nil end
++    end
++end
+ 
+ local function sendChat(str)
+     str = str:gsub('^%s+', ''):gsub('%s+$', '')
+@@ -428,6 +477,7 @@ return {
+             end
+         end,
+         onFrame = function()
++            updateMarkers()
+             if not synced then
+                 synced = true
+                 core.sendGlobalEvent('MpCmd', { cmd = 'sync' })
+@@ -474,6 +524,8 @@ return {
+             state = d
+             if changed then dirty.party = true; dirty.invites = true end
+         end,
++        MpDebugAttack = function(d) attackSeq = attackSeq + 1; lastAttack = d.kind end, -- test macro
++        MpAvatars = function(d) avatarList = d.list or {} end,
+         MpPlayers = function(d)
+             playerList, myPlayerId = d.list, d.me
+             -- shown on the Multiplayer settings page (renderer in menu.lua)
+diff --git a/multiplayer/mod/scripts/mp/remote.lua b/multiplayer/mod/scripts/mp/remote.lua
+index 64b5c86950..f31e751dbd 100644
+--- a/multiplayer/mod/scripts/mp/remote.lua
++++ b/multiplayer/mod/scripts/mp/remote.lua
+@@ -19,7 +19,10 @@ local TURN_RATE = 14 -- rad/s
+ local DAMAGE_REPORT_INTERVAL = 0.2
+ 
+ local playAttack
+-local checkGroup, checkTimer, beat
++local ATTACK_TIME = 0.9 -- a swing is cut off after this long, so a queued animation can never freeze the avatar
++local attackLeft
++local speedTimer
++local checkGroup, checkTimer, beat, dbgT, dbgPos
+ local isProxy, key
+ local target -- { pos, yaw, stance, sneak, hp }
+ local walking = false
+@@ -119,9 +122,12 @@ playAttack = function(kind)
+     local group, from, to = attackAnimation(kind)
+     local ok = pcall(function()
+         if not anim.hasGroup(self, group) then error('no group') end
+-        -- the character controller cancels playBlended animations on an AI-less actor, a queued one sticks
+-        anim.clearAnimationQueue(self, false)
+-        anim.playQueued(self, group, { startKey = from, stopKey = to, loops = 0 })
++        -- Blended on the upper body only, so walking, strafing and jumping carry on underneath. (A queued animation
++        -- takes over the whole actor and left it stuck.)
++        anim.playBlended(self, group, {
++            startKey = from, stopKey = to, priority = anim.PRIORITY.Weapon, blendMask = anim.BLEND_MASK.UpperBody,
++            autoDisable = true, speed = 1.3,
++        })
+     end)
+     if ok then print('[mp-anim] playing ' .. group .. ' ' .. from .. ' weapon=' .. tostring((Actor.getEquipment(self)[Actor.EQUIPMENT_SLOT.CarriedRight] or {}).recordId)); checkGroup, checkTimer = group, 0.15 end
+     if not ok then print('[mp-anim] could not play ' .. tostring(group) .. ' ' .. tostring(kind)) end
+@@ -136,6 +142,13 @@ return {
+         onUpdate = function(dt)
+             if not aiOff and not aggro then self:enableAI(false); aiOff = true end
+             local c = self.controls
++            if attackLeft then
++                attackLeft = attackLeft - dt
++                if attackLeft <= 0 then
++                    attackLeft = nil
++                    pcall(anim.clearAnimationQueue, self, false)
++                end
++            end
+             beat = (beat or 0) + dt
+             if checkGroup and beat > 0.2 then beat = 0 print('[mp-anim] tick, queued ' .. tostring(anim.isPlaying(self, checkGroup))) end
+             if checkGroup then
+@@ -189,11 +202,30 @@ return {
+             c.run = walking and ((target.speed or 0) > RUN_SPEED or dist > 120)
+             c.sneak = target.sneak or false
+             c.jump = (target.air or delta.z > 40) and Actor.isOnGround(self)
++            -- make the avatar as fast as the player it mirrors, so it does not fall behind (or overshoot)
++            speedTimer = (speedTimer or 0) + dt
++            if speedTimer >= 0.4 and target.rs and target.rs > 0 then
++                speedTimer = 0
++                local mine = Actor.getRunSpeed(self)
++                local ratio = mine > 0 and target.rs / mine or 1
++                if math.abs(ratio - 1) > 0.02 then
++                    local attr = Actor.stats.attributes.speed(self)
++                    local total = attr.base + attr.modifier
++                    attr.modifier = math.max(-attr.base + 1, math.min(1000, attr.modifier + (ratio - 1) * total * 0.9))
++                end
++            end
++            dbgT = (dbgT or 0) + dt
++            if dbgT >= 0.5 and not isProxy then
++                local moved = (self.position - (dbgPos or self.position)):length() / dbgT
++                print(string.format('[mp-move] dist %.0f targetSpeed %.0f actualSpeed %.0f fwd %.2f side %.2f run %s walking %s',
++                    dist, target.speed or 0, moved, c.movement, c.sideMovement, tostring(c.run), tostring(walking)))
++                dbgT, dbgPos = 0, self.position
++            end
+         end,
+     },
+     eventHandlers = {
+         MpTarget = function(d)
+-            target = { pos = d.pos, yaw = d.yaw, sneak = d.sneak, hp = d.hp, speed = d.speed, air = d.air }
++            target = { pos = d.pos, yaw = d.yaw, sneak = d.sneak, hp = d.hp, speed = d.speed, air = d.air, rs = d.rs }
+             if d.stance and Actor.getStance(self) ~= d.stance then Actor.setStance(self, d.stance) end
+         end,
+         -- Another player attacked or cast: show the animation only. (The avatar has no AI and never deals damage.)
+diff --git a/multiplayer/mod/textures/mp_arrow.tga b/multiplayer/mod/textures/mp_arrow.tga
+new file mode 100644
+index 0000000000000000000000000000000000000000..750c6f82c2349286c17bde5b030541ad4432425c
+GIT binary patch
+literal 4114
+zcmeH|K@NZ*3<QZsU*XY5@c*ay4b2`lqN%1->S@Q2AlU9g3YIbzvfx?yCVb3w-rt%p
+zOB`s|t(pyU@ytG?ul-m3>HJwWp!-MnukSB%1$E<XR^7E@-aPkOWn7ypqfedd4xC^<
+zLl-&kYknfbgIAl3^w6tK5ckCg<C!l?!~<fYdKNt%Mr#v~hb(P^{FV=n^Sf+X59nv>
+KS^T|bF`fg-V~0%u
+
+literal 0
+HcmV?d00001
+
+-- 
+2.55.0
+

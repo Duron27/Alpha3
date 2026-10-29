@@ -1,0 +1,79 @@
+From de1c40a57511caf8de945643d2fa2dce5cfcb9c1 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Fri, 9 Oct 2026 17:52:11 -0400
+Subject: [PATCH 5/5] Render to the context's default FBO instead of FBO 0
+
+iOS has no default framebuffer; SDL draws through an FBO backed by the screen layer. Expose it via setDefaultFboId and have the post-processing canvas return to it, so frames are not discarded.
+---
+ apps/openmw/mwrender/pingpongcanvas.cpp  | 11 +++++++----
+ components/sdlutil/sdlgraphicswindow.cpp | 17 +++++++++++++++++
+ 2 files changed, 24 insertions(+), 4 deletions(-)
+
+diff --git a/apps/openmw/mwrender/pingpongcanvas.cpp b/apps/openmw/mwrender/pingpongcanvas.cpp
+index c5460d468e..e7e1be31f1 100644
+--- a/apps/openmw/mwrender/pingpongcanvas.cpp
++++ b/apps/openmw/mwrender/pingpongcanvas.cpp
+@@ -217,9 +217,11 @@ namespace MWRender
+             }
+             else
+             {
+-                ext->glBindFramebuffer(GL_DRAW_FRAMEBUFFER_EXT, 0);
++                const GLuint defaultFbo
++                    = state.getGraphicsContext() ? state.getGraphicsContext()->getDefaultFboId() : 0;
++                ext->glBindFramebuffer(GL_DRAW_FRAMEBUFFER_EXT, defaultFbo);
+ 
+-                lastApplied = 0;
++                lastApplied = defaultFbo;
+             }
+         };
+ 
+@@ -359,8 +361,9 @@ namespace MWRender
+ 
+         if (Stereo::getMultiview())
+         {
+-            ext->glBindFramebuffer(GL_DRAW_FRAMEBUFFER_EXT, 0);
+-            lastApplied = 0;
++            const GLuint defaultFbo = state.getGraphicsContext() ? state.getGraphicsContext()->getDefaultFboId() : 0;
++            ext->glBindFramebuffer(GL_DRAW_FRAMEBUFFER_EXT, defaultFbo);
++            lastApplied = defaultFbo;
+ 
+             resolveViewport->apply(state);
+             state.pushStateSet(mMultiviewResolveStateSet);
+diff --git a/components/sdlutil/sdlgraphicswindow.cpp b/components/sdlutil/sdlgraphicswindow.cpp
+index 775a92d13d..ecdc668933 100644
+--- a/components/sdlutil/sdlgraphicswindow.cpp
++++ b/components/sdlutil/sdlgraphicswindow.cpp
+@@ -2,6 +2,11 @@
+ 
+ #include <SDL_video.h>
+ 
++#ifdef __APPLE__
++#include <SDL_syswm.h>
++#include <TargetConditionals.h>
++#endif
++
+ #ifdef OPENMW_GL4ES_MANUAL_INIT
+ #include "gl4esinit.h"
+ #endif
+@@ -149,6 +154,18 @@ namespace SDLUtil
+         openmw_gl4es_init(mWindow);
+ #endif
+ 
++#if TARGET_OS_IPHONE
++        // iOS has no default framebuffer: SDL renders into a framebuffer object backed by the screen layer.
++        // Tell OSG about it so render stages that unbind their FBO return to the screen instead of FBO 0.
++        {
++            SDL_SysWMinfo wmInfo;
++            SDL_VERSION(&wmInfo.version);
++            if (SDL_GetWindowWMInfo(mWindow, &wmInfo) && wmInfo.subsystem == SDL_SYSWM_UIKIT
++                && wmInfo.info.uikit.framebuffer != 0)
++                setDefaultFboId(wmInfo.info.uikit.framebuffer);
++        }
++#endif
++
+         setSwapInterval(mVSyncMode);
+ 
+         // Update traits with what we've actually been given
+-- 
+2.55.0
+

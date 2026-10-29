@@ -1,0 +1,28 @@
+From 6610a62746cf0367a0526fe56f84695bc6ad52aa Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Wed, 7 Oct 2026 02:58:00 -0400
+Subject: [PATCH] Bot vitals no longer track the creature it owns
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ multiplayer/server/owner_bot.py | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/multiplayer/server/owner_bot.py b/multiplayer/server/owner_bot.py
+index c6decbe861..1f9f2da7e5 100644
+--- a/multiplayer/server/owner_bot.py
++++ b/multiplayer/server/owner_bot.py
+@@ -86,7 +86,9 @@ while True:
+         if say and not did["say"]:
+             did["say"] = True; send({"t": "chat", "scope": "global", "text": say})
+         if len(party) > 1:
+-            send({"t": "vitals", "h": int(80 * max(hp, 0.05)), "hm": 80, "m": 40, "mm": 60, "f": 90, "fm": 100})
++            # The bot's own character vitals, independent of the creature it owns (they just wobble so the panel moves).
++            send({"t": "vitals", "h": 80, "hm": 80, "m": 30 + int(20 * (1 + math.sin(a / 4))), "mm": 70,
++                  "f": 70 + int(25 * (1 + math.sin(a / 6))), "fm": 120})
+             lst = [{"n": "morrowind.esm:16777000", "r": rec, "h": hp,
+                     "p": [pos0[0] + 200 + 80 * math.cos(a), pos0[1] + 200 + 80 * math.sin(a), pos0[2]], "y": 0}] if hp > 0 else []
+             send({"t": "actors", "cell": cell, "list": lst, "dead": [] if hp > 0 else ["morrowind.esm:16777000"]})
+-- 
+2.55.0
+

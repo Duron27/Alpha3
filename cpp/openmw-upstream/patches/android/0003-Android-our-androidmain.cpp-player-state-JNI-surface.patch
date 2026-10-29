@@ -1,0 +1,659 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Alpha3 <noreply@alpha3.invalid>
+Date: Tue, 20 Oct 2026 18:45:53 -0400
+Subject: [PATCH 03/17] Android: our androidmain.cpp (player state JNI, surface
+ hooks); the library is libopenmw_upstream.so
+
+---
+ apps/openmw/CMakeLists.txt         |   5 +
+ apps/openmw/androidmain.cpp        | 575 +++++++++++++++++++++++++++--
+ apps/openmw/mwbase/environment.hpp |   4 +
+ 3 files changed, 555 insertions(+), 29 deletions(-)
+
+diff --git a/apps/openmw/CMakeLists.txt b/apps/openmw/CMakeLists.txt
+index fe5c085ba8..9bfc1b51ba 100644
+--- a/apps/openmw/CMakeLists.txt
++++ b/apps/openmw/CMakeLists.txt
+@@ -155,6 +155,11 @@ if(BUILD_OPENMW)
+ 
+     target_link_libraries(openmw openmw-lib)
+ 
++    if (ANDROID)
++        # Ships next to the fork's libopenmw.so in the same APK
++        set_target_properties(openmw PROPERTIES OUTPUT_NAME openmw_upstream)
++    endif()
++
+     # Workaround necessary to ensure osgAnimation::MatrixLinearSampler dynamic casts work under Clang
+     # NOTE: it's unclear whether the broken behavior is spec-compliant
+     if (CMAKE_CXX_COMPILER_ID STREQUAL Clang)
+diff --git a/apps/openmw/androidmain.cpp b/apps/openmw/androidmain.cpp
+index ade009ae07..0ac5c7aaf9 100644
+--- a/apps/openmw/androidmain.cpp
++++ b/apps/openmw/androidmain.cpp
+@@ -1,65 +1,582 @@
+-#ifndef stderr
++#if defined(stderr) && (__ANDROID_API__ < 23)
+ int stderr = 0; // Hack: fix linker error
+ #endif
+ 
+ #include "SDL_main.h"
++#include "engine.hpp"
++#include "mwbase/environment.hpp"
++#include "mwbase/statemanager.hpp"
++#include "mwbase/windowmanager.hpp"
++#include "mwbase/world.hpp"
++#include "mwclass/classes.hpp"
++#include "mwmechanics/creaturestats.hpp"
++#include "mwmechanics/drawstate.hpp"
++#include "mwmechanics/spells.hpp"
++#include "mwstate/statemanagerimp.hpp"
++#include "mwworld/cellstore.hpp"
++#include "mwworld/class.hpp"
++#include "mwworld/inventorystore.hpp"
++#include "mwworld/ptr.hpp"
++#include "mwrender/postprocessor.hpp"
+ #include <SDL_events.h>
+ #include <SDL_gamecontroller.h>
++#include <SDL_hints.h>
+ #include <SDL_mouse.h>
++#include <components/resource/resourcesystem.hpp>
++#include <components/sceneutil/depth.hpp>
++#include <components/vfs/pathutil.hpp>
++
++#include <alpha3/upstream.hpp>
++
++#include <algorithm>
++#include <atomic>
++#include <chrono>
++#include <cstdint>
++#include <mutex>
++#include <string>
++
++#include <osg/Camera>
++#include <osg/GraphicsContext>
++#include <osg/OperationThread>
++#include <osg/View>
+ 
+ /*******************************************************************************
+- Functions called by JNI
++ * JNA / JNI C Exports & SDL Hooks
+  *******************************************************************************/
+-#include <jni.h>
+ 
+-/* Called before  to initialize JNI bindings  */
++#include <jni.h>
+ 
+ extern void SDL_Android_Init(JNIEnv* env, jclass cls);
+ extern int argcData;
+ extern const char** argvData;
+ void releaseArgv();
+ 
+-extern "C" int Java_org_libsdl_app_SDLActivity_getMouseX(JNIEnv* env, jclass cls, jobject obj)
++namespace
++{
++inline const MWBase::Environment& liveEnvironment()
++{
++  if (!MWBase::Environment::exists())
++    throw std::runtime_error("engine not running");
++  return MWBase::Environment::get();
++}
++
++inline MWWorld::Ptr getPlayerPtrSafely()
++{
++  try
++  {
++    auto& env = liveEnvironment();
++    auto world = env.getWorld();
++    if (world)
++      return world->getPlayerPtr();
++  }
++  catch (...)
++  {
++  }
++  return MWWorld::Ptr();
++}
++
++inline jstring c_str_to_jstring(JNIEnv* env, const char* str)
++{
++  if (!str)
++    return env->NewStringUTF("");
++  return env->NewStringUTF(str);
++}
++}
++
++static osg::GraphicsContext* ctx;
++
++class CtxReleaseOperation : public osg::Operation
++{
++public:
++  virtual void operator()(osg::Object* caller) { ctx->releaseContext(); }
++};
++
++class CtxAcquireOperation : public osg::Operation
++{
++public:
++  virtual void operator()(osg::Object* caller) { ctx->makeCurrent(); }
++};
++
++extern "C"
++{
++
++// JNA Surface Lifecycle management
++void omw_surface_destroyed()
++{
++  try {
++    osg::GraphicsContext::GraphicsContexts contexts = osg::GraphicsContext::getRegisteredGraphicsContexts(0);
++    if (!contexts.empty() && contexts[0])
++    {
++      osg::ref_ptr<CtxReleaseOperation> op = new CtxReleaseOperation();
++      ctx = contexts[0];
++      ctx->add(op);
++    }
++  } catch (...) {}
++}
++
++void omw_surface_recreated()
++{
++  try {
++    osg::GraphicsContext::GraphicsContexts contexts = osg::GraphicsContext::getRegisteredGraphicsContexts(0);
++    if (!contexts.empty() && contexts[0])
++    {
++      osg::ref_ptr<CtxAcquireOperation> op = new CtxAcquireOperation();
++      ctx = contexts[0];
++      ctx->add(op);
++    }
++  } catch (...) {}
++}
++
++// The last frame intervals of the main loop, for the launcher's performance overlay
++static constexpr size_t sFrameHistory = 240;
++static std::mutex sFrameMutex;
++static float sFrameTimes[sFrameHistory];
++static size_t sFrameCount = 0;
++
++void omw_record_frame_time(float milliseconds)
++{
++  std::lock_guard<std::mutex> lock(sFrameMutex);
++  sFrameTimes[sFrameCount++ % sFrameHistory] = milliseconds;
++}
++
++// The player state the app polls from its UI thread is copied from the game on the engine's main thread
++// (omw_frame_update, about ten times a second). The UI thread never touches the game's objects: they are not thread
++// safe, and the engine destroys them while the app may still be polling, when the game quits.
++struct PlayerSnapshot
++{
++  bool running = false;
++  float healthCurrent = 0.f, healthModified = 0.f, healthBase = 0.f;
++  float magickaCurrent = 0.f, magickaModified = 0.f;
++  float fatigueCurrent = 0.f, fatigueModified = 0.f;
++  int level = 0;
++  float x = 0.f, y = 0.f, z = 0.f;
++  std::string cellName = "Main Menu / Loading";
++  std::string inventorySummary = "Main Menu / Loading";
++  int drawState = 0;
++  std::string selectedWeapon;
++  std::string selectedSpell;
++};
++
++static std::mutex sSnapshotMutex;
++static PlayerSnapshot sSnapshot;
++static std::atomic<bool> sQuitRequested{ false };
++// The inventory list walks every item and builds text; it is only made while the app's overlay keeps asking for it
++static std::atomic<std::int64_t> sInventoryAskedAt{ 0 };
++
++static std::int64_t steadyMillis()
++{
++  return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
++      .count();
++}
++
++static PlayerSnapshot takeSnapshot(const PlayerSnapshot& previous)
++{
++  PlayerSnapshot snapshot;
++  try
++  {
++    auto& env = liveEnvironment();
++    auto stateMgr = env.getStateManager();
++    snapshot.running = stateMgr && stateMgr->getState() == MWState::StateManager::State_Running;
++  }
++  catch (...)
++  {
++  }
++  // The world exists before there is a player (the intro video plays while the engine starts, and World::getPlayerPtr
++  // does not check), so the player is read only while a game runs
++  if (!snapshot.running)
++    return snapshot;
++  snapshot.cellName = "Unknown Cell";
++  snapshot.inventorySummary = "(No Inventory)";
++
++  auto player = getPlayerPtrSafely();
++  if (player.isEmpty())
++    return snapshot;
++  try
++  {
++    auto& stats = player.getClass().getCreatureStats(player);
++    snapshot.healthCurrent = stats.getHealth().getCurrent();
++    snapshot.healthModified = stats.getHealth().getModified();
++    snapshot.healthBase = stats.getHealth().getBase();
++    snapshot.magickaCurrent = stats.getMagicka().getCurrent();
++    snapshot.magickaModified = stats.getMagicka().getModified();
++    snapshot.fatigueCurrent = stats.getFatigue().getCurrent();
++    snapshot.fatigueModified = stats.getFatigue().getModified();
++    snapshot.level = stats.getLevel();
++    snapshot.drawState = static_cast<int>(stats.getDrawState());
++    const osg::Vec3f position = player.getRefData().getPosition().asVec3();
++    snapshot.x = position.x();
++    snapshot.y = position.y();
++    snapshot.z = position.z();
++    const auto spellId = stats.getSpells().getSelectedSpell();
++    if (!spellId.empty())
++      snapshot.selectedSpell = spellId.toDebugString();
++  }
++  catch (...)
++  {
++  }
++
++  try
++  {
++    if (player.isInCell() && player.getCell())
++    {
++      auto cell = player.getCell()->getCell();
++      if (cell)
++      {
++        auto name = cell->getDisplayName();
++        if (name.empty())
++          name = cell->getNameId();
++        snapshot.cellName = std::string(name);
++      }
++    }
++  }
++  catch (...)
++  {
++  }
++
++  try
++  {
++    if (player.getClass().hasInventoryStore(player))
++    {
++      auto& invStore = player.getClass().getInventoryStore(player);
++      if (steadyMillis() - sInventoryAskedAt.load() > 3000)
++        snapshot.inventorySummary = previous.inventorySummary;
++      else
++      {
++        std::string summary;
++        int count = 0;
++        for (auto it = invStore.begin(); it != invStore.end(); ++it)
++        {
++          if (it->isEmpty()) continue;
++          if (!it->getClass().showsInInventory(*it)) continue;
++          if (count > 0) summary += ", ";
++          int itemCount = 1;
++          try {
++            itemCount = it->getCellRef().getCount();
++          } catch (...) {}
++          summary += std::string(it->getClass().getName(*it)) + " (x" + std::to_string(itemCount) + ")";
++          count++;
++          if (count > 30) { summary += ", ..."; break; }
++        }
++        snapshot.inventorySummary = summary.empty() ? "(Empty Inventory)" : summary;
++      }
++
++      auto weapon = invStore.getSlot(MWWorld::InventoryStore::Slot_CarriedRight);
++      if (weapon != invStore.end() && !weapon->isEmpty())
++        snapshot.selectedWeapon = std::string(weapon->getClass().getName(*weapon));
++    }
++  }
++  catch (...)
++  {
++  }
++
++  if (snapshot.selectedSpell.empty())
++  {
++    try
++    {
++      auto winMgr = liveEnvironment().getWindowManager();
++      if (winMgr)
++      {
++        auto spellId = winMgr->getSelectedSpell();
++        if (!spellId.empty())
++          snapshot.selectedSpell = spellId.toDebugString();
++      }
++    }
++    catch (...)
++    {
++    }
++  }
++  return snapshot;
++}
++
++// The viewer's own camera (the one the window's context draws for), which the engine has placed for this frame by now
++static osg::Camera* viewerCamera()
++{
++  for (osg::GraphicsContext* gc : osg::GraphicsContext::getAllRegisteredGraphicsContexts())
++    for (osg::Camera* camera : gc->getCameras())
++      if (camera->getView() != nullptr && camera->getView()->getCamera() == camera)
++        return camera;
++  return nullptr;
++}
++
++// Frame generation makes the frame between two rendered ones from the camera's motion and the scene's depth: hands over
++// this frame's camera and the post processor's textures it is drawn into
++static void submitFrameGenView()
++{
++  if (!Alpha3::frameGenWanted())
++    return;
++  try
++  {
++    auto& env = liveEnvironment();
++    auto stateMgr = env.getStateManager();
++    MWBase::World* world = env.getWorld();
++    if (!stateMgr || stateMgr->getState() != MWState::StateManager::State_Running || world == nullptr)
++      return;
++    MWRender::PostProcessor* postProcessor = world->getPostProcessor();
++    osg::Camera* camera = viewerCamera();
++    if (postProcessor == nullptr || camera == nullptr || camera->getView()->getFrameStamp() == nullptr)
++      return;
++    // the post processor's camera draws the scene into the window before the GUI: frame generation copies it there
++    static bool captureAdded = false;
++    if (!captureAdded)
++    {
++      postProcessor->getHUDCamera()->addFinalDrawCallback(Alpha3::frameGenPreGuiCapture());
++      captureAdded = true;
++    }
++    Alpha3::FrameGenView view;
++    view.frame = camera->getView()->getFrameStamp()->getFrameNumber();
++    view.view = camera->getViewMatrix();
++    view.projection = camera->getProjectionMatrix();
++    view.reversedDepth = SceneUtil::AutoDepth::isReversed();
++    view.postProcessing = postProcessor->isEnabled();
++    const unsigned frameId = view.frame % 2;
++    view.scene = postProcessor->getTexture(MWRender::PostProcessor::Tex_Scene, frameId);
++    view.depth = postProcessor->getTexture(MWRender::PostProcessor::Tex_Depth, frameId);
++    view.opaqueDepth = postProcessor->getTexture(MWRender::PostProcessor::Tex_OpaqueDepth, frameId);
++    Alpha3::frameGenSubmitView(std::move(view));
++  }
++  catch (...)
++  {
++  }
++}
++
++// Alpha3's support library calls it on the engine's main thread before each frame is rendered
++void omw_frame_update()
++{
++  submitFrameGenView();
++
++  if (sQuitRequested.exchange(false))
++  {
++    try
++    {
++      auto stateMgr = liveEnvironment().getStateManager();
++      if (stateMgr)
++        stateMgr->requestQuit();
++    }
++    catch (...)
++    {
++    }
++  }
++
++  static std::chrono::steady_clock::time_point last;
++  const auto now = std::chrono::steady_clock::now();
++  if (now - last < std::chrono::milliseconds(100))
++    return;
++  last = now;
++  PlayerSnapshot previous;
++  {
++    std::lock_guard<std::mutex> lock(sSnapshotMutex);
++    previous.inventorySummary = sSnapshot.inventorySummary;
++  }
++  PlayerSnapshot snapshot = takeSnapshot(previous);
++  std::lock_guard<std::mutex> lock(sSnapshotMutex);
++  sSnapshot = std::move(snapshot);
++}
++
++extern "C++"
++{
++template <class T>
++static T snapshotValue(T PlayerSnapshot::*member)
++{
++  std::lock_guard<std::mutex> lock(sSnapshotMutex);
++  return sSnapshot.*member;
++}
++}
++
++// The returned text stays valid until the calling thread asks for the same value again
++static const char* snapshotText(std::string PlayerSnapshot::*member)
++{
++  thread_local std::string texts[4];
++  std::string& text = member == &PlayerSnapshot::cellName ? texts[0]
++      : member == &PlayerSnapshot::inventorySummary      ? texts[1]
++      : member == &PlayerSnapshot::selectedWeapon        ? texts[2]
++                                                         : texts[3];
++  std::lock_guard<std::mutex> lock(sSnapshotMutex);
++  text = sSnapshot.*member;
++  return text.c_str();
++}
++
++bool omw_is_game_running() { return snapshotValue(&PlayerSnapshot::running); }
++
++// Applied by the engine's main thread on its next frame
++void omw_quit_game() { sQuitRequested = true; }
++
++float omw_get_player_health_current() { return snapshotValue(&PlayerSnapshot::healthCurrent); }
++float omw_get_player_health_modified() { return snapshotValue(&PlayerSnapshot::healthModified); }
++float omw_get_player_health_base() { return snapshotValue(&PlayerSnapshot::healthBase); }
++float omw_get_player_magicka_current() { return snapshotValue(&PlayerSnapshot::magickaCurrent); }
++float omw_get_player_magicka_modified() { return snapshotValue(&PlayerSnapshot::magickaModified); }
++float omw_get_player_fatigue_current() { return snapshotValue(&PlayerSnapshot::fatigueCurrent); }
++float omw_get_player_fatigue_modified() { return snapshotValue(&PlayerSnapshot::fatigueModified); }
++int omw_get_player_level() { return snapshotValue(&PlayerSnapshot::level); }
++float omw_get_player_x() { return snapshotValue(&PlayerSnapshot::x); }
++float omw_get_player_y() { return snapshotValue(&PlayerSnapshot::y); }
++float omw_get_player_z() { return snapshotValue(&PlayerSnapshot::z); }
++const char* omw_get_player_cell_name() { return snapshotText(&PlayerSnapshot::cellName); }
++const char* omw_get_player_inventory_summary()
+ {
+-    int ret = 0;
+-    SDL_GetMouseState(&ret, nullptr);
+-    return ret;
++  sInventoryAskedAt = steadyMillis();
++  return snapshotText(&PlayerSnapshot::inventorySummary);
+ }
++int omw_get_draw_state() { return snapshotValue(&PlayerSnapshot::drawState); }
++const char* omw_get_selected_weapon_name() { return snapshotText(&PlayerSnapshot::selectedWeapon); }
++const char* omw_get_selected_spell_id() { return snapshotText(&PlayerSnapshot::selectedSpell); }
+ 
+-extern "C" int Java_org_libsdl_app_SDLActivity_getMouseY(JNIEnv* env, jclass cls, jobject obj)
++/// The recent frame intervals in milliseconds, oldest first
++JNIEXPORT jfloatArray JNICALL Java_org_openmw_EngineActivity_omwGetFrameTimes(JNIEnv* env, jobject thiz)
+ {
+-    int ret = 0;
+-    SDL_GetMouseState(nullptr, &ret);
+-    return ret;
++  float copy[sFrameHistory];
++  size_t count;
++  {
++    std::lock_guard<std::mutex> lock(sFrameMutex);
++    count = std::min(sFrameCount, sFrameHistory);
++    for (size_t i = 0; i < count; ++i)
++      copy[i] = sFrameTimes[(sFrameCount - count + i) % sFrameHistory];
++  }
++  jfloatArray result = env->NewFloatArray(static_cast<jsize>(count));
++  if (result != nullptr && count > 0)
++    env->SetFloatArrayRegion(result, 0, static_cast<jsize>(count), copy);
++  return result;
+ }
+ 
+-extern "C" int Java_org_libsdl_app_SDLActivity_isMouseShown(JNIEnv* env, jclass cls, jobject obj)
++JNIEXPORT jboolean JNICALL Java_org_openmw_EngineActivity_omwIsGameRunning(JNIEnv* env, jobject thiz)
+ {
+-    return SDL_ShowCursor(SDL_QUERY);
++  return omw_is_game_running() ? JNI_TRUE : JNI_FALSE;
+ }
+ 
+-extern SDL_Window* Android_Window;
+-extern "C" int SDL_SendMouseMotion(SDL_Window* window, int mouseID, int relative, int x, int y);
+-extern "C" void Java_org_libsdl_app_SDLActivity_sendRelativeMouseMotion(JNIEnv* env, jclass cls, int x, int y)
++JNIEXPORT void JNICALL Java_org_openmw_EngineActivity_omwQuitGame(JNIEnv* env, jobject thiz)
+ {
+-    SDL_SendMouseMotion(Android_Window, 0, 1, x, y);
++  omw_quit_game();
+ }
+ 
+-extern "C" int SDL_SendMouseButton(SDL_Window* window, int mouseID, Uint8 state, Uint8 button);
+-extern "C" void Java_org_libsdl_app_SDLActivity_sendMouseButton(JNIEnv* env, jclass cls, int state, int button)
++JNIEXPORT jfloat JNICALL Java_org_openmw_EngineActivity_omwGetPlayerHealthCurrent(JNIEnv* env, jobject thiz)
+ {
+-    SDL_SendMouseButton(Android_Window, 0, state, button);
++  return omw_get_player_health_current();
+ }
+ 
+-extern "C" int Java_org_libsdl_app_SDLActivity_nativeInit(JNIEnv* env, jclass cls, jobject obj)
++JNIEXPORT jfloat JNICALL Java_org_openmw_EngineActivity_omwGetPlayerHealthModified(JNIEnv* env, jobject thiz)
+ {
+-    setenv("OPENMW_DECOMPRESS_TEXTURES", "1", 1);
++  return omw_get_player_health_modified();
++}
+ 
+-    // On Android, we use a virtual controller with guid="Virtual"
+-    SDL_GameControllerAddMapping(
+-        "5669727475616c000000000000000000,Virtual,a:b0,b:b1,back:b15,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,"
+-        "guide:b16,leftshoulder:b6,leftstick:b13,lefttrigger:a5,leftx:a0,lefty:a1,rightshoulder:b7,rightstick:b14,"
+-        "righttrigger:a4,rightx:a2,righty:a3,start:b11,x:b3,y:b4");
++JNIEXPORT jfloat JNICALL Java_org_openmw_EngineActivity_omwGetPlayerHealthBase(JNIEnv* env, jobject thiz)
++{
++  return omw_get_player_health_base();
++}
++
++JNIEXPORT jfloat JNICALL Java_org_openmw_EngineActivity_omwGetPlayerMagickaCurrent(JNIEnv* env, jobject thiz)
++{
++  return omw_get_player_magicka_current();
++}
++
++JNIEXPORT jfloat JNICALL Java_org_openmw_EngineActivity_omwGetPlayerMagickaModified(JNIEnv* env, jobject thiz)
++{
++  return omw_get_player_magicka_modified();
++}
++
++JNIEXPORT jfloat JNICALL Java_org_openmw_EngineActivity_omwGetPlayerFatigueCurrent(JNIEnv* env, jobject thiz)
++{
++  return omw_get_player_fatigue_current();
++}
++
++JNIEXPORT jfloat JNICALL Java_org_openmw_EngineActivity_omwGetPlayerFatigueModified(JNIEnv* env, jobject thiz)
++{
++  return omw_get_player_fatigue_modified();
++}
++
++JNIEXPORT jint JNICALL Java_org_openmw_EngineActivity_omwGetPlayerLevel(JNIEnv* env, jobject thiz)
++{
++  return omw_get_player_level();
++}
++
++JNIEXPORT jfloat JNICALL Java_org_openmw_EngineActivity_omwGetPlayerX(JNIEnv* env, jobject thiz)
++{
++  return omw_get_player_x();
++}
++
++JNIEXPORT jfloat JNICALL Java_org_openmw_EngineActivity_omwGetPlayerY(JNIEnv* env, jobject thiz)
++{
++  return omw_get_player_y();
++}
++
++JNIEXPORT jfloat JNICALL Java_org_openmw_EngineActivity_omwGetPlayerZ(JNIEnv* env, jobject thiz)
++{
++  return omw_get_player_z();
++}
++
++JNIEXPORT jstring JNICALL Java_org_openmw_EngineActivity_omwGetPlayerCellName(JNIEnv* env, jobject thiz)
++{
++  return c_str_to_jstring(env, omw_get_player_cell_name());
++}
+ 
+-    return 0;
++JNIEXPORT jstring JNICALL Java_org_openmw_EngineActivity_omwGetPlayerInventorySummary(JNIEnv* env, jobject thiz)
++{
++  return c_str_to_jstring(env, omw_get_player_inventory_summary());
++}
++
++JNIEXPORT jint JNICALL Java_org_openmw_EngineActivity_omwGetDrawState(JNIEnv* env, jobject thiz)
++{
++  return omw_get_draw_state();
++}
++
++JNIEXPORT jstring JNICALL Java_org_openmw_EngineActivity_omwGetSelectedWeaponName(JNIEnv* env, jobject thiz)
++{
++  return c_str_to_jstring(env, omw_get_selected_weapon_name());
++}
++
++JNIEXPORT jstring JNICALL Java_org_openmw_EngineActivity_omwGetSelectedSpellId(JNIEnv* env, jobject thiz)
++{
++  return c_str_to_jstring(env, omw_get_selected_spell_id());
++}
++
++} // extern "C"
++
++extern "C" int Java_org_libsdl_app_SDLActivity_getMouseX(JNIEnv* env, jclass cls)
++{
++  int ret = 0;
++  SDL_GetMouseState(&ret, nullptr);
++  return ret;
++}
++
++extern "C" int Java_org_libsdl_app_SDLActivity_getMouseY(JNIEnv* env, jclass cls)
++{
++  int ret = 0;
++  SDL_GetMouseState(nullptr, &ret);
++  return ret;
++}
++
++extern "C" int Java_org_libsdl_app_SDLActivity_isMouseShown(JNIEnv* env, jclass cls)
++{
++  return SDL_ShowCursor(SDL_QUERY);
++}
++
++extern "C" int Java_org_libsdl_app_SDLActivity_nativeInit(JNIEnv* env, jclass cls)
++{
++  // On Android, we use a virtual controller with guid="Virtual"
++  SDL_GameControllerAddMapping(
++      "5669727475616c000000000000000000,Virtual,a:b0,b:b1,back:b15,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,"
++      "guide:b16,leftshoulder:b6,leftstick:b13,lefttrigger:a5,leftx:a0,lefty:a1,rightshoulder:b7,rightstick:b14,"
++      "righttrigger:a4,rightx:a2,righty:a3,start:b11,x:b3,y:b4");
++
++  SDL_SetHint(SDL_HINT_ANDROID_BLOCK_ON_PAUSE, "0");
++  SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
++
++  // Alpha3's support library preloads the last session's textures into the engine's image manager; it asks for it on
++  // the first image the engine reads, after the resource system is set
++  Alpha3::setImageManagerSource([]() -> Resource::ImageManager* {
++    if (!MWBase::Environment::exists())
++      return nullptr;
++    return MWBase::Environment::get().getResourceSystem()->getImageManager();
++  });
++
++  return 0;
++}
++
++extern "C" void JNICALL Java_org_libsdl_app_SDLActivity_omwSurfaceDestroyed(JNIEnv* env, jclass cls)
++{
++  omw_surface_destroyed();
++}
++
++extern "C" void JNICALL Java_org_libsdl_app_SDLActivity_omwSurfaceRecreated(JNIEnv* env, jclass cls)
++{
++  omw_surface_recreated();
+ }
+diff --git a/apps/openmw/mwbase/environment.hpp b/apps/openmw/mwbase/environment.hpp
+index 94f918a60b..d64345fb7b 100644
+--- a/apps/openmw/mwbase/environment.hpp
++++ b/apps/openmw/mwbase/environment.hpp
+@@ -132,6 +132,10 @@ namespace MWBase
+ 
+         void setFrameDuration(float value) { mFrameDuration = value; }
+ 
++        /// False before the engine has built its environment and after it is gone (Environment::get() would
++        /// dereference null; the Android JNI entry points are polled from the UI thread at any time).
++        static bool exists() { return sThis != nullptr; }
++
+         /// Return instance of this class.
+         static const Environment& get()
+         {

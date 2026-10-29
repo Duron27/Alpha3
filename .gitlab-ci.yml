@@ -31,7 +31,9 @@ buildingJob:
   - echo $CI_COMMIT_TAG
   - dnf upgrade -y
   - dnf install -y @development-tools
-  - dnf install -y wget glibc-devel.i686 glibc-devel gcc gcc-c++ libstdc++-devel unzip bzip2 cmake make which pkgconf pkg-config 
+  - dnf install -y wget glibc-devel.i686 glibc-devel gcc gcc-c++ libstdc++-devel unzip zip bzip2 cmake make which pkgconf pkg-config 
+  # The native build clones and patches OpenMW and Mesa (Turnip/Zink) and needs these for it and for the Mesa and ANGLE builds:
+  - dnf install -y git patch diffutils python3 python3-pip python3-mako python3-pyyaml python3-packaging meson ninja-build bison flex glslang
   # Only needed until JDK 21 isn't used anymore:
   - dnf install -y adoptium-temurin-java-repository && fedora-third-party enable && dnf install -y temurin-21-jdk
 
@@ -58,8 +60,24 @@ buildingJob:
   - chmod +x ./gradlew
 
   script:
+    # assembleDebug also runs generateNativeSymbolsDebug (androidApp/build.gradle.kts), which writes the debug symbols of every
+    # native library named by build id, the same id the crash reports print:
+    #   androidApp/src/main/assets/symbols/<build id>.syms        function names (the app bundles these for its crash viewer)
+    #   androidApp/native-symbols/.build-id/ab/cdef....debug      full debug info (source lines), for llvm-addr2line / lldb
     - ./gradlew assembleDebug -Dorg.gradle.java.home=/usr/lib/jvm/temurin-21-jdk/ &> ./gradle.log
-    - cp app/build/outputs/apk/debug/*.apk openmw-android-alpha3-$CI_COMMIT_TAG.apk
+    - cp androidApp/build/outputs/apk/debug/*.apk openmw-android-alpha3-$CI_COMMIT_TAG.apk
+    # Keep the symbols next to the apk: without them a crash report from this release cannot be read down to source lines.
+    - test "$(find androidApp/native-symbols/.build-id -name '*.debug' | wc -l)" -gt 0 || { echo "No debug symbols were produced"; exit 1; }
+    - test "$(ls androidApp/src/main/assets/symbols/*.syms | wc -l)" -gt 0 || { echo "No symbol tables were produced"; exit 1; }
+    # One symbol table per build id in the package registry, which is where the app's crash viewer looks for builds it does not
+    # carry itself (composeApp crash/OnlineSymbols.android.kt). Uploaded with the job token; PUT is idempotent.
+    - |
+      for table in androidApp/src/main/assets/symbols/*.syms; do
+        id=$(basename "$table" .syms)
+        curl --fail --silent --show-error --header "JOB-TOKEN: $CI_JOB_TOKEN" --upload-file "$table" \
+          "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/native-symbols/$id/$id.syms"
+      done
+    - (cd androidApp && zip -qr ../openmw-android-alpha3-$CI_COMMIT_TAG-symbols.zip native-symbols src/main/assets/symbols)
 
   # So we can access the artifacts in the next job:
   after_script:
@@ -72,6 +90,7 @@ buildingJob:
       - ./buildscript.log
       - ./gradle.log
       - openmw-android-alpha3-$CI_COMMIT_TAG.apk
+      - openmw-android-alpha3-$CI_COMMIT_TAG-symbols.zip
     expire_in: never
     reports:
       dotenv: job.env
@@ -100,3 +119,5 @@ releaseJob:
       links:
         - name: "openmw-android-alpha3-$CI_COMMIT_TAG.apk"
           url: "https://gitlab.com/$CI_PROJECT_NAMESPACE/$CI_PROJECT_NAME/-/jobs/$JOB_ID/artifacts/file/openmw-android-alpha3-$CI_COMMIT_TAG.apk"
+        - name: "openmw-android-alpha3-$CI_COMMIT_TAG-symbols.zip (debug symbols for crash reports)"
+          url: "https://gitlab.com/$CI_PROJECT_NAMESPACE/$CI_PROJECT_NAME/-/jobs/$JOB_ID/artifacts/file/openmw-android-alpha3-$CI_COMMIT_TAG-symbols.zip"

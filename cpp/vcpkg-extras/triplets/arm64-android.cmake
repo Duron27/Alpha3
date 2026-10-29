@@ -1,0 +1,20 @@
+set(VCPKG_TARGET_ARCHITECTURE arm64)
+set(VCPKG_CMAKE_SYSTEM_NAME Android)
+set(VCPKG_CRT_LINKAGE dynamic)
+set(VCPKG_LIBRARY_LINKAGE static)
+set(VCPKG_C_FLAGS "-O3 -fPIC -w")
+set(VCPKG_CXX_FLAGS "-O3 -fPIC -w -frtti -fexceptions -stdlib=libc++")
+
+if(DEFINED ENV{VCPKG_ANDROID_API})
+    set(VCPKG_CMAKE_SYSTEM_VERSION $ENV{VCPKG_ANDROID_API})
+else()
+    set(VCPKG_CMAKE_SYSTEM_VERSION 28)
+endif()
+
+if(PORT MATCHES "^(sdl2|openal-soft|collada-dom)$")
+    set(VCPKG_LIBRARY_LINKAGE dynamic)
+endif()
+
+set(VCPKG_MAKE_BUILD_TRIPLET "--host=aarch64-linux-android")
+set(VCPKG_BUILD_TYPE release)
+set(VCPKG_CMAKE_CONFIGURE_OPTIONS "-DANDROID_ABI=arm64-v8a")

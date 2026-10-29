@@ -1,0 +1,135 @@
+From 33536979fdffa67a27fc0c5113d80526dc1a33bb Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Fri, 9 Oct 2026 08:49:02 -0400
+Subject: [PATCH] No duplicate NPCs/creatures: one stand-in per actor across
+ all members, never next to a living twin, dropped when our own copy returns,
+ never saved as ghosts
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ multiplayer/mod/scripts/mp/global.lua  |  1 +
+ multiplayer/mod/scripts/mp/proxies.lua | 59 +++++++++++++++++++++++---
+ 2 files changed, 55 insertions(+), 5 deletions(-)
+
+diff --git a/multiplayer/mod/scripts/mp/global.lua b/multiplayer/mod/scripts/mp/global.lua
+index cf0cd4cece..dc6c17003d 100644
+--- a/multiplayer/mod/scripts/mp/global.lua
++++ b/multiplayer/mod/scripts/mp/global.lua
+@@ -718,6 +718,7 @@ return {
+             -- stand-ins are saved with the world; remember them so they can be cleaned up on load
+             local objs = {}
+             for _, r in pairs(remotes) do if r.obj then objs[#objs + 1] = r.obj end end
++            for _, o in ipairs(proxies.savedObjects()) do objs[#objs + 1] = o end
+             return { objs = objs }
+         end,
+         onLoad = function(saved)
+diff --git a/multiplayer/mod/scripts/mp/proxies.lua b/multiplayer/mod/scripts/mp/proxies.lua
+index 071292c2d5..e104e58a8a 100644
+--- a/multiplayer/mod/scripts/mp/proxies.lua
++++ b/multiplayer/mod/scripts/mp/proxies.lua
+@@ -21,8 +21,9 @@ local CRIME_WINDOW = 1.5
+ 
+ local ctx -- { send, log, player, cellKey, myId, ownerName, isAvatar }
+ local rosterTimer = 0
++local cleanTimer = 0
+ local clock = 0
+-local proxies = {} -- key -> { owner, obj, key, last, ownerCell, gone }
++local proxies = {} -- actor id (nid) -> { owner, obj, key, last, ownerCell, gone }: at most ONE proxy per actor
+ local proxyById = {} -- local object id -> proxy
+ local ownerCells = {} -- owner id -> cell key
+ local records = {} -- owner..'|'..recordId -> custom record
+@@ -44,6 +45,15 @@ end
+ 
+ function M.isProxy(obj) return proxyById[obj.id] ~= nil end
+ 
++-- Objects to delete when a save is loaded: stand-ins are saved with the world, and must not come back as ghosts.
++function M.savedObjects()
++    local list = {}
++    for _, px in pairs(proxies) do
++        if px.obj and px.obj:isValid() then list[#list + 1] = px.obj end
++    end
++    return list
++end
++
+ function M.removeOwner(owner)
+     ownerCells[owner] = nil
+     for key, px in pairs(proxies) do
+@@ -129,6 +139,29 @@ local function needsProxy(nid)
+     return not obj or types.Actor.isDead(obj) or not obj.enabled
+ end
+ 
++local DUPLICATE_RADIUS = 350
++
++-- Never put a stand-in next to a living actor with the same record: that is the same NPC twice, whatever the
++-- bookkeeping says (e.g. our copy could not be looked up by id).
++local function livingTwinNearby(e)
++    local pos = util.vector3(e.p[1], e.p[2], e.p[3])
++    for _, a in ipairs(world.activeActors) do
++        if a.recordId == e.r and not M.isProxy(a) and not ctx.isAvatar(a) and a.enabled
++            and not types.Actor.isDead(a) and (a.position - pos):length() < DUPLICATE_RADIUS then
++            return true
++        end
++    end
++    return false
++end
++
++local function removeProxy(px)
++    if px.obj and px.obj:isValid() then
++        proxyById[px.obj.id] = nil
++        pcall(function() px.obj:remove() end)
++    end
++    proxies[px.last.n] = nil
++end
++
+ local function recordFor(owner, recordId)
+     local cacheKey = owner .. '|' .. recordId
+     if records[cacheKey] then return records[cacheKey] end
+@@ -191,9 +224,16 @@ local function onRoster(msg)
+     ownerCells[owner] = msg.cell
+     local sameCell = msg.cell == ctx.cellKey(p.cell)
+     for _, e in ipairs(msg.list) do
+-        local key = owner .. '|' .. e.n
++        local key = e.n -- one proxy per actor, whoever owns it
+         local px = proxies[key]
+-        if not px and sameCell and needsProxy(e.n) then px = spawn(owner, e, key) end
++        if px and px.owner ~= owner then
++            px = nil -- another member's copy of this actor is already standing in for it
++        elseif px and not needsProxy(e.n) then
++            removeProxy(px) -- our own copy of the actor is back (respawned/enabled): no stand-in needed
++            px = nil
++        elseif not px and sameCell and not proxies[key] and needsProxy(e.n) and not livingTwinNearby(e) then
++            px = spawn(owner, e, key)
++        end
+         if px then
+             px.last = e
+             if sameCell and px.obj:isValid() and px.obj.enabled and not px.gone then
+@@ -204,8 +244,8 @@ local function onRoster(msg)
+         end
+     end
+     for _, nid in ipairs(msg.dead or {}) do
+-        local px = proxies[owner .. '|' .. nid]
+-        if px then kill(px) end
++        local px = proxies[nid]
++        if px and px.owner == owner then kill(px) end
+     end
+ end
+ 
+@@ -277,6 +317,15 @@ function M.onUpdate(dt)
+         end
+     end
+ 
++    -- a stand-in must not outlive its reason: if our own copy of the actor is alive and enabled again, drop it
++    cleanTimer = cleanTimer + dt
++    if cleanTimer >= 1 then
++        cleanTimer = 0
++        for _, px in pairs(proxies) do
++            if not px.gone and not needsProxy(px.last.n) then removeProxy(px) end
++        end
++    end
++
+     -- proxies are only present while their owner shares our cell
+     local here = ctx.cellKey(p.cell)
+     for _, px in pairs(proxies) do
+-- 
+2.55.0
+

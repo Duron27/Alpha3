@@ -1,0 +1,118 @@
+From 2998a13ff16c868d85b38b3ce13ead03ffa20706 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Fri, 9 Oct 2026 17:52:11 -0400
+Subject: [PATCH 1/5] Build OpenMW as a library on iOS
+
+iOS apps are provided by a host project, so build the engine as a shared
+library without a macOS app bundle, link the UIKit frameworks instead of
+Cocoa, and skip the macOS packaging.
+---
+ CMakeLists.txt             | 15 ++++++++++-----
+ apps/openmw/CMakeLists.txt | 24 +++++++++++++++++++++++-
+ components/CMakeLists.txt  |  6 +++---
+ 3 files changed, 36 insertions(+), 9 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index d266e39161..80d0d41fc2 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -592,15 +597,15 @@ if(MYGUI_STATIC)
+     add_compile_definitions(MYGUI_STATIC)
+ endif (MYGUI_STATIC)
+ 
+-if (APPLE)
++if (APPLE AND NOT IOS)
+     configure_file(${OpenMW_SOURCE_DIR}/files/mac/openmw-Info.plist.in
+         "${APP_BUNDLE_DIR}/Contents/Info.plist")
+ 
+     configure_file(${OpenMW_SOURCE_DIR}/files/mac/openmw.icns
+         "${APP_BUNDLE_DIR}/Contents/Resources/OpenMW.icns" COPYONLY)
+-endif (APPLE)
++endif ()
+ 
+-if (NOT APPLE)  # this is modified for macOS use later in "apps/open[mw|cs]/CMakeLists.txt"
++if (NOT APPLE OR IOS)  # this is modified for macOS use later in "apps/open[mw|cs]/CMakeLists.txt"
+     set(OPENMW_RESOURCES_ROOT ${OpenMW_BINARY_DIR})
+ endif ()
+ 
+@@ -901,8 +906,8 @@ if (NOT APPLE AND OPENMW_DEPLOY_RUNTIME_DEPENDENCIES)
+     )
+ endif ()
+ 
+-# Apple bundling
+-if (APPLE)
++# Apple bundling (macOS only, iOS apps are packaged by the embedding Xcode project)
++if (APPLE AND NOT IOS)
+     if(CMAKE_VERSION VERSION_LESS 3.19)
+         message(FATAL_ERROR "macOS packaging requires CMake 3.19 or higher to sign macOS app bundles.")
+     endif()
+diff --git a/apps/openmw/CMakeLists.txt b/apps/openmw/CMakeLists.txt
+index d4c942ef67..e99f40e87a 100644
+--- a/apps/openmw/CMakeLists.txt
++++ b/apps/openmw/CMakeLists.txt
+@@ -145,6 +145,11 @@ if(BUILD_OPENMW)
+             main.cpp
+             androidmain.cpp
+         )
++    elseif (IOS)
++        # The iOS app is provided by a host project that loads the engine as a library.
++        add_library(openmw SHARED
++            main.cpp
++        )
+     else()
+         openmw_add_executable(openmw
+             ${APPLE_BUNDLE_RESOURCES}
+@@ -234,7 +239,24 @@ if (UNIX AND NOT APPLE)
+     target_link_libraries(openmw-lib ${CMAKE_THREAD_LIBS_INIT})
+ endif()
+ 
+-if(APPLE AND BUILD_OPENMW)
++if(IOS AND BUILD_OPENMW)
++    # No app bundle: resources are generated into the build directory and the host project copies them.
++    add_subdirectory(../../files/ ${CMAKE_CURRENT_BINARY_DIR}/files)
++
++    find_library(UIKIT_FRAMEWORK UIKit REQUIRED)
++    find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
++    find_library(COREGRAPHICS_FRAMEWORK CoreGraphics REQUIRED)
++    find_library(QUARTZCORE_FRAMEWORK QuartzCore REQUIRED)
++    target_link_libraries(openmw ${UIKIT_FRAMEWORK} ${FOUNDATION_FRAMEWORK} ${COREGRAPHICS_FRAMEWORK}
++                                 ${QUARTZCORE_FRAMEWORK})
++
++    if (FFmpeg_FOUND)
++        target_link_options(openmw PRIVATE "LINKER:SHELL:-framework CoreVideo"
++                                           "LINKER:SHELL:-framework CoreMedia"
++                                           "LINKER:SHELL:-framework VideoToolbox"
++                                           "LINKER:SHELL:-framework AudioToolbox")
++    endif()
++elseif(APPLE AND BUILD_OPENMW)
+     set(BUNDLE_RESOURCES_DIR "${APP_BUNDLE_DIR}/Contents/Resources")
+ 
+     set(OPENMW_RESOURCES_ROOT ${BUNDLE_RESOURCES_DIR})
+diff --git a/components/CMakeLists.txt b/components/CMakeLists.txt
+index e4e3e66aa5..74fde64706 100644
+--- a/components/CMakeLists.txt
++++ b/components/CMakeLists.txt
+@@ -1,9 +1,9 @@
+ project (Components)
+ 
+-if(APPLE)
++if(APPLE AND NOT IOS)
+     set(BUNDLE_RESOURCES_DIR "${APP_BUNDLE_DIR}/Contents/Resources")
+     set(OPENMW_RESOURCES_ROOT ${BUNDLE_RESOURCES_DIR})
+-endif(APPLE)
++endif()
+ 
+ # Version file
+ set (VERSION_RESOURCE_FILE_IN "${OpenMW_SOURCE_DIR}/files/version.in")
+@@ -398,7 +398,7 @@ if(WIN32)
+         windowscrashmonitor
+         windowscrashshm
+     )
+-elseif(NOT ANDROID)
++elseif(NOT ANDROID AND NOT IOS)
+     add_component_dir (crashcatcher
+         crashcatcher
+     )
+-- 
+2.55.0
+

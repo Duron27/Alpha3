@@ -1,0 +1,91 @@
+From 84aaed267a1d94b699fe56cd9966a9ee3305b7e8 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Thu, 15 Oct 2026 08:53:53 -0400
+Subject: [PATCH] Add make-appimage.sh: wrap the portable client zip into an
+ AppImage
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ multiplayer/README.md        |  5 ++++
+ multiplayer/make-appimage.sh | 53 ++++++++++++++++++++++++++++++++++++
+ 2 files changed, 58 insertions(+)
+ create mode 100755 multiplayer/make-appimage.sh
+
+diff --git a/multiplayer/README.md b/multiplayer/README.md
+index d02193dba1..76687d45f2 100644
+--- a/multiplayer/README.md
++++ b/multiplayer/README.md
+@@ -63,6 +63,11 @@ Older distributions (Ubuntu 22.04, Debian 12) are not covered. The script behind
+ (`python3 multiplayer/package-client.py --build-dir <build>` does the same by hand). A dedicated server is a separate zip:
+ `--target mpserver-bundle`.
+ 
++A single-file version: `multiplayer/make-appimage.sh <portable zip> [output.AppImage]` wraps the portable zip into an AppImage
++(downloads `appimagetool` if needed). Running it starts the launcher; `./OpenMW-Multiplayer-x86_64.AppImage openmw-cs` (or
++`openmw`, `openmw-wizard`, `esmtool`, ...) starts another program. It has the same system requirements as the zip. Make it executable
++(`chmod +x`) before the first run. If the system has no FUSE, run it with `--appimage-extract-and-run`.
++
+ ## Hosting and joining
+ Main menu → **Multiplayer**: choose **Join a server** (address, port, password) or **Host a game** (port, optional
+ password), then start or load a character. Hosting starts with your game: the relay runs inside it and you play through a
+diff --git a/multiplayer/make-appimage.sh b/multiplayer/make-appimage.sh
+new file mode 100755
+index 0000000000..f106e52e8f
+--- /dev/null
++++ b/multiplayer/make-appimage.sh
+@@ -0,0 +1,53 @@
++#!/bin/sh
++# Turns the portable client zip (client-package / container build) into one AppImage file.
++#
++#   multiplayer/make-appimage.sh <openmw-multiplayer-client-...-portable.zip> [output.AppImage]
++#
++# Double-click or run it: the launcher starts. Another program: ./OpenMW-Multiplayer.AppImage openmw-cs
++# (openmw, openmw-launcher, openmw-wizard, openmw-cs, bsatool, esmtool, niftest, ... as in the zip).
++# Needs appimagetool (downloaded if it is not on PATH). The AppImage uses the static type 2 runtime: no FUSE needed to build or run.
++set -eu
++ZIP=${1:?usage: make-appimage.sh <portable zip> [output]}
++OUT=${2:-OpenMW-Multiplayer-$(uname -m).AppImage}
++WORK=$(mktemp -d)
++trap 'rm -rf "$WORK"' EXIT
++OUT=$(cd "$(dirname "$OUT")" && pwd)/$(basename "$OUT")
++
++TOOL=$(command -v appimagetool || true)
++if [ -z "$TOOL" ]; then
++    TOOL=$WORK/appimagetool
++    curl -fsSL -o "$TOOL" "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-$(uname -m).AppImage"
++    chmod +x "$TOOL"
++fi
++
++unzip -q "$ZIP" -d "$WORK"
++APPDIR=$WORK/AppDir
++mv "$WORK/openmw-multiplayer-client" "$APPDIR"
++cp "$APPDIR/openmw.png" "$APPDIR/.DirIcon"
++
++cat > "$APPDIR/AppRun" <<'RUN'
++#!/bin/sh
++HERE="$(dirname "$(readlink -f "$0")")"
++PROGRAM=openmw-launcher
++case "${1:-}" in
++    openmw|openmw-launcher|openmw-wizard|openmw-cs|bsatool|esmtool|niftest|openmw-iniimporter|openmw-essimporter|openmw-navmeshtool|openmw-bulletobjecttool)
++        PROGRAM=$1; shift ;;
++esac
++exec "$HERE/$PROGRAM" "$@"
++RUN
++chmod +x "$APPDIR/AppRun"
++
++cat > "$APPDIR/openmw-multiplayer.desktop" <<'DESK'
++[Desktop Entry]
++Type=Application
++Name=OpenMW Multiplayer
++GenericName=Role Playing Game
++Comment=OpenMW with the multiplayer mod built in
++Exec=AppRun
++Icon=openmw
++Categories=Game;RolePlaying;
++DESK
++
++ARCH=$(uname -m) "$TOOL" --appimage-extract-and-run "$APPDIR" "$OUT"
++chmod +x "$OUT"
++echo "Made $OUT"
+-- 
+2.55.0
+

@@ -1,0 +1,163 @@
+From cbe07e1e715165d340cc0db58da052fd7d899dc7 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Wed, 7 Oct 2026 02:39:25 -0400
+Subject: [PATCH] Sync custom/generated armor, clothing and weapons; warn on
+ missing content files
+
+- equip message carries model/icon/name for runtime-generated items; receiver rebuilds a local record from a
+  same-model content-file template so bodyparts render correctly
+- profile carries the content file list; clients warn when a player uses content they lack
+- trade snapshot: case-insensitive generated-item filter
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ multiplayer/mod/scripts/mp/global.lua | 83 +++++++++++++++++++++++++--
+ multiplayer/mod/scripts/mp/trade.lua  |  2 +-
+ 2 files changed, 79 insertions(+), 6 deletions(-)
+
+diff --git a/multiplayer/mod/scripts/mp/global.lua b/multiplayer/mod/scripts/mp/global.lua
+index 3d1da2104b..e1f9662b4e 100644
+--- a/multiplayer/mod/scripts/mp/global.lua
++++ b/multiplayer/mod/scripts/mp/global.lua
+@@ -100,6 +100,15 @@ end))
+ 
+ ------------------------------------------------------------------ outbound player state
+ 
++local function contentList()
++    local ok, list = pcall(function()
++        local out = {}
++        for _, f in ipairs(core.contentFiles.list) do out[#out + 1] = f:lower() end
++        return out
++    end)
++    return ok and list or {}
++end
++
+ local function sendProfile()
+     local p = player()
+     if not p then return end
+@@ -107,15 +116,37 @@ local function sendProfile()
+     net.send(net.encodeJson({
+         t = 'profile', name = rec.name, race = rec.race, class = rec.class,
+         head = rec.head, hair = rec.hair, isMale = rec.isMale,
++        content = contentList(),
+     }))
+ end
+ 
++-- Items made at runtime (enchanting, spellmaking, ...) have record ids that only exist on this machine.
++-- Describe them so the other side can rebuild something that looks the same.
++local EQUIP_KINDS = { 'Armor', 'Clothing', 'Weapon' }
++
++local function describeGenerated(obj)
++    for _, kind in ipairs(EQUIP_KINDS) do
++        if obj.type == types[kind] then
++            local ok, rec = pcall(function() return types[kind].record(obj) end)
++            if ok and rec and rec.model then return { k = kind, n = rec.name, m = rec.model, i = rec.icon } end
++        end
++    end
++    return nil
++end
++
+ local function sendEquipment(force)
+     local p = player()
+     if not p then return end
+-    local slots = {}
+-    for slot, obj in pairs(types.Actor.getEquipment(p)) do slots[tostring(slot)] = obj.recordId end
+-    local json = net.encodeJson({ t = 'equip', slots = slots })
++    local slots, gen = {}, {}
++    for slot, obj in pairs(types.Actor.getEquipment(p)) do
++        local key = tostring(slot)
++        slots[key] = obj.recordId
++        if obj.recordId:lower():find('^generated:') then
++            local d = describeGenerated(obj)
++            if d then gen[key] = d else slots[key] = nil end
++        end
++    end
++    local json = net.encodeJson({ t = 'equip', slots = slots, gen = gen })
+     if force or json ~= lastEquipJson then
+         lastEquipJson = json
+         net.send(json)
+@@ -148,15 +179,45 @@ local function placeRemote(r)
+     r.obj:teleport(r.state.cell, pos, { rotation = rot })
+ end
+ 
++local genCache = {} -- "<kind>|<model>|<name>" -> local record id (or false)
++
++-- Rebuild a runtime-generated item as a local record: find a content-file record with the same model to
++-- use as a template (so armor/clothing bodyparts are right), then rename it.
++local function resolveGenerated(d)
++    local key = d.k .. '|' .. d.m .. '|' .. tostring(d.n)
++    if genCache[key] ~= nil then return genCache[key] or nil end
++    local T = types[d.k]
++    local template
++    if T then
++        for _, rec in ipairs(T.records) do
++            if rec.model == d.m and not rec.id:lower():find('^generated:') then template = rec break end
++        end
++    end
++    local id = false
++    if template then
++        local ok, record = pcall(function()
++            return world.createRecord(T.createRecordDraft({ template = template, name = d.n }))
++        end)
++        if ok then id = record.id end
++    end
++    genCache[key] = id
++    if not id then log('cannot rebuild item ' .. tostring(d.n) .. ' (' .. d.k .. ', model ' .. tostring(d.m) .. ')') end
++    return id or nil
++end
++
+ local function stockEquipment(r)
+     local inv = types.Actor.inventory(r.obj)
+     local slots = {}
+     for slotStr, recordId in pairs(r.equip or {}) do
++        local gen = r.gen and r.gen[slotStr]
++        if gen then recordId = resolveGenerated(gen) end
++        if recordId == nil then goto continue end
+         if inv:countOf(recordId) == 0 then
+             local ok, item = pcall(world.createObject, recordId, 1)
+             if ok then item:moveInto(inv) else log('cannot create item ' .. recordId) end
+         end
+         slots[tonumber(slotStr)] = recordId
++        ::continue::
+     end
+     r.obj:sendEvent('MpEquip', { slots = slots })
+     r.equipSent = true
+@@ -421,8 +482,20 @@ local function onMessage(msg)
+         remotes[id] = r
+         log('player ' .. tostring(id) .. ' appeared')
+     end
+-    if t == 'profile' then r.profile = msg
+-    elseif t == 'equip' then r.equip = msg.slots; r.equipSent = false
++    if t == 'profile' then
++        r.profile = msg
++        if not r.contentChecked and type(msg.content) == 'table' then
++            r.contentChecked = true
++            local mine = {}
++            for _, f in ipairs(contentList()) do mine[f] = true end
++            local missing = {}
++            for _, f in ipairs(msg.content) do if not mine[f] then missing[#missing + 1] = f end end
++            if #missing > 0 then
++                notice(nameOf(id) .. ' uses content you do not have (' .. table.concat(missing, ', ')
++                    .. '); some of their gear or actors may not appear.')
++            end
++        end
++    elseif t == 'equip' then r.equip, r.gen, r.equipSent = msg.slots, msg.gen, false
+     elseif t == 'state' and type(msg.pos) == 'table' then r.state = msg end
+ end
+ 
+diff --git a/multiplayer/mod/scripts/mp/trade.lua b/multiplayer/mod/scripts/mp/trade.lua
+index 84b770c646..f31162a7b3 100644
+--- a/multiplayer/mod/scripts/mp/trade.lua
++++ b/multiplayer/mod/scripts/mp/trade.lua
+@@ -55,7 +55,7 @@ local function snapshot()
+     local items = {}
+     for _, obj in ipairs(types.Actor.inventory(self):getAll()) do
+         local rid = obj.recordId
+-        if not rid:find('^generated:') then items[rid] = (items[rid] or 0) + obj.count end
++        if not rid:lower():find('^generated:') then items[rid] = (items[rid] or 0) + obj.count end
+     end
+     return items
+ end
+-- 
+2.55.0
+

@@ -1,0 +1,139 @@
+diff --git a/apps/openmw/mwrender/renderingmanager.cpp b/apps/openmw/mwrender/renderingmanager.cpp
+index 777f3f757d..0a51e574de 100644
+--- a/apps/openmw/mwrender/renderingmanager.cpp
++++ b/apps/openmw/mwrender/renderingmanager.cpp
+@@ -434,6 +434,7 @@ namespace MWRender
+ 
+         // A Vulkan entry links the 450 dialect.
+         globalDefines["glslVersion"] = Diagnostics::runtime().glslVersion();
++        globalDefines["clipDistance"] = Diagnostics::runtime().mClipDistance ? "1" : "0";
+         globalDefines["preLightEnv"] = Settings::shaders().mApplyLightingToEnvironmentMaps ? "1" : "0";
+         Shader::setShadingDefines(globalDefines);
+         Shader::setClassicDefines(globalDefines);
+diff --git a/components/diagnostics/identity.hpp b/components/diagnostics/identity.hpp
+index 726c0d46da..417e8aad6e 100644
+--- a/components/diagnostics/identity.hpp
++++ b/components/diagnostics/identity.hpp
+@@ -17,6 +17,8 @@ namespace Diagnostics
+         std::string mRendererEntry = "opengl";
+         /// The OpenGL entry runs OpenGL ES (shaders in the 320 es dialect).
+         bool mGles = false;
++        /// The OpenGL ES context has GL_EXT_clip_cull_distance, so the clip planes can clip.
++        bool mClipDistance = false;
+ 
+         /// The GLSL dialect the shaders are written for.
+         std::string glslVersion() const { return mRendererEntry == "opengl" ? (mGles ? "320 es" : "120") : "450"; }
+diff --git a/components/sdlutil/sdlgraphicswindow.cpp b/components/sdlutil/sdlgraphicswindow.cpp
+index 7ee3c47006..45e679ff0a 100644
+--- a/components/sdlutil/sdlgraphicswindow.cpp
++++ b/components/sdlutil/sdlgraphicswindow.cpp
+@@ -5,6 +5,8 @@
+ #include <SDL_video.h>
+ 
+ #include <components/debug/debuglog.hpp>
++#include <components/diagnostics/identity.hpp>
++#include <cstring>
+ 
+ #ifdef ANDROID
+ #include <EGL/egl.h>
+@@ -411,6 +413,12 @@ namespace SDLUtil
+         if (!version) {
+             Log(Debug::Error) << "Failed to initialize GLAD\n";
+         }
++        // OpenGL ES clip planes work through gl_ClipDistance: ask the context whether it has it (ANGLE's often does not)
++        {
++            const char* extensions = reinterpret_cast<const char*>(glGetString(GL_EXTENSIONS));
++            Diagnostics::runtime().mClipDistance
++                = extensions != nullptr && std::strstr(extensions, "GL_EXT_clip_cull_distance") != nullptr;
++        }
+         //else
+             //Log(Debug::Error) << "Initialized GLAD " << version << "\n";
+ 
+diff --git a/components/shader/shadermanager.cpp b/components/shader/shadermanager.cpp
+index d62b710994..00e2b5b572 100644
+--- a/components/shader/shadermanager.cpp
++++ b/components/shader/shadermanager.cpp
+@@ -2006,6 +2006,14 @@ namespace Shader
+             append(append, extra);
+         }
+ 
++        // Clip planes in OpenGL ES vertex shaders need their extension, which has to come before anything else; it is only
++        // asked for when the context has it (a driver that lacks it, such as ANGLE's, refuses the line's users).
++        if (shader->getType() == osg::Shader::VERTEX)
++            if (const auto clip = mGlobalDefines.find("clipDistance"); clip != mGlobalDefines.end() && clip->second == "1")
++                if (const std::size_t lineEnd = source.find('\n'); lineEnd != std::string::npos
++                    && source.compare(0, 8, "#version") == 0)
++                    source.insert(lineEnd + 1, "#extension GL_EXT_clip_cull_distance : enable\n#define OPENMW_CLIP_DISTANCE 1\n");
++
+         osg::ref_ptr<osg::Shader> merged(new osg::Shader(shader->getType()));
+         merged->setShaderSource(source);
+         merged->setName(shader->getName() + " (merged)");
+diff --git a/files/shaders/compatibility/sky.vert b/files/shaders/compatibility/sky.vert
+index 8f6428a50b..56515dd79f 100644
+--- a/files/shaders/compatibility/sky.vert
++++ b/files/shaders/compatibility/sky.vert
+@@ -20,7 +20,11 @@ void main()
+ {
+     vec4 vertex = instanceWorld() * osg_Vertex;
+     gl_Position = modelToClip(vertex);
+-    osg_NoClip();
++#ifdef OPENMW_CLIP_DISTANCE
++    // The sky is never clipped, whatever clip plane the pass has on
++    gl_ClipDistance[0] = 1.0;
++    gl_ClipDistance[1] = 1.0;
++#endif
+ #if __VERSION__ >= 450
+     // The glare and the floor give clip positions directly.
+     if (pass == PASS_SUNGLARE || pass == PASS_FLOOR)
+diff --git a/files/shaders/lib/core/profile_vertex.glsl b/files/shaders/lib/core/profile_vertex.glsl
+index 4269a48632..a1b5d3ee24 100644
+--- a/files/shaders/lib/core/profile_vertex.glsl
++++ b/files/shaders/lib/core/profile_vertex.glsl
+@@ -4,9 +4,9 @@
+ #include "lib/core/profile_varyings.glsl"
+ // clockwork profile begin
+ #if defined(GL_ES)
+-// Clip planes need GL_EXT_clip_cull_distance on OpenGL ES; the planes come from the two uniforms below (OSG's own clip
+-// plane attribute does nothing there) and the attribute's mode enables the distances.
+-#extension GL_EXT_clip_cull_distance : enable
++// Clip planes need the clip distance extension on OpenGL ES. The shader manager turns it on at the top of the vertex
++// shader and defines OPENMW_CLIP_DISTANCE when the context has it. The planes come from the two uniforms below (OSG's
++// own clip plane attribute does nothing there) and the attribute's mode enables the distances.
+ // OpenGL ES 3.2. OSG binds these attribute names to its own locations when the program is linked.
+ in vec4 osg_Vertex;
+ in vec3 osg_Normal;
+@@ -19,16 +19,13 @@ in vec4 osg_MultiTexCoord4;
+ in vec4 osg_MultiTexCoord5;
+ in vec4 osg_MultiTexCoord6;
+ in vec4 osg_MultiTexCoord7;
+-#ifdef GL_EXT_clip_cull_distance
++#ifdef OPENMW_CLIP_DISTANCE
+ uniform vec4 osg_ClipPlane0;
+ uniform vec4 osg_ClipPlane1;
+-#define osg_ClipVertex(v) { gl_ClipDistance[0] = dot(osg_ClipPlane0, (v)); gl_ClipDistance[1] = dot(osg_ClipPlane1, (v)); }
+-// For shaders drawn while a clip plane is on that must not be clipped.
+-#define osg_NoClip() { gl_ClipDistance[0] = 1.0; gl_ClipDistance[1] = 1.0; }
++#define osg_ClipVertex(v) gl_ClipDistance[0] = dot(osg_ClipPlane0, (v)); gl_ClipDistance[1] = dot(osg_ClipPlane1, (v))
+ #else
+ // Without the extension reflections are not clipped.
+ #define osg_ClipVertex(v)
+-#define osg_NoClip()
+ #endif
+ #define osg_Varying(type, name) out type name;
+ #define osg_VaryingCentroid(type, name) centroid out type name;
+@@ -47,7 +44,6 @@ uniform vec4 osg_ClipPlane1;
+ #define osg_MultiTexCoord6 gl_MultiTexCoord6
+ #define osg_MultiTexCoord7 gl_MultiTexCoord7
+ #define osg_ClipVertex(v) gl_ClipVertex = (v)
+-#define osg_NoClip()
+ #define osg_Varying(type, name) varying type name;
+ #define osg_VaryingCentroid(type, name) centroid varying type name;
+ #if __VERSION__ < 300
+@@ -72,7 +68,6 @@ layout(location = 12) in vec4 osg_MultiTexCoord6;
+ layout(location = 13) in vec4 osg_MultiTexCoord7;
+ #endif
+ #define osg_ClipVertex(v) gl_ClipDistance[0] = dot(osg_ClipPlane, (v))
+-#define osg_NoClip()
+ #define osg_Varying(type, name) layout(location = OSG_VARYING_ ## name) out type name;
+ #define osg_VaryingCentroid(type, name) layout(location = OSG_VARYING_ ## name) centroid out type name;
+ #define osg_Attribute(loc, type, name) layout(location = loc) in type name;

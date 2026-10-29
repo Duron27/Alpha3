@@ -1,0 +1,131 @@
+From c4dbe2b930df07ea00db9a09df73e732587e36d6 Mon Sep 17 00:00:00 2001
+From: t <t@t>
+Date: Sun, 11 Oct 2026 02:15:47 -0400
+Subject: [PATCH] mp: port netbindings to the Luau binding API
+
+---
+ apps/openmw/mwlua/netbindings.cpp | 61 ++++++++++++++++++-------------
+ apps/openmw/mwlua/netbindings.hpp |  4 +-
+ 2 files changed, 37 insertions(+), 28 deletions(-)
+
+diff --git a/apps/openmw/mwlua/netbindings.cpp b/apps/openmw/mwlua/netbindings.cpp
+index 77bf760027..8d39a8b665 100644
+--- a/apps/openmw/mwlua/netbindings.cpp
++++ b/apps/openmw/mwlua/netbindings.cpp
+@@ -1,56 +1,65 @@
+ #include "netbindings.hpp"
+ 
++#include <cstdint>
+ #include <limits>
++#include <optional>
+ #include <stdexcept>
+ 
++#include <components/lua/bindfunction.hpp>
+ #include <components/lua/luastate.hpp>
++#include <components/lua/readonlytables.hpp>
+ #include <components/net/sockets.hpp>
+ 
+ #include "context.hpp"
+ 
+ namespace MWLua
+ {
+-    sol::table initNetPackage(const Context& context, Net::Sockets& sockets)
++    namespace
+     {
+-        sol::state_view lua = context.sol();
+-        sol::table api(lua, sol::create);
++        std::uint32_t socketId(double id)
++        {
++            if (!(id >= 0 && id <= std::numeric_limits<std::uint32_t>::max()))
++                return 0;
++            return static_cast<std::uint32_t>(id);
++        }
++    }
++
++    Lua::Table initNetPackage(const Context& context, Net::Sockets& sockets)
++    {
++        lua_State* state = context.unsafeState();
++        const Lua::PackageBuilder api(state, "net");
+ 
+-        api["connect"] = [&sockets](std::string_view host, int port) -> sol::optional<std::uint32_t> {
++        api.function("connect", [&sockets](std::string_view host, int port) -> std::optional<double> {
+             if (host.empty())
+                 throw std::invalid_argument("net.connect: empty host");
+             if (port < 1 || port > std::numeric_limits<std::uint16_t>::max())
+                 throw std::invalid_argument("net.connect: port out of range");
+             const std::uint32_t id = sockets.connect(std::string(host), static_cast<std::uint16_t>(port));
+             if (id == 0)
+-                return sol::nullopt;
++                return std::nullopt;
+             return id;
+-        };
+-        api["listen"] = [&sockets](int port, sol::this_state state) -> sol::variadic_results {
++        });
++        // Returns the listener id, or nil and an error message
++        api.function("listen", [&sockets](int port) -> Lua::ResultOrError<double> {
+             if (port < 1 || port > std::numeric_limits<std::uint16_t>::max())
+                 throw std::invalid_argument("net.listen: port out of range");
+             std::string error;
+             const std::uint32_t id = sockets.listen(static_cast<std::uint16_t>(port), error);
+-            sol::variadic_results out;
+-            if (id != 0)
+-                out.push_back(sol::make_object(state, id));
+-            else
+-            {
+-                out.push_back(sol::make_object(state, sol::nil));
+-                out.push_back(sol::make_object(state, error));
+-            }
+-            return out;
+-        };
+-        api["send"] = [&sockets](std::uint32_t id, std::string_view data, sol::optional<bool> raw) {
+-            return sockets.send(id, data, raw.value_or(false));
+-        };
+-        api["close"] = [&sockets](std::uint32_t id) { sockets.close(id); };
+-        api["localAddress"] = [&sockets](std::uint32_t id) -> sol::optional<std::string> {
+-            std::string address = sockets.localAddress(id);
++            if (id == 0)
++                return Lua::ResultOrError<double>::failure(error);
++            return Lua::ResultOrError<double>::success(id);
++        });
++        api.function("send", [&sockets](double id, std::string_view data, std::optional<bool> raw) {
++            return sockets.send(socketId(id), data, raw.value_or(false));
++        });
++        api.function("close", [&sockets](double id) { sockets.close(socketId(id)); });
++        api.function("localAddress", [&sockets](double id) -> std::optional<std::string> {
++            std::string address = sockets.localAddress(socketId(id));
+             if (address.empty())
+-                return sol::nullopt;
++                return std::nullopt;
+             return address;
+-        };
++        });
+ 
+-        return LuaUtil::makeReadOnly(api);
++        return api.readOnly();
+     }
+ }
+diff --git a/apps/openmw/mwlua/netbindings.hpp b/apps/openmw/mwlua/netbindings.hpp
+index 4529accd5b..e885981819 100644
+--- a/apps/openmw/mwlua/netbindings.hpp
++++ b/apps/openmw/mwlua/netbindings.hpp
+@@ -1,7 +1,7 @@
+ #ifndef MWLUA_NETBINDINGS_H
+ #define MWLUA_NETBINDINGS_H
+ 
+-#include <sol/forward.hpp>
++#include <components/luau/forward.hpp>
+ 
+ namespace Net
+ {
+@@ -12,7 +12,7 @@ namespace MWLua
+ {
+     struct Context;
+ 
+-    sol::table initNetPackage(const Context& context, Net::Sockets& sockets);
++    Lua::Table initNetPackage(const Context& context, Net::Sockets& sockets);
+ }
+ 
+ #endif // MWLUA_NETBINDINGS_H
+-- 
+2.55.0
+

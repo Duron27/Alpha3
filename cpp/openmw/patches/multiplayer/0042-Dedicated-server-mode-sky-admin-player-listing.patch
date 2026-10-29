@@ -1,0 +1,994 @@
+From: Duron27 <duron27@gmail.com>
+Subject: [PATCH] Dedicated server mode: server-owned weather and time of day, admin login, player listing, activity log, window data
+
+- relay: dedicated mode has no host; the server keeps the time of day (not the date) and the weather and broadcasts them,
+  clients apply the weather wherever they are; admins log in with a password; console commands (players, kick, ban,
+  weather, time, announce, help...); /who lists name, latency, address and location for admins (never in the public
+  player list)
+- relay logs what happens with a time: connections (with address), joins, refusals, leaving, losing connection and
+  coming back, global chat, parties, trades, admin actions, weather changes and dropped messages once a minute
+- relay.snapshot() gives a window the players, bans, sky and limits as plain data
+- netlib.remoteAddress, server/server.lua, README, relay_test and server_test.py (runs the real server, terminal and
+  window)
+
+---
+diff --git a/multiplayer/README.md b/multiplayer/README.md
+index ef11f30..f7b5907 100644
+--- a/multiplayer/README.md
++++ b/multiplayer/README.md
+@@ -18,7 +18,8 @@ mod/scripts/mp/
+   proxies.lua            stand-ins for party members' actors, shared kills, no duplicate NPCs
+   items.lua              describes, keys and rebuilds items made while playing (enchanted gear, potions, scrolls)
+   trade.lua, damage.lua  trade window, damage/kill delivery to real actors
+-server/                  old standalone Python relay (no password/admin/ping list), bots for it
++server/server.lua        what the dedicated server runs (apps/mpserver loads it); the rest of that folder is the old Python relay (obsolete)
++test/server_test.py      starts the real dedicated server (terminal and, offscreen, the window) and plays clients against it
+ test/relay_test.lua      runs the relay logic without the game:  luajit multiplayer/test/relay_test.lua
+ test/items_test.lua      the same for item descriptions:  luajit multiplayer/test/items_test.lua
+ run-two.sh               two real instances on one machine (host + joiner)
+@@ -42,9 +43,39 @@ The host's relay checks what it passes on: messages have to fit their type (fini
+ rate limited per type (positions, shots, rosters...), and a trade is only forwarded between two players who agreed to it
+ (request, accept, then deals) - an outsider or a stray message cannot inject into one.
+ 
+-Safety: protocol version check (both sides must run the same mod), optional password, player limit (default 8), unique
++Safety (hosted games and servers): protocol version check (both sides must run the same mod), optional password, player limit (default 64), unique
+ names (a second "Alice" becomes "Alice (2)"), a message of the day, and a 10 second limit to say who you are.
+ 
++## Dedicated server
++`openmw-mp-server` runs the same relay as a hosted game, on its own, with nobody playing on it: put it on a machine with an
++open TCP port and everybody uses **Join a server**. Nobody has to forward a port except whoever runs the server.
++
++```
++cmake -DBUILD_MP_SERVER=ON ... && cmake --build . --target openmw-mp-server   # the window needs Qt6 Widgets; -DBUILD_MP_SERVER_GUI=OFF leaves it out
++openmw-mp-server --mod multiplayer/mod --port 25565 --password secret --admin-password hunter2 --motd "Welcome"
++```
++By default it opens a **window**: the players (name, latency, address, location, status) with Kick, Ban, Mute/Unmute and
++Copy address buttons for the selected one, the sky (weather box and time of day), an announcement box, the banned names with
++an Unban button, the log, and a command line for everything else (Help lists the commands). Closing the window asks first if
++players are connected. `--cli-only` runs it in the terminal instead, and so does a machine with no display (a VPS) by itself.
++`--help` lists the rest (player limit, weather, how fast time runs...). The passwords can also come from `MP_PASSWORD` and
++`MP_ADMIN_PASSWORD`. The program embeds the same Luau VM as the game and the engine's own sockets (`components/net`), and
++loads `relay.lua` unchanged, so a server behaves exactly like a hosted game (resume tokens, rate limits, trade checks).
++
++- **Sky:** the server owns time of day and weather. Time advances on its own clock (`--time-scale`, `--start-hour`), the
++  weather changes by itself every ~15 minutes (or stays fixed with `--weather rain`) and applies wherever each player is.
++  The date is never synced: everybody keeps their own day.
++- **Admins:** players type `/login <admin password>`; admins can `/kick /ban /unban /mute /unmute /announce`, `/who`
++  (name, latency, address and location of everyone), `/weather [id|cycle]` and `/time <hour>`.
++- **Console:** type into the server's terminal: `players` (or `who`), `kick|ban|unban|mute|unmute <name>`,
++  `announce <text>`, `weather [id|cycle]`, `time <hour>`, `quit`. Latency is measured by the server's pings; the address is
++  where the player connects from; the location is their cell (or exterior grid square) and position.
++- Addresses go only to admins and the console, never into the player list everybody receives.
++- **Log:** the console prints a timestamped line for connections (with the address), joins, refusals (wrong password,
++  version, full, banned), leaving, losing connection and coming back, global chat (not party chat, and whispers only as who
++  wrote to whom), parties, trades, admin logins and commands, weather changes, and once a minute how many messages a player
++  had thrown away for flooding or being malformed. Type `help` for the commands.
++
+ ## Playing together
+ Every player keeps their **own** world; nothing a group member does changes yours, except the shared things below.
+ - **Presence:** everyone appears as a stand-in NPC (look and gear) when you share a cell, with a green arrow and name that
+diff --git a/multiplayer/mod/scripts/mp/global.lua b/multiplayer/mod/scripts/mp/global.lua
+index d31968f..a544601 100644
+--- a/multiplayer/mod/scripts/mp/global.lua
++++ b/multiplayer/mod/scripts/mp/global.lua
+@@ -38,8 +38,8 @@ I.Settings.registerGroup {
+           argument = { l10n = 'Multiplayer', items = { 'join', 'host' } } },
+         { key = 'Host', renderer = 'textLine', name = 'Server host', default = '127.0.0.1' },
+         { key = 'Password', renderer = 'textLine', name = 'Password (host: required to join, joiner: sent to the host)', default = '' },
+-        { key = 'MaxPlayers', renderer = 'number', name = 'Most players when hosting', default = 8,
+-          argument = { integer = true, min = 2, max = 32 } },
++        { key = 'MaxPlayers', renderer = 'number', name = 'Most players when hosting', default = 64,
++          argument = { integer = true, min = 2, max = 64 } },
+         { key = 'Motd', renderer = 'textLine', name = 'Message of the day when hosting', default = '' },
+         { key = 'SharedKills', renderer = 'checkbox', name = 'Kills are shared with your group', default = true },
+         { key = 'SharedFights', renderer = 'checkbox', name = 'Damage to actors is shared with your group', default = true },
+@@ -208,10 +208,21 @@ local function applyWorld(msg)
+             pcall(world.setGameTimeScale, 0)
+         end
+     end
+-    -- weather in the host's region follows the host
+-    if msg.weather and msg.region and msg.region ~= '' then
+-        local ok, rec = pcall(function() return core.weather.records[msg.weather] end)
+-        if ok and rec then pcall(core.weather.changeWeather, msg.region, rec) end
++    -- weather in the host's region follows the host; a dedicated server names no region: the weather applies wherever we are
++    if msg.weather then
++        local region = msg.region
++        local p = player()
++        if (not region or region == '') and p then region = p.cell.region end
++        if region and region ~= '' then
++            local ok, rec = pcall(function() return core.weather.records[msg.weather] end)
++            local current = pcall(function() return core.weather.getCurrent(p and p.cell).recordId end)
++            local same = false
++            if p then
++                local okC, cur = pcall(function() return core.weather.getCurrent(p.cell) end)
++                same = okC and cur and cur.recordId == msg.weather and (not msg.region or msg.region == '')
++            end
++            if ok and rec and not same then pcall(core.weather.changeWeather, region, rec) end
++        end
+     end
+ end
+ 
+@@ -637,7 +648,7 @@ local function onCommand(d)
+             notice('Asking api.ipify.org for your internet address...')
+         end
+     elseif cmd == 'admin' then
+-        net.send(net.encodeJson({ t = 'admin', cmd = d.sub, name = d.name, text = d.text }))
++        net.send(net.encodeJson({ t = 'admin', cmd = d.sub, name = d.name, text = d.text, password = d.password }))
+     elseif cmd == 'emote' then
+         if not net.isConnected() then notice('Not connected to the server.') return end
+         net.send(net.encodeJson({ t = 'chat', scope = 'emote', text = d.text }))
+diff --git a/multiplayer/mod/scripts/mp/netlib.lua b/multiplayer/mod/scripts/mp/netlib.lua
+index 2313fe1..c25a251 100644
+--- a/multiplayer/mod/scripts/mp/netlib.lua
++++ b/multiplayer/mod/scripts/mp/netlib.lua
+@@ -130,7 +130,13 @@ function M.kick(player)
+     socketOfPlayer[player], playerOfSocket[sock] = nil, nil
+ end
+ 
+--- The remote address would be nice here too, but sockets only expose our own side.
++-- Where a player connects from (nil if the engine cannot tell).
++function M.remoteAddress(player)
++    local sock = socketOfPlayer[player]
++    if not sock or not net.remoteAddress then return nil end
++    local ok, address = pcall(net.remoteAddress, sock)
++    return ok and address or nil
++end
+ 
+ ------------------------------------------------------------------ public address lookup (HTTP GET to api.ipify.org)
+ 
+diff --git a/multiplayer/mod/scripts/mp/player.lua b/multiplayer/mod/scripts/mp/player.lua
+index 2e91e7c..2baed62 100644
+--- a/multiplayer/mod/scripts/mp/player.lua
++++ b/multiplayer/mod/scripts/mp/player.lua
+@@ -306,6 +306,12 @@ local function sendChat(str)
+         elseif cmd == 'kick' or cmd == 'ban' or cmd == 'unban' or cmd == 'mute' or cmd == 'unmute' then
+             if arg then core.sendGlobalEvent('MpCmd', { cmd = 'admin', sub = cmd, name = arg })
+             else addLine('system', 'Usage: /' .. cmd .. ' <player> (host only)') end
++        elseif cmd == 'who' then
++            core.sendGlobalEvent('MpCmd', { cmd = 'admin', sub = 'who' })
++        elseif cmd == 'login' then
++            if arg then core.sendGlobalEvent('MpCmd', { cmd = 'admin', sub = 'login', password = arg }) else addLine('system', 'Usage: /login <admin password> (dedicated servers)') end
++        elseif cmd == 'weather' or cmd == 'time' then
++            core.sendGlobalEvent('MpCmd', { cmd = 'admin', sub = cmd, text = arg or '' })
+         elseif cmd == 'announce' then
+             if arg then core.sendGlobalEvent('MpCmd', { cmd = 'admin', sub = 'announce', text = arg })
+             else addLine('system', 'Usage: /announce <text> (host only)') end
+@@ -324,7 +330,7 @@ local function sendChat(str)
+         elseif cmd == 'g' or cmd == 'p' then
+             if arg then core.sendGlobalEvent('MpCmd', { cmd = 'chat', scope = cmd == 'g' and 'global' or 'party', text = arg }) end
+         else
+-            addLine('system', 'Commands: /players, /me, /goto, /ip, /w, /r, /pkick (party leader), host: /kick /ban /unban /mute /unmute /announce, /accept [name], /decline [name], /leave, /g <text>, /p <text>')
++            addLine('system', 'Commands: /players, /me, /goto, /ip, /w, /r, /pkick (party leader), host or server admin: /kick /ban /unban /mute /unmute /announce, server: /login /who /weather /time, /accept [name], /decline [name], /leave, /g <text>, /p <text>')
+         end
+         return
+     end
+diff --git a/multiplayer/mod/scripts/mp/relay.lua b/multiplayer/mod/scripts/mp/relay.lua
+index b30193f..09f9227 100644
+--- a/multiplayer/mod/scripts/mp/relay.lua
++++ b/multiplayer/mod/scripts/mp/relay.lua
+@@ -30,9 +30,12 @@ local JOIN_TIMEOUT = 10
+ local SILENCE_LIMIT = 25 -- a player that sends nothing (not even ping replies) for this long is gone
+ local MESSAGE_LIMIT = 400 -- messages per second per player; more is dropped
+ local KICK_DELAY = 0.5 -- lets the "you were refused" message reach the client before the socket closes
+-local options = { password = '', maxPlayers = 8, motd = '' }
++local options = { password = '', maxPlayers = 8, motd = '', adminPassword = '' }
++local dedicated = false -- a standalone server: nobody is the host, one player is the clock, admins log in with a password
+ local bans = {} -- lower-case character name -> true (for this session)
+ local pendingKicks = {} -- id -> clock to close at
++local dropReport = 0 -- when the dropped messages were last reported
++local DROP_REPORT_INTERVAL = 60
+ local conn = {} -- socket id -> player id (a player that reconnects keeps the id everybody else knows)
+ local trades = {} -- 'low:high' -> { from, to, state = 'requested' | 'active', exp }
+ local GRACE = 90 -- seconds a player that lost their connection keeps their name, party and place
+@@ -45,6 +48,18 @@ local M = {}
+ M.PROTO = PROTO
+ 
+ local function enc(t) return net.encodeJson(t) end
++
++-- What the operator sees in the server console (or the game's log): who did what, with a time.
++local function stamp()
++    local ok, s = pcall(function() return os.date('%H:%M:%S') end)
++    return ok and s or string.format('+%ds', math.floor(clock))
++end
++local function log(text) print('[' .. stamp() .. '] ' .. text) end
++local function who(id)
++    local c = clients[id]
++    if not c then return '#' .. tostring(id) end
++    return (c.name or ('connection ' .. tostring(id))) .. ' (#' .. tostring(id) .. ')'
++end
+ local function sendRaw(id, json)
+     local c = clients[id]
+     if not c then return end
+@@ -82,6 +97,7 @@ local function removeFromParty(id)
+     local pid = c and c.party
+     if not pid then return end
+     local p = parties[pid]
++    log('party: ' .. who(id) .. ' left their party')
+     remove(p.members, id)
+     c.party = nil
+     sendRaw(id, noParty)
+@@ -174,6 +190,7 @@ local function handleAccept(id, msg)
+         if inv.to == id or inv.from == id then invites[k] = nil end -- nothing pending once grouped
+     end
+     announceParty(pid)
++    log(string.format('party: %s joined %s (%d in the party)', who(id), who(frm), #parties[pid].members))
+     -- bring everyone up to date on each other's actors/vitals
+     for _, m in ipairs(parties[pid].members) do
+         for _, t in ipairs({ 'actors', 'vitals' }) do
+@@ -209,6 +226,29 @@ local function broadcastOthers(id, json)
+     end
+ end
+ 
++-- Dedicated server world: time of day and weather belong to the server, so everybody sees the same sky. The date is
++-- never synced (everybody is on their own day), only the hour.
++local WEATHER_POOL = { 'clear', 'clear', 'clear', 'cloudy', 'cloudy', 'overcast', 'foggy', 'rain', 'thunder' }
++local WORLD_INTERVAL = 2 -- seconds between world messages
++local skyTime = 9 * 3600 -- seconds into the day
++local skyScale = 30 -- game seconds per real second (the game's default)
++local skyWeather = 'clear'
++local fixedWeather -- a weather id the admin set, or nil to let the weather change by itself
++local weatherEvery = 15 * 60
++local nextWeatherAt = 0
++local worldJson, worldTimer = nil, 0
++
++local function broadcastWorld()
++    worldJson = enc({ t = 'world', time = math.floor(skyTime), weather = skyWeather })
++    for o, c in pairs(clients) do if c.authed then sendRaw(o, worldJson) end end
++end
++
++-- Who sets time and weather: the host's game, or on a dedicated server the server itself (nobody's game).
++local function clockId()
++    if dedicated then return nil end
++    return hostId
++end
++
+ ------------------------------------------------------------------ validation
+ 
+ local function isNum(x) return type(x) == 'number' and x == x and x > -1e9 and x < 1e9 end
+@@ -298,18 +338,24 @@ local function handleTrade(id, c, t, msg)
+             return true
+         end
+         trades[key] = { from = id, to = other, state = 'requested', exp = clock + TRADE_REQUEST_TTL }
++        log('trade: ' .. who(id) .. ' asked ' .. who(other))
+     elseif t == 'trade_accept' then
+         if not tr or tr.state ~= 'requested' or tr.to ~= id then return true end
+         tr.state, tr.exp = 'active', nil
++        log('trade: ' .. who(id) .. ' and ' .. who(other) .. ' are trading')
+     elseif t == 'trade_decline' then
+         if not tr or tr.state ~= 'requested' or tr.to ~= id then return true end
+         trades[key] = nil
+     elseif t == 'trade_cancel' then
+         if not tr then return true end
+         trades[key] = nil
++        log('trade: ' .. who(id) .. ' cancelled the trade with ' .. who(other))
+     elseif t == 'trade_inv' or t == 'trade_deal' or t == 'trade_ok' or t == 'trade_done' then
+         if not tr or tr.state ~= 'active' then return true end -- nothing is being traded
+-        if t == 'trade_done' then trades[key] = nil end
++        if t == 'trade_done' then
++            trades[key] = nil
++            log('trade: ' .. who(id) .. ' and ' .. who(other) .. ' completed a trade')
++        end
+     else
+         return true -- unknown trade message
+     end
+@@ -323,10 +369,11 @@ end
+ function M.onClientConnected(id)
+     if not running then return end
+     conn[id] = id
++    local ip = net.remoteAddress and net.remoteAddress(id) or nil
+     clients[id] = { last = {}, tokens = 5.0, tokenTime = clock, pings = {}, authed = false, joinBy = clock + JOIN_TIMEOUT,
+-        lastSeen = clock, sock = id }
+-    if not hostId then hostId = id end
+-    print('[mp-relay]', '+ client', id, id == hostId and '(host)' or '')
++        lastSeen = clock, sock = id, ip = ip }
++    if not hostId and not dedicated then hostId = id end
++    log(string.format('connection %d from %s%s', id, ip or 'unknown address', id == hostId and ' (the host)' or ''))
+     sendTo(id, { t = 'hello', id = id, host = id == hostId, proto = PROTO, needPassword = options.password ~= '' })
+ end
+ 
+@@ -334,8 +381,13 @@ end
+ local function admit(id)
+     local c = clients[id]
+     c.authed = true
+-    if hostId ~= id and clients[hostId] and clients[hostId].last.world then
+-        sendRaw(id, clients[hostId].last.world)
++    if dedicated then
++        if worldJson then sendRaw(id, worldJson) end
++    else
++        local source = clockId()
++        if source ~= id and source and clients[source] and clients[source].last.world then
++            sendRaw(id, clients[source].last.world)
++        end
+     end
+     for other, oc in pairs(clients) do
+         if other ~= id and oc.authed then
+@@ -374,6 +426,7 @@ end
+ local function refuse(id, reason)
+     sendTo(id, { t = 'join_result', ok = false, reason = reason })
+     local c = clients[id]
++    log(string.format('refused %s from %s: %s', c and c.tryName or '?', c and c.ip or 'unknown address', reason))
+     if c then c.refused = true end
+     pendingKicks[id] = clock + KICK_DELAY
+ end
+@@ -402,9 +455,10 @@ local function resume(sock, old, msg)
+         net.kick(c0.sock) -- the old socket is dead to us from now on
+     end
+     c0.sock, c0.awayUntil, c0.dropped, c0.lastSeen, c0.pings = sock, nil, nil, clock, {}
++    c0.ip = clients[sock] and clients[sock].ip or c0.ip
+     conn[sock] = old
+     clients[sock] = nil
+-    print('[mp-relay]', 'client', old, 'is back')
++    log(who(old) .. ' is back, now from ' .. tostring(c0.ip or 'unknown address'))
+     sendTo(old, { t = 'join_result', ok = true, name = c0.name, id = old, token = c0.token, resumed = true,
+         motd = options.motd ~= '' and options.motd or nil })
+     admit(old)
+@@ -430,6 +484,7 @@ end
+ local function handleJoin(id, msg)
+     local c = clients[id]
+     if c.authed or c.refused then return end
++    c.tryName = tostring(msg.name or '?'):sub(1, 32)
+     if msg.proto ~= PROTO then return refuse(id, 'version') end
+     if options.password ~= '' and msg.password ~= options.password then return refuse(id, 'password') end
+     if bans[tostring(msg.name or ''):lower()] then return refuse(id, 'banned') end
+@@ -442,11 +497,13 @@ local function handleJoin(id, msg)
+     sendTo(id, { t = 'join_result', ok = true, name = name, token = c.token,
+         motd = options.motd ~= '' and options.motd or nil })
+     admit(id)
++    log(string.format('%s joined from %s (%d/%d players)', who(id), c.ip or 'unknown address', playerCount(), options.maxPlayers))
+ end
+ 
+ -- The player is gone for good: out of their party, invites and trades, and everyone is told.
+ local function removeClient(id)
+     if not clients[id] then return end
++    local label = who(id)
+     pendingKicks[id] = nil
+     endTrades(id, true)
+     removeFromParty(id)
+@@ -456,7 +513,7 @@ local function removeClient(id)
+     local wasAdmitted = clients[id].authed
+     clients[id] = nil
+     if id == hostId then hostId = nil end
+-    print('[mp-relay]', '- client', id)
++    log(label .. ' left')
+     if not wasAdmitted then return end -- nobody knew about them
+     local json = enc({ t = 'leave', id = id })
+     for o, c in pairs(clients) do if c.authed then sendRaw(o, json) end end
+@@ -472,7 +529,7 @@ function M.onClientDisconnected(sock)
+     if c.authed and not c.virtual and not c.refused and id ~= hostId and c.token then
+         -- connection lost: keep their name, party and place for a while so they can come back
+         c.sock, c.awayUntil, c.pings = nil, clock + GRACE, {}
+-        print('[mp-relay]', 'client', id, 'lost connection, place kept for', GRACE, 's')
++        log(who(id) .. ' lost connection; their place is kept for ' .. GRACE .. ' s')
+         endTrades(id, true)
+         local json = enc({ t = 'away', id = id, name = c.name, grace = GRACE })
+         for o, oc in pairs(clients) do if o ~= id and oc.authed then sendRaw(o, json) end end
+@@ -489,18 +546,38 @@ local function findByName(name)
+     return nil
+ end
+ 
+--- Host-only commands: kick, ban, unban, mute, unmute, announce.
+-local function handleAdmin(id, msg)
+-    local function reply(text) sendTo(id, { t = 'notice', text = text }) end
+-    if id ~= hostId then return reply('Only the host can do that.') end
++-- Commands for the host, or (on a dedicated server) for admins and the server console: kick, ban, unban, mute,
++-- unmute, announce. `reply(text)` answers whoever asked; `actor` is their player id (nil for the console).
++local function adminCommand(msg, reply, actor)
+     local cmd = msg.cmd
+     if cmd == 'announce' then
+         local text = tostring(msg.text or ''):sub(1, CHAT_MAX)
+         if text == '' then return end
+-        local json = enc({ t = 'notice', text = '[Host] ' .. text })
++        local json = enc({ t = 'notice', text = (dedicated and '[Server] ' or '[Host] ') .. text })
+         for other, c in pairs(clients) do if c.authed then sendRaw(other, json) end end
+         return
+     end
++    if cmd == 'weather' or cmd == 'time' then
++        if not dedicated then return reply('Only a dedicated server controls the sky; the host\'s game does that here.') end
++        local arg = tostring(msg.text or msg.name or ''):lower()
++        if cmd == 'weather' then
++            if arg == '' then return reply('Weather is ' .. skyWeather .. (fixedWeather and ' (fixed)' or ' (changes by itself)') .. '.') end
++            if arg == 'cycle' then
++                fixedWeather = nil
++                nextWeatherAt = clock
++                return reply('The weather changes by itself again.')
++            end
++            if #arg > 40 or arg:find('[^%w_ ]') then return reply('Not a weather id.') end
++            fixedWeather, skyWeather = arg, arg
++        else
++            local hours = tonumber(arg)
++            if not hours or hours < 0 or hours >= 24 then return reply('Usage: time <hour 0-24>, for example 14.5') end
++            skyTime = hours * 3600
++        end
++        broadcastWorld()
++        return reply(cmd == 'time' and ('It is now ' .. string.format('%d:%02d', math.floor(skyTime / 3600), math.floor(skyTime / 60) % 60) .. '.')
++            or ('The weather is now ' .. skyWeather .. '.'))
++    end
+     if cmd == 'unban' then
+         local key = tostring(msg.name or ''):lower()
+         if bans[key] then bans[key] = nil reply(msg.name .. ' can join again.') else reply('Nobody by that name is banned.') end
+@@ -508,7 +585,7 @@ local function handleAdmin(id, msg)
+     end
+     local target, c = findByName(msg.name)
+     if not target then return reply('No player named ' .. tostring(msg.name) .. ' is online.') end
+-    if target == hostId then return reply('You cannot do that to yourself.') end
++    if target == hostId or target == actor then return reply('You cannot do that to yourself.') end
+     if cmd == 'kick' or cmd == 'ban' then
+         if cmd == 'ban' then bans[c.name:lower()] = true end
+         if not c.sock then -- (lost their connection: there is nobody to tell)
+@@ -522,10 +599,87 @@ local function handleAdmin(id, msg)
+     elseif cmd == 'mute' or cmd == 'unmute' then
+         c.muted = cmd == 'mute'
+         reply(c.name .. (c.muted and ' is muted.' or ' can chat again.'))
+-        sendTo(target, { t = 'notice', text = c.muted and 'The host muted you.' or 'The host unmuted you.' })
++        sendTo(target, { t = 'notice', text = c.muted and 'The ' .. (dedicated and 'server' or 'host') .. ' muted you.' or 'You were unmuted.' })
+     end
+ end
+ 
++-- Where a player is in the game, from their last position message: the cell, or the exterior grid square.
++local function locationOf(c)
++    local s = c.last and c.last.state and markup.decodeYaml(c.last.state)
++    if type(s) ~= 'table' or type(s.pos) ~= 'table' then return 'unknown' end
++    local x, y, z = tonumber(s.pos[1]) or 0, tonumber(s.pos[2]) or 0, tonumber(s.pos[3]) or 0
++    local where = (s.cell and s.cell ~= '') and s.cell or string.format('exterior (%d, %d)', math.floor(x / 8192), math.floor(y / 8192))
++    return string.format('%s  at %d, %d, %d', where, x, y, z)
++end
++
++-- Lines describing everybody online, for admins and the server console: id, name, flags, latency, address, location.
++-- (Addresses never go in the player list that all players receive.)
++local function whoLines()
++    local ids = {}
++    for id, c in pairs(clients) do if c.authed then ids[#ids + 1] = id end end
++    table.sort(ids)
++    local lines = {}
++    for _, id in ipairs(ids) do
++        local c = clients[id]
++        local flags = (c.admin and ' [admin]' or '') .. (id == hostId and ' [host]' or '') .. (c.muted and ' [muted]' or '')
++        local latency = c.virtual and 'bot' or c.sock and (c.ping and (math.floor(c.ping + 0.5) .. ' ms') or '? ms') or 'away'
++        lines[#lines + 1] = string.format('%d  %s%s  %s  %s  %s', id, c.name or '?', flags, latency, c.ip or 'unknown address',
++            locationOf(c))
++    end
++    if #lines == 0 then lines[1] = 'Nobody is online.' end
++    return lines
++end
++
++local MAX_LOGIN_FAILURES = 5
++
++local function handleAdmin(id, msg)
++    local c = clients[id]
++    local function reply(text) sendTo(id, { t = 'notice', text = text }) end
++    if msg.cmd == 'login' then
++        if options.adminPassword == '' then return reply('This server has no admin password.') end
++        if (c.loginFailures or 0) >= MAX_LOGIN_FAILURES then return reply('Too many wrong passwords.') end
++        if msg.password == options.adminPassword then
++            c.admin = true
++            log('admin: ' .. who(id) .. ' logged in')
++            reply('You are now an admin.')
++        else
++            c.loginFailures = (c.loginFailures or 0) + 1
++            log(string.format('admin: wrong password from %s (%d/%d)', who(id), c.loginFailures, MAX_LOGIN_FAILURES))
++            reply('Wrong password.')
++        end
++        return
++    end
++    if id ~= hostId and not c.admin then
++        return reply(dedicated and 'Only admins can do that. Use /login <password>.' or 'Only the host can do that.')
++    end
++    log(string.format('admin: %s ran %s %s', who(id), tostring(msg.cmd), tostring(msg.name or msg.text or '')))
++    if msg.cmd == 'who' then
++        for _, line in ipairs(whoLines()) do reply(line) end
++        return
++    end
++    adminCommand(msg, reply, id)
++end
++
++-- What the server console and the in-game admin commands do (shown by `help`, and by openmw-mp-server --help).
++M.HELP = table.concat({
++    'Server console commands:',
++    '  players | who              list everybody online: id, name, flags, latency, address and location',
++    '  kick <name>                disconnect a player',
++    '  ban <name>                 disconnect a player and refuse that name until the server restarts',
++    '  unban <name>               let a banned name join again',
++    '  mute <name> | unmute <name>   stop or allow a player\'s chat',
++    '  announce <text> | say <text>  send a message to everybody',
++    '  weather                    show the current weather',
++    '  weather <id>               fix the weather: clear, cloudy, overcast, foggy, rain, thunder, snow, ash, blight, blizzard',
++    '  weather cycle              let the weather change by itself again',
++    '  time <hour>                set the time of day, 0 to 24 (for example 14.5); the date is never synced',
++    '  help | ?                   this list',
++    '  quit | exit | stop         stop the server (Ctrl+C does the same)',
++    '',
++    'In the game, admins (after /login <admin password>) can use: /who /kick /ban /unban /mute /unmute',
++    '/announce /weather /time. Everyone can use /players /me /w /r /g /p /goto /accept /decline /leave /pkick.',
++}, '\n')
++
+ local process
+ 
+ function M.onClientMessage(sock, line)
+@@ -542,7 +696,7 @@ process = function(id, msg)
+     c.lastSeen = clock
+     if c.windowStart ~= math.floor(clock) then c.windowStart, c.windowCount = math.floor(clock), 0 end
+     c.windowCount = c.windowCount + 1
+-    if c.windowCount > MESSAGE_LIMIT then return end -- flooding
++    if c.windowCount > MESSAGE_LIMIT then c.floodDropped = (c.floodDropped or 0) + 1 return end -- flooding
+     local t = msg.t
+     if t == 'join' then return handleJoin(id, msg) end
+     if not c.authed then return end -- nothing counts before the join check
+@@ -571,11 +725,11 @@ process = function(id, msg)
+     end
+     msg.id = id
+     if type(t) ~= 'string' or #t > 16 then return end
+-    if not withinRate(c, t) then return end
++    if not withinRate(c, t) then c.rateDropped = (c.rateDropped or 0) + 1 return end
+     local valid = VALID[t]
+-    if valid and not valid(msg) then return end
+-    if t == 'world' then -- time and weather: only the host is the clock
+-        if id == hostId then
++    if valid and not valid(msg) then c.invalidDropped = (c.invalidDropped or 0) + 1 return end
++    if t == 'world' then -- time and weather: only the clock (the host, or the elected player of a server) sets them
++        if id == clockId() then
+             c.last.world = enc(msg)
+             broadcastOthers(id, c.last.world)
+         end
+@@ -599,9 +753,11 @@ process = function(id, msg)
+             if type(target) ~= 'number' or not clients[target] or target == id then
+                 return sendTo(id, { t = 'invite_result', ok = false, to = target, reason = 'unknown' })
+             end
++            log('[whisper] ' .. who(id) .. ' -> ' .. who(target))
+             return sendTo(target, { t = 'chat', id = id, text = text, scope = 'whisper' })
+         end
+         local scope = msg.scope == 'party' and 'party' or msg.scope == 'emote' and 'emote' or 'global'
++        if scope ~= 'party' and dedicated then log('[' .. scope .. '] ' .. (c.name or '?') .. ': ' .. text) end
+         local json = enc({ t = 'chat', id = id, text = text, scope = scope })
+         if msg.scope == 'party' then toParty(id, json) else broadcastOthers(id, json) end
+         return
+@@ -632,8 +788,19 @@ end
+ -- Returns an error message, or nil on success.
+ function M.start(port, opts)
+     M.stop()
+-    options = { password = tostring(opts and opts.password or ''), maxPlayers = tonumber(opts and opts.maxPlayers) or 8,
+-        motd = tostring(opts and opts.motd or '') }
++    options = { password = tostring(opts and opts.password or ''), maxPlayers = tonumber(opts and opts.maxPlayers) or 64,
++        motd = tostring(opts and opts.motd or ''), adminPassword = tostring(opts and opts.adminPassword or '') }
++    dedicated = opts and opts.dedicated and true or false
++    if dedicated then
++        skyTime = (tonumber(opts.startHour) or 9) % 24 * 3600
++        skyScale = tonumber(opts.timeScale) or 30
++        weatherEvery = (tonumber(opts.weatherMinutes) or 15) * 60
++        local w = tostring(opts.weather or 'cycle'):lower()
++        fixedWeather = w ~= 'cycle' and w ~= '' and w or nil
++        skyWeather = fixedWeather or 'clear'
++        nextWeatherAt, worldJson, worldTimer = clock + weatherEvery, nil, 0
++        broadcastWorld() -- (nobody is connected yet: this just makes the first sky ready for whoever joins)
++    end
+     local err = net.listen(port)
+     if err then return err end
+     running = true
+@@ -650,6 +817,57 @@ function M.stop()
+ end
+ 
+ function M.isRunning() return running end
++function M.isDedicated() return dedicated end
++
++-- Everything a server window needs, as plain data: the players (with latency, address and location), banned names, the
++-- sky and the limits.
++function M.snapshot()
++    local ids = {}
++    for id, c in pairs(clients) do if c.authed then ids[#ids + 1] = id end end
++    table.sort(ids)
++    local players = {}
++    for _, id in ipairs(ids) do
++        local c = clients[id]
++        players[#players + 1] = {
++            id = id, name = c.name or '?', admin = c.admin and true or false, muted = c.muted and true or false,
++            away = not c.sock and not c.virtual, host = id == hostId, bot = c.virtual and true or false,
++            ping = c.sock and c.ping and math.floor(c.ping + 0.5) or -1, ip = c.ip or '', location = locationOf(c),
++        }
++    end
++    local bannedNames = {}
++    for name in pairs(bans) do bannedNames[#bannedNames + 1] = name end
++    table.sort(bannedNames)
++    return {
++        players = players, bans = bannedNames, maxPlayers = options.maxPlayers, passworded = options.password ~= '',
++        dedicated = dedicated, hour = skyTime / 3600, weather = skyWeather, weatherFixed = fixedWeather ~= nil,
++    }
++end
++
++-- The server console (dedicated servers): one line in, the answer out.
++function M.console(line)
++    local cmd, arg = tostring(line or ''):match('^%s*(%S+)%s*(.-)%s*$')
++    if not cmd then return '' end
++    cmd = cmd:lower()
++    local out = {}
++    local function reply(text) out[#out + 1] = text end
++    if cmd == 'help' or cmd == '?' then
++        reply(M.HELP)
++    elseif cmd == 'players' or cmd == 'who' then
++        for _, line in ipairs(whoLines()) do reply(line) end
++    elseif cmd == 'weather' or cmd == 'time' then
++        adminCommand({ cmd = cmd, text = arg }, reply, nil)
++    elseif cmd == 'announce' or cmd == 'say' then
++        adminCommand({ cmd = 'announce', text = arg }, reply, nil)
++    elseif cmd == 'kick' or cmd == 'ban' or cmd == 'unban' or cmd == 'mute' or cmd == 'unmute' then
++        if arg == '' then reply('Usage: ' .. cmd .. ' <name>') else
++            log('console: ' .. cmd .. ' ' .. arg)
++            adminCommand({ cmd = cmd, name = arg }, reply, nil)
++        end
++    else
++        reply('Unknown command. Type help.')
++    end
++    return table.concat(out, '\n')
++end
+ function M.clientCount()
+     local n = 0
+     for _ in pairs(clients) do n = n + 1 end
+@@ -684,17 +902,28 @@ function M.update(dt)
+         if c.authed and not c.virtual and not c.refused and c.sock and not c.dropped
+             and clock - (c.lastSeen or clock) > SILENCE_LIMIT then
+             c.dropped = true -- (not refused: they may come back)
+-            print('[mp-relay]', 'client', id, 'went silent')
++            log(who(id) .. ' stopped answering; closing the connection')
+             pendingKicks[id] = clock
+         end
+         if c.awayUntil and clock > c.awayUntil then
+-            print('[mp-relay]', 'client', id, 'did not come back')
++            log(who(id) .. ' did not come back; their place is given up')
+             removeClient(id)
+         end
+     end
+     for key, tr in pairs(trades) do
+         if tr.exp and clock > tr.exp then trades[key] = nil end -- nobody answered the request
+     end
++    -- messages thrown away (too many, or not shaped like what they claim to be), reported once a minute per player
++    if clock - dropReport >= DROP_REPORT_INTERVAL then
++        dropReport = clock
++        for id, c in pairs(clients) do
++            if c.floodDropped or c.rateDropped or c.invalidDropped then
++                log(string.format('%s: dropped %d flooding, %d rate-limited and %d malformed messages in the last minute', who(id),
++                    c.floodDropped or 0, c.rateDropped or 0, c.invalidDropped or 0))
++                c.floodDropped, c.rateDropped, c.invalidDropped = nil, nil, nil
++            end
++        end
++    end
+     for id, c in pairs(clients) do
+         if not c.authed and not c.refused and clock > c.joinBy then
+             c.refused = true
+@@ -710,6 +939,19 @@ function M.update(dt)
+             elseif c then removeClient(id) end
+         end
+     end
++    if dedicated then
++        skyTime = (skyTime + dt * skyScale) % 86400
++        if not fixedWeather and clock >= nextWeatherAt then
++            nextWeatherAt = clock + weatherEvery * (0.5 + math.random())
++            skyWeather = WEATHER_POOL[math.random(#WEATHER_POOL)]
++            log('weather is now ' .. skyWeather)
++        end
++        worldTimer = worldTimer + dt
++        if worldTimer >= WORLD_INTERVAL then
++            worldTimer = 0
++            broadcastWorld()
++        end
++    end
+     pingTimer = pingTimer + dt
+     if pingTimer < PING_INTERVAL then return end
+     pingTimer = 0
+diff --git a/multiplayer/server/server.lua b/multiplayer/server/server.lua
+new file mode 100644
+index 0000000..feee4e5
+--- /dev/null
++++ b/multiplayer/server/server.lua
+@@ -0,0 +1,43 @@
++-- The server script run by openmw-mp-server (apps/mpserver). The program supplies sockets, a clock and a JSON decoder
++-- as the usual engine modules; everything else is the mod's own relay, so a server behaves like a hosted game that
++-- nobody plays on. OPTIONS is set by the program from its command line.
++local net = require('scripts/mp/netlib')
++local relay = require('scripts/mp/relay')
++
++net.callbacks = {
++    onClientConnected = relay.onClientConnected,
++    onClientDisconnected = relay.onClientDisconnected,
++    onClientMessage = relay.onClientMessage,
++}
++
++local err = relay.start(OPTIONS.port, {
++    dedicated = true,
++    password = OPTIONS.password,
++    adminPassword = OPTIONS.adminPassword,
++    maxPlayers = OPTIONS.maxPlayers,
++    motd = OPTIONS.motd,
++    weather = OPTIONS.weather,
++    weatherMinutes = OPTIONS.weatherMinutes,
++    timeScale = OPTIONS.timeScale,
++    startHour = OPTIONS.startHour,
++})
++if err then error('cannot listen on port ' .. tostring(OPTIONS.port) .. ': ' .. tostring(err), 0) end
++
++print(string.format('[server] listening on port %d%s', OPTIONS.port, OPTIONS.password ~= '' and ' (password protected)' or ' (no password)'))
++print(string.format('[server] up to %d players; weather %s; time starts at %s and runs %gx',
++    OPTIONS.maxPlayers, OPTIONS.weather == 'cycle' and 'changes by itself' or ('fixed at ' .. OPTIONS.weather),
++    string.format('%d:%02d', math.floor(OPTIONS.startHour), math.floor(OPTIONS.startHour % 1 * 60)), OPTIONS.timeScale))
++if OPTIONS.adminPassword == '' then print('[server] no admin password: players cannot use /login (use this console)') end
++print('[server] type help for the list of commands, quit to stop')
++
++local M = {}
++
++function M.onEvent(kind, id, data, listener) net.onEvent(kind, id, data, listener) end
++
++function M.update(dt) relay.update(dt) end
++
++function M.console(line) return relay.console(line) end
++
++function M.snapshot() return relay.snapshot() end
++
++return M
+diff --git a/multiplayer/test/relay_test.lua b/multiplayer/test/relay_test.lua
+index 02a0794..3708b47 100644
+--- a/multiplayer/test/relay_test.lua
++++ b/multiplayer/test/relay_test.lua
+@@ -214,4 +214,57 @@ check(count(18, 'trade_deal') == 1, 'a negative count is dropped')
+ relay.onClientDisconnected(18) -- Dora loses her connection mid-trade
+ check(count(17, 'trade_cancel') == 1, 'a dropped partner cancels the trade')
+ 
++-- ---------------------------------------------------------------- dedicated server
++sent, kicked = {}, {}
++check(relay.start(25567, { dedicated = true, password = '', adminPassword = 'sesame', weather = 'cycle', startHour = 6,
++    timeScale = 60, weatherMinutes = 1 }) == nil, 'start dedicated')
++check(relay.isDedicated(), 'it is dedicated')
++join(31, 'Ann'); join(32, 'Ben')
++check(not last(31, 'hello').host and not last(32, 'hello').host, 'nobody is the host')
++local w = last(31, 'world')
++check(w and w.time == 6 * 3600 and w.weather, 'a joining player gets the server time and weather')
++say(31, { t = 'world', time = 12345, weather = 'thunder' })
++tick(2.1)
++check(last(32, 'world').time ~= 12345 and last(32, 'world').weather ~= 'thunder', 'a player cannot set the sky')
++tick(10)
++check(math.abs(last(32, 'world').time - (6 * 3600 + 12.1 * 60)) < 200, 'time of day advances by the server clock')
++
++say(31, { t = 'admin', cmd = 'weather', text = 'rain' })
++check(last(31, 'notice').text:find('Only admins'), 'players are not admins')
++say(31, { t = 'admin', cmd = 'login', password = 'wrong' })
++check(last(31, 'notice').text == 'Wrong password.', 'wrong admin password')
++for _ = 1, 5 do say(31, { t = 'admin', cmd = 'login', password = 'wrong' }) end
++say(31, { t = 'admin', cmd = 'login', password = 'sesame' })
++check(last(31, 'notice').text == 'Too many wrong passwords.', 'guessing the admin password is limited')
++say(32, { t = 'admin', cmd = 'login', password = 'sesame' })
++check(last(32, 'notice').text == 'You are now an admin.', 'the right password makes an admin')
++say(32, { t = 'admin', cmd = 'weather', text = 'rain' })
++check(last(31, 'world').weather == 'rain', 'an admin sets the weather for everybody')
++say(32, { t = 'admin', cmd = 'time', text = '23.5' })
++check(last(31, 'world').time == 23.5 * 3600, 'an admin sets the time')
++say(32, { t = 'admin', cmd = 'time', text = '99' })
++check(last(32, 'notice').text:find('Usage'), 'a bad hour is refused')
++tick(1.1)
++say(32, { t = 'admin', cmd = 'weather', text = 'rain; drop' })
++check(last(32, 'notice').text == 'Not a weather id.', 'a weather id must be a plain word')
++
++say(31, { t = 'state', cell = 'Vivec, Temple', pos = { 1, 2, 3 } })
++do
++    local snap = relay.snapshot()
++    local ann
++    for _, p in ipairs(snap.players) do if p.name == 'Ann' then ann = p end end
++    check(ann and ann.location:find('Vivec, Temple') and ann.ping == -1 and ann.ip == '' and not ann.admin, 'snapshot: a player with location')
++    local ben
++    for _, p in ipairs(snap.players) do if p.name == 'Ben' then ben = p end end
++    check(ben and ben.admin, 'snapshot: admin flag')
++    check(snap.dedicated and snap.maxPlayers == 64 and snap.weather == 'rain' and snap.weatherFixed and math.abs(snap.hour - 23.5) < 0.5 and snap.passworded == false,
++        'snapshot: sky and limits')
++end
++local who = relay.console('players')
++check(who:find('Ann') and who:find('Vivec, Temple') and who:find('at 1, 2, 3') and who:find('%[admin%]'), 'the console lists players with their location')
++check(relay.console('weather'):find('rain'), 'console: weather')
++check(relay.console('kick Ann'):find('was kicked'), 'console: kick')
++check(relay.console('bogus'):find('Unknown command'), 'console: unknown command')
++check(relay.console('weather cycle'):find('by itself'), 'console: weather cycles again')
++
+ if failures == 0 then print('relay tests: all passed') else print(failures .. ' failed') os.exit(1) end
+diff --git a/multiplayer/test/server_test.py b/multiplayer/test/server_test.py
+new file mode 100644
+index 0000000..1f7615a
+--- /dev/null
++++ b/multiplayer/test/server_test.py
+@@ -0,0 +1,203 @@
++#!/usr/bin/env python3
++"""Starts the real openmw-mp-server and plays two clients against it:  server_test.py <path to openmw-mp-server> <mod dir>"""
++import json, socket, subprocess, sys, time, threading
++
++binary, mod = sys.argv[1], sys.argv[2]
++PORT = 25977
++failures = 0
++
++def check(cond, what):
++    global failures
++    if not cond:
++        failures += 1
++        print('FAIL:', what)
++
++class Client:
++    def __init__(self):
++        self.sock = socket.create_connection(('127.0.0.1', PORT), timeout=5)
++        self.buf = b''
++        self.inbox = []
++    def send(self, **msg):
++        self.sock.sendall((json.dumps(msg) + '\n').encode())
++    def pump(self, seconds=0.5):
++        end = time.time() + seconds
++        self.sock.settimeout(0.05)
++        while time.time() < end:
++            try:
++                data = self.sock.recv(65536)
++                if not data:
++                    break
++                self.buf += data
++            except socket.timeout:
++                pass
++            while b'\n' in self.buf:
++                line, self.buf = self.buf.split(b'\n', 1)
++                msg = json.loads(line)
++                self.inbox.append(msg)
++                if msg.get('t') == 'ping':
++                    self.send(t='pong', n=msg['n'])
++    def last(self, t):
++        for m in reversed(self.inbox):
++            if m.get('t') == t:
++                return m
++    def count(self, t):
++        return sum(1 for m in self.inbox if m.get('t') == t)
++
++server = subprocess.Popen([binary, '--cli-only', '--mod', mod, '--port', str(PORT), '--password', 'pw', '--admin-password', 'adm',
++                           '--weather', 'rain', '--start-hour', '14', '--motd', 'welcome'],
++                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
++output = []
++threading.Thread(target=lambda: [output.append(l) for l in server.stdout], daemon=True).start()
++def console(line, wait=0.4):
++    n = len(output)
++    server.stdin.write(line + '\n'); server.stdin.flush()
++    time.sleep(wait)
++    return ''.join(output[n:])
++
++try:
++    time.sleep(1.0)
++    a = Client(); a.pump(0.3)
++    hello = a.last('hello')
++    check(hello and hello['proto'] == 2 and hello['needPassword'] and not hello['host'], 'hello: version, password needed, nobody is host')
++    a.send(t='join', proto=2, name='Alice', password='wrong'); a.pump(0.8)
++    check(a.last('join_result') and a.last('join_result')['reason'] == 'password', 'wrong password refused')
++
++    a = Client(); a.pump(0.3)
++    a.send(t='join', proto=2, name='Alice', password='pw'); a.pump(0.5)
++    jr = a.last('join_result')
++    check(jr and jr['ok'] and jr['token'] and jr['motd'] == 'welcome', 'joined with the password, got a token and the motd')
++    world = a.last('world')
++    check(world and world['weather'] == 'rain' and abs(world['time'] - 14 * 3600) < 600, 'the server sets weather and time of day')
++    check('date' not in (world or {}) and 'day' not in (world or {}), 'no date is synced')
++
++    b = Client(); b.pump(0.3)
++    b.send(t='join', proto=2, name='Bob', password='pw'); b.pump(0.5)
++    a.send(t='chat', scope='global', text='hello bob'); b.pump(0.5)
++    check(b.last('chat') and b.last('chat')['text'] == 'hello bob', 'chat between two players')
++    a.send(t='state', cell='Balmora', pos=[100, 200, 300], yaw=0); a.pump(0.2)
++    b.pump(0.5)
++    check(b.last('state') and b.last('state')['pos'] == [100, 200, 300], 'positions are relayed')
++
++    a.pump(2.5)
++    players = a.last('players')
++    check(players and len(players['list']) == 2 and all('ip' not in p for p in players['list']), 'the player list has no addresses')
++
++    out = console('players')
++    check('Alice' in out and '127.0.0.1' in out and 'ms' in out and 'Balmora' in out and 'at 100, 200, 300' in out,
++          'console lists name, latency, address and location: ' + out.strip())
++    check('Bob' in out and 'unknown' in out, 'a player who has not sent a position shows an unknown location: ' + out.strip())
++    check('? ms' not in out, 'latency is measured: ' + out.strip())
++
++    a.send(t='admin', cmd='kick', name='Bob'); a.pump(0.4)
++    check('Only admins' in (a.last('notice') or {}).get('text', ''), 'a normal player cannot kick')
++    a.send(t='admin', cmd='login', password='nope'); a.pump(0.3)
++    a.send(t='admin', cmd='login', password='adm'); a.pump(0.3)
++    check('now an admin' in (a.last('notice') or {}).get('text', ''), 'admin login works')
++    a.send(t='admin', cmd='who'); a.pump(0.4)
++    check('127.0.0.1' in (a.last('notice') or {}).get('text', ''), 'an admin can list addresses')
++    a.send(t='admin', cmd='weather', text='clear'); a.pump(0.4); b.pump(0.3)
++    check(b.last('world') and b.last('world')['weather'] == 'clear', 'an admin changes the weather for everybody')
++    a.send(t='admin', cmd='time', text='23.5'); a.pump(0.4)
++    check(abs(a.last('world')['time'] - 23.5 * 3600) < 120, 'an admin changes the time')
++    console('weather rain')
++
++    # reconnect with the token
++    token = jr['token']
++    a.sock.close()
++    b.pump(0.6)
++    check(b.count('away') == 1 and b.count('leave') == 0, 'others see that Alice is away, not gone')
++    a2 = Client(); a2.pump(0.3)
++    a2.send(t='join', proto=2, name='Alice', password='pw', token=token); a2.pump(0.6)
++    r = a2.last('join_result')
++    check(r and r['ok'] and r.get('resumed') and r['id'] == jr.get('id', r['id']), 'the token resumes the session')
++    b.pump(0.4)
++    check(b.count('back') == 1, 'others see that she is back')
++
++    # flooding and bad input
++    c = Client(); c.pump(0.3)
++    c.sock.sendall(b'not json\n{"t":\n[1,2,3]\n\xff\xfe\n')
++    c.pump(0.3)
++    d = Client(); d.pump(0.2)
++    d.send(t='join', proto=2, name='Dave', password='pw'); d.pump(0.5)
++    check(d.last('join_result') and d.last('join_result')['ok'], 'garbage from another client does not hurt the server')
++
++    out = console('help')
++    commands = ['players', 'kick', 'ban', 'unban', 'mute', 'unmute', 'announce', 'weather', 'time', 'help', 'quit', '/login', '/who']
++    check(all(c in out for c in commands), 'console help lists every command: ' + out.strip()[:80])
++    helped = subprocess.run([binary, '--help'], capture_output=True, text=True).stdout
++    check(all(c in helped for c in commands) and '--port' in helped and '--admin-password' in helped,
++          '--help lists the options and the same commands')
++    out = console('weather')
++    check('rain' in out, 'console shows the weather: ' + out.strip())
++    out = console('announce hello everybody'); a2.pump(0.5)
++    check('[Server] hello everybody' in (a2.last('notice') or {}).get('text', ''), 'console announce reaches players')
++    log = ''.join(output)
++    for expected in ['connection ', 'refused Alice from 127.0.0.1: password', 'Alice (#', 'joined from 127.0.0.1 (1/64 players)',
++                     'Bob (#', '[global] Alice: hello bob', 'admin: ', 'wrong password from', 'logged in', 'ran weather clear',
++                     'lost connection; their place is kept', 'is back, now from 127.0.0.1', 'weather']:
++        check(expected in log, 'the server log shows: ' + expected)
++    check(all(line.startswith('[') or line.startswith('  ') or not line.strip() for line in output if 'joined' in line),
++          'log lines carry a time')
++    check(server.poll() is None, 'the server is still running')
++finally:
++    server.stdin.write('quit\n'); server.stdin.flush()
++    try:
++        server.wait(timeout=5)
++    except subprocess.TimeoutExpired:
++        server.kill(); failures += 1; print('FAIL: the server did not stop on quit')
++
++
++# ---------------------------------------------------------------- the window (Qt offscreen), driven like a person would
++import os
++def gui_test():
++    global failures
++    port = PORT + 1
++    shot = os.path.join(os.environ.get('TMPDIR', '/tmp'), 'mp-server-window.png')
++    if os.path.exists(shot):
++        os.remove(shot)
++    env = dict(os.environ, QT_QPA_PLATFORM='offscreen', MP_SERVER_SCREENSHOT=shot,
++               MP_SERVER_TEST_STEPS='select Sleepy;kick;select Nerevarine;mute;select Bandit;ban;unban bandit;weather clear;'
++                                    'time 23:30;announce Server restarting;command players')
++    proc = subprocess.Popen([binary, '--mod', mod, '--port', str(port), '--password', 'pw', '--admin-password', 'adm',
++                             '--weather', 'rain'], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
++    lines = []
++    threading.Thread(target=lambda: [lines.append(l) for l in proc.stdout], daemon=True).start()
++    time.sleep(1.2)
++    if any('no window' in l for l in lines):
++        proc.kill()
++        print('(this build has no window: window tests skipped)')
++        return
++    names = ['Arin', 'Nerevarine', 'Sleepy', 'Bandit']
++    clients = {}
++    for name in names:
++        c = Client.__new__(Client)
++        c.sock = socket.create_connection(('127.0.0.1', port), timeout=5)
++        c.buf, c.inbox = b'', []
++        c.pump(0.2)
++        c.send(t='join', proto=2, name=name, password='pw'); c.pump(0.3)
++        c.send(t='state', cell='Balmora', pos=[1, 2, 3], yaw=0)
++        clients[name] = c
++    clients['Arin'].send(t='admin', cmd='login', password='adm')
++    end = time.time() + 9
++    while time.time() < end and proc.poll() is None:
++        for c in clients.values():
++            c.pump(0.1)
++    check(proc.poll() is not None, 'the window closed itself after the steps (screenshot written)')
++    if proc.poll() is None:
++        proc.kill()
++    check(clients['Sleepy'].last('kicked') and clients['Sleepy'].last('kicked')['reason'] == 'kicked', 'the Kick button kicks the selected player')
++    check(any('muted you' in m.get('text', '') for m in clients['Nerevarine'].inbox if m.get('t') == 'notice'), 'the Mute button mutes the selected player')
++    check(clients['Bandit'].last('kicked') and clients['Bandit'].last('kicked')['reason'] == 'banned', 'the Ban button bans the selected player')
++    world = clients['Arin'].last('world')
++    check(world and world['weather'] == 'clear', 'the weather box sets the weather for everybody')
++    check(world and abs(world['time'] - 23.5 * 3600) < 600, 'the time box sets the time of day')
++    notices = [m.get('text', '') for m in clients['Arin'].inbox if m.get('t') == 'notice']
++    check('[Server] Server restarting' in notices, 'the announcement box reaches the players')
++    out = ''.join(lines)
++    check('console: kick Sleepy' in out and 'console: ban Bandit' in out and 'console: unban bandit' in out,
++          'button presses are logged like console commands')
++    check(os.path.exists(shot) and os.path.getsize(shot) > 5000, 'a picture of the window was saved: ' + shot)
++
++gui_test()
++print('server tests: all passed' if failures == 0 else '%d failed' % failures)
++sys.exit(1 if failures else 0)

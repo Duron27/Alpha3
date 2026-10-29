@@ -1,0 +1,435 @@
+From: Duron27 <duron27@gmail.com>
+Subject: [PATCH] Arrows, thrown weapons and spell bolts of other players, spell cast and hit effects (visuals only)
+
+- player.lua works out the aim (crosshair ray, then a ray from the body) and tells the global script when a spell is
+  cast or a bow/crossbow/thrown weapon is released
+- relay forwards a new uncached message type "shot" to everyone
+- shots.lua flies a harmless object from start to end and plays the spell hit effect there
+- remote.lua shows the spell cast effect on the avatar (and hit effect for self spells)
+- relay test covers shot routing
+
+---
+diff --git a/multiplayer/README.md b/multiplayer/README.md
+index 7536be1..aac813a 100644
+--- a/multiplayer/README.md
++++ b/multiplayer/README.md
+@@ -14,6 +14,7 @@ mod/scripts/mp/
+   player.lua             UI: chat, party panel, invites, arrows over players, status line, avatar menu
+   menu.lua               main-menu screen (host/join, port, password, test player) and settings renderers
+   remote.lua             runs on avatars/stand-ins: movement, attacks, head tilt, death pose, reading pose
++  shots.lua              arrows, thrown weapons and spell bolts of other players (visuals only)
+   proxies.lua            stand-ins for party members' actors, shared kills, no duplicate NPCs
+   trade.lua, damage.lua  trade window, damage/kill delivery to real actors
+ server/                  old standalone Python relay (no password/admin/ping list), bots for it
+@@ -41,7 +42,9 @@ Every player keeps their **own** world; nothing a group member does changes your
+ - **Animation:** walking, running, strafing and backing up relative to where they face, jumping (once per jump), sneaking,
+   swimming, attacks (wind-up on press, swing size by how long it was charged, chop/slash/thrust), spells, head and body tilt
+   following their aim, a death pose, and a "reading a book" pose while they have a menu open (their game is paused).
+-  Attacks are animation only: an avatar never damages anything in your world.
++  Attacks are animation only: an avatar never damages anything in your world. Arrows, thrown weapons and spell bolts
++  fly as visuals (the shooter's game works out where the shot ends), spells show their cast effect on the avatar's hand and,
++  on the caster, their own effect; hit effects play where a shot ends.
+ - **Parties (max 3):** shared party chat, vitals panel, and stand-ins for actors that are alive in a member's world but dead
+   or missing in yours (one per actor, never next to a living twin). **Kills are shared** (setting, on by default): if a member
+   kills an NPC or creature it dies for everybody in the group (essential NPCs excepted).
+@@ -60,5 +63,7 @@ puts a fake player next to you that accepts invites, chats, trades and shows vit
+ automated runs (auto-host, auto-join with a walking character, auto-bot, kill test).
+ 
+ ## Not done
+-Shared fights where both worlds have the actor alive, container contents, stand-ins for actors that are alive but unloaded in
+-your world, trade of enchanted/generated items, projectiles and spell effects of other players.
++Container contents, stand-ins for actors that are alive but unloaded in your world, trade of enchanted/generated
++items. Shared fights are approximate: damage to an actor alive in several worlds is synced as "lowest health wins"
++(setting *Damage to actors is shared*), so simultaneous hits by two players are not added up. Projectiles do not collide with
++anything in your world and spell effects other than cast/hit visuals are not shown.
+diff --git a/multiplayer/mod/scripts/mp/global.lua b/multiplayer/mod/scripts/mp/global.lua
+index 8d8ea00..f80f169 100644
+--- a/multiplayer/mod/scripts/mp/global.lua
++++ b/multiplayer/mod/scripts/mp/global.lua
+@@ -12,6 +12,7 @@ local storage = require('openmw.storage')
+ local markup = require('openmw.markup')
+ local I = require('openmw.interfaces')
+ local proxies = require('scripts/mp/proxies')
++local shots = require('scripts/mp/shots')
+ local relay = require('scripts/mp/relay')
+ local bot = require('scripts/mp/bot')
+ 
+@@ -107,6 +108,12 @@ proxies.init({
+     sharedFights = function() return settings:get('SharedFights') ~= false end,
+ })
+ 
++shots.init({
++    player = player,
++    cellKey = cellKey,
++    blockActivation = function(obj) I.Activation.addHandlerForObject(obj, function() return false end) end,
++})
++
+ ------------------------------------------------------------------ connection / group
+ 
+ -- Two modes, never both: 'join' connects to someone else's server; 'host' runs the server in this game
+@@ -150,6 +157,7 @@ local function connect()
+ end
+ 
+ local clearRemotes
++local onShot
+ local onAvatarActivated
+ 
+ settings:subscribe(async:callback(function()
+@@ -400,6 +408,7 @@ clearRemotes = function()
+     for id in pairs(remotes) do ids[#ids + 1] = id end
+     for _, id in ipairs(ids) do removeRemote(id) end
+     proxies.reset()
++    shots.reset()
+     releaseClock()
+     players = {}
+     party = { members = {}, leader = nil }
+@@ -788,6 +797,7 @@ local function onMessage(msg)
+         return
+     end
+     if t == 'vitals' then vitals[msg.id] = msg return end
++    if t == 'shot' then onShot(msg) return end
+     if proxies.onMessage(msg) then return end
+     local id = msg.id
+     if not id then return end
+@@ -818,6 +828,19 @@ local function onMessage(msg)
+     elseif t == 'state' and type(msg.pos) == 'table' then r.state = msg; r.stateAt = core.getRealTime() end
+ end
+ 
++-- Another player shot or cast something: show it if they are in our cell (cosmetic only).
++-- k = 'bolt' / 'arrow' fly from msg.from to msg.to (shots.lua); every spell also shows its cast effect on their
++-- avatar, and a spell on themselves (k = 'cast') its hit effect too.
++onShot = function(msg)
++    local r = remotes[msg.id]
++    local p = player()
++    if not r or not p or not r.state or r.state.cell ~= cellKey(p.cell) then return end
++    if msg.k == 'bolt' or msg.k == 'arrow' then shots.onShot(msg) end
++    if msg.k ~= 'arrow' and r.obj and r.obj:isValid() and r.obj.enabled then
++        r.obj:sendEvent('MpCastVfx', { cast = msg.cast, hit = msg.k == 'cast' and msg.hit or nil })
++    end
++end
++
+ ------------------------------------------------------------------ network callbacks (see netlib.lua)
+ 
+ net.callbacks = {
+@@ -848,12 +871,14 @@ return {
+             local objs = {}
+             for _, r in pairs(remotes) do if r.obj then objs[#objs + 1] = r.obj end end
+             for _, o in ipairs(proxies.savedObjects()) do objs[#objs + 1] = o end
++            for _, o in ipairs(shots.savedObjects()) do objs[#objs + 1] = o end
+             return { objs = objs, kills = proxies.getPendingKills() }
+         end,
+         onLoad = function(saved)
+             remotes, avatarIds, lastEquipJson = {}, {}, nil
+             party, vitals, invitesIn, invitesOut = { members = {}, leader = nil }, {}, {}, {}
+             proxies.reset()
++            shots.reset()
+             proxies.setPendingKills(saved and saved.kills)
+             for _, obj in ipairs(saved and saved.objs or {}) do
+                 if obj:isValid() then pcall(function() obj:remove() end) end
+@@ -913,6 +938,7 @@ return {
+                 toUi('MpAvatars', { list = list })
+             end
+             proxies.onUpdate(gameDt)
++            shots.onUpdate(gameDt)
+             for _, r in pairs(remotes) do updateRemote(r, gameDt) end
+             if net.isConnected() and core.getRealTime() - lastServerMessage > SERVER_SILENCE then
+                 -- the host stopped answering (crash, cable, router): do not stay "connected" to nothing
+@@ -973,6 +999,13 @@ return {
+     },
+     eventHandlers = {
+         MpInput = function(d) myInput = d end,
++        -- Our player shot an arrow or cast a spell (player.lua works out the details): tell the others
++        MpShot = function(d)
++            local p = player()
++            if not p or not net.isConnected() then return end
++            d.t = 'shot'
++            net.send(net.encodeJson(d))
++        end,
+         MpSnap = function(d)
+             if proxies.onSnap(d.actor) then dlog('proxy snapped') return end
+             for _, r in pairs(remotes) do
+diff --git a/multiplayer/mod/scripts/mp/player.lua b/multiplayer/mod/scripts/mp/player.lua
+index 7adfd2a..cff5210 100644
+--- a/multiplayer/mod/scripts/mp/player.lua
++++ b/multiplayer/mod/scripts/mp/player.lua
+@@ -43,6 +43,7 @@ local COLORS = {
+ }
+ 
+ local camera = require('openmw.camera')
++local nearby = require('openmw.nearby')
+ local markers = {} -- avatar object id -> { el, name }
+ local avatarList = {}
+ local ambient = require('openmw.ambient')
+@@ -528,6 +529,75 @@ local function openMenu(d)
+     }
+ end
+ 
++------------------------------------------------------------------ shots (see shots.lua)
++
++local SHOT_MAX_RANGE = 6000
++local AIM_RANGE = 8000
++local BOLT_SPEED, ARROW_SPEED, THROWN_SPEED = 1500, 2400, 1500
++
++local function vtab(v) return { math.floor(v.x + 0.5), math.floor(v.y + 0.5), math.floor(v.z + 0.5) } end
++
++-- Where a shot fired from our body at what the crosshair points at ends: { from, to, hit }.
++local function aimShot()
++    local ok, res = pcall(function()
++        local camPos = camera.getPosition()
++        local look = camera.viewportToWorldVector(util.vector2(0.5, 0.5)):normalize()
++        local aim = nearby.castRay(camPos, camPos + look * AIM_RANGE, { ignore = self })
++        local aimPoint = aim.hit and aim.hitPos or (camPos + look * AIM_RANGE)
++        local from = self.position + util.vector3(0, 0, 110) + util.vector3(look.x, look.y, 0):normalize() * 30
++        local dir = (aimPoint - from):normalize()
++        local stop = nearby.castRay(from, from + dir * SHOT_MAX_RANGE, { ignore = self })
++        local to = stop.hit and stop.hitPos or (from + dir * SHOT_MAX_RANGE)
++        return { from = vtab(from), to = vtab(to), hitpos = stop.hit and true or false }
++    end)
++    return ok and res or nil
++end
++
++-- A spell was cast: its cast effect shows on our avatar, a bolt flies, a spell on ourselves shows its hit effect.
++local function reportCast()
++    pcall(function()
++        local spell = types.Actor.getSelectedSpell(self)
++        local fx = spell and spell.effects and spell.effects[1]
++        local mgef = fx and fx.effect
++        if not mgef then return end
++        local magicka = types.Actor.stats.dynamic.magicka(self).current
++        if not spell.isAutocalc and spell.cost and spell.cost > magicka then return end -- not cast: no mana
++        local msg = { k = 'cast', cast = mgef.castStatic, hit = mgef.hitStatic }
++        if fx.range == core.magic.RANGE.Target and mgef.bolt and mgef.bolt ~= '' then
++            local aim = aimShot()
++            if aim then
++                msg = { k = 'bolt', cast = mgef.castStatic, rec = mgef.bolt, hit = mgef.hitStatic, from = aim.from,
++                    to = aim.to, hitpos = aim.hitpos, spd = (mgef.speed and mgef.speed > 0) and (mgef.speed > 20 and mgef.speed or mgef.speed * BOLT_SPEED) or BOLT_SPEED }
++            end
++        end
++        core.sendGlobalEvent('MpShot', msg)
++    end)
++end
++
++local function rangedWeapon()
++    local W = types.Weapon
++    return { [W.TYPE.MarksmanBow] = ARROW_SPEED, [W.TYPE.MarksmanCrossbow] = ARROW_SPEED, [W.TYPE.MarksmanThrown] = THROWN_SPEED }
++end
++
++-- A bow, crossbow or thrown weapon was released: the arrow (or the weapon itself) flies.
++local function reportRangedShot(strength)
++    pcall(function()
++        if strength < 0.1 then return end
++        local eq = types.Actor.getEquipment(self)
++        local weapon = eq[types.Actor.EQUIPMENT_SLOT.CarriedRight]
++        if not weapon then return end
++        local speed = rangedWeapon()[types.Weapon.record(weapon).type]
++        if not speed then return end
++        local ammo = types.Weapon.record(weapon).type ~= types.Weapon.TYPE.MarksmanThrown
++            and eq[types.Actor.EQUIPMENT_SLOT.Ammunition] or weapon
++        if not ammo then return end
++        local aim = aimShot()
++        if not aim then return end
++        core.sendGlobalEvent('MpShot', { k = 'arrow', rec = ammo.recordId, from = aim.from, to = aim.to,
++            hitpos = aim.hitpos, spd = speed * (0.6 + 0.4 * strength) })
++    end)
++end
++
+ ------------------------------------------------------------------ handlers
+ 
+ return {
+@@ -552,6 +622,7 @@ return {
+                 elseif stance == types.Actor.STANCE.Spell then
+                     attackSeq = attackSeq + 1
+                     lastAttack = 'cast'
++                    reportCast()
+                 end
+             elseif holding and not using and wasUsing then
+                 holding = false
+@@ -563,6 +634,7 @@ return {
+                 releaseSeq = releaseSeq + 1
+                 releaseKind = attackKind()
+                 releaseStrength = math.max(0, math.min(1, (core.getRealTime() - pressedAt) * speed / 0.8))
++                reportRangedShot(releaseStrength)
+             end
+             wasUsing = using
+             local air = not types.Actor.isOnGround(self) and not types.Actor.isSwimming(self)
+diff --git a/multiplayer/mod/scripts/mp/relay.lua b/multiplayer/mod/scripts/mp/relay.lua
+index 43dfe72..73be6c6 100644
+--- a/multiplayer/mod/scripts/mp/relay.lua
++++ b/multiplayer/mod/scripts/mp/relay.lua
+@@ -10,6 +10,7 @@ local MAX_PARTY = 3
+ local INVITE_TTL = 60
+ local CHAT_MAX = 240
+ local GLOBAL_TYPES = { profile = true, equip = true, state = true }
++local SHOT_TYPES = { shot = true } -- shown to everyone, never cached (a late joiner must not see old shots)
+ local PARTY_TYPES = { actors = true, vitals = true, dmg = true }
+ local CACHED = { profile = true, equip = true, state = true, actors = true, vitals = true }
+ local GLOBAL_ORDER = { 'profile', 'equip', 'state' }
+@@ -406,6 +407,10 @@ process = function(id, msg)
+         if msg.scope == 'party' then toParty(id, json) else broadcastOthers(id, json) end
+         return
+     end
++    if SHOT_TYPES[t] then
++        if type(msg.k) == 'string' and #msg.k < 8 then broadcastOthers(id, enc(msg)) end
++        return
++    end
+     if CACHED[t] then c.last[t] = enc(msg) end
+     if GLOBAL_TYPES[t] then
+         broadcastOthers(id, c.last[t])
+diff --git a/multiplayer/mod/scripts/mp/remote.lua b/multiplayer/mod/scripts/mp/remote.lua
+index 8148174..cef69a1 100644
+--- a/multiplayer/mod/scripts/mp/remote.lua
++++ b/multiplayer/mod/scripts/mp/remote.lua
+@@ -369,6 +369,20 @@ return {
+         -- Another player attacked or cast: show the animation only. (The avatar has no AI and never deals damage.)
+         MpAttack = function(d) playAttack(d) end,
+         MpJump = function() jumpLeft = 0.15 end,
++        -- The player cast a spell: its cast effect on their hands, or its effect on themselves
++        MpCastVfx = function(d)
++            local function static(id)
++                if not id or id == '' then return nil end
++                local ok, rec = pcall(function() return types.Static.records[id] end)
++                return ok and rec and rec.model or nil
++            end
++            local cast, hit = static(d.cast), static(d.hit)
++            if cast then
++                pcall(anim.addVfx, self, cast, { boneName = 'Bip01 L Hand', vfxId = 'mp_cast', loop = false,
++                    useAmbientLight = false })
++            end
++            if hit then pcall(anim.addVfx, self, hit, { vfxId = 'mp_selfhit', loop = false, useAmbientLight = false }) end
++        end,
+         MpEquip = function(d)
+             desiredEquip = d.slots
+             equipTimer = 0
+diff --git a/multiplayer/mod/scripts/mp/shots.lua b/multiplayer/mod/scripts/mp/shots.lua
+new file mode 100644
+index 0000000..52774cd
+--- /dev/null
++++ b/multiplayer/mod/scripts/mp/shots.lua
+@@ -0,0 +1,106 @@
++-- Arrows, thrown weapons and spell bolts of other players, as harmless visuals. The shooter's game works out where
++-- the shot ends (it casts the ray in its own world); here an object just flies from the start to that point and the
++-- spell's hit effect plays there. Nothing here damages anything: attacks of other players are animation only.
++local world = require('openmw.world')
++local core = require('openmw.core')
++local types = require('openmw.types')
++local util = require('openmw.util')
++
++local M = {}
++
++local MAX_SHOTS = 40
++local MAX_RANGE = 8000
++local MAX_LIFETIME = 6
++local MIN_SPEED, MAX_SPEED = 300, 6000
++local SHOW_DISTANCE = 6000 -- shots further than this from us are not worth showing
++
++local ctx -- { player, cellKey, blockActivation, log }
++local shots = {} -- { obj, from, dir, length, travelled, speed, rot, hitModel, age }
++
++function M.init(context) ctx = context end
++
++function M.reset()
++    for _, s in ipairs(shots) do
++        if s.obj and s.obj:isValid() then pcall(function() s.obj:remove() end) end
++    end
++    shots = {}
++end
++
++function M.savedObjects()
++    local list = {}
++    for _, s in ipairs(shots) do
++        if s.obj and s.obj:isValid() then list[#list + 1] = s.obj end
++    end
++    return list
++end
++
++local function vec(t)
++    if type(t) ~= 'table' then return nil end
++    local x, y, z = tonumber(t[1]), tonumber(t[2]), tonumber(t[3])
++    if not (x and y and z) then return nil end
++    return util.vector3(x, y, z)
++end
++
++-- Facing along dir: yaw about Z, then pitch (the engine's positive pitch is downwards).
++local function rotationFor(dir)
++    local yaw = math.atan2(dir.x, dir.y)
++    local pitch = -math.asin(math.max(-1, math.min(1, dir.z)))
++    return util.transform.rotateZ(yaw) * util.transform.rotateX(pitch)
++end
++
++local function modelOf(kind, id)
++    if not id then return nil end
++    local ok, rec = pcall(function() return types[kind].records[id] end)
++    return ok and rec and rec.model or nil
++end
++
++local function playHit(s)
++    if not s.hitModel then return end
++    pcall(world.vfx.spawn, s.hitModel, s.to, { useAmbientLight = false })
++end
++
++-- msg: { k = 'bolt' | 'arrow', rec = record id of the flying object, hit = static id of the hit effect,
++--        from, to = { x, y, z }, spd = units/s, hitpos = true if the shot ended on something }
++function M.onShot(msg)
++    local p = ctx.player()
++    if not p or #shots >= MAX_SHOTS then return end
++    local from, to = vec(msg.from), vec(msg.to)
++    if not from or not to or type(msg.rec) ~= 'string' then return end
++    if (from - p.position):length() > SHOW_DISTANCE then return end
++    local delta = to - from
++    local length = delta:length()
++    if length < 1 or length > MAX_RANGE then return end
++    local speed = math.max(MIN_SPEED, math.min(MAX_SPEED, tonumber(msg.spd) or 1500))
++    local ok, obj = pcall(world.createObject, msg.rec, 1)
++    if not ok or not obj then return end
++    pcall(ctx.blockActivation, obj)
++    local dir = delta / length
++    local rot = rotationFor(dir)
++    obj:teleport(ctx.cellKey(p.cell), from, { rotation = rot })
++    shots[#shots + 1] = {
++        obj = obj, from = from, to = to, dir = dir, length = length, travelled = 0, speed = speed, rot = rot, age = 0,
++        hitModel = msg.hitpos ~= false and modelOf('Static', msg.hit) or nil,
++    }
++end
++
++function M.onUpdate(dt)
++    local p = ctx.player()
++    for i = #shots, 1, -1 do
++        local s = shots[i]
++        s.age = s.age + dt
++        s.travelled = s.travelled + s.speed * dt
++        local gone = not p or not s.obj:isValid() or s.age > MAX_LIFETIME
++        if not gone and s.travelled >= s.length then
++            playHit(s)
++            gone = true
++        end
++        if gone then
++            if s.obj:isValid() then pcall(function() s.obj:remove() end) end
++            table.remove(shots, i)
++        else
++            s.obj:teleport(ctx.cellKey(p.cell), s.from + s.dir * s.travelled, { rotation = s.rot })
++        end
++    end
++end
++
++return M
+diff --git a/multiplayer/test/relay_test.lua b/multiplayer/test/relay_test.lua
+index d2b3d2e..e7efcfd 100644
+--- a/multiplayer/test/relay_test.lua
++++ b/multiplayer/test/relay_test.lua
+@@ -112,6 +112,16 @@ tick(3)
+ local list = last(1, 'players')
+ check(list and #list.list >= 2, 'player list is broadcast')
+ 
++-- ---------------------------------------------------------------- shots
++local shotsBefore = count(1, 'shot')
++say(4, { t = 'shot', k = 'arrow', rec = 'iron arrow', from = { 0, 0, 0 }, to = { 100, 0, 0 }, spd = 2000 })
++check(count(1, 'shot') == shotsBefore + 1 and last(1, 'shot').id == 4, 'a shot is shown to the others, stamped with its shooter')
++check(count(4, 'shot') == 0, 'a shot is not echoed to its shooter')
++say(4, { t = 'shot', k = 12345 })
++check(count(1, 'shot') == shotsBefore + 1, 'a malformed shot is dropped')
++join(8, 'Dave', 'secret')
++check(not last(8, 'shot'), 'shots are not replayed to late joiners')
++
+ -- ---------------------------------------------------------------- silence and flooding
+ for i = 1, 600 do say(4, { t = 'state', cell = '', pos = { i, 0, 0 } }) end
+ check(last(1, 'state') and last(1, 'state').pos[1] <= 400, 'a flood of messages is cut off')

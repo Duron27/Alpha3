@@ -1,0 +1,2757 @@
+From 4270622d3e88c72dc82de27ea69453cbe94120d4 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Fri, 9 Oct 2026 09:14:04 -0400
+Subject: [PATCH] Networking is Lua now: one generic socket API in C++
+ (openmw.net: connect/listen/send/close + onNetEvent), client, server, JSON
+ and the internet-address lookup moved to netlib.lua
+
+C++ drops the client, server and address classes and the JSON encoder (~1100 lines -> ~350).
+ui.setPlayerMarkers renamed ui.setMapMarkers.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ apps/components_tests/CMakeLists.txt          |   3 +-
+ apps/components_tests/net/client.cpp          | 111 -----
+ apps/components_tests/net/server.cpp          |  91 ----
+ apps/components_tests/net/sockets.cpp         | 130 ++++++
+ apps/openmw/mwbase/windowmanager.hpp          |   2 +-
+ apps/openmw/mwgui/windowmanagerimp.cpp        |   2 +-
+ apps/openmw/mwgui/windowmanagerimp.hpp        |   2 +-
+ apps/openmw/mwlua/globalscripts.hpp           |  19 +-
+ apps/openmw/mwlua/luabindings.cpp             |   2 +-
+ apps/openmw/mwlua/luamanagerimp.cpp           |  35 +-
+ apps/openmw/mwlua/luamanagerimp.hpp           |  12 +-
+ apps/openmw/mwlua/netbindings.cpp             | 194 +--------
+ apps/openmw/mwlua/netbindings.hpp             |   6 +-
+ apps/openmw/mwlua/uibindings.cpp              |   4 +-
+ components/CMakeLists.txt                     |   4 +-
+ components/net/address.cpp                    | 119 -----
+ components/net/address.hpp                    |  45 --
+ components/net/client.cpp                     | 225 ----------
+ components/net/client.hpp                     |  59 ---
+ components/net/server.cpp                     | 270 ------------
+ components/net/server.hpp                     |  59 ---
+ components/net/sockets.cpp                    | 411 ++++++++++++++++++
+ components/net/sockets.hpp                    |  70 +++
+ .../lua-scripting/engine_handlers.rst         |  16 +-
+ files/lua_api/openmw/net.lua                  | 104 ++---
+ files/lua_api/openmw/ui.lua                   |   4 +-
+ multiplayer/mod/scripts/mp/global.lua         |  43 +-
+ multiplayer/mod/scripts/mp/netlib.lua         | 228 ++++++++++
+ multiplayer/mod/scripts/mp/player.lua         |   2 +-
+ multiplayer/mod/scripts/mp/relay.lua          |   2 +-
+ multiplayer/run-two.sh                        |   2 +-
+ 31 files changed, 959 insertions(+), 1317 deletions(-)
+ delete mode 100644 apps/components_tests/net/client.cpp
+ delete mode 100644 apps/components_tests/net/server.cpp
+ create mode 100644 apps/components_tests/net/sockets.cpp
+ delete mode 100644 components/net/address.cpp
+ delete mode 100644 components/net/address.hpp
+ delete mode 100644 components/net/client.cpp
+ delete mode 100644 components/net/client.hpp
+ delete mode 100644 components/net/server.cpp
+ delete mode 100644 components/net/server.hpp
+ create mode 100644 components/net/sockets.cpp
+ create mode 100644 components/net/sockets.hpp
+ create mode 100644 multiplayer/mod/scripts/mp/netlib.lua
+
+diff --git a/apps/components_tests/CMakeLists.txt b/apps/components_tests/CMakeLists.txt
+index 886ba0432d..2782ce67fe 100644
+--- a/apps/components_tests/CMakeLists.txt
++++ b/apps/components_tests/CMakeLists.txt
+@@ -97,8 +97,7 @@ file(GLOB UNITTEST_SRC_FILES
+     shader/shadervisitor.cpp
+     shader/sunpenumbra.cpp
+ 
+-    net/client.cpp
+-    net/server.cpp
++    net/sockets.cpp
+ 
+     sqlite3/db.cpp
+     sqlite3/request.cpp
+diff --git a/apps/components_tests/net/client.cpp b/apps/components_tests/net/client.cpp
+deleted file mode 100644
+index 2bb9e43c37..0000000000
+--- a/apps/components_tests/net/client.cpp
++++ /dev/null
+@@ -1,111 +0,0 @@
+-#include <components/net/client.hpp>
+-
+-#include <chrono>
+-#include <thread>
+-
+-#include <boost/asio.hpp>
+-#include <gtest/gtest.h>
+-
+-namespace
+-{
+-    using namespace testing;
+-    namespace asio = boost::asio;
+-    using asio::ip::tcp;
+-
+-    std::vector<Net::Event> waitForEvents(Net::Client& client, std::size_t count)
+-    {
+-        std::vector<Net::Event> result;
+-        for (int i = 0; i < 500 && result.size() < count; ++i)
+-        {
+-            for (Net::Event& e : client.poll())
+-                result.push_back(std::move(e));
+-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+-        }
+-        return result;
+-    }
+-
+-    struct NetClientTest : Test
+-    {
+-        asio::io_context mIo;
+-        tcp::acceptor mAcceptor{ mIo, tcp::endpoint(asio::ip::make_address("127.0.0.1"), 0) };
+-        Net::Client mClient;
+-
+-        std::uint16_t port() const { return mAcceptor.local_endpoint().port(); }
+-    };
+-
+-    TEST_F(NetClientTest, shouldExchangeLines)
+-    {
+-        std::thread server([this] {
+-            tcp::socket socket(mIo);
+-            mAcceptor.accept(socket);
+-            asio::streambuf buf;
+-            asio::read_until(socket, buf, '\n');
+-            std::istream in(&buf);
+-            std::string line;
+-            std::getline(in, line);
+-            asio::write(socket, asio::buffer("echo:" + line + "\r\nsecond\n"));
+-            boost::system::error_code ec;
+-            asio::read(socket, buf, ec); // wait for the client to go away
+-        });
+-
+-        mClient.connect("127.0.0.1", port());
+-        auto events = waitForEvents(mClient, 1);
+-        ASSERT_EQ(events.size(), 1u);
+-        EXPECT_EQ(events[0].mType, Net::Event::Type::Connected);
+-        EXPECT_TRUE(mClient.isConnected());
+-
+-        EXPECT_TRUE(mClient.send("hello"));
+-        events = waitForEvents(mClient, 2);
+-        ASSERT_EQ(events.size(), 2u);
+-        EXPECT_EQ(events[0].mType, Net::Event::Type::Message);
+-        EXPECT_EQ(events[0].mData, "echo:hello");
+-        EXPECT_EQ(events[1].mData, "second");
+-
+-        mClient.disconnect();
+-        EXPECT_FALSE(mClient.isConnected());
+-        server.join();
+-    }
+-
+-    TEST_F(NetClientTest, shouldReportDisconnectFromServer)
+-    {
+-        std::thread server([this] {
+-            tcp::socket socket(mIo);
+-            mAcceptor.accept(socket);
+-        });
+-        mClient.connect("127.0.0.1", port());
+-        const auto events = waitForEvents(mClient, 2);
+-        server.join();
+-        ASSERT_EQ(events.size(), 2u);
+-        EXPECT_EQ(events[0].mType, Net::Event::Type::Connected);
+-        EXPECT_EQ(events[1].mType, Net::Event::Type::Disconnected);
+-        EXPECT_FALSE(mClient.isConnected());
+-    }
+-
+-    TEST_F(NetClientTest, shouldReportConnectionFailure)
+-    {
+-        const std::uint16_t closedPort = port();
+-        mAcceptor.close();
+-        mClient.connect("127.0.0.1", closedPort);
+-        const auto events = waitForEvents(mClient, 1);
+-        ASSERT_EQ(events.size(), 1u);
+-        EXPECT_EQ(events[0].mType, Net::Event::Type::Disconnected);
+-    }
+-
+-    TEST_F(NetClientTest, sendShouldRejectInvalidInput)
+-    {
+-        EXPECT_FALSE(mClient.send("not connected"));
+-        std::thread server([this] {
+-            tcp::socket socket(mIo);
+-            mAcceptor.accept(socket);
+-            boost::system::error_code ec;
+-            asio::streambuf buf;
+-            asio::read(socket, buf, ec);
+-        });
+-        mClient.connect("127.0.0.1", port());
+-        ASSERT_EQ(waitForEvents(mClient, 1).size(), 1u);
+-        EXPECT_FALSE(mClient.send("a\nb"));
+-        EXPECT_FALSE(mClient.send(std::string(Net::Client::sMaxLineSize + 1, 'x')));
+-        mClient.disconnect();
+-        server.join();
+-    }
+-}
+diff --git a/apps/components_tests/net/server.cpp b/apps/components_tests/net/server.cpp
+deleted file mode 100644
+index e0ff107286..0000000000
+--- a/apps/components_tests/net/server.cpp
++++ /dev/null
+@@ -1,91 +0,0 @@
+-#include <components/net/server.hpp>
+-
+-#include <chrono>
+-#include <thread>
+-
+-#include <boost/asio.hpp>
+-#include <gtest/gtest.h>
+-
+-namespace
+-{
+-    using namespace testing;
+-    namespace asio = boost::asio;
+-    using asio::ip::tcp;
+-
+-    std::vector<Net::ServerEvent> waitForEvents(Net::Server& server, std::size_t count)
+-    {
+-        std::vector<Net::ServerEvent> result;
+-        for (int i = 0; i < 500 && result.size() < count; ++i)
+-        {
+-            for (Net::ServerEvent& e : server.poll())
+-                result.push_back(std::move(e));
+-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+-        }
+-        return result;
+-    }
+-
+-    // Port 0 is not usable through Server::listen, so look for a free one.
+-    std::uint16_t listenOnFreePort(Net::Server& server)
+-    {
+-        for (std::uint16_t port = 47200; port < 47400; ++port)
+-            if (server.listen(port).empty())
+-                return port;
+-        return 0;
+-    }
+-
+-    TEST(NetServerTest, shouldExchangeLinesWithSeveralClients)
+-    {
+-        Net::Server server;
+-        const std::uint16_t port = listenOnFreePort(server);
+-        ASSERT_NE(port, 0);
+-        EXPECT_TRUE(server.isListening());
+-
+-        asio::io_context io;
+-        tcp::socket a(io), b(io);
+-        a.connect(tcp::endpoint(asio::ip::make_address("127.0.0.1"), port));
+-        b.connect(tcp::endpoint(asio::ip::make_address("127.0.0.1"), port));
+-        auto events = waitForEvents(server, 2);
+-        ASSERT_EQ(events.size(), 2u);
+-        EXPECT_EQ(events[0].mType, Net::ServerEvent::Type::ClientConnected);
+-        EXPECT_EQ(events[0].mClient, 1u);
+-        EXPECT_EQ(events[1].mClient, 2u);
+-
+-        asio::write(b, asio::buffer(std::string("hi\r\n")));
+-        events = waitForEvents(server, 1);
+-        ASSERT_EQ(events.size(), 1u);
+-        EXPECT_EQ(events[0].mType, Net::ServerEvent::Type::Message);
+-        EXPECT_EQ(events[0].mClient, 2u);
+-        EXPECT_EQ(events[0].mData, "hi");
+-
+-        EXPECT_TRUE(server.send(1, "to-a"));
+-        EXPECT_FALSE(server.send(1, "bad\nline"));
+-        asio::streambuf buf;
+-        asio::read_until(a, buf, '\n');
+-        std::istream in(&buf);
+-        std::string line;
+-        std::getline(in, line);
+-        EXPECT_EQ(line, "to-a");
+-
+-        b.close();
+-        events = waitForEvents(server, 1);
+-        ASSERT_EQ(events.size(), 1u);
+-        EXPECT_EQ(events[0].mType, Net::ServerEvent::Type::ClientDisconnected);
+-        EXPECT_EQ(events[0].mClient, 2u);
+-
+-        server.kick(1);
+-        boost::system::error_code ec;
+-        asio::read(a, buf, ec);
+-        EXPECT_TRUE(ec); // closed by the server
+-        server.stop();
+-        EXPECT_FALSE(server.isListening());
+-    }
+-
+-    TEST(NetServerTest, shouldReportListenFailure)
+-    {
+-        Net::Server first, second;
+-        const std::uint16_t port = listenOnFreePort(first);
+-        ASSERT_NE(port, 0);
+-        EXPECT_FALSE(second.listen(port).empty());
+-        EXPECT_FALSE(second.isListening());
+-    }
+-}
+diff --git a/apps/components_tests/net/sockets.cpp b/apps/components_tests/net/sockets.cpp
+new file mode 100644
+index 0000000000..0267c44f58
+--- /dev/null
++++ b/apps/components_tests/net/sockets.cpp
+@@ -0,0 +1,130 @@
++#include <components/net/sockets.hpp>
++
++#include <chrono>
++#include <thread>
++
++#include <gtest/gtest.h>
++
++namespace
++{
++    using namespace testing;
++    using Type = Net::SocketEvent::Type;
++
++    std::vector<Net::SocketEvent> waitFor(Net::Sockets& s, std::size_t count)
++    {
++        std::vector<Net::SocketEvent> result;
++        for (int i = 0; i < 500 && result.size() < count; ++i)
++        {
++            for (Net::SocketEvent& e : s.poll())
++                result.push_back(std::move(e));
++            std::this_thread::sleep_for(std::chrono::milliseconds(10));
++        }
++        return result;
++    }
++
++    std::uint32_t listenOnFreePort(Net::Sockets& s, std::uint16_t& port)
++    {
++        for (port = 47400; port < 47600; ++port)
++        {
++            std::string error;
++            if (const std::uint32_t id = s.listen(port, error))
++                return id;
++        }
++        return 0;
++    }
++
++    TEST(NetSocketsTest, shouldTalkToItselfOverLoopback)
++    {
++        Net::Sockets s;
++        std::uint16_t port = 0;
++        const std::uint32_t listener = listenOnFreePort(s, port);
++        ASSERT_NE(listener, 0u);
++
++        const std::uint32_t client = s.connect("127.0.0.1", port);
++        ASSERT_NE(client, 0u);
++        auto events = waitFor(s, 2);
++        ASSERT_EQ(events.size(), 2u);
++        std::uint32_t accepted = 0;
++        bool connected = false;
++        for (const auto& e : events)
++        {
++            if (e.mType == Type::Accepted)
++            {
++                EXPECT_EQ(e.mListener, listener);
++                accepted = e.mId;
++            }
++            else if (e.mType == Type::Connected)
++            {
++                EXPECT_EQ(e.mId, client);
++                connected = true;
++            }
++        }
++        EXPECT_TRUE(connected);
++        ASSERT_NE(accepted, 0u);
++        EXPECT_EQ(s.localAddress(client), "127.0.0.1");
++
++        EXPECT_TRUE(s.send(client, "hello", false));
++        EXPECT_FALSE(s.send(client, "bad\nline", false));
++        events = waitFor(s, 1);
++        ASSERT_EQ(events.size(), 1u);
++        EXPECT_EQ(events[0].mType, Type::Line);
++        EXPECT_EQ(events[0].mId, accepted);
++        EXPECT_EQ(events[0].mData, "hello");
++
++        // raw data, with a final line that has no terminator, delivered when the peer closes
++        EXPECT_TRUE(s.send(accepted, "HTTP/1.0 200 OK\r\n\r\n1.2.3.4", true));
++        events = waitFor(s, 2);
++        ASSERT_EQ(events.size(), 2u);
++        EXPECT_EQ(events[0].mData, "HTTP/1.0 200 OK");
++        EXPECT_EQ(events[1].mData, "");
++        s.close(accepted);
++        events = waitFor(s, 1);
++        ASSERT_GE(events.size(), 1u);
++        const Net::SocketEvent& tail = events.back();
++        EXPECT_TRUE(tail.mType == Type::Line || tail.mType == Type::Closed);
++    }
++
++    TEST(NetSocketsTest, shouldReportRemoteCloseButNotLocalClose)
++    {
++        Net::Sockets s;
++        std::uint16_t port = 0;
++        ASSERT_NE(listenOnFreePort(s, port), 0u);
++        const std::uint32_t client = s.connect("127.0.0.1", port);
++        auto events = waitFor(s, 2);
++        ASSERT_EQ(events.size(), 2u);
++        std::uint32_t accepted = 0;
++        for (const auto& e : events)
++            if (e.mType == Type::Accepted)
++                accepted = e.mId;
++        s.close(accepted); // the server side hangs up
++        events = waitFor(s, 1);
++        ASSERT_EQ(events.size(), 1u);
++        EXPECT_EQ(events[0].mType, Type::Closed);
++        EXPECT_EQ(events[0].mId, client);
++        s.close(client);
++        EXPECT_FALSE(s.send(client, "x", false));
++        for (int i = 0; i < 20; ++i)
++        {
++            EXPECT_TRUE(s.poll().empty());
++            std::this_thread::sleep_for(std::chrono::milliseconds(10));
++        }
++    }
++
++    TEST(NetSocketsTest, shouldReportListenAndConnectFailures)
++    {
++        Net::Sockets a, b;
++        std::uint16_t port = 0;
++        ASSERT_NE(listenOnFreePort(a, port), 0u);
++        std::string error;
++        EXPECT_EQ(b.listen(port, error), 0u);
++        EXPECT_FALSE(error.empty());
++
++        Net::Sockets c;
++        const std::uint32_t id = c.connect("127.0.0.1", 1); // nothing listens there
++        ASSERT_NE(id, 0u);
++        const auto events = waitFor(c, 1);
++        ASSERT_EQ(events.size(), 1u);
++        EXPECT_EQ(events[0].mType, Type::Closed);
++        EXPECT_EQ(events[0].mId, id);
++    }
++}
+diff --git a/apps/openmw/mwbase/windowmanager.hpp b/apps/openmw/mwbase/windowmanager.hpp
+index 092e530a64..5bb5c9c5e1 100644
+--- a/apps/openmw/mwbase/windowmanager.hpp
++++ b/apps/openmw/mwbase/windowmanager.hpp
+@@ -214,7 +214,7 @@ namespace MWBase
+         virtual bool toggleFogOfWar() = 0;
+ 
+         // Shows markers for other players on the map and minimap (not saved).
+-        virtual void setPlayerMarkers(std::vector<ESM::CustomMarker> markers) = 0;
++        virtual void setMapMarkers(std::vector<ESM::CustomMarker> markers) = 0;
+ 
+         virtual bool toggleFullHelp() = 0;
+         ///< show extra info in item tooltips (owner, script)
+diff --git a/apps/openmw/mwgui/windowmanagerimp.cpp b/apps/openmw/mwgui/windowmanagerimp.cpp
+index fc55e27de3..cf524a4483 100644
+--- a/apps/openmw/mwgui/windowmanagerimp.cpp
++++ b/apps/openmw/mwgui/windowmanagerimp.cpp
+@@ -1225,7 +1225,7 @@ namespace MWGui
+         mHud->setMinimapVisible(visible);
+     }
+ 
+-    void WindowManager::setPlayerMarkers(std::vector<ESM::CustomMarker> markers)
++    void WindowManager::setMapMarkers(std::vector<ESM::CustomMarker> markers)
+     {
+         mCustomMarkers.setTransient(std::move(markers));
+     }
+diff --git a/apps/openmw/mwgui/windowmanagerimp.hpp b/apps/openmw/mwgui/windowmanagerimp.hpp
+index 5b23da7e20..4f99b98127 100644
+--- a/apps/openmw/mwgui/windowmanagerimp.hpp
++++ b/apps/openmw/mwgui/windowmanagerimp.hpp
+@@ -229,7 +229,7 @@ namespace MWGui
+         float getScalingFactor() const override;
+ 
+         bool toggleFogOfWar() override;
+-        void setPlayerMarkers(std::vector<ESM::CustomMarker> markers) override;
++        void setMapMarkers(std::vector<ESM::CustomMarker> markers) override;
+         bool toggleFullHelp() override; ///< show extra info in item tooltips (owner, script)
+         bool getFullHelp() const override;
+ 
+diff --git a/apps/openmw/mwlua/globalscripts.hpp b/apps/openmw/mwlua/globalscripts.hpp
+index 573d5108a5..3e0ba6cf7f 100644
+--- a/apps/openmw/mwlua/globalscripts.hpp
++++ b/apps/openmw/mwlua/globalscripts.hpp
+@@ -27,8 +27,7 @@ namespace MWLua
+             registerEngineHandlers({ &mObjectActiveHandlers, &mActorActiveHandlers, &mItemActiveHandlers,
+                 &mNewGameHandlers, &mPlayerAddedHandlers, &mOnActivateHandlers, &mOnUseItemHandlers,
+                 &mOnNewExteriorHandlers, &mOnDroppedHandlers, &mOnPlacedHandlers, &mOnProjectileHit,
+-                &mNetConnectedHandlers, &mNetDisconnectedHandlers, &mNetMessageHandlers,
+-                &mNetClientConnectedHandlers, &mNetClientDisconnectedHandlers, &mNetClientMessageHandlers });
++                &mNetEventHandlers });
+         }
+ 
+         void newGameStarted() { callEngineHandlers(mNewGameHandlers); }
+@@ -48,14 +47,9 @@ namespace MWLua
+             callEngineHandlers(mOnProjectileHit, projectile, hitResult);
+         }
+ 
+-        void onNetConnected() { callEngineHandlers(mNetConnectedHandlers); }
+-        void onNetDisconnected(const std::string& reason) { callEngineHandlers(mNetDisconnectedHandlers, reason); }
+-        void onNetMessage(const std::string& message) { callEngineHandlers(mNetMessageHandlers, message); }
+-        void onNetClientConnected(std::uint32_t id) { callEngineHandlers(mNetClientConnectedHandlers, id); }
+-        void onNetClientDisconnected(std::uint32_t id) { callEngineHandlers(mNetClientDisconnectedHandlers, id); }
+-        void onNetClientMessage(std::uint32_t id, const std::string& message)
++        void onNetEvent(std::string_view type, std::uint32_t id, const std::string& data, std::uint32_t listener)
+         {
+-            callEngineHandlers(mNetClientMessageHandlers, id, message);
++            callEngineHandlers(mNetEventHandlers, std::string(type), id, data, listener);
+         }
+ 
+     private:
+@@ -70,12 +64,7 @@ namespace MWLua
+         EngineHandlerList mOnUseItemHandlers{ "_onUseItem" };
+         EngineHandlerList mOnNewExteriorHandlers{ "onNewExterior" };
+         EngineHandlerList mOnProjectileHit{ "_onProjectileHit" };
+-        EngineHandlerList mNetConnectedHandlers{ "onNetConnected" };
+-        EngineHandlerList mNetDisconnectedHandlers{ "onNetDisconnected" };
+-        EngineHandlerList mNetMessageHandlers{ "onNetMessage" };
+-        EngineHandlerList mNetClientConnectedHandlers{ "onNetClientConnected" };
+-        EngineHandlerList mNetClientDisconnectedHandlers{ "onNetClientDisconnected" };
+-        EngineHandlerList mNetClientMessageHandlers{ "onNetClientMessage" };
++        EngineHandlerList mNetEventHandlers{ "onNetEvent" };
+     };
+ 
+ }
+diff --git a/apps/openmw/mwlua/luabindings.cpp b/apps/openmw/mwlua/luabindings.cpp
+index 003bd053a4..e723d7c9da 100644
+--- a/apps/openmw/mwlua/luabindings.cpp
++++ b/apps/openmw/mwlua/luabindings.cpp
+@@ -58,7 +58,7 @@ namespace MWLua
+         initObjectBindingsForGlobalScripts(context);
+         initCellBindingsForGlobalScripts(context);
+         return {
+-            { "openmw.net", initNetPackage(context, context.mLuaManager->netClient(), context.mLuaManager->netServer(), context.mLuaManager->publicAddressLookup()) },
++            { "openmw.net", initNetPackage(context, context.mLuaManager->sockets()) },
+             { "openmw.types", initTypesPackage(context) },
+             { "openmw.core", initCorePackage(context) },
+             { "openmw.world", initWorldPackage(context) },
+diff --git a/apps/openmw/mwlua/luamanagerimp.cpp b/apps/openmw/mwlua/luamanagerimp.cpp
+index 610b43b4b9..9303ef9a20 100644
+--- a/apps/openmw/mwlua/luamanagerimp.cpp
++++ b/apps/openmw/mwlua/luamanagerimp.cpp
+@@ -467,35 +467,25 @@ namespace MWLua
+                 mEngineEvents.callEngineHandlers();
+             }
+ 
+-            for (const Net::Event& event : mNetClient.poll())
++            for (const Net::SocketEvent& event : mSockets.poll())
+             {
++                std::string_view type;
+                 switch (event.mType)
+                 {
+-                    case Net::Event::Type::Connected:
+-                        mGlobalScripts.onNetConnected();
++                    case Net::SocketEvent::Type::Connected:
++                        type = "connected";
+                         break;
+-                    case Net::Event::Type::Disconnected:
+-                        mGlobalScripts.onNetDisconnected(event.mData);
++                    case Net::SocketEvent::Type::Accepted:
++                        type = "accepted";
+                         break;
+-                    case Net::Event::Type::Message:
+-                        mGlobalScripts.onNetMessage(event.mData);
++                    case Net::SocketEvent::Type::Line:
++                        type = "line";
+                         break;
+-                }
+-            }
+-            for (const Net::ServerEvent& event : mNetServer.poll())
+-            {
+-                switch (event.mType)
+-                {
+-                    case Net::ServerEvent::Type::ClientConnected:
+-                        mGlobalScripts.onNetClientConnected(event.mClient);
+-                        break;
+-                    case Net::ServerEvent::Type::ClientDisconnected:
+-                        mGlobalScripts.onNetClientDisconnected(event.mClient);
+-                        break;
+-                    case Net::ServerEvent::Type::Message:
+-                        mGlobalScripts.onNetClientMessage(event.mClient, event.mData);
++                    case Net::SocketEvent::Type::Closed:
++                        type = "closed";
+                         break;
+                 }
++                mGlobalScripts.onNetEvent(type, event.mId, event.mData, event.mListener);
+             }
+             bool isPaused = timeManager.isPaused();
+ 
+@@ -766,8 +756,7 @@ namespace MWLua
+         mActiveLocalScripts.clear();
+         mLuaEvents.clear();
+         mEngineEvents.clear();
+-        mNetClient.disconnect();
+-        mNetServer.stop();
++        mSockets.closeAll();
+         mInputEvents.clear();
+         mMenuInputEvents.clear();
+         mObjectLists.clear();
+diff --git a/apps/openmw/mwlua/luamanagerimp.hpp b/apps/openmw/mwlua/luamanagerimp.hpp
+index 84e5432227..fa6cdf93c0 100644
+--- a/apps/openmw/mwlua/luamanagerimp.hpp
++++ b/apps/openmw/mwlua/luamanagerimp.hpp
+@@ -15,9 +15,7 @@
+ #include <components/lua/scripttracker.hpp>
+ #include <components/lua/storage.hpp>
+ #include <components/lua_ui/resources.hpp>
+-#include <components/net/address.hpp>
+-#include <components/net/client.hpp>
+-#include <components/net/server.hpp>
++#include <components/net/sockets.hpp>
+ #include <components/misc/color.hpp>
+ 
+ #include "../mwbase/luamanager.hpp"
+@@ -84,9 +82,7 @@ namespace MWLua
+         void contentFilesLoaded() override;
+         void initPostLoad();
+ 
+-        Net::Client& netClient() { return mNetClient; }
+-        Net::Server& netServer() { return mNetServer; }
+-        Net::PublicAddressLookup& publicAddressLookup() { return mPublicAddress; }
++        Net::Sockets& sockets() { return mSockets; }
+ 
+         void loadPermanentStorage(const std::filesystem::path& userConfigPath);
+         void savePermanentStorage(const std::filesystem::path& userConfigPath) override;
+@@ -374,9 +370,7 @@ namespace MWLua
+ 
+         LuaEvents mLuaEvents{ mGlobalScripts, mMenuScripts, mLua };
+         EngineEvents mEngineEvents{ mGlobalScripts };
+-        Net::Client mNetClient;
+-        Net::Server mNetServer;
+-        Net::PublicAddressLookup mPublicAddress;
++        Net::Sockets mSockets;
+         std::vector<MWBase::LuaManager::InputEvent> mInputEvents;
+         std::vector<MWBase::LuaManager::InputEvent> mMenuInputEvents;
+ 
+diff --git a/apps/openmw/mwlua/netbindings.cpp b/apps/openmw/mwlua/netbindings.cpp
+index 21dbfb09f1..77bf760027 100644
+--- a/apps/openmw/mwlua/netbindings.cpp
++++ b/apps/openmw/mwlua/netbindings.cpp
+@@ -1,200 +1,54 @@
+ #include "netbindings.hpp"
+ 
+-#include <cmath>
+-#include <cstdio>
+ #include <limits>
+ #include <stdexcept>
+ 
+ #include <components/lua/luastate.hpp>
+-#include <components/net/address.hpp>
+-#include <components/net/client.hpp>
+-#include <components/net/server.hpp>
++#include <components/net/sockets.hpp>
+ 
+ #include "context.hpp"
+ 
+ namespace MWLua
+ {
+-    namespace
+-    {
+-        constexpr int sMaxJsonDepth = 32;
+-
+-        void appendJsonString(std::string& out, std::string_view str)
+-        {
+-            out.push_back('"');
+-            for (const unsigned char c : str)
+-            {
+-                switch (c)
+-                {
+-                    case '"':
+-                        out += "\\\"";
+-                        break;
+-                    case '\\':
+-                        out += "\\\\";
+-                        break;
+-                    case '\n':
+-                        out += "\\n";
+-                        break;
+-                    case '\r':
+-                        out += "\\r";
+-                        break;
+-                    case '\t':
+-                        out += "\\t";
+-                        break;
+-                    default:
+-                        if (c < 0x20)
+-                        {
+-                            char buf[8];
+-                            std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+-                            out += buf;
+-                        }
+-                        else
+-                            out.push_back(static_cast<char>(c));
+-                }
+-            }
+-            out.push_back('"');
+-        }
+-
+-        void appendJson(std::string& out, const sol::object& value, int depth)
+-        {
+-            if (depth > sMaxJsonDepth)
+-                throw std::runtime_error("encodeJson: table is nested too deeply or contains a cycle");
+-            switch (value.get_type())
+-            {
+-                case sol::type::lua_nil:
+-                    out += "null";
+-                    return;
+-                case sol::type::boolean:
+-                    out += value.as<bool>() ? "true" : "false";
+-                    return;
+-                case sol::type::number:
+-                {
+-                    const double d = value.as<double>();
+-                    if (!std::isfinite(d))
+-                        throw std::runtime_error("encodeJson: NaN and infinity can not be encoded");
+-                    char buf[32];
+-                    std::snprintf(buf, sizeof(buf), "%.17g", d);
+-                    out += buf;
+-                    return;
+-                }
+-                case sol::type::string:
+-                    appendJsonString(out, value.as<std::string_view>());
+-                    return;
+-                case sol::type::table:
+-                {
+-                    const sol::table table = value.as<sol::table>();
+-                    std::size_t count = 0;
+-                    bool isArray = true;
+-                    for (const auto& [k, v] : table)
+-                    {
+-                        ++count;
+-                        if (!(k.is<double>() && k.as<double>() >= 1 && k.as<double>() == std::floor(k.as<double>())))
+-                            isArray = false;
+-                    }
+-                    if (count == 0)
+-                    {
+-                        out += "[]";
+-                        return;
+-                    }
+-                    if (isArray)
+-                    {
+-                        // Keys must be exactly 1..count
+-                        for (std::size_t i = 1; i <= count; ++i)
+-                            if (!table[i].valid() || table[i].get_type() == sol::type::lua_nil)
+-                                isArray = false;
+-                    }
+-                    if (isArray)
+-                    {
+-                        out.push_back('[');
+-                        for (std::size_t i = 1; i <= count; ++i)
+-                        {
+-                            if (i > 1)
+-                                out.push_back(',');
+-                            appendJson(out, table[i], depth + 1);
+-                        }
+-                        out.push_back(']');
+-                        return;
+-                    }
+-                    out.push_back('{');
+-                    bool first = true;
+-                    for (const auto& [k, v] : table)
+-                    {
+-                        if (!k.is<std::string_view>() || k.get_type() != sol::type::string)
+-                            throw std::runtime_error("encodeJson: object keys must be strings");
+-                        if (!first)
+-                            out.push_back(',');
+-                        first = false;
+-                        appendJsonString(out, k.as<std::string_view>());
+-                        out.push_back(':');
+-                        appendJson(out, v, depth + 1);
+-                    }
+-                    out.push_back('}');
+-                    return;
+-                }
+-                default:
+-                    throw std::runtime_error(std::string("encodeJson: unsupported value type: ")
+-                        + sol::type_name(value.lua_state(), value.get_type()));
+-            }
+-        }
+-    }
+-
+-    sol::table initNetPackage(const Context& context, Net::Client& client, Net::Server& server, Net::PublicAddressLookup& lookup)
++    sol::table initNetPackage(const Context& context, Net::Sockets& sockets)
+     {
+         sol::state_view lua = context.sol();
+         sol::table api(lua, sol::create);
+ 
+-        api["connect"] = [&client](std::string_view host, int port) {
++        api["connect"] = [&sockets](std::string_view host, int port) -> sol::optional<std::uint32_t> {
+             if (host.empty())
+                 throw std::invalid_argument("net.connect: empty host");
+             if (port < 1 || port > std::numeric_limits<std::uint16_t>::max())
+                 throw std::invalid_argument("net.connect: port out of range");
+-            client.connect(std::string(host), static_cast<std::uint16_t>(port));
++            const std::uint32_t id = sockets.connect(std::string(host), static_cast<std::uint16_t>(port));
++            if (id == 0)
++                return sol::nullopt;
++            return id;
+         };
+-        api["disconnect"] = [&client]() { client.disconnect(); };
+-        api["isConnected"] = [&client]() { return client.isConnected(); };
+-        api["send"] = [&client](std::string_view message) { return client.send(message); };
+-        // Hosting: a listening server whose clients are addressed by numeric id. Events arrive in global
+-        // scripts as onNetClientConnected(id), onNetClientDisconnected(id) and onNetClientMessage(id, line).
+-        api["listen"] = [&server](int port) -> sol::optional<std::string> {
++        api["listen"] = [&sockets](int port, sol::this_state state) -> sol::variadic_results {
+             if (port < 1 || port > std::numeric_limits<std::uint16_t>::max())
+                 throw std::invalid_argument("net.listen: port out of range");
+-            std::string error = server.listen(static_cast<std::uint16_t>(port));
+-            if (error.empty())
+-                return sol::nullopt;
+-            return error;
+-        };
+-        api["stopListening"] = [&server]() { server.stop(); };
+-        api["isListening"] = [&server]() { return server.isListening(); };
+-        api["sendTo"] = [&server](std::uint32_t id, std::string_view message) { return server.send(id, message); };
+-        api["kick"] = [&server](std::uint32_t id) { server.kick(id); };
+-        // This machine's address on the network that reaches the internet (nil if none). Sends nothing.
+-        api["localAddress"] = []() -> sol::optional<std::string> {
+-            std::string address = Net::localAddress();
+-            if (address.empty())
+-                return sol::nullopt;
+-            return address;
+-        };
+-        // Asks api.ipify.org for the public address (an outside request: call it only when the user asks for it).
+-        // The answer is read with getPublicAddress.
+-        api["lookupPublicAddress"] = [&lookup]() { lookup.start(); };
+-        // Returns nil while the lookup is running or was never started; otherwise once: address, error (one is nil).
+-        api["getPublicAddress"] = [&lookup](sol::this_state state) -> sol::variadic_results {
++            std::string error;
++            const std::uint32_t id = sockets.listen(static_cast<std::uint16_t>(port), error);
+             sol::variadic_results out;
+-            if (const auto result = lookup.poll())
++            if (id != 0)
++                out.push_back(sol::make_object(state, id));
++            else
+             {
+-                if (result->mAddress.empty())
+-                {
+-                    out.push_back(sol::make_object(state, sol::nil));
+-                    out.push_back(sol::make_object(state, result->mError));
+-                }
+-                else
+-                    out.push_back(sol::make_object(state, result->mAddress));
++                out.push_back(sol::make_object(state, sol::nil));
++                out.push_back(sol::make_object(state, error));
+             }
+             return out;
+         };
+-        api["encodeJson"] = [](const sol::object& value) {
+-            std::string out;
+-            appendJson(out, value, 0);
+-            return out;
++        api["send"] = [&sockets](std::uint32_t id, std::string_view data, sol::optional<bool> raw) {
++            return sockets.send(id, data, raw.value_or(false));
++        };
++        api["close"] = [&sockets](std::uint32_t id) { sockets.close(id); };
++        api["localAddress"] = [&sockets](std::uint32_t id) -> sol::optional<std::string> {
++            std::string address = sockets.localAddress(id);
++            if (address.empty())
++                return sol::nullopt;
++            return address;
+         };
+ 
+         return LuaUtil::makeReadOnly(api);
+diff --git a/apps/openmw/mwlua/netbindings.hpp b/apps/openmw/mwlua/netbindings.hpp
+index 4111ce14a1..4529accd5b 100644
+--- a/apps/openmw/mwlua/netbindings.hpp
++++ b/apps/openmw/mwlua/netbindings.hpp
+@@ -5,16 +5,14 @@
+ 
+ namespace Net
+ {
+-    class Client;
+-    class Server;
+-    class PublicAddressLookup;
++    class Sockets;
+ }
+ 
+ namespace MWLua
+ {
+     struct Context;
+ 
+-    sol::table initNetPackage(const Context& context, Net::Client& client, Net::Server& server, Net::PublicAddressLookup& lookup);
++    sol::table initNetPackage(const Context& context, Net::Sockets& sockets);
+ }
+ 
+ #endif // MWLUA_NETBINDINGS_H
+diff --git a/apps/openmw/mwlua/uibindings.cpp b/apps/openmw/mwlua/uibindings.cpp
+index 6eaf93b544..482a3a1230 100644
+--- a/apps/openmw/mwlua/uibindings.cpp
++++ b/apps/openmw/mwlua/uibindings.cpp
+@@ -398,7 +398,7 @@ namespace MWLua
+         api.function("_getDefaultFontSize", []() -> int { return Settings::gui().mFontSize; });
+         // Markers for other players on the map and minimap. Each entry: { cell = '' for the exterior or an
+         // interior cell name, x, y (world position), name }. Replaces the previous list; not saved.
+-        api.function("setPlayerMarkers", [luaManager = context.mLuaManager](const Lua::TableView& list) {
++        api.function("setMapMarkers", [luaManager = context.mLuaManager](const Lua::TableView& list) {
+             std::vector<ESM::CustomMarker> markers;
+             list.forEach([&](const Lua::ValueView&, const Lua::ValueView& value) {
+                 const Lua::TableView entry = value.asTable();
+@@ -416,7 +416,7 @@ namespace MWLua
+             });
+             // GUI widgets may only be touched from the main thread
+             luaManager->addAction([markers = std::move(markers)]() mutable {
+-                MWBase::Environment::get().getWindowManager()->setPlayerMarkers(std::move(markers));
++                MWBase::Environment::get().getWindowManager()->setMapMarkers(std::move(markers));
+             });
+         });
+         api.function("showMessage",
+diff --git a/components/CMakeLists.txt b/components/CMakeLists.txt
+index ab12626665..62dac9492a 100644
+--- a/components/CMakeLists.txt
++++ b/components/CMakeLists.txt
+@@ -504,9 +504,7 @@ add_component_dir(serialization
+     )
+ 
+ add_component_dir(net
+-    address
+-    client
+-    server
++    sockets
+     )
+ 
+ add_component_dir(sqlite3
+diff --git a/components/net/address.cpp b/components/net/address.cpp
+deleted file mode 100644
+index 821e6b4afe..0000000000
+--- a/components/net/address.cpp
++++ /dev/null
+@@ -1,119 +0,0 @@
+-#include "address.hpp"
+-
+-#include <algorithm>
+-#include <chrono>
+-
+-#include <boost/asio.hpp>
+-
+-namespace Net
+-{
+-    namespace asio = boost::asio;
+-    using asio::ip::tcp;
+-    using asio::ip::udp;
+-
+-    std::string localAddress()
+-    {
+-        try
+-        {
+-            asio::io_context io;
+-            udp::socket socket(io);
+-            // Connecting a UDP socket sends nothing; it only makes the OS pick the outgoing interface.
+-            socket.connect(udp::endpoint(asio::ip::make_address("8.8.8.8"), 80));
+-            return socket.local_endpoint().address().to_string();
+-        }
+-        catch (const std::exception&)
+-        {
+-            return {};
+-        }
+-    }
+-
+-    namespace
+-    {
+-        PublicAddressLookup::Result fetch()
+-        {
+-            using namespace std::chrono_literals;
+-            try
+-            {
+-                asio::io_context io;
+-                tcp::resolver resolver(io);
+-                tcp::socket socket(io);
+-                asio::steady_timer deadline(io, 8s);
+-                deadline.async_wait([&socket](const boost::system::error_code& ec) {
+-                    if (!ec)
+-                    {
+-                        boost::system::error_code ignored;
+-                        socket.close(ignored);
+-                    }
+-                });
+-                boost::system::error_code ec;
+-                const auto endpoints = resolver.resolve("api.ipify.org", "80", ec);
+-                if (ec)
+-                    return { {}, "could not resolve api.ipify.org: " + ec.message() };
+-                asio::connect(socket, endpoints, ec);
+-                if (ec)
+-                    return { {}, "could not connect: " + ec.message() };
+-                const std::string request = "GET / HTTP/1.1\r\nHost: api.ipify.org\r\nConnection: close\r\n"
+-                                            "User-Agent: openmw-multiplayer\r\n\r\n";
+-                asio::write(socket, asio::buffer(request), ec);
+-                if (ec)
+-                    return { {}, "request failed: " + ec.message() };
+-                std::string response;
+-                asio::read(socket, asio::dynamic_buffer(response, 16384), ec); // until the server closes
+-                deadline.cancel();
+-                const std::size_t bodyStart = response.find("\r\n\r\n");
+-                if (response.compare(0, 12, "HTTP/1.1 200") != 0 || bodyStart == std::string::npos)
+-                    return { {}, "unexpected reply" };
+-                std::string body = response.substr(bodyStart + 4);
+-                body.erase(std::remove_if(body.begin(), body.end(), [](unsigned char c) { return c <= ' '; }), body.end());
+-                // a bare address: digits, dots, colons and hex letters
+-                if (body.empty() || body.size() > 45
+-                    || !std::all_of(body.begin(), body.end(), [](unsigned char c) { return std::isxdigit(c) || c == '.' || c == ':'; }))
+-                    return { {}, "unexpected reply" };
+-                return { std::move(body), {} };
+-            }
+-            catch (const std::exception& e)
+-            {
+-                return { {}, e.what() };
+-            }
+-        }
+-    }
+-
+-    PublicAddressLookup::~PublicAddressLookup()
+-    {
+-        if (mThread.joinable())
+-            mThread.join(); // bounded by the 8 second deadline
+-    }
+-
+-    void PublicAddressLookup::start()
+-    {
+-        {
+-            const std::lock_guard lock(mMutex);
+-            if (mRunning)
+-                return;
+-            mRunning = true;
+-            mResult.reset();
+-        }
+-        if (mThread.joinable())
+-            mThread.join();
+-        mThread = std::thread([this] {
+-            Result result = fetch();
+-            const std::lock_guard lock(mMutex);
+-            mResult = std::move(result);
+-            mRunning = false;
+-        });
+-    }
+-
+-    bool PublicAddressLookup::isRunning() const
+-    {
+-        const std::lock_guard lock(mMutex);
+-        return mRunning;
+-    }
+-
+-    std::optional<PublicAddressLookup::Result> PublicAddressLookup::poll()
+-    {
+-        const std::lock_guard lock(mMutex);
+-        std::optional<Result> result;
+-        result.swap(mResult);
+-        return result;
+-    }
+-}
+diff --git a/components/net/address.hpp b/components/net/address.hpp
+deleted file mode 100644
+index 7acc13109d..0000000000
+--- a/components/net/address.hpp
++++ /dev/null
+@@ -1,45 +0,0 @@
+-#ifndef OPENMW_COMPONENTS_NET_ADDRESS_H
+-#define OPENMW_COMPONENTS_NET_ADDRESS_H
+-
+-#include <memory>
+-#include <mutex>
+-#include <optional>
+-#include <string>
+-#include <thread>
+-
+-namespace Net
+-{
+-    // The address of this machine on the network used to reach the internet (usually the LAN address).
+-    // Nothing is sent; returns an empty string if there is no route.
+-    std::string localAddress();
+-
+-    // Asks an external service (api.ipify.org, plain HTTP GET) for this machine's public address.
+-    // Runs on a background thread; check with poll().
+-    class PublicAddressLookup
+-    {
+-    public:
+-        struct Result
+-        {
+-            std::string mAddress; // empty on failure
+-            std::string mError;
+-        };
+-
+-        PublicAddressLookup() = default;
+-        ~PublicAddressLookup();
+-        PublicAddressLookup(const PublicAddressLookup&) = delete;
+-        PublicAddressLookup& operator=(const PublicAddressLookup&) = delete;
+-
+-        void start();
+-        bool isRunning() const;
+-        // Returns the result once, after the lookup finished.
+-        std::optional<Result> poll();
+-
+-    private:
+-        mutable std::mutex mMutex;
+-        std::thread mThread;
+-        bool mRunning = false;
+-        std::optional<Result> mResult;
+-    };
+-}
+-
+-#endif
+diff --git a/components/net/client.cpp b/components/net/client.cpp
+deleted file mode 100644
+index ba464b99f8..0000000000
+--- a/components/net/client.cpp
++++ /dev/null
+@@ -1,225 +0,0 @@
+-#include "client.hpp"
+-
+-#include <atomic>
+-#include <deque>
+-#include <mutex>
+-#include <optional>
+-#include <thread>
+-
+-#include <boost/asio.hpp>
+-
+-namespace Net
+-{
+-    namespace asio = boost::asio;
+-    using asio::ip::tcp;
+-
+-    namespace
+-    {
+-        struct EventQueue
+-        {
+-            std::mutex mMutex;
+-            std::vector<Event> mEvents;
+-            std::atomic<bool> mConnected = false;
+-
+-            void push(Event::Type type, std::string data = {})
+-            {
+-                const std::lock_guard lock(mMutex);
+-                mEvents.push_back({ type, std::move(data) });
+-            }
+-        };
+-
+-        // Lives on the io thread; all members except mQueue are touched only there.
+-        class Session : public std::enable_shared_from_this<Session>
+-        {
+-        public:
+-            Session(asio::io_context& io, std::shared_ptr<EventQueue> queue)
+-                : mResolver(io)
+-                , mSocket(io)
+-                , mQueue(std::move(queue))
+-            {
+-            }
+-
+-            void start(const std::string& host, std::uint16_t port)
+-            {
+-                mResolver.async_resolve(host, std::to_string(port),
+-                    [self = shared_from_this()](const boost::system::error_code& ec, tcp::resolver::results_type r) {
+-                        if (ec)
+-                            return self->fail(ec);
+-                        asio::async_connect(self->mSocket, r,
+-                            [self](const boost::system::error_code& connectEc, const tcp::endpoint&) {
+-                                if (connectEc)
+-                                    return self->fail(connectEc);
+-                                boost::system::error_code ignored;
+-                                self->mSocket.set_option(tcp::no_delay(true), ignored);
+-                                self->mOpen = true;
+-                                self->mQueue->mConnected = true;
+-                                self->mQueue->push(Event::Type::Connected);
+-                                self->read();
+-                            });
+-                    });
+-            }
+-
+-            void write(std::string line)
+-            {
+-                if (!mOpen || mClosed)
+-                    return;
+-                line.push_back('\n');
+-                const bool idle = mOut.empty();
+-                mOut.push_back(std::move(line));
+-                if (idle)
+-                    doWrite();
+-            }
+-
+-            void close()
+-            {
+-                mClosed = true;
+-                boost::system::error_code ignored;
+-                mResolver.cancel();
+-                mSocket.close(ignored);
+-            }
+-
+-        private:
+-            void read()
+-            {
+-                asio::async_read_until(mSocket, asio::dynamic_buffer(mIn, Client::sMaxLineSize), '\n',
+-                    [self = shared_from_this()](const boost::system::error_code& ec, std::size_t n) {
+-                        if (ec)
+-                            return self->fail(ec);
+-                        std::size_t len = n - 1;
+-                        if (len > 0 && self->mIn[len - 1] == '\r')
+-                            --len;
+-                        self->mQueue->push(Event::Type::Message, self->mIn.substr(0, len));
+-                        self->mIn.erase(0, n);
+-                        self->read();
+-                    });
+-            }
+-
+-            void doWrite()
+-            {
+-                asio::async_write(mSocket, asio::buffer(mOut.front()),
+-                    [self = shared_from_this()](const boost::system::error_code& ec, std::size_t) {
+-                        if (ec)
+-                            return self->fail(ec);
+-                        self->mOut.pop_front();
+-                        if (!self->mOut.empty())
+-                            self->doWrite();
+-                    });
+-            }
+-
+-            void fail(const boost::system::error_code& ec)
+-            {
+-                if (mClosed)
+-                    return; // closed locally, nobody is listening
+-                mClosed = true;
+-                mOpen = false;
+-                mQueue->mConnected = false;
+-                mQueue->push(Event::Type::Disconnected, ec.message());
+-                boost::system::error_code ignored;
+-                mSocket.close(ignored);
+-            }
+-
+-            tcp::resolver mResolver;
+-            tcp::socket mSocket;
+-            std::shared_ptr<EventQueue> mQueue;
+-            std::string mIn;
+-            std::deque<std::string> mOut;
+-            bool mOpen = false;
+-            bool mClosed = false;
+-        };
+-    }
+-
+-    class Client::Impl
+-    {
+-    public:
+-        ~Impl()
+-        {
+-            if (mThread.joinable())
+-            {
+-                mWork.reset();
+-                mIo.stop();
+-                mThread.join();
+-            }
+-        }
+-
+-        void connect(const std::string& host, std::uint16_t port)
+-        {
+-            disconnect();
+-            if (!mThread.joinable())
+-            {
+-                mWork.emplace(asio::make_work_guard(mIo));
+-                mThread = std::thread([this] { mIo.run(); });
+-            }
+-            mQueue = std::make_shared<EventQueue>();
+-            mSession = std::make_shared<Session>(mIo, mQueue);
+-            asio::post(mIo, [s = mSession, host, port] { s->start(host, port); });
+-        }
+-
+-        void disconnect()
+-        {
+-            if (mSession)
+-                asio::post(mIo, [s = std::move(mSession)] { s->close(); });
+-            mSession.reset();
+-            mQueue.reset();
+-        }
+-
+-        bool isConnected() const { return mQueue && mQueue->mConnected; }
+-
+-        bool send(std::string_view line)
+-        {
+-            if (!isConnected() || line.size() > sMaxLineSize || line.find_first_of("\r\n") != std::string_view::npos)
+-                return false;
+-            asio::post(mIo, [s = mSession, l = std::string(line)]() mutable { s->write(std::move(l)); });
+-            return true;
+-        }
+-
+-        std::vector<Event> poll()
+-        {
+-            std::vector<Event> result;
+-            if (mQueue)
+-            {
+-                const std::lock_guard lock(mQueue->mMutex);
+-                result.swap(mQueue->mEvents);
+-            }
+-            return result;
+-        }
+-
+-    private:
+-        asio::io_context mIo;
+-        std::optional<asio::executor_work_guard<asio::io_context::executor_type>> mWork;
+-        std::thread mThread;
+-        std::shared_ptr<EventQueue> mQueue;
+-        std::shared_ptr<Session> mSession;
+-    };
+-
+-    Client::Client()
+-        : mImpl(std::make_unique<Impl>())
+-    {
+-    }
+-
+-    Client::~Client() = default;
+-
+-    void Client::connect(const std::string& host, std::uint16_t port)
+-    {
+-        mImpl->connect(host, port);
+-    }
+-
+-    void Client::disconnect()
+-    {
+-        mImpl->disconnect();
+-    }
+-
+-    bool Client::isConnected() const
+-    {
+-        return mImpl->isConnected();
+-    }
+-
+-    bool Client::send(std::string_view line)
+-    {
+-        return mImpl->send(line);
+-    }
+-
+-    std::vector<Event> Client::poll()
+-    {
+-        return mImpl->poll();
+-    }
+-}
+diff --git a/components/net/client.hpp b/components/net/client.hpp
+deleted file mode 100644
+index 6408f8ea62..0000000000
+--- a/components/net/client.hpp
++++ /dev/null
+@@ -1,59 +0,0 @@
+-#ifndef OPENMW_COMPONENTS_NET_CLIENT_H
+-#define OPENMW_COMPONENTS_NET_CLIENT_H
+-
+-#include <cstdint>
+-#include <memory>
+-#include <string>
+-#include <string_view>
+-#include <vector>
+-
+-namespace Net
+-{
+-    struct Event
+-    {
+-        enum class Type
+-        {
+-            Connected,
+-            Disconnected, // mData holds the reason. Not emitted after a local disconnect().
+-            Message, // mData holds one received line, without the line terminator.
+-        };
+-        Type mType;
+-        std::string mData;
+-    };
+-
+-    // Line-oriented TCP client. All socket work happens on a background thread;
+-    // the owner drives it with non-blocking calls and collects results with poll().
+-    // Not thread-safe: use from a single thread.
+-    class Client
+-    {
+-    public:
+-        static constexpr std::size_t sMaxLineSize = 1024 * 1024;
+-
+-        Client();
+-        ~Client();
+-        Client(const Client&) = delete;
+-        Client& operator=(const Client&) = delete;
+-
+-        // Starts connecting asynchronously, dropping any existing connection.
+-        // The outcome is reported by a Connected or Disconnected event.
+-        void connect(const std::string& host, std::uint16_t port);
+-
+-        // Drops the connection and discards pending events.
+-        void disconnect();
+-
+-        bool isConnected() const;
+-
+-        // Queues a message; a newline is appended. Returns false if not connected,
+-        // if the message contains a line break, or if it exceeds sMaxLineSize.
+-        bool send(std::string_view line);
+-
+-        // Returns and clears the events received since the last call.
+-        std::vector<Event> poll();
+-
+-    private:
+-        class Impl;
+-        std::unique_ptr<Impl> mImpl;
+-    };
+-}
+-
+-#endif
+diff --git a/components/net/server.cpp b/components/net/server.cpp
+deleted file mode 100644
+index 40ecc50c7a..0000000000
+--- a/components/net/server.cpp
++++ /dev/null
+@@ -1,270 +0,0 @@
+-#include "server.hpp"
+-
+-#include <deque>
+-#include <map>
+-#include <mutex>
+-#include <optional>
+-#include <thread>
+-
+-#include <boost/asio.hpp>
+-
+-namespace Net
+-{
+-    namespace asio = boost::asio;
+-    using asio::ip::tcp;
+-
+-    namespace
+-    {
+-        struct EventQueue
+-        {
+-            std::mutex mMutex;
+-            std::vector<ServerEvent> mEvents;
+-
+-            void push(ServerEvent::Type type, std::uint32_t client, std::string data = {})
+-            {
+-                const std::lock_guard lock(mMutex);
+-                mEvents.push_back({ type, client, std::move(data) });
+-            }
+-        };
+-
+-        // Lives on the io thread.
+-        class Connection : public std::enable_shared_from_this<Connection>
+-        {
+-        public:
+-            Connection(tcp::socket socket, std::uint32_t id, std::shared_ptr<EventQueue> queue)
+-                : mSocket(std::move(socket))
+-                , mId(id)
+-                , mQueue(std::move(queue))
+-            {
+-            }
+-
+-            void start()
+-            {
+-                boost::system::error_code ignored;
+-                mSocket.set_option(tcp::no_delay(true), ignored);
+-                mQueue->push(ServerEvent::Type::ClientConnected, mId);
+-                read();
+-            }
+-
+-            void write(std::string line)
+-            {
+-                if (mClosed)
+-                    return;
+-                line.push_back('\n');
+-                mPending += line.size();
+-                if (mPending > Server::sMaxPendingOutput)
+-                    return fail(); // the client is not keeping up
+-                const bool idle = mOut.empty();
+-                mOut.push_back(std::move(line));
+-                if (idle)
+-                    doWrite();
+-            }
+-
+-            // Closes without reporting a disconnect.
+-            void close()
+-            {
+-                mClosed = true;
+-                boost::system::error_code ignored;
+-                mSocket.close(ignored);
+-            }
+-
+-        private:
+-            void read()
+-            {
+-                asio::async_read_until(mSocket, asio::dynamic_buffer(mIn, Server::sMaxLineSize), '\n',
+-                    [self = shared_from_this()](const boost::system::error_code& ec, std::size_t n) {
+-                        if (ec)
+-                            return self->fail();
+-                        std::size_t len = n - 1;
+-                        if (len > 0 && self->mIn[len - 1] == '\r')
+-                            --len;
+-                        self->mQueue->push(ServerEvent::Type::Message, self->mId, self->mIn.substr(0, len));
+-                        self->mIn.erase(0, n);
+-                        self->read();
+-                    });
+-            }
+-
+-            void doWrite()
+-            {
+-                asio::async_write(mSocket, asio::buffer(mOut.front()),
+-                    [self = shared_from_this()](const boost::system::error_code& ec, std::size_t n) {
+-                        if (ec)
+-                            return self->fail();
+-                        self->mPending -= n;
+-                        self->mOut.pop_front();
+-                        if (!self->mOut.empty())
+-                            self->doWrite();
+-                    });
+-            }
+-
+-            void fail()
+-            {
+-                if (mClosed)
+-                    return;
+-                close();
+-                mQueue->push(ServerEvent::Type::ClientDisconnected, mId);
+-            }
+-
+-            tcp::socket mSocket;
+-            std::uint32_t mId;
+-            std::shared_ptr<EventQueue> mQueue;
+-            std::string mIn;
+-            std::deque<std::string> mOut;
+-            std::size_t mPending = 0;
+-            bool mClosed = false;
+-        };
+-    }
+-
+-    class Server::Impl
+-    {
+-    public:
+-        ~Impl() { stop(); }
+-
+-        std::string listen(std::uint16_t port)
+-        {
+-            stop();
+-            boost::system::error_code ec;
+-            tcp::acceptor acceptor(mIo);
+-            const tcp::endpoint endpoint(tcp::v4(), port);
+-            acceptor.open(endpoint.protocol(), ec);
+-            if (!ec)
+-                acceptor.set_option(tcp::acceptor::reuse_address(true), ec);
+-            if (!ec)
+-                acceptor.bind(endpoint, ec);
+-            if (!ec)
+-                acceptor.listen(asio::socket_base::max_listen_connections, ec);
+-            if (ec)
+-                return ec.message();
+-            mQueue = std::make_shared<EventQueue>();
+-            mAcceptor.emplace(std::move(acceptor));
+-            mNextId = 1;
+-            mWork.emplace(asio::make_work_guard(mIo));
+-            mThread = std::thread([this] { mIo.run(); });
+-            asio::post(mIo, [this] { accept(); });
+-            return {};
+-        }
+-
+-        void stop()
+-        {
+-            if (!mThread.joinable())
+-                return;
+-            asio::post(mIo, [this] {
+-                boost::system::error_code ignored;
+-                mAcceptor->close(ignored);
+-                for (auto& [id, c] : mConnections)
+-                    c->close();
+-                mConnections.clear();
+-            });
+-            mWork.reset();
+-            mThread.join();
+-            mIo.restart();
+-            mAcceptor.reset();
+-            mQueue.reset();
+-        }
+-
+-        bool isListening() const { return mThread.joinable(); }
+-
+-        bool send(std::uint32_t client, std::string_view line)
+-        {
+-            if (!isListening() || line.size() > Server::sMaxLineSize
+-                || line.find_first_of("\r\n") != std::string_view::npos)
+-                return false;
+-            asio::post(mIo, [this, client, l = std::string(line)]() mutable {
+-                const auto it = mConnections.find(client);
+-                if (it != mConnections.end())
+-                    it->second->write(std::move(l));
+-            });
+-            return true;
+-        }
+-
+-        void kick(std::uint32_t client)
+-        {
+-            if (!isListening())
+-                return;
+-            asio::post(mIo, [this, client] {
+-                const auto it = mConnections.find(client);
+-                if (it != mConnections.end())
+-                {
+-                    it->second->close();
+-                    mConnections.erase(it);
+-                }
+-            });
+-        }
+-
+-        std::vector<ServerEvent> poll()
+-        {
+-            std::vector<ServerEvent> result;
+-            if (mQueue)
+-            {
+-                {
+-                    const std::lock_guard lock(mQueue->mMutex);
+-                    result.swap(mQueue->mEvents);
+-                }
+-                // Forget connections the io thread has already closed, so ids are not leaked.
+-                for (const ServerEvent& e : result)
+-                    if (e.mType == ServerEvent::Type::ClientDisconnected)
+-                        asio::post(mIo, [this, id = e.mClient] { mConnections.erase(id); });
+-            }
+-            return result;
+-        }
+-
+-    private:
+-        void accept()
+-        {
+-            mAcceptor->async_accept([this](const boost::system::error_code& ec, tcp::socket socket) {
+-                if (ec)
+-                    return; // acceptor closed
+-                const std::uint32_t id = mNextId++;
+-                auto connection = std::make_shared<Connection>(std::move(socket), id, mQueue);
+-                mConnections.emplace(id, connection);
+-                connection->start();
+-                accept();
+-            });
+-        }
+-
+-        asio::io_context mIo;
+-        std::optional<asio::executor_work_guard<asio::io_context::executor_type>> mWork;
+-        std::thread mThread;
+-        std::optional<tcp::acceptor> mAcceptor;
+-        std::shared_ptr<EventQueue> mQueue;
+-        std::map<std::uint32_t, std::shared_ptr<Connection>> mConnections; // io thread only
+-        std::uint32_t mNextId = 1;
+-    };
+-
+-    Server::Server()
+-        : mImpl(std::make_unique<Impl>())
+-    {
+-    }
+-
+-    Server::~Server() = default;
+-
+-    std::string Server::listen(std::uint16_t port)
+-    {
+-        return mImpl->listen(port);
+-    }
+-
+-    void Server::stop()
+-    {
+-        mImpl->stop();
+-    }
+-
+-    bool Server::isListening() const
+-    {
+-        return mImpl->isListening();
+-    }
+-
+-    bool Server::send(std::uint32_t client, std::string_view line)
+-    {
+-        return mImpl->send(client, line);
+-    }
+-
+-    void Server::kick(std::uint32_t client)
+-    {
+-        mImpl->kick(client);
+-    }
+-
+-    std::vector<ServerEvent> Server::poll()
+-    {
+-        return mImpl->poll();
+-    }
+-}
+diff --git a/components/net/server.hpp b/components/net/server.hpp
+deleted file mode 100644
+index b27ae81165..0000000000
+--- a/components/net/server.hpp
++++ /dev/null
+@@ -1,59 +0,0 @@
+-#ifndef OPENMW_COMPONENTS_NET_SERVER_H
+-#define OPENMW_COMPONENTS_NET_SERVER_H
+-
+-#include <cstdint>
+-#include <memory>
+-#include <string>
+-#include <string_view>
+-#include <vector>
+-
+-namespace Net
+-{
+-    struct ServerEvent
+-    {
+-        enum class Type
+-        {
+-            ClientConnected,
+-            ClientDisconnected, // not emitted for kick() or stop()
+-            Message, // mData holds one received line, without the line terminator.
+-        };
+-        Type mType;
+-        std::uint32_t mClient;
+-        std::string mData;
+-    };
+-
+-    // Line-oriented TCP server. Sockets live on a background thread; the owner drives it with
+-    // non-blocking calls and collects results with poll(). Not thread-safe: use from a single thread.
+-    class Server
+-    {
+-    public:
+-        static constexpr std::size_t sMaxLineSize = 1024 * 1024;
+-        static constexpr std::size_t sMaxPendingOutput = 8 * 1024 * 1024;
+-
+-        Server();
+-        ~Server();
+-        Server(const Server&) = delete;
+-        Server& operator=(const Server&) = delete;
+-
+-        // Starts listening on all interfaces. Returns an error message, or an empty string on success.
+-        // Stops any previous listening first.
+-        std::string listen(std::uint16_t port);
+-
+-        // Closes the listening socket and every client, and discards pending events.
+-        void stop();
+-
+-        bool isListening() const;
+-
+-        // Client ids start at 1 and are never reused while listening.
+-        bool send(std::uint32_t client, std::string_view line);
+-        void kick(std::uint32_t client);
+-
+-        std::vector<ServerEvent> poll();
+-
+-    private:
+-        class Impl;
+-        std::unique_ptr<Impl> mImpl;
+-    };
+-}
+-
+-#endif
+diff --git a/components/net/sockets.cpp b/components/net/sockets.cpp
+new file mode 100644
+index 0000000000..8dc8293f1d
+--- /dev/null
++++ b/components/net/sockets.cpp
+@@ -0,0 +1,411 @@
++#include "sockets.hpp"
++
++#include <atomic>
++#include <deque>
++#include <map>
++#include <mutex>
++#include <optional>
++#include <set>
++#include <thread>
++
++#include <boost/asio.hpp>
++
++namespace Net
++{
++    namespace asio = boost::asio;
++    using asio::ip::tcp;
++
++    namespace
++    {
++        struct Shared
++        {
++            std::mutex mMutex;
++            std::vector<SocketEvent> mEvents;
++            std::map<std::uint32_t, std::string> mLocalAddress;
++
++            void push(SocketEvent event)
++            {
++                const std::lock_guard lock(mMutex);
++                mEvents.push_back(std::move(event));
++            }
++        };
++
++        // Lives on the io thread.
++        class Connection : public std::enable_shared_from_this<Connection>
++        {
++        public:
++            Connection(asio::io_context& io, std::uint32_t id, std::shared_ptr<Shared> shared)
++                : mResolver(io)
++                , mSocket(io)
++                , mId(id)
++                , mShared(std::move(shared))
++            {
++            }
++
++            // Outgoing: resolve, connect, then read.
++            void connect(const std::string& host, std::uint16_t port)
++            {
++                mResolver.async_resolve(host, std::to_string(port),
++                    [self = shared_from_this()](const boost::system::error_code& ec, tcp::resolver::results_type r) {
++                        if (ec)
++                            return self->fail(ec);
++                        asio::async_connect(self->mSocket, r,
++                            [self](const boost::system::error_code& connectEc, const tcp::endpoint&) {
++                                if (connectEc)
++                                    return self->fail(connectEc);
++                                self->opened();
++                                self->mShared->push({ SocketEvent::Type::Connected, self->mId, 0, {} });
++                                self->read();
++                            });
++                    });
++            }
++
++            // Incoming: the socket is already connected.
++            tcp::socket& socket() { return mSocket; }
++            void startAccepted(std::uint32_t listener)
++            {
++                opened();
++                mShared->push({ SocketEvent::Type::Accepted, mId, listener, {} });
++                read();
++            }
++
++            void write(std::string data)
++            {
++                if (mClosed)
++                    return;
++                mPending += data.size();
++                if (mPending > Sockets::sMaxPendingOutput)
++                    return fail(asio::error::no_buffer_space); // the peer is not keeping up
++                const bool idle = mOut.empty();
++                mOut.push_back(std::move(data));
++                if (idle)
++                    doWrite();
++            }
++
++            // Closes without reporting.
++            void close()
++            {
++                mClosed = true;
++                boost::system::error_code ignored;
++                mResolver.cancel();
++                mSocket.close(ignored);
++                const std::lock_guard lock(mShared->mMutex);
++                mShared->mLocalAddress.erase(mId);
++            }
++
++        private:
++            void opened()
++            {
++                boost::system::error_code ec;
++                mSocket.set_option(tcp::no_delay(true), ec);
++                const tcp::endpoint local = mSocket.local_endpoint(ec);
++                if (!ec)
++                {
++                    const std::lock_guard lock(mShared->mMutex);
++                    mShared->mLocalAddress[mId] = local.address().to_string();
++                }
++            }
++
++            void read()
++            {
++                asio::async_read_until(mSocket, asio::dynamic_buffer(mIn, Sockets::sMaxLineSize), '\n',
++                    [self = shared_from_this()](const boost::system::error_code& ec, std::size_t n) {
++                        if (ec)
++                        {
++                            // a final line without a terminator (e.g. an HTTP body) still counts
++                            if (ec == asio::error::eof && !self->mIn.empty() && !self->mClosed)
++                                self->mShared->push({ SocketEvent::Type::Line, self->mId, 0, std::move(self->mIn) });
++                            return self->fail(ec);
++                        }
++                        std::size_t len = n - 1;
++                        if (len > 0 && self->mIn[len - 1] == '\r')
++                            --len;
++                        self->mShared->push({ SocketEvent::Type::Line, self->mId, 0, self->mIn.substr(0, len) });
++                        self->mIn.erase(0, n);
++                        self->read();
++                    });
++            }
++
++            void doWrite()
++            {
++                asio::async_write(mSocket, asio::buffer(mOut.front()),
++                    [self = shared_from_this()](const boost::system::error_code& ec, std::size_t n) {
++                        if (ec)
++                            return self->fail(ec);
++                        self->mPending -= n;
++                        self->mOut.pop_front();
++                        if (!self->mOut.empty())
++                            self->doWrite();
++                    });
++            }
++
++            void fail(const boost::system::error_code& ec)
++            {
++                if (mClosed)
++                    return;
++                close();
++                mShared->push({ SocketEvent::Type::Closed, mId, 0, ec.message() });
++            }
++
++            tcp::resolver mResolver;
++            tcp::socket mSocket;
++            std::uint32_t mId;
++            std::shared_ptr<Shared> mShared;
++            std::string mIn;
++            std::deque<std::string> mOut;
++            std::size_t mPending = 0;
++            bool mClosed = false;
++        };
++
++        struct Listener
++        {
++            explicit Listener(asio::io_context& io)
++                : mAcceptor(io)
++            {
++            }
++            tcp::acceptor mAcceptor;
++        };
++    }
++
++    class Sockets::Impl
++    {
++    public:
++        Impl()
++            : mShared(std::make_shared<Shared>())
++        {
++        }
++
++        ~Impl() { stopThread(); }
++
++        std::uint32_t connect(const std::string& host, std::uint16_t port)
++        {
++            if (mLive.size() >= sMaxSockets)
++                return 0;
++            startThread();
++            const std::uint32_t id = mNextId.fetch_add(1);
++            mLive.insert(id);
++            asio::post(mIo, [this, id, host, port] {
++                auto c = std::make_shared<Connection>(mIo, id, mShared);
++                mConnections[id] = c;
++                c->connect(host, port);
++            });
++            return id;
++        }
++
++        std::uint32_t listen(std::uint16_t port, std::string& error)
++        {
++            if (mLive.size() >= sMaxSockets)
++            {
++                error = "too many sockets";
++                return 0;
++            }
++            auto listener = std::make_shared<Listener>(mIo);
++            boost::system::error_code ec;
++            const tcp::endpoint endpoint(tcp::v4(), port);
++            listener->mAcceptor.open(endpoint.protocol(), ec);
++            if (!ec)
++                listener->mAcceptor.set_option(tcp::acceptor::reuse_address(true), ec);
++            if (!ec)
++                listener->mAcceptor.bind(endpoint, ec);
++            if (!ec)
++                listener->mAcceptor.listen(asio::socket_base::max_listen_connections, ec);
++            if (ec)
++            {
++                error = ec.message();
++                return 0;
++            }
++            startThread();
++            const std::uint32_t id = mNextId.fetch_add(1);
++            mLive.insert(id);
++            asio::post(mIo, [this, id, listener] {
++                mListeners[id] = listener;
++                accept(id, listener);
++            });
++            return id;
++        }
++
++        bool send(std::uint32_t id, std::string_view data, bool raw)
++        {
++            if (!mLive.contains(id) || data.size() > sMaxLineSize)
++                return false;
++            std::string out(data);
++            if (!raw)
++            {
++                if (data.find_first_of("\r\n") != std::string_view::npos)
++                    return false;
++                out.push_back('\n');
++            }
++            asio::post(mIo, [this, id, out = std::move(out)]() mutable {
++                const auto it = mConnections.find(id);
++                if (it != mConnections.end())
++                    it->second->write(std::move(out));
++            });
++            return true;
++        }
++
++        void close(std::uint32_t id)
++        {
++            if (!mLive.erase(id))
++                return;
++            mIgnored.insert(id);
++            asio::post(mIo, [this, id] {
++                if (const auto it = mConnections.find(id); it != mConnections.end())
++                {
++                    it->second->close();
++                    mConnections.erase(it);
++                }
++                if (const auto it = mListeners.find(id); it != mListeners.end())
++                {
++                    boost::system::error_code ignored;
++                    it->second->mAcceptor.close(ignored);
++                    mListeners.erase(it);
++                }
++            });
++        }
++
++        void closeAll()
++        {
++            stopThread();
++            mLive.clear();
++            mIgnored.clear();
++            const std::lock_guard lock(mShared->mMutex);
++            mShared->mEvents.clear();
++            mShared->mLocalAddress.clear();
++        }
++
++        std::string localAddress(std::uint32_t id) const
++        {
++            const std::lock_guard lock(mShared->mMutex);
++            const auto it = mShared->mLocalAddress.find(id);
++            return it == mShared->mLocalAddress.end() ? std::string() : it->second;
++        }
++
++        std::vector<SocketEvent> poll()
++        {
++            std::vector<SocketEvent> raw;
++            {
++                const std::lock_guard lock(mShared->mMutex);
++                raw.swap(mShared->mEvents);
++            }
++            std::vector<SocketEvent> result;
++            for (SocketEvent& e : raw)
++            {
++                if (mIgnored.contains(e.mId))
++                {
++                    // events that were already queued when a script closed the connection
++                    if (e.mType == SocketEvent::Type::Accepted)
++                        mLive.erase(e.mId);
++                    continue;
++                }
++                if (e.mType == SocketEvent::Type::Accepted)
++                    mLive.insert(e.mId);
++                else if (e.mType == SocketEvent::Type::Closed)
++                    mLive.erase(e.mId); // the id is dead; scripts need not close it
++                result.push_back(std::move(e));
++            }
++            return result;
++        }
++
++    private:
++        void startThread()
++        {
++            if (mThread.joinable())
++                return;
++            mWork.emplace(asio::make_work_guard(mIo));
++            mThread = std::thread([this] { mIo.run(); });
++        }
++
++        void stopThread()
++        {
++            if (!mThread.joinable())
++                return;
++            asio::post(mIo, [this] {
++                for (auto& [id, l] : mListeners)
++                {
++                    boost::system::error_code ignored;
++                    l->mAcceptor.close(ignored);
++                }
++                for (auto& [id, c] : mConnections)
++                    c->close();
++                mListeners.clear();
++                mConnections.clear();
++            });
++            mWork.reset();
++            mThread.join();
++            mIo.restart();
++        }
++
++        void accept(std::uint32_t listenerId, std::shared_ptr<Listener> listener)
++        {
++            const std::uint32_t id = mNextId.fetch_add(1);
++            auto connection = std::make_shared<Connection>(mIo, id, mShared);
++            listener->mAcceptor.async_accept(connection->socket(),
++                [this, listenerId, listener, connection, id](const boost::system::error_code& ec) {
++                    if (ec)
++                        return; // listener closed
++                    if (mConnections.size() >= sMaxSockets)
++                        connection->close();
++                    else
++                    {
++                        mConnections[id] = connection;
++                        connection->startAccepted(listenerId);
++                    }
++                    accept(listenerId, listener);
++                });
++        }
++
++        asio::io_context mIo;
++        std::optional<asio::executor_work_guard<asio::io_context::executor_type>> mWork;
++        std::thread mThread;
++        std::shared_ptr<Shared> mShared;
++        std::atomic<std::uint32_t> mNextId{ 1 };
++        // main thread
++        std::set<std::uint32_t> mLive;
++        std::set<std::uint32_t> mIgnored;
++        // io thread
++        std::map<std::uint32_t, std::shared_ptr<Connection>> mConnections;
++        std::map<std::uint32_t, std::shared_ptr<Listener>> mListeners;
++    };
++
++    Sockets::Sockets()
++        : mImpl(std::make_unique<Impl>())
++    {
++    }
++
++    Sockets::~Sockets() = default;
++
++    std::uint32_t Sockets::connect(const std::string& host, std::uint16_t port)
++    {
++        return mImpl->connect(host, port);
++    }
++
++    std::uint32_t Sockets::listen(std::uint16_t port, std::string& error)
++    {
++        return mImpl->listen(port, error);
++    }
++
++    bool Sockets::send(std::uint32_t id, std::string_view data, bool raw)
++    {
++        return mImpl->send(id, data, raw);
++    }
++
++    void Sockets::close(std::uint32_t id)
++    {
++        mImpl->close(id);
++    }
++
++    void Sockets::closeAll()
++    {
++        mImpl->closeAll();
++    }
++
++    std::string Sockets::localAddress(std::uint32_t id) const
++    {
++        return mImpl->localAddress(id);
++    }
++
++    std::vector<SocketEvent> Sockets::poll()
++    {
++        return mImpl->poll();
++    }
++}
+diff --git a/components/net/sockets.hpp b/components/net/sockets.hpp
+new file mode 100644
+index 0000000000..8661d47855
+--- /dev/null
++++ b/components/net/sockets.hpp
+@@ -0,0 +1,70 @@
++#ifndef OPENMW_COMPONENTS_NET_SOCKETS_H
++#define OPENMW_COMPONENTS_NET_SOCKETS_H
++
++#include <cstdint>
++#include <memory>
++#include <string>
++#include <string_view>
++#include <vector>
++
++namespace Net
++{
++    struct SocketEvent
++    {
++        enum class Type
++        {
++            Connected, // an outgoing connection was established
++            Accepted, // a listener accepted a connection: mId is the new connection, mListener the listener
++            Line, // mData holds one received line without its terminator (a final unterminated line is delivered too)
++            Closed, // the peer closed or the connection failed; mData is the reason. Not sent after close().
++        };
++        Type mType;
++        std::uint32_t mId = 0;
++        std::uint32_t mListener = 0;
++        std::string mData;
++    };
++
++    // Plain TCP sockets for scripts: any number of outgoing connections and listeners, identified by ids that are
++    // never reused. All socket work happens on a background thread; the owner drives it with non-blocking calls and
++    // collects results with poll(). Messages are lines terminated by '\n' ('\r' before it is dropped).
++    // Not thread-safe: use from a single thread.
++    class Sockets
++    {
++    public:
++        static constexpr std::size_t sMaxLineSize = 1024 * 1024;
++        static constexpr std::size_t sMaxPendingOutput = 8 * 1024 * 1024;
++        static constexpr std::size_t sMaxSockets = 128;
++
++        Sockets();
++        ~Sockets();
++        Sockets(const Sockets&) = delete;
++        Sockets& operator=(const Sockets&) = delete;
++
++        // Starts connecting asynchronously; a Connected or Closed event follows. Returns 0 if there are too many sockets.
++        std::uint32_t connect(const std::string& host, std::uint16_t port);
++
++        // Starts listening on all interfaces. On failure returns 0 and sets error.
++        std::uint32_t listen(std::uint16_t port, std::string& error);
++
++        // Queues data on a connection. Unless raw, a '\n' is appended and the data must not contain line breaks.
++        // Returns false for unknown or closed ids, rejected data or when too much is already queued.
++        bool send(std::uint32_t id, std::string_view data, bool raw);
++
++        // Closes a connection or listener (and, for a listener, nothing else: accepted connections stay open).
++        // No further events are delivered for it.
++        void close(std::uint32_t id);
++
++        void closeAll();
++
++        // Our address on this connection, or an empty string if it is not connected.
++        std::string localAddress(std::uint32_t id) const;
++
++        std::vector<SocketEvent> poll();
++
++    private:
++        class Impl;
++        std::unique_ptr<Impl> mImpl;
++    };
++}
++
++#endif
+diff --git a/docs/source/reference/lua-scripting/engine_handlers.rst b/docs/source/reference/lua-scripting/engine_handlers.rst
+index c8ad1cf539..652c15203c 100644
+--- a/docs/source/reference/lua-scripting/engine_handlers.rst
++++ b/docs/source/reference/lua-scripting/engine_handlers.rst
+@@ -53,19 +53,9 @@ Engine handler is a function defined by a script, that can be called by the engi
+   * - onPlayerAdded(player)
+     - | Player added to the game world. The argument is a `Game object`. 
+       | Note that this is triggered at the start of a game, and when a game is loaded.
+-  * - onNetConnected()
+-    - The connection requested with ``openmw.net.connect`` is established.
+-  * - onNetDisconnected(reason)
+-    - | The connection failed or was closed by the server. ``reason`` is a string.
+-      | Not called after ``openmw.net.disconnect``.
+-  * - onNetMessage(message)
+-    - A line was received from the server. ``message`` is a string without the line terminator.
+-  * - onNetClientConnected(id)
+-    - A client connected to the server started with ``openmw.net.listen``. ``id`` is a number.
+-  * - onNetClientDisconnected(id)
+-    - | A client of the server went away. Not called after ``openmw.net.kick``.
+-  * - onNetClientMessage(id, message)
+-    - A line was received from a client of the server.
++  * - onNetEvent(type, id, data, listener)
++    - | Something happened on a socket opened with ``openmw.net``. ``type`` is ``"connected"``, ``"accepted"``,
++        ``"line"`` or ``"closed"``; see the ``openmw.net`` documentation for the meaning of the other arguments.
+   * - onObjectActive(object)
+     - Object becomes active.
+   * - onActorActive(actor)
+diff --git a/files/lua_api/openmw/net.lua b/files/lua_api/openmw/net.lua
+index 837814df79..193d3036e0 100644
+--- a/files/lua_api/openmw/net.lua
++++ b/files/lua_api/openmw/net.lua
+@@ -1,93 +1,55 @@
+ ---
+--- Line-based TCP connection to an external server, for multiplayer and
+--- other out-of-process integrations.
+--- There is a single connection shared by all global scripts.
+--- Messages are UTF-8 strings terminated by a line break; the payload format is
+--- up to the script (see @{#net.encodeJson} and @{openmw.markup#markup.decodeYaml}, which also parses JSON).
+--- Connection progress and incoming data are delivered through the engine handlers
+--- `onNetConnected()`, `onNetDisconnected(reason)` and `onNetMessage(message)`.
+--- A script can also host: @{#net.listen} accepts any number of clients, addressed by numeric id, and reports them through
+--- `onNetClientConnected(id)`, `onNetClientDisconnected(id)` and `onNetClientMessage(id, message)`.
+--- The connection and the server are closed when a game is unloaded.
++-- Plain TCP sockets for global scripts, e.g. for multiplayer or other out-of-process integrations.
++-- A script can open any number of outgoing connections and listeners. Each is identified by a number that is not
++-- reused. Messages are UTF-8 lines terminated by a line break; the payload format is up to the script
++-- (see @{openmw.markup#markup.decodeYaml}, which also parses JSON).
++--
++-- Everything that happens on a socket is delivered through one engine handler,
++-- `onNetEvent(type, id, data, listener)`:
++--
++--   * `"connected"`: the outgoing connection `id` is established.
++--   * `"accepted"`: listener `listener` accepted a new connection `id`.
++--   * `"line"`: connection `id` received one line (`data`, without the line terminator). A last line that the peer
++--     sent without a terminator before closing is delivered too.
++--   * `"closed"`: connection `id` was closed by the peer or failed (`data` is the reason). Not sent after @{#net.close}.
++--
++-- All sockets are closed when a game is unloaded.
+ -- @context global
+ -- @module net
+ -- @usage local net = require('openmw.net')
+ 
+-
+-
+ ---
+--- Start connecting to a server. Does not block; the result is reported by
+--- the `onNetConnected` or `onNetDisconnected` handler. Replaces the current connection, if any.
++-- Start connecting to a server. Does not block; the result is reported by a `"connected"` or `"closed"` event.
+ -- @function [parent=#net] connect
+ -- @param #string host Host name or IP address.
+ -- @param #number port TCP port, 1-65535.
++-- @return #number The connection id, or `nil` if there are too many sockets.
+ 
+ ---
+--- Close the connection. `onNetDisconnected` is not called for a disconnect requested by a script.
+--- @function [parent=#net] disconnect
+-
+----
+--- Whether the connection is established.
+--- @function [parent=#net] isConnected
+--- @return #boolean
+-
+----
+--- Send a message to the server. A line break is appended.
+--- @function [parent=#net] send
+--- @param #string message Must not contain line breaks (`\r` or `\n`) and must be at most 1 MiB.
+--- @return #boolean `false` if not connected or the message was rejected.
+-
+----
+--- Start accepting clients on all interfaces, replacing any previous server. Does not block.
++-- Start accepting connections on all interfaces. Does not block.
+ -- @function [parent=#net] listen
+ -- @param #number port TCP port, 1-65535.
+--- @return #string An error message if the port could not be opened, otherwise `nil`.
+-
+----
+--- Close the server and all of its clients. `onNetClientDisconnected` is not called for them.
+--- @function [parent=#net] stopListening
+-
+----
+--- Whether @{#net.listen} succeeded and the server has not been stopped.
+--- @function [parent=#net] isListening
+--- @return #boolean
++-- @return #number The listener id, or `nil` followed by an error message (for example if the port is in use).
+ 
+ ---
+--- Send a message to a client of the server. A line break is appended.
+--- @function [parent=#net] sendTo
+--- @param #number id Client id from `onNetClientConnected`.
+--- @param #string message Same restrictions as for @{#net.send}.
+--- @return #boolean `false` if not listening or the message was rejected. A client that has already gone is silently ignored.
++-- Send data on a connection.
++-- @function [parent=#net] send
++-- @param #number id Connection id.
++-- @param #string data Without `raw`, a line break is appended and `data` must not contain line breaks (`\r` or `\n`).
++-- At most 1 MiB.
++-- @param #boolean raw Optional. If true the data is sent exactly as given (for example an HTTP request).
++-- @return #boolean `false` if the id is unknown or closed, the data was rejected or too much is already queued.
+ 
+ ---
+--- Disconnect a client of the server. `onNetClientDisconnected` is not called for it.
+--- @function [parent=#net] kick
+--- @param #number id Client id.
++-- Close a connection or a listener. No further events are delivered for it; connections that a listener accepted stay
++-- open. Ids of connections that were closed by the peer do not need to be closed.
++-- @function [parent=#net] close
++-- @param #number id
+ 
+ ---
+--- This machine's address on the network that reaches the internet (normally its LAN address). Sends nothing.
++-- Our address on a connected connection, i.e. the address of this machine on the network it uses to reach the other end.
+ -- @function [parent=#net] localAddress
+--- @return #string The address, or `nil` if there is no route.
+-
+----
+--- Ask an external service (api.ipify.org, plain HTTP) for this machine's public address. Only call this when the user asked
+--- for it, since it contacts a third party. The answer is read with @{#net.getPublicAddress}.
+--- @function [parent=#net] lookupPublicAddress
+-
+----
+--- The result of @{#net.lookupPublicAddress}, returned once. Returns nothing while it is still running.
+--- @function [parent=#net] getPublicAddress
+--- @return #string The public address, or `nil` on failure.
+--- @return #string An error message on failure.
+-
+----
+--- Convert a Lua value to a JSON string, which contains no line breaks and can be passed to @{#net.send}.
+--- Supports nil, booleans, numbers, strings and tables; a table with keys 1..n is
+--- an array, any other table (with string keys) is an object. An empty table is an empty array.
+--- Throws an error for unsupported values (functions, userdata such as vectors and game objects),
+--- non-finite numbers, non-string object keys and cyclic tables.
+--- @function [parent=#net] encodeJson
+--- @param value Value to encode.
+--- @return #string
++-- @param #number id
++-- @return #string The address, or `nil` if the connection is not established.
+ 
+ return nil
+diff --git a/files/lua_api/openmw/ui.lua b/files/lua_api/openmw/ui.lua
+index 1b5633535f..dbd0e1cb18 100644
+--- a/files/lua_api/openmw/ui.lua
++++ b/files/lua_api/openmw/ui.lua
+@@ -76,9 +76,9 @@
+ -- @field Container Automatically wraps around its contents
+ 
+ ---
+--- Shows markers for other players on the map window and the minimap, replacing the previous markers.
++-- Shows extra markers on the map window and the minimap (for example other players), replacing the previous ones.
+ -- They are not saved and can not be edited. Pass an empty list to remove them.
+--- @function [parent=#ui] setPlayerMarkers
++-- @function [parent=#ui] setMapMarkers
+ -- @param #list<#table> markers Each entry is a table `{ cell = "", x = 0, y = 0, name = "" }`: `cell` is empty for the exterior or
+ -- the name of an interior cell, `x` and `y` are world coordinates, `name` is shown as the tooltip.
+ 
+diff --git a/multiplayer/mod/scripts/mp/global.lua b/multiplayer/mod/scripts/mp/global.lua
+index 12a4cb92cf..c3a19687fc 100644
+--- a/multiplayer/mod/scripts/mp/global.lua
++++ b/multiplayer/mod/scripts/mp/global.lua
+@@ -2,7 +2,7 @@
+ -- NPC avatar when they share your cell (activate one to invite them). Members of your party (max 3)
+ -- additionally share vitals and chat, and actors that are alive in a member's world but dead/missing
+ -- in ours appear as marked proxies (proxies.lua). The UI lives in player.lua.
+-local net = require('openmw.net')
++local net = require('scripts/mp/netlib')
+ local world = require('openmw.world')
+ local util = require('openmw.util')
+ local types = require('openmw.types')
+@@ -118,7 +118,7 @@ local function connect()
+             end
+             hostErrorShown = false
+             log('hosting on port ' .. tostring(port))
+-            hostInfo = { port = port, lan = net.localAddress(), looking = true }
++            hostInfo = { port = port, looking = true }
+             -- hosting is pointless without the address people outside the network must use, so look it up now
+             -- (one request to api.ipify.org)
+             net.lookupPublicAddress()
+@@ -560,7 +560,7 @@ local function onCommand(d)
+             notice('Still looking up your address...')
+         else
+             hostInfo.looking = true
+-            net.lookupPublicAddress() -- contacts api.ipify.org; only done because the player asked
++            net.lookupPublicAddress() -- contacts api.ipify.org
+             notice('Asking api.ipify.org for your internet address...')
+         end
+     elseif cmd == 'whisper' then
+@@ -728,6 +728,25 @@ local function onMessage(msg)
+     elseif t == 'state' and type(msg.pos) == 'table' then r.state = msg; r.stateAt = core.getRealTime() end
+ end
+ 
++------------------------------------------------------------------ network callbacks (see netlib.lua)
++
++net.callbacks = {
++    onConnected = function() log('connected'); retry = 0; pushUi() end,
++    onDisconnected = function(reason)
++        log('disconnected: ' .. tostring(reason))
++        clearRemotes()
++        notice('Disconnected from the server.')
++        pushUi()
++    end,
++    onMessage = function(line)
++        local ok, msg = pcall(markup.decodeYaml, line)
++        if ok and type(msg) == 'table' then onMessage(msg) end
++    end,
++    onClientConnected = relay.onClientConnected,
++    onClientDisconnected = relay.onClientDisconnected,
++    onClientMessage = relay.onClientMessage,
++}
++
+ ------------------------------------------------------------------ handlers
+ 
+ return {
+@@ -758,6 +777,7 @@ return {
+             lastReal = realNow
+             clock = clock + dt
+             relay.update(dt)
++            net.update(dt)
+             if botWanted and hosting() and relay.isRunning() and net.isConnected() then
+                 if not bot.isRunning() then
+                     bot.start({ player = player, cellKey = cellKey })
+@@ -769,6 +789,8 @@ return {
+                 local address, err = net.getPublicAddress()
+                 if address or err then
+                     hostInfo.looking = false
++                    hostInfo.lan = net.lanAddress
++                    log('address lookup: ' .. tostring(address) .. ' ' .. tostring(err) .. ' lan ' .. tostring(net.lanAddress))
+                     if address then
+                         hostInfo.public, hostInfo.error = address, nil
+                         notice('Others join you at ' .. address .. ':' .. tostring(hostInfo.port)
+@@ -840,20 +862,7 @@ return {
+                 pushUi()
+             end
+         end,
+-        onNetConnected = function() log('connected'); retry = 0; pushUi() end,
+-        onNetDisconnected = function(reason)
+-            log('disconnected: ' .. tostring(reason))
+-            clearRemotes()
+-            notice('Disconnected from the server.')
+-            pushUi()
+-        end,
+-        onNetClientConnected = relay.onClientConnected,
+-        onNetClientDisconnected = relay.onClientDisconnected,
+-        onNetClientMessage = relay.onClientMessage,
+-        onNetMessage = function(line)
+-            local ok, msg = pcall(markup.decodeYaml, line)
+-            if ok and type(msg) == 'table' then onMessage(msg) end
+-        end,
++        onNetEvent = net.onEvent,
+     },
+     eventHandlers = {
+         MpInput = function(d) myInput = d end,
+diff --git a/multiplayer/mod/scripts/mp/netlib.lua b/multiplayer/mod/scripts/mp/netlib.lua
+new file mode 100644
+index 0000000000..2313fe1c38
+--- /dev/null
++++ b/multiplayer/mod/scripts/mp/netlib.lua
+@@ -0,0 +1,228 @@
++-- The multiplayer networking layer, written on top of the engine's generic sockets (openmw.net):
++--   * one outgoing connection to a host ("client"),
++--   * a listener with any number of players ("server"; player ids are small numbers starting at 1),
++--   * a JSON encoder (decoding is markup.decodeYaml),
++--   * a small HTTP lookup of the public internet address.
++-- Engine events arrive through M.onEvent (wired to the onNetEvent handler); the owner sets M.callbacks:
++--   onConnected(), onDisconnected(reason), onMessage(line)                      -- client
++--   onClientConnected(id), onClientDisconnected(id), onClientMessage(id, line)  -- server
++local net = require('openmw.net')
++
++local M = {}
++M.callbacks = {}
++
++------------------------------------------------------------------ JSON
++
++local MAX_DEPTH = 32
++local ESCAPES = { ['"'] = '\\"', ['\\'] = '\\\\', ['\n'] = '\\n', ['\r'] = '\\r', ['\t'] = '\\t' }
++
++local function quote(s)
++    return '"' .. (s:gsub('[%c"\\]', function(c) return ESCAPES[c] or string.format('\\u%04x', c:byte()) end)) .. '"'
++end
++
++local function encode(v, depth, out)
++    local t = type(v)
++    if t == 'nil' then out[#out + 1] = 'null'
++    elseif t == 'boolean' then out[#out + 1] = v and 'true' or 'false'
++    elseif t == 'number' then
++        if v ~= v or v == math.huge or v == -math.huge then error('encodeJson: NaN and infinity can not be encoded', 0) end
++        if v == math.floor(v) and math.abs(v) < 1e15 then out[#out + 1] = string.format('%d', v)
++        else out[#out + 1] = string.format('%.17g', v) end
++    elseif t == 'string' then out[#out + 1] = quote(v)
++    elseif t == 'table' then
++        if depth > MAX_DEPTH then error('encodeJson: table is nested too deeply or contains a cycle', 0) end
++        local count, maxIndex, isArray = 0, 0, true
++        for k in pairs(v) do
++            count = count + 1
++            if type(k) == 'number' and k >= 1 and k == math.floor(k) then
++                if k > maxIndex then maxIndex = k end
++            else
++                isArray = false
++            end
++        end
++        if count == 0 then out[#out + 1] = '[]'
++        elseif isArray and maxIndex == count then
++            out[#out + 1] = '['
++            for i = 1, count do
++                if i > 1 then out[#out + 1] = ',' end
++                encode(v[i], depth + 1, out)
++            end
++            out[#out + 1] = ']'
++        else
++            out[#out + 1] = '{'
++            local first = true
++            for k, x in pairs(v) do
++                if type(k) ~= 'string' then error('encodeJson: object keys must be strings', 0) end
++                if not first then out[#out + 1] = ',' end
++                first = false
++                out[#out + 1] = quote(k)
++                out[#out + 1] = ':'
++                encode(x, depth + 1, out)
++            end
++            out[#out + 1] = '}'
++        end
++    else
++        error('encodeJson: unsupported value type: ' .. t, 0)
++    end
++end
++
++-- Lua value -> JSON text without line breaks. nil, booleans, numbers, strings and tables; a table with keys 1..n
++-- is an array, anything else is an object with string keys, and an empty table is an empty array.
++function M.encodeJson(value)
++    local out = {}
++    encode(value, 0, out)
++    return table.concat(out)
++end
++
++------------------------------------------------------------------ client: one connection to a host
++
++local clientId, clientUp = nil, false
++
++function M.disconnect()
++    if clientId then net.close(clientId) end
++    clientId, clientUp = nil, false
++end
++
++function M.connect(host, port)
++    M.disconnect()
++    clientId = net.connect(host, port)
++end
++
++function M.isConnected() return clientUp end
++
++function M.send(line)
++    if not clientUp then return false end
++    return net.send(clientId, line)
++end
++
++------------------------------------------------------------------ server: a listener and its players
++
++local listenerId
++local socketOfPlayer, playerOfSocket = {}, {}
++local nextPlayer = 1
++
++-- Returns an error message, or nil on success.
++function M.stopListening()
++    if listenerId then net.close(listenerId) end
++    for _, sock in pairs(socketOfPlayer) do net.close(sock) end
++    listenerId, socketOfPlayer, playerOfSocket, nextPlayer = nil, {}, {}, 1
++end
++
++function M.listen(port)
++    M.stopListening()
++    local id, err = net.listen(port)
++    if not id then return err or 'could not listen' end
++    listenerId = id
++    return nil
++end
++
++function M.isListening() return listenerId ~= nil end
++
++function M.sendTo(player, line)
++    local sock = socketOfPlayer[player]
++    return sock ~= nil and net.send(sock, line)
++end
++
++function M.kick(player)
++    local sock = socketOfPlayer[player]
++    if not sock then return end
++    net.close(sock)
++    socketOfPlayer[player], playerOfSocket[sock] = nil, nil
++end
++
++-- The remote address would be nice here too, but sockets only expose our own side.
++
++------------------------------------------------------------------ public address lookup (HTTP GET to api.ipify.org)
++
++local LOOKUP_TIMEOUT = 10
++local lookup -- { id, status, headersDone, body, age }
++local lookupResult -- { address } or { error }, read once by getPublicAddress
++M.lanAddress = nil -- our address on the network that reached the internet (known after a lookup connected)
++
++local function finishLookup(address, err)
++    if lookup and lookup.id then net.close(lookup.id) end
++    lookup = nil
++    lookupResult = address and { address = address } or { error = err or 'lookup failed' }
++end
++
++function M.lookupPublicAddress()
++    if lookup then return end
++    lookupResult = nil
++    local id = net.connect('api.ipify.org', 80)
++    if not id then return finishLookup(nil, 'too many sockets') end
++    lookup = { id = id, body = {}, age = 0 }
++end
++
++-- Nothing while the lookup runs; once it is done: address, or nil and an error message (returned only once).
++function M.getPublicAddress()
++    local r = lookupResult
++    if not r then return nil end
++    lookupResult = nil
++    return r.address, r.error
++end
++
++local function lookupEvent(kind, data)
++    if kind == 'connected' then
++        M.lanAddress = net.localAddress(lookup.id)
++        net.send(lookup.id, 'GET / HTTP/1.0\r\nHost: api.ipify.org\r\nUser-Agent: openmw-multiplayer\r\n\r\n', true)
++    elseif kind == 'line' then
++        if not lookup.status then lookup.status = data
++        elseif lookup.headersDone then lookup.body[#lookup.body + 1] = data
++        elseif data == '' then lookup.headersDone = true end
++    elseif kind == 'closed' then
++        lookup.id = nil -- already closed
++        local address
++        for _, line in ipairs(lookup.body) do
++            line = line:gsub('%s', '')
++            if line ~= '' and #line <= 45 and not line:find('[^%x%.:]') then address = line end
++        end
++        if address and lookup.status and lookup.status:find(' 200') then finishLookup(address)
++        else finishLookup(nil, data ~= '' and ('could not reach api.ipify.org: ' .. tostring(data)) or 'unexpected reply') end
++    end
++end
++
++-- Call every frame with the real elapsed time (timeouts).
++function M.update(dt)
++    if lookup then
++        lookup.age = lookup.age + dt
++        if lookup.age > LOOKUP_TIMEOUT then finishLookup(nil, 'timed out') end
++    end
++end
++
++------------------------------------------------------------------ engine events
++
++function M.onEvent(kind, id, data, listener)
++    local cb = M.callbacks
++    if lookup and id == lookup.id then return lookupEvent(kind, data) end
++    if id == clientId then
++        if kind == 'connected' then
++            clientUp = true
++            if cb.onConnected then cb.onConnected() end
++        elseif kind == 'line' then
++            if cb.onMessage then cb.onMessage(data) end
++        elseif kind == 'closed' then
++            clientId, clientUp = nil, false
++            if cb.onDisconnected then cb.onDisconnected(data) end
++        end
++    elseif kind == 'accepted' then
++        if listener == listenerId then
++            local player = nextPlayer
++            nextPlayer = nextPlayer + 1
++            socketOfPlayer[player], playerOfSocket[id] = id, player
++            if cb.onClientConnected then cb.onClientConnected(player) end
++        else
++            net.close(id) -- a listener we no longer track
++        end
++    else
++        local player = playerOfSocket[id]
++        if not player then return end
++        if kind == 'line' then
++            if cb.onClientMessage then cb.onClientMessage(player, data) end
++        elseif kind == 'closed' then
++            socketOfPlayer[player], playerOfSocket[id] = nil, nil
++            if cb.onClientDisconnected then cb.onClientDisconnected(player) end
++        end
++    end
++end
++
++return M
+diff --git a/multiplayer/mod/scripts/mp/player.lua b/multiplayer/mod/scripts/mp/player.lua
+index 39fed7802b..d532b1c27b 100644
+--- a/multiplayer/mod/scripts/mp/player.lua
++++ b/multiplayer/mod/scripts/mp/player.lua
+@@ -581,7 +581,7 @@ return {
+             pcall(function() playersSection:set('Address', text) end)
+         end,
+         MpAvatars = function(d) avatarList = d.list or {} end,
+-        MpMarkers = function(d) pcall(ui.setPlayerMarkers, d.list or {}) end,
++        MpMarkers = function(d) pcall(ui.setMapMarkers, d.list or {}) end,
+         MpPlayers = function(d)
+             playerList, myPlayerId = d.list, d.me
+             -- shown on the Multiplayer settings page (renderer in menu.lua)
+diff --git a/multiplayer/mod/scripts/mp/relay.lua b/multiplayer/mod/scripts/mp/relay.lua
+index 441d202426..f471b5e3cb 100644
+--- a/multiplayer/mod/scripts/mp/relay.lua
++++ b/multiplayer/mod/scripts/mp/relay.lua
+@@ -2,7 +2,7 @@
+ -- Everyone connected shares a global channel (presence and global chat). Parties (max 3) are formed
+ -- with invites and additionally share party chat, vitals, and actor rosters/damage. Every player keeps
+ -- their own world; the relay only routes messages. The host plays through an ordinary loopback client.
+-local net = require('openmw.net')
++local net = require('scripts/mp/netlib')
+ local markup = require('openmw.markup')
+ local core = require('openmw.core')
+ 
+diff --git a/multiplayer/run-two.sh b/multiplayer/run-two.sh
+index b4358d6ced..947107c60a 100755
+--- a/multiplayer/run-two.sh
++++ b/multiplayer/run-two.sh
+@@ -8,7 +8,7 @@ OPENMW="${1:?path to openmw}"; SAVE="${2:?path to a .omwsave}"; shift 2
+ [ "${1:-}" = "--" ] && shift
+ OUT="${TMPDIR:-/tmp}/mp-two"; mkdir -p "$OUT/host" "$OUT/join"
+ common=(--data "$HERE/mod" --data "$HERE/debug" --load-savegame "$SAVE")
+-"$OPENMW" "${common[@]}" --content mp.omwscripts --content autohost.omwscripts --content autokill.omwscripts --user-data "$OUT/host" "$@" > "$OUT/host.log" 2>&1 &
++"$OPENMW" "${common[@]}" --content mp.omwscripts --content autohost.omwscripts --user-data "$OUT/host" "$@" > "$OUT/host.log" 2>&1 &
+ HOST=$!
+ trap 'kill $HOST ${JOIN:-} 2>/dev/null' EXIT
+ sleep 25   # let the host load and start listening
+-- 
+2.55.0
+

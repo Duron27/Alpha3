@@ -1,0 +1,637 @@
+diff --git a/include/osg/GLExtensions b/include/osg/GLExtensions
+index f2d06a8..49bc143 100644
+--- a/include/osg/GLExtensions
++++ b/include/osg/GLExtensions
+@@ -201,6 +201,14 @@ class OSG_EXPORT GLExtensions : public osg::Referenced
+ 
+         bool isTextureCompressionBPTCSupported;
+ 
++        // Alpha3: an OpenGL ES context (GL_VERSION starts with "OpenGL ES"), whatever profile OSG was built for, and what
++        // its shader stages may use of storage buffer blocks and compute work group invocations
++        bool isOpenGLES;
++        GLint maxVertexShaderStorageBlocks;
++        GLint maxFragmentShaderStorageBlocks;
++        GLint maxComputeShaderStorageBlocks;
++        GLint maxComputeWorkGroupInvocations;
++
+         bool isGlslSupported;
+         bool isShaderObjectsSupported;
+         bool isVertexShaderSupported;
+diff --git a/include/osg/GraphicsContext b/include/osg/GraphicsContext
+index fc2371f..f8defcb 100644
+--- a/include/osg/GraphicsContext
++++ b/include/osg/GraphicsContext
+@@ -462,9 +462,12 @@ class OSG_EXPORT GraphicsContext : public Object
+             if (_state.valid()) _state->frameCompleted();
+ 
+             if (_swapCallback.valid()) _swapCallback->swapBuffersImplementation(this);
+-            else swapBuffersImplementation();
++            else if (!swapBuffersWithRuntimeHooks()) swapBuffersImplementation();
+         }
+ 
++        /** Swaps through the installed RuntimeHooks; false when there are none. */
++        bool swapBuffersWithRuntimeHooks();
++
+         /** Swap the front and back buffers implementation.
+           * Pure virtual - must be implemented by concrete implementations of GraphicsContext. */
+         virtual void swapBuffersImplementation() = 0;
+diff --git a/include/osg/Program b/include/osg/Program
+index 90fba7e..d5f5526 100644
+--- a/include/osg/Program
++++ b/include/osg/Program
+@@ -31,6 +31,8 @@
+ #include <osg/Shader>
+ #include <osg/StateAttribute>
+ 
++#include <OpenThreads/Mutex>
++
+ namespace osg {
+ 
+ class State;
+@@ -291,6 +293,10 @@ class OSG_EXPORT Program : public osg::StateAttribute
+                  * to disk for faster subsequent compiling. */
+                 virtual ProgramBinary* compileProgramBinary(osg::State& state);
+ 
++                /** Alpha3: links the program from the binary the RuntimeHooks saved for it, without compiling its
++                  * shaders. False when there is no such binary or the driver does not take it. */
++                bool linkFromSavedBinary(osg::State& state);
++
+                 virtual void useProgram() const;
+ 
+                 void resetAppliedUniforms() const
+@@ -392,6 +398,11 @@ class OSG_EXPORT Program : public osg::StateAttribute
+                 ShaderList _shadersToDetach;
+                 ShaderList _shadersToAttach;
+ 
++                /** Alpha3: key of the binary the RuntimeHooks keep for this program, empty when they keep none */
++                std::string _binaryKey;
++                /** Alpha3: binary the next linkProgram() loads in place of the program's own */
++                osg::ref_ptr<ProgramBinary> _savedBinary;
++
+             private:
+                 PerContextProgram();        // disallowed
+                 PerContextProgram(const PerContextProgram&);        // disallowed
+@@ -434,6 +445,13 @@ class OSG_EXPORT Program : public osg::StateAttribute
+ 
+         osg::ref_ptr<ProgramBinary> _programBinary;
+ 
++        /** Alpha3: the shaders compiled and attached: the shader list, or with RuntimeHooks installed, the list with the
++          * stages RuntimeHooks::mergeShaderStage() merged into one shader each. */
++        ShaderList getEffectiveShaders() const;
++        mutable ShaderList _effectiveShaders;
++        mutable bool _effectiveShadersValid = false;
++        mutable OpenThreads::Mutex _effectiveShadersMutex;
++
+         /** Parameters maintained with glProgramParameteriEXT */
+         GLint _geometryVerticesOut;
+         GLint _geometryInputType;
+diff --git a/include/osg/RuntimeHooks b/include/osg/RuntimeHooks
+new file mode 100644
+index 0000000..7f29b3f
+--- /dev/null
++++ b/include/osg/RuntimeHooks
+@@ -0,0 +1,88 @@
++/* -*-c++-*- OpenSceneGraph - Copyright (C) 1998-2006 Robert Osfield
++ *
++ * This library is open source and may be redistributed and/or modified under
++ * the terms of the OpenSceneGraph Public License (OSGPL) version 0.0 or
++ * (at your option) any later version.  The full license is in LICENSE file
++ * included with this distribution, and on the openscenegraph.org website.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * OpenSceneGraph Public License for more details.
++*/
++
++#ifndef OSG_RUNTIMEHOOKS
++#define OSG_RUNTIMEHOOKS 1
++
++#include <osg/Image>
++#include <osg/Program>
++
++#include <string>
++#include <vector>
++
++namespace osg {
++
++class GraphicsContext;
++class GLExtensions;
++class State;
++
++/** Points where an application can change how OSG drives the GL implementation, without changes to the application
++  * code that uses OSG (Alpha3's Android build of OpenMW: shader translation for OpenGL ES, a program binary cache, frame
++  * pacing, texture conversion). Nothing calls a hook unless a hooks object is installed with RuntimeHooks::set(), and
++  * with none installed OSG behaves as it always did. A static OSG linked into several libraries has one hooks object
++  * per library. */
++class OSG_EXPORT RuntimeHooks : public Referenced
++{
++    public:
++
++        /** Installs the hooks of this copy of OSG, or none with NULL. Meant to be called once, before any context is made. */
++        static void set(RuntimeHooks* hooks);
++
++        /** The installed hooks, NULL if there are none. */
++        static RuntimeHooks* get() { return s_hooks; }
++
++        /** True when hooks are installed and the context is OpenGL ES: OSG then works around what OpenGL ES rejects
++          * (unsized depth formats, mipmapped depth textures, shadow comparison on colour textures, ...). */
++        static bool glesFixes(const State& state);
++
++        /** A context has just been made current, before OSG reads its extensions (GL entry points can be loaded here). */
++        virtual void contextMadeCurrent(GraphicsContext& /*gc*/) {}
++
++        /** The extensions of a context have just been read, with the context current. */
++        virtual void extensionsRead(GLExtensions& /*extensions*/) {}
++
++        /** Swaps the buffers of a context that has no swap callback, in place of its swapBuffersImplementation(). The
++          * default swaps them. */
++        virtual void swapBuffers(GraphicsContext& gc);
++
++        /** Changes the source a shader is compiled from, before OSG's own substitutions. Called on the thread that
++          * compiles the shader. Returns false to compile the source as it is. */
++        virtual bool translateShaderSource(const Shader& /*shader*/, std::string& /*source*/) { return false; }
++
++        /** The shaders of one stage of a program (more than one, in the order of the program). A shader returned is
++          * compiled and attached in their place; NULL keeps them as they are. */
++        virtual ref_ptr<Shader> mergeShaderStage(const std::vector<const Shader*>& /*shaders*/) { return 0; }
++
++        /** Key of the saved binary of a program with these defines; empty for a program that is not saved. */
++        virtual std::string programBinaryKey(const Program& /*program*/, const std::string& /*defines*/, State& /*state*/) { return std::string(); }
++
++        /** The binary saved under the key, NULL if there is none. */
++        virtual ref_ptr<Program::ProgramBinary> loadProgramBinary(const std::string& /*key*/, State& /*state*/) { return 0; }
++
++        /** A program has been linked from its shaders: its binary, to save under the key. */
++        virtual void storeProgramBinary(const std::string& /*key*/, const Program::ProgramBinary& /*binary*/, State& /*state*/) {}
++
++        /** An image a plugin has just read (extension without the dot). Returns the image to use in its place, or NULL
++          * to keep it. Called on the thread that reads the image. */
++        virtual ref_ptr<Image> imageRead(Image& /*image*/, const std::string& /*extension*/) { return 0; }
++
++    protected:
++
++        virtual ~RuntimeHooks() {}
++
++        static RuntimeHooks* s_hooks;
++};
++
++}
++
++#endif
+diff --git a/src/osg/CMakeLists.txt b/src/osg/CMakeLists.txt
+index df6f14a..d93e953 100644
+--- a/src/osg/CMakeLists.txt
++++ b/src/osg/CMakeLists.txt
+@@ -146,6 +146,7 @@ SET(TARGET_H
+     ${HEADER_PATH}/ProxyNode
+     ${HEADER_PATH}/Quat
+     ${HEADER_PATH}/Referenced
++    ${HEADER_PATH}/RuntimeHooks
+     ${HEADER_PATH}/ref_ptr
+     ${HEADER_PATH}/RenderInfo
+     ${HEADER_PATH}/SampleMaski
+@@ -357,6 +358,7 @@ SET(TARGET_SRC
+     ProxyNode.cpp
+     Quat.cpp
+     Referenced.cpp
++    RuntimeHooks.cpp
+     SampleMaski.cpp
+     Sampler.cpp
+     Scissor.cpp
+diff --git a/src/osg/GLExtensions.cpp b/src/osg/GLExtensions.cpp
+index 76f4780..369daf0 100644
+--- a/src/osg/GLExtensions.cpp
++++ b/src/osg/GLExtensions.cpp
+@@ -20,6 +20,8 @@
+ 
+ #include <stdlib.h>
+ #include <string.h>
++
++#include <osg/RuntimeHooks>
+ #include <stdio.h>
+ #include <float.h>
+ 
+@@ -463,6 +465,18 @@ GLExtensions::GLExtensions(unsigned int in_contextID):
+     glVersion = validContext ? findAsciiToFloat( versionString ) : 0.0f;
+     glslLanguageVersion = 0.0f;
+ 
++    isOpenGLES = validContext && strncmp(versionString, "OpenGL ES", 9) == 0;
++    maxVertexShaderStorageBlocks = maxFragmentShaderStorageBlocks = maxComputeShaderStorageBlocks = 0;
++    maxComputeWorkGroupInvocations = 0;
++    if (validContext)
++    {
++        glGetIntegerv(0x90D6 /*GL_MAX_VERTEX_SHADER_STORAGE_BLOCKS*/, &maxVertexShaderStorageBlocks);
++        glGetIntegerv(0x90DA /*GL_MAX_FRAGMENT_SHADER_STORAGE_BLOCKS*/, &maxFragmentShaderStorageBlocks);
++        glGetIntegerv(0x90DB /*GL_MAX_COMPUTE_SHADER_STORAGE_BLOCKS*/, &maxComputeShaderStorageBlocks);
++        glGetIntegerv(0x90EB /*GL_MAX_COMPUTE_WORK_GROUP_INVOCATIONS*/, &maxComputeWorkGroupInvocations);
++        for (int i = 0; i < 8 && glGetError() != GL_NO_ERROR; ++i) {} // a context without them reports GL_INVALID_ENUM
++    }
++
+     // Custered lighting support check
+     isClusteredLightingSupported = false;
+     if (validContext) {
+@@ -1359,6 +1373,10 @@ GLExtensions::GLExtensions(unsigned int in_contextID):
+ 
+     osg::setGLExtensionFuncPtr(glObjectLabel, "glObjectLabel", validContext);
+ 
++    if (RuntimeHooks* hooks = RuntimeHooks::get())
++    {
++        if (validContext) hooks->extensionsRead(*this);
++    }
+ }
+ 
+ GLExtensions::~GLExtensions()
+diff --git a/src/osg/GraphicsContext.cpp b/src/osg/GraphicsContext.cpp
+index 0d14aaf..f1bb0a1 100644
+--- a/src/osg/GraphicsContext.cpp
++++ b/src/osg/GraphicsContext.cpp
+@@ -14,6 +14,7 @@
+ #include <stdlib.h>
+ 
+ #include <osg/GraphicsContext>
++#include <osg/RuntimeHooks>
+ #include <osg/Camera>
+ #include <osg/View>
+ #include <osg/GLObjects>
+@@ -72,7 +73,16 @@ GraphicsContext::WindowingSystemInterface* GraphicsContext::WindowingSystemInter
+ {
+     if (_interfaces.empty())
+     {
+-        OSG_WARN<<"Warning: GraphicsContext::WindowingSystemInterfaces::getWindowingSystemInterface() failed, no interfaces available."<<std::endl;
++        // an application with RuntimeHooks makes its windows itself (an SDL window on Android): nothing to warn about
++        // braces: OSG_INFO is an if statement of its own, an else after it would belong to it
++        if (RuntimeHooks::get())
++        {
++            OSG_INFO<<"GraphicsContext::WindowingSystemInterfaces::getWindowingSystemInterface(): no interfaces available."<<std::endl;
++        }
++        else
++        {
++            OSG_WARN<<"Warning: GraphicsContext::WindowingSystemInterfaces::getWindowingSystemInterface() failed, no interfaces available."<<std::endl;
++        }
+         return 0;
+     }
+ 
+@@ -532,6 +542,8 @@ bool GraphicsContext::makeCurrent()
+ 
+     if (result)
+     {
++        if (RuntimeHooks* hooks = RuntimeHooks::get()) hooks->contextMadeCurrent(*this);
++
+         // initialize extension process, not only initializes on first
+         // call, will be a non-op on subsequent calls.
+         getState()->initializeExtensionProcs();
+@@ -540,6 +552,14 @@ bool GraphicsContext::makeCurrent()
+     return result;
+ }
+ 
++bool GraphicsContext::swapBuffersWithRuntimeHooks()
++{
++    RuntimeHooks* hooks = RuntimeHooks::get();
++    if (!hooks) return false;
++    hooks->swapBuffers(*this);
++    return true;
++}
++
+ bool GraphicsContext::makeContextCurrent(GraphicsContext* readContext)
+ {
+     bool result = makeContextCurrentImplementation(readContext);
+@@ -548,6 +568,8 @@ bool GraphicsContext::makeContextCurrent(GraphicsContext* readContext)
+     {
+         _threadOfLastMakeCurrent = OpenThreads::Thread::CurrentThreadId();
+ 
++        if (RuntimeHooks* hooks = RuntimeHooks::get()) hooks->contextMadeCurrent(*this);
++
+         // initialize extension process, not only initializes on first
+         // call, will be a non-op on subsequent calls.
+         getState()->initializeExtensionProcs();
+diff --git a/src/osg/PrimitiveSet.cpp b/src/osg/PrimitiveSet.cpp
+index c142f3c..1f03bf6 100644
+--- a/src/osg/PrimitiveSet.cpp
++++ b/src/osg/PrimitiveSet.cpp
+@@ -11,6 +11,7 @@
+  * OpenSceneGraph Public License for more details.
+ */
+ #include <osg/PrimitiveSet>
++#include <osg/RuntimeHooks>
+ #include <osg/BufferObject>
+ #include <osg/State>
+ #include <osg/Notify>
+@@ -49,6 +50,15 @@ unsigned int PrimitiveSet::getNumPrimitives() const
+ //
+ void DrawArrays::draw(State& state, bool) const
+ {
++    // Alpha3: too few vertices for one primitive draw nothing, but OpenGL ES drivers report such a draw (an empty debug
++    // line list) every frame
++    if (_count < 3 && RuntimeHooks::get())
++    {
++        const GLsizei needed = _mode == GL_POINTS ? 1
++            : (_mode == GL_LINES || _mode == GL_LINE_STRIP || _mode == GL_LINE_LOOP) ? 2 : 3;
++        if (_count < needed) return;
++    }
++
+ #if defined(OSG_GLES1_AVAILABLE) || defined(OSG_GLES2_AVAILABLE) || defined(OSG_GLES3_AVAILABLE)
+     GLenum mode = _mode;
+     if (_mode==GL_QUADS)
+diff --git a/src/osg/Program.cpp b/src/osg/Program.cpp
+index d8f2297..a0e569d 100644
+--- a/src/osg/Program.cpp
++++ b/src/osg/Program.cpp
+@@ -28,7 +28,10 @@
+ #include <osg/Timer>
+ #include <osg/buffered_value>
+ #include <osg/ref_ptr>
++#include <algorithm>
++
+ #include <osg/Program>
++#include <osg/RuntimeHooks>
+ #include <osg/Shader>
+ #include <osg/GLExtensions>
+ #include <osg/ContextData>
+@@ -189,9 +192,14 @@ void Program::compileGLObjects( osg::State& state ) const
+ {
+     if( _shaderList.empty() ) return;
+ 
+-    for( unsigned int i=0; i < _shaderList.size(); ++i )
++    // Alpha3: a binary the RuntimeHooks saved links the program without compiling its shaders
++    PerContextProgram* linkPcp = getPCP( state );
++    if (linkPcp->needsLink() && linkPcp->linkFromSavedBinary(state)) return;
++
++    const ShaderList shaders = getEffectiveShaders();
++    for( unsigned int i=0; i < shaders.size(); ++i )
+     {
+-        _shaderList[i]->compileShader( state );
++        shaders[i]->compileShader( state );
+     }
+ 
+     if(!_feedbackout.empty())
+@@ -227,6 +235,11 @@ void Program::setThreadSafeRefUnref(bool threadSafe)
+ 
+ void Program::dirtyProgram()
+ {
++    {
++        OpenThreads::ScopedLock<OpenThreads::Mutex> lock(_effectiveShadersMutex);
++        _effectiveShadersValid = false;
++    }
++
+     // mark our PCPs as needing relink
+     for( unsigned int cxt=0; cxt < _pcpList.size(); ++cxt )
+     {
+@@ -256,6 +269,14 @@ void Program::resizeGLObjectBuffers(unsigned int maxSize)
+         if (_shaderList[i].valid()) _shaderList[i]->resizeGLObjectBuffers(maxSize);
+     }
+ 
++    {
++        OpenThreads::ScopedLock<OpenThreads::Mutex> lock(_effectiveShadersMutex);
++        for( unsigned int i=0; i < _effectiveShaders.size(); ++i )
++        {
++            if (_effectiveShaders[i].valid()) _effectiveShaders[i]->resizeGLObjectBuffers(maxSize);
++        }
++    }
++
+     _pcpList.resize(maxSize);
+ }
+ 
+@@ -266,6 +287,14 @@ void Program::releaseGLObjects(osg::State* state) const
+         if (_shaderList[i].valid()) _shaderList[i]->releaseGLObjects(state);
+     }
+ 
++    {
++        OpenThreads::ScopedLock<OpenThreads::Mutex> lock(_effectiveShadersMutex);
++        for( unsigned int i=0; i < _effectiveShaders.size(); ++i )
++        {
++            if (_effectiveShaders[i].valid()) _effectiveShaders[i]->releaseGLObjects(state);
++        }
++    }
++
+     if (!state) _pcpList.setAllElementsTo(0);
+     else
+     {
+@@ -274,6 +303,40 @@ void Program::releaseGLObjects(osg::State* state) const
+     }
+ }
+ 
++Program::ShaderList Program::getEffectiveShaders() const
++{
++    RuntimeHooks* hooks = RuntimeHooks::get();
++    if (!hooks) return _shaderList;
++
++    OpenThreads::ScopedLock<OpenThreads::Mutex> lock(_effectiveShadersMutex);
++    if (!_effectiveShadersValid)
++    {
++        _effectiveShaders.clear();
++        std::vector<Shader::Type> types;
++        for (ShaderList::const_iterator itr = _shaderList.begin(); itr != _shaderList.end(); ++itr)
++        {
++            if (std::find(types.begin(), types.end(), (*itr)->getType()) == types.end()) types.push_back((*itr)->getType());
++        }
++        for (std::vector<Shader::Type>::const_iterator type = types.begin(); type != types.end(); ++type)
++        {
++            std::vector<const Shader*> stage;
++            for (ShaderList::const_iterator itr = _shaderList.begin(); itr != _shaderList.end(); ++itr)
++            {
++                if ((*itr)->getType() == *type) stage.push_back(itr->get());
++            }
++            ref_ptr<Shader> merged = stage.size() > 1 ? hooks->mergeShaderStage(stage) : ref_ptr<Shader>();
++            if (merged.valid()) _effectiveShaders.push_back(merged);
++            else
++            {
++                for (std::vector<const Shader*>::const_iterator itr = stage.begin(); itr != stage.end(); ++itr)
++                    _effectiveShaders.push_back(const_cast<Shader*>(*itr));
++            }
++        }
++        _effectiveShadersValid = true;
++    }
++    return _effectiveShaders;
++}
++
+ bool Program::addShader( Shader* shader )
+ {
+     if( !shader ) return false;
+@@ -697,7 +760,8 @@ void Program::PerContextProgram::linkProgram(osg::State& state)
+              << " contextID=" << _contextID
+              <<  std::endl;
+ 
+-    const ProgramBinary* programBinary = _program->getProgramBinary();
++    // Alpha3: the binary of linkFromSavedBinary() in place of the program's own
++    const ProgramBinary* programBinary = _savedBinary.valid() ? _savedBinary.get() : _program->getProgramBinary();
+ 
+     _loadedBinary = false;
+     if (programBinary && programBinary->getSize())
+@@ -731,9 +795,10 @@ void Program::PerContextProgram::linkProgram(osg::State& state)
+             shadersRequired[shaderObjectHandle[i]]--;
+         }
+ 
+-        for(unsigned int i=0; i < getProgram()->getNumShaders(); ++i)
++        const ShaderList shaders = _program->getEffectiveShaders();
++        for(unsigned int i=0; i < shaders.size(); ++i)
+         {
+-            const Shader* shader = getProgram()->getShader( i );
++            const Shader* shader = shaders[i].get();
+             Shader::PerContextShader* pcs = shader->getPCS(state);
+             if (pcs) shadersRequired[ pcs->getHandle() ]++;
+         }
+@@ -794,7 +859,7 @@ void Program::PerContextProgram::linkProgram(osg::State& state)
+         }
+ 
+         // if any program binary has been set then assume we want to retrieve a binary later.
+-        if (programBinary)
++        if (programBinary || !_binaryKey.empty())
+         {
+             _extensions->glProgramParameteri( _glProgramHandle, GL_PROGRAM_BINARY_RETRIEVABLE_HINT, GL_TRUE );
+         }
+@@ -829,6 +894,24 @@ void Program::PerContextProgram::linkProgram(osg::State& state)
+         }
+ 
+         _extensions->debugObjectLabel(GL_PROGRAM, _glProgramHandle, _program->getName());
++
++        // Alpha3: linked from its shaders, the program is saved for the next start
++        RuntimeHooks* hooks = RuntimeHooks::get();
++        if (hooks && !_loadedBinary && !_binaryKey.empty())
++        {
++            GLint binaryLength = 0;
++            _extensions->glGetProgramiv( _glProgramHandle, GL_PROGRAM_BINARY_LENGTH, &binaryLength );
++            if (binaryLength > 0)
++            {
++                ref_ptr<ProgramBinary> binary = new ProgramBinary;
++                binary->allocate(binaryLength);
++                GLenum binaryFormat = 0;
++                _extensions->glGetProgramBinary( _glProgramHandle, binaryLength, 0, &binaryFormat, reinterpret_cast<GLvoid*>(binary->getData()) );
++                binary->setFormat(binaryFormat);
++                hooks->storeProgramBinary(_binaryKey, *binary, state);
++            }
++        }
++        _binaryKey.clear();
+     }
+ 
+     if (_extensions->isUniformBufferObjectSupported)
+@@ -1078,6 +1161,31 @@ bool Program::PerContextProgram::getInfoLog( std::string& infoLog ) const
+     return _extensions->getProgramInfoLog( _glProgramHandle, infoLog );
+ }
+ 
++bool Program::PerContextProgram::linkFromSavedBinary(osg::State& state)
++{
++    _binaryKey.clear();
++    RuntimeHooks* hooks = RuntimeHooks::get();
++    if (!hooks || !_glProgramHandle) return false;
++
++    _binaryKey = hooks->programBinaryKey(*_program, _defineStr, state);
++    if (_binaryKey.empty()) return false;
++
++    _savedBinary = hooks->loadProgramBinary(_binaryKey, state);
++    if (!_savedBinary.valid() || _savedBinary->getSize() == 0)
++    {
++        _savedBinary = 0;
++        return false;
++    }
++
++    linkProgram(state);
++    _savedBinary = 0;
++    if (_loadedBinary) return true;
++
++    // not taken by the driver (or not linked from it): compiled and linked as usual, then saved again
++    requestLink();
++    return false;
++}
++
+ Program::ProgramBinary* Program::PerContextProgram::compileProgramBinary(osg::State& state)
+ {
+     if (!_glProgramHandle) return 0;
+diff --git a/src/osg/RuntimeHooks.cpp b/src/osg/RuntimeHooks.cpp
+new file mode 100644
+index 0000000..f165b28
+--- /dev/null
++++ b/src/osg/RuntimeHooks.cpp
+@@ -0,0 +1,42 @@
++/* -*-c++-*- OpenSceneGraph - Copyright (C) 1998-2006 Robert Osfield
++ *
++ * This library is open source and may be redistributed and/or modified under
++ * the terms of the OpenSceneGraph Public License (OSGPL) version 0.0 or
++ * (at your option) any later version.  The full license is in LICENSE file
++ * included with this distribution, and on the openscenegraph.org website.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * OpenSceneGraph Public License for more details.
++*/
++
++#include <osg/RuntimeHooks>
++#include <osg/GraphicsContext>
++#include <osg/GLExtensions>
++#include <osg/State>
++
++using namespace osg;
++
++RuntimeHooks* RuntimeHooks::s_hooks = 0;
++
++void RuntimeHooks::set(RuntimeHooks* hooks)
++{
++    // kept for the life of the library
++    if (hooks) hooks->ref();
++    RuntimeHooks* previous = s_hooks;
++    s_hooks = hooks;
++    if (previous) previous->unref();
++}
++
++bool RuntimeHooks::glesFixes(const State& state)
++{
++    if (!s_hooks) return false;
++    const GLExtensions* extensions = state.get<GLExtensions>();
++    return extensions && extensions->isOpenGLES;
++}
++
++void RuntimeHooks::swapBuffers(GraphicsContext& gc)
++{
++    gc.swapBuffersImplementation();
++}
+diff --git a/src/osg/Shader.cpp b/src/osg/Shader.cpp
+index 9ba057c..7a67166 100644
+--- a/src/osg/Shader.cpp
++++ b/src/osg/Shader.cpp
+@@ -31,6 +31,7 @@
+ #include <osg/buffered_value>
+ #include <osg/ref_ptr>
+ #include <osg/Shader>
++#include <osg/RuntimeHooks>
+ #include <osg/GLExtensions>
+ #include <osg/ContextData>
+ 
+@@ -634,6 +635,8 @@ void Shader::PerContextShader::compileShader(osg::State& state)
+ #endif
+ 
+     std::string source = _shader->getShaderSource();
++    // Alpha3: an application can change the source for the GL implementation it runs on (OpenMW's GLSL 1.20 for OpenGL ES)
++    if (RuntimeHooks* hooks = RuntimeHooks::get()) hooks->translateShaderSource(*_shader, source);
+     // Alpha3: only vertex shaders get their gl_ built-ins renamed. For other stages the declarations OSG inserts can land
+     // after the first use, and OpenMW's fragment profile declares the matrices it needs itself. Every stage still gets the
+     // $OSG_ variables substituted (osgText's shaders start with one).
+diff --git a/src/osgPlugins/dds/ReaderWriterDDS.cpp b/src/osgPlugins/dds/ReaderWriterDDS.cpp
+index e4d000a..2666044 100644
+--- a/src/osgPlugins/dds/ReaderWriterDDS.cpp
++++ b/src/osgPlugins/dds/ReaderWriterDDS.cpp
+@@ -25,6 +25,7 @@
+ *
+ **********************************************************************/
+ #include <osg/Texture>
++#include <osg/RuntimeHooks>
+ #include <osg/Notify>
+ 
+ #include <osgDB/Registry>
+@@ -1529,6 +1530,16 @@ public:
+             }
+         }
+ 
++        // Alpha3: the application can put an image the GL implementation takes in its place (one converted from DXT
++        // for a GPU without S3TC, RGBA for BGRA on OpenGL ES)
++        if (osg::RuntimeHooks* hooks = osg::RuntimeHooks::get())
++        {
++            osg::ref_ptr<osg::Image> image = osgImage;
++            osg::ref_ptr<osg::Image> replacement = hooks->imageRead(*image, "dds");
++            if (replacement.valid()) return replacement.get();
++            return image.get();
++        }
++
+         return osgImage;
+     }
+ 

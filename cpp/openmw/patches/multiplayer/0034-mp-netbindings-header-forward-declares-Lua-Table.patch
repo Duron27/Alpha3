@@ -1,0 +1,29 @@
+From dcec766238785b8bb1b79e352456532d223cade0 Mon Sep 17 00:00:00 2001
+From: t <t@t>
+Date: Sun, 11 Oct 2026 02:15:53 -0400
+Subject: [PATCH] mp: netbindings header forward declares Lua::Table
+
+---
+ apps/openmw/mwlua/netbindings.hpp | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/apps/openmw/mwlua/netbindings.hpp b/apps/openmw/mwlua/netbindings.hpp
+index e885981819..8c1a4b0212 100644
+--- a/apps/openmw/mwlua/netbindings.hpp
++++ b/apps/openmw/mwlua/netbindings.hpp
+@@ -1,7 +1,11 @@
+ #ifndef MWLUA_NETBINDINGS_H
+ #define MWLUA_NETBINDINGS_H
+ 
+-#include <components/luau/forward.hpp>
++
++namespace Lua
++{
++    class Table;
++}
+ 
+ namespace Net
+ {
+-- 
+2.55.0
+

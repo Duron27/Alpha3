@@ -1,0 +1,115 @@
+From: Alpha3 <noreply@alpha3.invalid>
+Subject: [PATCH] Program: find uniform locations and last applied uniforms by index
+
+PerContextProgram::apply(Uniform) runs for every uniform of every draw and did
+two std::map lookups each time (uniform name id -> location, location -> last
+applied uniform). Both are small dense integers: index vectors instead.
+Uniform::getNameID is a header inline for the same reason.
+---
+diff --git a/include/osg/Program b/include/osg/Program
+--- a/include/osg/Program
++++ b/include/osg/Program
+@@ -304,20 +304,22 @@
+                     GLint location = getUniformLocation(uniform.getNameID());
+                     if (location>=0)
+                     {
+-                        const Uniform* lastAppliedUniform = _lastAppliedUniformList[location].first.get();
+-                        if (lastAppliedUniform != &uniform)
++                        // by location, not by map: this runs for every uniform of every draw
++                        if (static_cast<size_t>(location) >= _lastAppliedUniformList.size())
++                            _lastAppliedUniformList.resize(static_cast<size_t>(location) + 1);
++                        UniformModifiedCountPair& lastApplied = _lastAppliedUniformList[location];
++                        if (lastApplied.first.get() != &uniform)
+                         {
+                             // new attribute
+                             uniform.apply(_extensions.get(),location);
+-                            _lastAppliedUniformList[location].first = &uniform;
+-                            _lastAppliedUniformList[location].second = uniform.getModifiedCount();
++                            lastApplied.first = &uniform;
++                            lastApplied.second = uniform.getModifiedCount();
+                         }
+-                        else if (_lastAppliedUniformList[location].second != uniform.getModifiedCount())
++                        else if (lastApplied.second != uniform.getModifiedCount())
+                         {
+                             // existing attribute has been modified
+                             uniform.apply(_extensions.get(),location);
+-                            _lastAppliedUniformList[location].first = &uniform;
+-                            _lastAppliedUniformList[location].second = uniform.getModifiedCount();
++                            lastApplied.second = uniform.getModifiedCount();
+                         }
+                     }
+                 }
+@@ -325,7 +327,7 @@
+                 const ActiveUniformMap& getActiveUniforms() const {return _uniformInfoMap;}
+                 const ActiveVarInfoMap& getActiveAttribs() const {return _attribInfoMap;}
+                 const UniformBlockMap& getUniformBlocks() const {return _uniformBlockMap; }
+-                inline GLint getUniformLocation( unsigned int uniformNameID ) const { ActiveUniformMap::const_iterator itr = _uniformInfoMap.find(uniformNameID); return (itr!=_uniformInfoMap.end()) ? itr->second._location : -1; }
++                inline GLint getUniformLocation( unsigned int uniformNameID ) const { return uniformNameID < _uniformLocationByID.size() ? _uniformLocationByID[uniformNameID] : -1; }
+ 
+                 /**
+                   * Alternative version of getUniformLocation( unsigned int uniformNameID )
+@@ -377,11 +379,13 @@
+                 bool _ownsProgramHandle;
+ 
+                 ActiveUniformMap _uniformInfoMap;
++                // The same locations indexed by the uniform's name id (small, sequential), -1 where this program has none
++                std::vector<GLint> _uniformLocationByID;
+                 ActiveVarInfoMap _attribInfoMap;
+                 UniformBlockMap _uniformBlockMap;
+ 
+                 typedef std::pair<osg::ref_ptr<const osg::Uniform>, unsigned int> UniformModifiedCountPair;
+-                typedef std::map<unsigned int, UniformModifiedCountPair> LastAppliedUniformList;
++                typedef std::vector<UniformModifiedCountPair> LastAppliedUniformList;
+                 mutable LastAppliedUniformList _lastAppliedUniformList;
+ 
+                 typedef std::vector< ref_ptr<Shader> > ShaderList;
+diff --git a/include/osg/Uniform b/include/osg/Uniform
+--- a/include/osg/Uniform
++++ b/include/osg/Uniform
+@@ -909,7 +909,7 @@
+         inline unsigned int getModifiedCount() const { return _modifiedCount; }
+ 
+         /** Get the number that the Uniform's name maps to uniquely */
+-        unsigned int getNameID() const;
++        unsigned int getNameID() const { return _nameID; }
+ 
+         void apply(const GLExtensions* ext, GLint location) const;
+ 
+diff --git a/src/osg/Program.cpp b/src/osg/Program.cpp
+--- a/src/osg/Program.cpp
++++ b/src/osg/Program.cpp
+@@ -757,6 +757,7 @@
+     _shadersToAttach.clear();
+ 
+     _uniformInfoMap.clear();
++    _uniformLocationByID.clear();
+     _attribInfoMap.clear();
+     _lastAppliedUniformList.clear();
+ 
+@@ -917,7 +918,10 @@
+ 
+             if( loc != -1 )
+             {
+-                _uniformInfoMap[Uniform::getNameID(reinterpret_cast<const char*>(name))] = ActiveVarInfo(loc,type,size);
++                const unsigned int nameID = Uniform::getNameID(reinterpret_cast<const char*>(name));
++                _uniformInfoMap[nameID] = ActiveVarInfo(loc,type,size);
++                if (nameID >= _uniformLocationByID.size()) _uniformLocationByID.resize(nameID + 1, -1);
++                _uniformLocationByID[nameID] = loc;
+ 
+                 OSG_INFO << "\tUniform \"" << name << "\""
+                     << " loc="<< loc
+diff --git a/src/osg/Uniform.cpp b/src/osg/Uniform.cpp
+--- a/src/osg/Uniform.cpp
++++ b/src/osg/Uniform.cpp
+@@ -2610,11 +2610,6 @@
+     return true;
+ }
+ 
+-unsigned int Uniform::getNameID() const
+-{
+-    return _nameID;
+-}
+-
+ ///////////////////////////////////////////////////////////////////////////
+ 
+ void Uniform::apply(const GLExtensions* ext, GLint location) const

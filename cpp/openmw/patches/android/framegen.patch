@@ -1,0 +1,511 @@
+--- a/components/sdlutil/sdlgraphicswindow.cpp
++++ b/components/sdlutil/sdlgraphicswindow.cpp
+@@ -10,6 +10,7 @@
+ #include <EGL/egl.h>
+ #include <android/native_window.h>
+ #include <swappy/swappyGL.h>
++#include <swappy/swappyGL_extra.h>
+ #include <SDL_syswm.h>
+ #include <SDL_system.h>
+ #include <jni.h>
+@@ -19,6 +20,13 @@
+ #include <chrono>
+ #include <cstdlib>
+ #include <cstring>
++#include <iomanip>
++#include <memory>
++#include <vector>
++#include <cstdio>
++#include <cstdio>
++#include <string>
++#include <osg/State>
+ #endif
+ 
+ #ifdef OPENMW_GL4ES_MANUAL_INIT
+@@ -498,9 +506,427 @@
+         return SDL_GL_MakeCurrent(nullptr, nullptr) == 0;
+     }
+ 
++#ifdef ANDROID
++    namespace
++    {
++        // Frame generation on Adreno: between two rendered frames one more is shown, extrapolated from the last two.
++        // Either GL_QCOM_frame_extrapolation does it in the driver, or GL_QCOM_motion_estimation (hardware block
++        // matching) gives motion vectors that a shader uses to push the last frame forward by half a frame.
++        using EstimateMotionFn = void(GL_APIENTRY*)(GLuint, GLuint, GLuint);
++        using ExtrapolateFn = void(GL_APIENTRY*)(GLuint, GLuint, GLuint, GLfloat);
++        constexpr GLenum MOTION_BLOCK_X = 0x8C90;
++        constexpr GLenum MOTION_BLOCK_Y = 0x8C91;
++
++        const char* const sFullscreenVertex = R"(#version 300 es
++out vec2 vUV;
++void main()
++{
++    vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
++    vUV = p;
++    gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
++})";
++
++        const char* const sLumaFragment = R"(#version 300 es
++precision highp float;
++uniform sampler2D uColor;
++in vec2 vUV;
++out vec4 oColor;
++void main()
++{
++    oColor = vec4(dot(texture(uColor, vUV).rgb, vec3(0.299, 0.587, 0.114)), 0.0, 0.0, 1.0);
++})";
++
++        // The vectors are in pixels of the luma image, from the earlier frame to the later one.
++        const char* const sWarpFragment = R"(#version 300 es
++precision highp float;
++uniform sampler2D uColor;
++uniform sampler2D uMotion;
++uniform vec2 uLumaSize;
++uniform float uTime;
++uniform float uTint;
++in vec2 vUV;
++out vec4 oColor;
++void main()
++{
++    vec2 move = texture(uMotion, vUV).rg;
++    // Blocks the estimator could not match come back as noise: no motion there
++    if (any(isnan(move)) || any(isinf(move)) || length(move) > 32.0)
++        move = vec2(0.0);
++    move /= uLumaSize;
++    vec3 colour = texture(uColor, clamp(vUV - move * uTime, vec2(0.0), vec2(1.0))).rgb;
++    oColor = vec4(colour + vec3(0.25, 0.0, 0.0) * uTint, 1.0);
++})";
++
++        const char* const sCopyFragment = R"(#version 300 es
++precision highp float;
++uniform sampler2D uColor;
++in vec2 vUV;
++out vec4 oColor;
++void main()
++{
++    oColor = vec4(texture(uColor, vUV).rgb, 1.0);
++})";
++
++        GLuint compileProgram(const char* vertexSource, const char* fragmentSource)
++        {
++            const auto compile = [](GLenum type, const char* source) {
++                GLuint shader = glCreateShader(type);
++                glShaderSource(shader, 1, &source, nullptr);
++                glCompileShader(shader);
++                GLint ok = 0;
++                glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
++                if (!ok)
++                {
++                    char log[512];
++                    glGetShaderInfoLog(shader, sizeof(log), nullptr, log);
++                    Log(Debug::Warning) << "Frame generation shader: " << log;
++                    glDeleteShader(shader);
++                    return GLuint(0);
++                }
++                return shader;
++            };
++            const GLuint vertex = compile(GL_VERTEX_SHADER, vertexSource);
++            const GLuint fragment = compile(GL_FRAGMENT_SHADER, fragmentSource);
++            if (vertex == 0 || fragment == 0)
++                return 0;
++            GLuint program = glCreateProgram();
++            glAttachShader(program, vertex);
++            glAttachShader(program, fragment);
++            glLinkProgram(program);
++            glDeleteShader(vertex);
++            glDeleteShader(fragment);
++            GLint ok = 0;
++            glGetProgramiv(program, GL_LINK_STATUS, &ok);
++            if (!ok)
++            {
++                glDeleteProgram(program);
++                return 0;
++            }
++            return program;
++        }
++
++        class FrameGen
++        {
++        public:
++            /// Null when the driver has neither extension (or the one asked for). request: 1/auto, motion or extrapolate.
++            static FrameGen* create(const std::string& request)
++            {
++                const char* extensions = reinterpret_cast<const char*>(glGetString(GL_EXTENSIONS));
++                const std::string list = extensions != nullptr ? extensions : "";
++                const bool hasMotion = list.find("GL_QCOM_motion_estimation") != std::string::npos;
++                const bool hasExtrapolation = list.find("GL_QCOM_frame_extrapolation") != std::string::npos;
++                std::unique_ptr<FrameGen> frames(new FrameGen);
++                if (hasExtrapolation && request != "motion")
++                {
++                    frames->mExtrapolate = reinterpret_cast<ExtrapolateFn>(eglGetProcAddress("glExtrapolateTex2DQCOM"));
++                    if (frames->mExtrapolate != nullptr)
++                        frames->mMode = Mode::Extrapolate;
++                }
++                if (frames->mMode == Mode::Off && hasMotion && request != "extrapolate")
++                {
++                    frames->mEstimate = reinterpret_cast<EstimateMotionFn>(eglGetProcAddress("glTexEstimateMotionQCOM"));
++                    if (frames->mEstimate != nullptr)
++                        frames->mMode = Mode::Motion;
++                }
++                if (frames->mMode == Mode::Off)
++                {
++                    Log(Debug::Info) << "Frame generation: this GPU has neither GL_QCOM_frame_extrapolation nor "
++                                        "GL_QCOM_motion_estimation, staying off";
++                    return nullptr;
++                }
++                glGetIntegerv(MOTION_BLOCK_X, &frames->mBlockX);
++                glGetIntegerv(MOTION_BLOCK_Y, &frames->mBlockY);
++                glGetError();
++                frames->mBlockX = std::max(frames->mBlockX, 1);
++                frames->mBlockY = std::max(frames->mBlockY, 1);
++                frames->mLumaProgram = compileProgram(sFullscreenVertex, sLumaFragment);
++                frames->mWarpProgram = compileProgram(sFullscreenVertex, sWarpFragment);
++                frames->mCopyProgram = compileProgram(sFullscreenVertex, sCopyFragment);
++                if (frames->mLumaProgram == 0 || frames->mWarpProgram == 0 || frames->mCopyProgram == 0)
++                    return nullptr;
++                glGenVertexArrays(1, &frames->mVao);
++                glGenFramebuffers(1, &frames->mFbo);
++                Log(Debug::Info) << "Frame generation: "
++                                 << (frames->mMode == Mode::Extrapolate ? "GL_QCOM_frame_extrapolation"
++                                                                        : "GL_QCOM_motion_estimation, search block ")
++                                 << (frames->mMode == Mode::Motion ? std::to_string(frames->mBlockX) + "x"
++                                            + std::to_string(frames->mBlockY)
++                                                                  : std::string());
++                return frames.release();
++            }
++
++            ~FrameGen() { release(); }
++
++            /// After a real frame is drawn, before it is shown: remember it.
++            void capture(int width, int height)
++            {
++                if (!prepare(width, height))
++                    return;
++                Saved saved = begin();
++                mCurrent = 1 - mCurrent;
++                glBindFramebuffer(GL_FRAMEBUFFER, 0);
++                glBindTexture(GL_TEXTURE_2D, mColor[mCurrent]);
++                glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, width, height);
++                if (mMode == Mode::Motion)
++                {
++                    glBindFramebuffer(GL_FRAMEBUFFER, mFbo);
++                    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, mLuma[mCurrent], 0);
++                    glViewport(0, 0, mLumaWidth, mLumaHeight);
++                    glUseProgram(mLumaProgram);
++                    glUniform1i(glGetUniformLocation(mLumaProgram, "uColor"), 0);
++                    glDrawArrays(GL_TRIANGLES, 0, 3);
++                    glBindFramebuffer(GL_FRAMEBUFFER, 0);
++                }
++                mHistory = std::min(mHistory + 1, 2);
++                end(saved);
++            }
++
++            /// Draws the extra frame into the back buffer; false when there is nothing to show yet.
++            bool generate()
++            {
++                if (mHistory < 2 || mWidth == 0)
++                    return false;
++                const int previous = 1 - mCurrent;
++                Saved saved = begin();
++                glBindFramebuffer(GL_FRAMEBUFFER, 0);
++                glViewport(0, 0, mWidth, mHeight);
++                if (mMode == Mode::Extrapolate)
++                {
++                    mExtrapolate(mColor[previous], mColor[mCurrent], mOutput, 0.5f);
++                    glUseProgram(mCopyProgram);
++                    glUniform1i(glGetUniformLocation(mCopyProgram, "uColor"), 0);
++                    glActiveTexture(GL_TEXTURE0);
++                    glBindTexture(GL_TEXTURE_2D, mOutput);
++                }
++                else
++                {
++                    mEstimate(mLuma[previous], mLuma[mCurrent], mMotion);
++                    if (const GLenum error = glGetError(); error != GL_NO_ERROR && mErrors++ < 3)
++                        Log(Debug::Warning) << "Frame generation: motion estimation error 0x" << std::hex << error;
++                    glUseProgram(mWarpProgram);
++                    glUniform1i(glGetUniformLocation(mWarpProgram, "uColor"), 0);
++                    glUniform1i(glGetUniformLocation(mWarpProgram, "uMotion"), 1);
++                    glUniform2f(glGetUniformLocation(mWarpProgram, "uLumaSize"), static_cast<float>(mLumaWidth),
++                        static_cast<float>(mLumaHeight));
++                    glUniform1f(glGetUniformLocation(mWarpProgram, "uTime"), 0.5f);
++                    glUniform1f(glGetUniformLocation(mWarpProgram, "uTint"), mTint ? 1.0f : 0.0f);
++                    glActiveTexture(GL_TEXTURE1);
++                    glBindTexture(GL_TEXTURE_2D, mMotion);
++                    glActiveTexture(GL_TEXTURE0);
++                    glBindTexture(GL_TEXTURE_2D, mColor[mCurrent]);
++                }
++                glDrawArrays(GL_TRIANGLES, 0, 3);
++                logUse();
++                end(saved);
++                return true;
++            }
++
++        private:
++            enum class Mode
++            {
++                Off,
++                Motion,
++                Extrapolate
++            };
++
++            /// Every few seconds: proof in the log that generated frames are shown, and how many.
++            void logUse()
++            {
++                ++mGenerated;
++                const auto now = std::chrono::steady_clock::now();
++                if (mLogStart == std::chrono::steady_clock::time_point())
++                    mLogStart = now;
++                const double seconds = std::chrono::duration<double>(now - mLogStart).count();
++                if (seconds < 5.0)
++                    return;
++                Log(Debug::Info) << "Frame generation active ("
++                                 << (mMode == Mode::Extrapolate ? "frame extrapolation" : "motion estimation")
++                                 << "): " << mGenerated << " generated frames in " << std::fixed << std::setprecision(1)
++                                 << seconds << " s, " << mGenerated / seconds << " rendered and " << mGenerated / seconds
++                                 << " generated frames per second, " << 2.0 * mGenerated / seconds << " shown";
++                mGenerated = 0;
++                mLogStart = now;
++            }
++
++            int mGenerated = 0;
++            int mErrors = 0;
++            std::chrono::steady_clock::time_point mLogStart;
++
++            struct Saved
++            {
++                GLint mActiveTexture = GL_TEXTURE0;
++                GLint mProgram = 0;
++                GLint mVao = 0;
++                GLint mFramebuffer = 0;
++                GLint mViewport[4] = {};
++                GLint mTexture0 = 0;
++                GLint mTexture1 = 0;
++                GLint mColorMask[4] = {};
++                GLboolean mDepth = GL_FALSE;
++                GLboolean mBlend = GL_FALSE;
++                GLboolean mCull = GL_FALSE;
++                GLboolean mScissor = GL_FALSE;
++                GLboolean mStencil = GL_FALSE;
++            };
++
++            // Everything touched here is put back exactly, so the engine's own state tracking stays right.
++            Saved begin()
++            {
++                Saved saved;
++                glGetIntegerv(GL_ACTIVE_TEXTURE, &saved.mActiveTexture);
++                glGetIntegerv(GL_CURRENT_PROGRAM, &saved.mProgram);
++                glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &saved.mVao);
++                glGetIntegerv(GL_FRAMEBUFFER_BINDING, &saved.mFramebuffer);
++                glGetIntegerv(GL_VIEWPORT, saved.mViewport);
++                glGetIntegerv(GL_COLOR_WRITEMASK, saved.mColorMask);
++                glActiveTexture(GL_TEXTURE0);
++                glGetIntegerv(GL_TEXTURE_BINDING_2D, &saved.mTexture0);
++                glActiveTexture(GL_TEXTURE1);
++                glGetIntegerv(GL_TEXTURE_BINDING_2D, &saved.mTexture1);
++                glActiveTexture(GL_TEXTURE0);
++                saved.mDepth = glIsEnabled(GL_DEPTH_TEST);
++                saved.mBlend = glIsEnabled(GL_BLEND);
++                saved.mCull = glIsEnabled(GL_CULL_FACE);
++                saved.mScissor = glIsEnabled(GL_SCISSOR_TEST);
++                saved.mStencil = glIsEnabled(GL_STENCIL_TEST);
++                glBindVertexArray(mVao);
++                glDisable(GL_DEPTH_TEST);
++                glDisable(GL_BLEND);
++                glDisable(GL_CULL_FACE);
++                glDisable(GL_SCISSOR_TEST);
++                glDisable(GL_STENCIL_TEST);
++                glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
++                return saved;
++            }
++
++            void end(const Saved& saved)
++            {
++                const auto set = [](GLenum capability, GLboolean on) {
++                    if (on)
++                        glEnable(capability);
++                    else
++                        glDisable(capability);
++                };
++                set(GL_DEPTH_TEST, saved.mDepth);
++                set(GL_BLEND, saved.mBlend);
++                set(GL_CULL_FACE, saved.mCull);
++                set(GL_SCISSOR_TEST, saved.mScissor);
++                set(GL_STENCIL_TEST, saved.mStencil);
++                glColorMask(saved.mColorMask[0], saved.mColorMask[1], saved.mColorMask[2], saved.mColorMask[3]);
++                glActiveTexture(GL_TEXTURE1);
++                glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(saved.mTexture1));
++                glActiveTexture(GL_TEXTURE0);
++                glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(saved.mTexture0));
++                glActiveTexture(static_cast<GLenum>(saved.mActiveTexture));
++                glBindVertexArray(static_cast<GLuint>(saved.mVao));
++                glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(saved.mFramebuffer));
++                glViewport(saved.mViewport[0], saved.mViewport[1], saved.mViewport[2], saved.mViewport[3]);
++                glUseProgram(static_cast<GLuint>(saved.mProgram));
++                while (glGetError() != GL_NO_ERROR)
++                {
++                }
++            }
++
++            GLuint makeTexture(GLenum internalFormat, int width, int height, GLenum filter)
++            {
++                GLuint texture = 0;
++                glGenTextures(1, &texture);
++                glBindTexture(GL_TEXTURE_2D, texture);
++                glTexStorage2D(GL_TEXTURE_2D, 1, internalFormat, width, height);
++                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, static_cast<GLint>(filter));
++                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, static_cast<GLint>(filter));
++                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
++                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
++                return texture;
++            }
++
++            bool prepare(int width, int height)
++            {
++                if (width == mWidth && height == mHeight && mColor[0] != 0)
++                    return true;
++                Saved saved = begin();
++                destroyTextures();
++                mWidth = width;
++                mHeight = height;
++                mHistory = 0;
++                for (int i = 0; i < 2; ++i)
++                    mColor[i] = makeTexture(GL_RGB8, width, height, GL_LINEAR);
++                if (mMode == Mode::Extrapolate)
++                    mOutput = makeTexture(GL_RGB8, width, height, GL_LINEAR);
++                else
++                {
++                    // Block matching on a quarter size luma image, each side a multiple of the search block
++                    mLumaWidth = std::max(mBlockX, (width / 4) / mBlockX * mBlockX);
++                    mLumaHeight = std::max(mBlockY, (height / 4) / mBlockY * mBlockY);
++                    for (int i = 0; i < 2; ++i)
++                        mLuma[i] = makeTexture(GL_R8, mLumaWidth, mLumaHeight, GL_LINEAR);
++                    mMotion = makeTexture(GL_RGBA16F, mLumaWidth / mBlockX, mLumaHeight / mBlockY, GL_LINEAR);
++                    Log(Debug::Info) << "Frame generation: " << width << "x" << height << ", motion on " << mLumaWidth
++                                     << "x" << mLumaHeight << " luma, " << mLumaWidth / mBlockX << "x"
++                                     << mLumaHeight / mBlockY << " vectors";
++                }
++                end(saved);
++                return true;
++            }
++
++            void destroyTextures()
++            {
++                for (GLuint* texture : { &mColor[0], &mColor[1], &mLuma[0], &mLuma[1], &mMotion, &mOutput })
++                    if (*texture != 0)
++                    {
++                        glDeleteTextures(1, texture);
++                        *texture = 0;
++                    }
++            }
++
++            void release()
++            {
++                destroyTextures();
++                if (mVao != 0)
++                    glDeleteVertexArrays(1, &mVao);
++                if (mFbo != 0)
++                    glDeleteFramebuffers(1, &mFbo);
++                for (GLuint program : { mLumaProgram, mWarpProgram, mCopyProgram })
++                    if (program != 0)
++                        glDeleteProgram(program);
++                mVao = mFbo = mLumaProgram = mWarpProgram = mCopyProgram = 0;
++            }
++
++            Mode mMode = Mode::Off;
++            EstimateMotionFn mEstimate = nullptr;
++            ExtrapolateFn mExtrapolate = nullptr;
++            GLint mBlockX = 1;
++            GLint mBlockY = 1;
++            bool mTint = std::getenv("OPENMW_FRAMEGEN_TINT") != nullptr;
++            GLuint mLumaProgram = 0;
++            GLuint mWarpProgram = 0;
++            GLuint mCopyProgram = 0;
++            GLuint mVao = 0;
++            GLuint mFbo = 0;
++            GLuint mColor[2] = { 0, 0 };
++            GLuint mLuma[2] = { 0, 0 };
++            GLuint mMotion = 0;
++            GLuint mOutput = 0;
++            int mWidth = 0;
++            int mHeight = 0;
++            int mLumaWidth = 0;
++            int mLumaHeight = 0;
++            int mCurrent = 0;
++            int mHistory = 0;
++        };
++    }
++#endif
++
+     void GraphicsWindowSDL2::closeImplementation()
+     {
+ #ifdef ANDROID
++        if (mFrameGen != nullptr)
++        {
++            // The context goes with its objects; they are only freed here when it is the current one
++            if (SDL_GL_GetCurrentContext() == mContext)
++                delete static_cast<FrameGen*>(mFrameGen);
++            mFrameGen = nullptr;
++        }
+         if (mUseSwappy)
+             SwappyGL_destroy();
+         mUseSwappy = false;
+@@ -528,7 +954,12 @@
+         mUseSwappy = false;
+         // ANGLE brings its own EGL, which Swappy (it talks to the system's) cannot swap; Zink never gets here.
+         if (std::getenv("OSG_USE_ANGLE") != nullptr || std::getenv("OPENMW_NO_SWAPPY") != nullptr)
++        {
++            const char* frameGen = std::getenv("OPENMW_FRAMEGEN");
++            if (frameGen != nullptr && *frameGen != '\0' && std::strcmp(frameGen, "0") != 0)
++                Log(Debug::Warning) << "Frame generation needs frame pacing (Swappy, OpenGL ES system driver only): off";
+             return;
++        }
+         auto* env = static_cast<JNIEnv*>(SDL_AndroidGetJNIEnv());
+         jobject activity = static_cast<jobject>(SDL_AndroidGetActivity());
+         SDL_SysWMinfo info;
+@@ -564,7 +995,32 @@
+ #ifdef ANDROID
+         if (mUseSwappy && SwappyGL_isEnabled())
+         {
++            if (!mFrameGenTried)
++            {
++                // The launcher's frame generation switch sets OPENMW_FRAMEGEN (1, motion or extrapolate)
++                mFrameGenTried = true;
++                const char* request = std::getenv("OPENMW_FRAMEGEN");
++                if (request != nullptr && *request != '\0' && std::strcmp(request, "0") != 0)
++                {
++                    mFrameGen = FrameGen::create(request);
++                    if (mFrameGen != nullptr)
++                    {
++                        // Every swap, the real frames and the generated ones, takes one refresh
++                        SwappyGL_setAutoSwapInterval(false);
++                        SwappyGL_setSwapIntervalNS(SwappyGL_getRefreshPeriodNanos());
++                    }
++                }
++            }
++            FrameGen* frames = static_cast<FrameGen*>(mFrameGen);
++            if (frames != nullptr)
++            {
++                int width = 0, height = 0;
++                SDL_GL_GetDrawableSize(mWindow, &width, &height);
++                frames->capture(width, height);
++            }
+             SwappyGL_swap(eglGetCurrentDisplay(), eglGetCurrentSurface(EGL_DRAW));
++            if (frames != nullptr && frames->generate())
++                SwappyGL_swap(eglGetCurrentDisplay(), eglGetCurrentSurface(EGL_DRAW));
+             return;
+         }
+ #endif
+--- a/components/sdlutil/sdlgraphicswindow.hpp
++++ b/components/sdlutil/sdlgraphicswindow.hpp
+@@ -28,6 +28,10 @@
+         bool mUseSwappy = false;
+         void initSwappy();
+ 
++        // Frame generation (Adreno, experimental): one extra frame between two real ones; FrameGen in the .cpp.
++        void* mFrameGen = nullptr;
++        bool mFrameGenTried = false;
++
+         void initZink();
+         bool makeCurrentZink();
+         void swapBuffersZink();

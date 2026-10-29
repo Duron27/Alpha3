@@ -1,0 +1,76 @@
+diff --git a/include/osg/RuntimeHooks b/include/osg/RuntimeHooks
+index 1bed371..0cf3a9d 100644
+--- a/include/osg/RuntimeHooks
++++ b/include/osg/RuntimeHooks
+@@ -85,6 +85,16 @@ class OSG_EXPORT RuntimeHooks : public Referenced
+           * before OSG reads its uniforms; the program bound in the context must be left as it was. */
+         virtual void programLinked(const Program& /*program*/, GLuint /*handle*/, State& /*state*/) {}
+ 
++        /** An image is being loaded into a 2D texture (or a cube map face) for the first time. On the draw thread. */
++        virtual void textureImageLoading(const Image& /*image*/, State& /*state*/) {}
++
++        /** A graphics context is about to close (the viewer closes its contexts when it is destroyed). */
++        virtual void contextClosing(GraphicsContext& /*gc*/) {}
++
++        /** A viewer is about to render a frame: on the thread that runs the viewer (the application's main loop), after
++          * its update, whatever the threading model. */
++        virtual void renderingTraversals() {}
++
+     protected:
+ 
+         virtual ~RuntimeHooks() {}
+diff --git a/src/osg/GraphicsContext.cpp b/src/osg/GraphicsContext.cpp
+index f1bb0a1..084a90e 100644
+--- a/src/osg/GraphicsContext.cpp
++++ b/src/osg/GraphicsContext.cpp
+@@ -450,6 +450,8 @@ void GraphicsContext::close(bool callCloseImplementation)
+ {
+     OSG_INFO<<"GraphicsContext::close("<<callCloseImplementation<<")"<<this<<std::endl;
+ 
++    if (RuntimeHooks* hooks = RuntimeHooks::get()) hooks->contextClosing(*this);
++
+     // switch off the graphics thread...
+     setGraphicsThread(0);
+ 
+diff --git a/src/osg/Texture.cpp b/src/osg/Texture.cpp
+index 6174372..5385b7f 100644
+--- a/src/osg/Texture.cpp
++++ b/src/osg/Texture.cpp
+@@ -15,6 +15,7 @@
+ #include <osg/Texture>
+ #include <osg/State>
+ #include <osg/Notify>
++#include <osg/RuntimeHooks>
+ #include <osg/GLU>
+ #include <osg/Timer>
+ #include <osg/ApplicationUsage>
+@@ -2355,6 +2356,8 @@ void Texture::applyTexImage2D_load(State& state, GLenum target, const Image* ima
+     if (!image || !image->data())
+         return;
+ 
++    if (RuntimeHooks* hooks = RuntimeHooks::get()) hooks->textureImageLoading(*image, state);
++
+ #ifdef DO_TIMING
+     osg::Timer_t start_tick = osg::Timer::instance()->tick();
+     OSG_NOTICE<<"glTexImage2D pixelFormat = "<<std::hex<<image->getPixelFormat()<<std::dec<<std::endl;
+diff --git a/src/osgViewer/ViewerBase.cpp b/src/osgViewer/ViewerBase.cpp
+index 8b4ffe2..749e286 100644
+--- a/src/osgViewer/ViewerBase.cpp
++++ b/src/osgViewer/ViewerBase.cpp
+@@ -15,6 +15,7 @@
+ #include <string.h>
+ 
+ #include <osgViewer/ViewerBase>
++#include <osg/RuntimeHooks>
+ #include <osgViewer/View>
+ #include <osgViewer/Renderer>
+ 
+@@ -751,6 +752,8 @@ void ViewerBase::frame(double simulationTime)
+ 
+ void ViewerBase::renderingTraversals()
+ {
++    if (osg::RuntimeHooks* hooks = osg::RuntimeHooks::get()) hooks->renderingTraversals();
++
+     Contexts contexts;
+     getContexts(contexts);
+ 

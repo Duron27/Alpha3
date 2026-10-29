@@ -1,0 +1,52 @@
+From: Duron27 <duron27@gmail.com>
+Subject: [PATCH] Install the multiplayer server with its mod; testers' quick start
+
+- openmw-mp-server installs the mod and server.lua under share/openmw-mp, where it looks for them
+- multiplayer/README.md: how to build, host, join and test, what is not tested in a real game yet, and not to load the mod
+  twice (built in AND through openmw.cfg)
+
+---
+diff --git a/apps/mpserver/CMakeLists.txt b/apps/mpserver/CMakeLists.txt
+index 10954ad403..41611f8311 100644
+--- a/apps/mpserver/CMakeLists.txt
++++ b/apps/mpserver/CMakeLists.txt
+@@ -47,3 +47,7 @@ if (WIN32)
+ endif()
+ 
+ install(TARGETS openmw-mp-server)
++
++# Where the server looks for the mod when it is installed (<prefix>/share/openmw-mp/mod and .../server/server.lua)
++install(DIRECTORY ${CMAKE_SOURCE_DIR}/multiplayer/mod DESTINATION share/openmw-mp)
++install(FILES ${CMAKE_SOURCE_DIR}/multiplayer/server/server.lua DESTINATION share/openmw-mp/server)
+diff --git a/multiplayer/README.md b/multiplayer/README.md
+index fe9306453e..df7c254ee5 100644
+--- a/multiplayer/README.md
++++ b/multiplayer/README.md
+@@ -4,8 +4,26 @@ Everything here is a mod. The engine only offers generic pieces: TCP sockets (`o
+ (`animation.setHeadPitch`), map markers (`ui.setMapMarkers`) and a main-menu button hook. The networking itself (client,
+ server, JSON, internet-address lookup), the relay, parties, trade, chat, avatars and all UI are Lua.
+ 
++## Try it
++1. **Build** this branch as usual. The mod is built into the engine on desktop (`-DOPENMW_BUILTIN_MULTIPLAYER=ON`, the
++   default; phone builds package it themselves and turn it off), so there is nothing to add to `openmw.cfg`: the
++   **Multiplayer** button on the main menu is all you need. It does nothing until you start a game from that screen.
++   For a dedicated server add `-DBUILD_MP_SERVER=ON` and build the target `openmw-mp-server`.
++2. **Host:** main menu -> Multiplayer -> *Host a game* (port, optional password), then start or load a character. Your game
++   shows the address friends need (the port must be forwarded on your router), or put the dedicated server on a machine
++   with an open port. **Join:** Multiplayer -> *Join a server* (address, port, password).
++3. **Two players on one machine:** `multiplayer/run-two.sh <openmw> <save.omwsave>`. **One player:** *Test: load a save with
++   a test player* on the multiplayer screen gives you a fake player to try invites, chat, trades and the party panel with.
++4. **Please report** what breaks together with the log (`openmw.log`; for the server its console output) and what you did.
++   Not tested in a real game yet: shared fights, projectiles and spell effects of other players, healing a party member,
++   trading made-up items and reconnecting - those are the interesting ones.
++
++Without `OPENMW_BUILTIN_MULTIPLAYER` (or with another engine) the mod can still be added the old way: put
++`data="<repo>/multiplayer/mod"` and `content=mp.omwscripts` in `openmw.cfg`. Do not do both: the scripts would load twice.
++
+ ```
+-mod/mp.omwscripts        what the mod loads
++mod/mp.omwscripts        what the mod loads (the build appends it to builtin.omwscripts)
++mod/l10n/Multiplayer/    the words of the settings page
+ mod/scripts/mp/
+   netlib.lua             client + server + JSON + public-address lookup on top of openmw.net sockets
+   relay.lua              the server logic that runs inside the host's game

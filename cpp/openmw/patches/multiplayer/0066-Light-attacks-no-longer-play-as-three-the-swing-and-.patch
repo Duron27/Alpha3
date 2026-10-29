@@ -1,0 +1,71 @@
+From febb2c02dda3f5de61bdd2f0c05ac694b3468a26 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Thu, 15 Oct 2026 14:55:47 -0400
+Subject: [PATCH 66/66] Light attacks no longer play as three: the swing and
+ only its own follow-through
+
+The attack animations hold the large, medium and small follow-throughs one after the other, so a swing played from the
+hit to "small follow stop" ran through all three. The swing now plays from the charged pose to the hit, then only the
+follow-through for the strength of the swing.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ multiplayer/mod/scripts/mp/remote.lua | 21 ++++++++++++++++-----
+ 1 file changed, 16 insertions(+), 5 deletions(-)
+
+diff --git a/multiplayer/mod/scripts/mp/remote.lua b/multiplayer/mod/scripts/mp/remote.lua
+index a012740888..9bdc4c45e1 100644
+--- a/multiplayer/mod/scripts/mp/remote.lua
++++ b/multiplayer/mod/scripts/mp/remote.lua
+@@ -55,6 +55,7 @@ local setDown
+ local downed = false
+ local ATTACK_TIME = 1.0 -- a swing is cut off after this long, whatever the animation does
+ local attackLeft, attackGroup, attackHeld
++local followPending -- { group, from, to, speed }: the follow-through that plays when the swing is over
+ local SWING_SPEED = 1.3
+ local speedTimer
+ local jumpLeft
+@@ -264,6 +265,7 @@ end
+ -- Spells have no charge: they are cast on press.
+ playAttack = function(d)
+     if Actor.isDead(self) then return end
++    followPending = nil
+     local kind = d.kind
+     local group, from = attackAnimation(kind)
+     if group == 'spellcast' then
+@@ -286,11 +288,17 @@ playAttack = function(d)
+     else
+         local str = d.str or 0
+         local size = str < 0.33 and 'small' or str < 0.66 and 'medium' or 'large'
+-        local hit = firstKey(group, { kind .. ' min hit', kind .. ' hit' }) or (kind .. ' start')
+-        local stop = firstKey(group, { kind .. ' ' .. size .. ' follow stop', kind .. ' small follow stop',
+-            kind .. ' follow stop', kind .. ' stop' }) or (kind .. ' small follow stop')
+-        -- a hard swing is a bit faster and carries further
+-        playSegment(group, hit, stop, 1.0 + 0.5 * str, false)
++        -- The swing runs from the charged pose to the point of impact. The follow-through that comes after it is played
++        -- separately and only for this strength: the animation holds all three (large, medium, small) one after the
++        -- other, so playing on from the hit to a later stop key would swing again and again.
++        local from = firstKey(group, { kind .. ' max attack', kind .. ' min attack', kind .. ' start' }) or (kind .. ' start')
++        local hit = firstKey(group, { kind .. ' min hit', kind .. ' hit' }) or (kind .. ' hit')
++        local fStart = firstKey(group, { kind .. ' ' .. size .. ' follow start' })
++        local fStop = firstKey(group, { kind .. ' ' .. size .. ' follow stop' })
++        local speed = 1.0 + 0.5 * str -- a hard swing is a bit faster and carries further
++        if playSegment(group, from, hit, speed, false) then
++            followPending = fStart and fStop and { group = group, from = fStart, to = fStop, speed = speed } or nil
++        end
+     end
+ end
+ 
+@@ -316,6 +324,9 @@ return {
+                 if attackLeft <= 0 or (not playing and not attackHeld) then
+                     if playing then pcall(anim.cancel, self, attackGroup) end
+                     attackGroup, attackLeft, attackHeld = nil, nil, nil
++                    local f = followPending
++                    followPending = nil
++                    if f then playSegment(f.group, f.from, f.to, f.speed, false) end
+                 end
+             end
+ 
+-- 
+2.55.0
+

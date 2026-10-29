@@ -1,0 +1,428 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 4add25831e..a8e8c15df2 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -948,7 +948,7 @@ if (NOT APPLE AND OPENMW_DEPLOY_RUNTIME_DEPENDENCIES)
+ endif ()
+ 
+ # Apple bundling
+-if (APPLE)
++if (APPLE AND NOT IOS)
+     if(CMAKE_VERSION VERSION_LESS 3.19)
+         message(FATAL_ERROR "macOS packaging requires CMake 3.19 or higher to sign macOS app bundles.")
+     endif()
+diff --git a/apps/openmw/CMakeLists.txt b/apps/openmw/CMakeLists.txt
+index 66f0c29c2f..5f515a3d74 100644
+--- a/apps/openmw/CMakeLists.txt
++++ b/apps/openmw/CMakeLists.txt
+@@ -165,18 +165,12 @@ if (MSVC)
+ endif()
+ 
+ if(BUILD_OPENMW)
+-    if (ANDROID)
++    
+         add_library(openmw SHARED
+             main.cpp
+-            androidmain.cpp
++            
+         )
+-    else()
+-        openmw_add_executable(openmw
+-            ${APPLE_BUNDLE_RESOURCES}
+-            ${OPENMW_RESOURCES}
+-            main.cpp
+-        )
+-    endif()
++    
+ 
+     target_link_libraries(openmw openmw-lib)
+ 
+@@ -258,30 +252,68 @@ if (UNIX AND NOT APPLE)
+ endif()
+ 
+ if(APPLE AND BUILD_OPENMW)
+-    set(BUNDLE_RESOURCES_DIR "${APP_BUNDLE_DIR}/Contents/Resources")
+-
+-    set(OPENMW_RESOURCES_ROOT ${BUNDLE_RESOURCES_DIR})
+-
+-    add_subdirectory(../../files/ ${CMAKE_CURRENT_BINARY_DIR}/files)
+-
+-    configure_file("${OpenMW_BINARY_DIR}/defaults.bin" ${BUNDLE_RESOURCES_DIR} COPYONLY)
+-    configure_file("${OpenMW_BINARY_DIR}/openmw.cfg" ${BUNDLE_RESOURCES_DIR} COPYONLY)
+-    configure_file("${OpenMW_BINARY_DIR}/gamecontrollerdb.txt" ${BUNDLE_RESOURCES_DIR} COPYONLY)
+-
+-    add_custom_command(TARGET openmw
+-        POST_BUILD
+-        COMMAND cp "${OpenMW_BINARY_DIR}/resources/version" "${BUNDLE_RESOURCES_DIR}/resources")
+-
+-    find_library(COCOA_FRAMEWORK Cocoa)
+-    find_library(IOKIT_FRAMEWORK IOKit)
+-    target_link_libraries(openmw ${COCOA_FRAMEWORK} ${IOKIT_FRAMEWORK})
+-
+-    if (FFmpeg_FOUND)
+-        target_link_options(openmw PRIVATE "LINKER:SHELL:-framework CoreVideo"
+-                                           "LINKER:SHELL:-framework CoreMedia"
+-                                           "LINKER:SHELL:-framework VideoToolbox"
+-                                           "LINKER:SHELL:-framework AudioToolbox"
+-                                           "LINKER:SHELL:-framework VideoDecodeAcceleration")
++    if(CMAKE_OSX_SYSROOT MATCHES "iphoneos" OR CMAKE_SYSTEM_NAME MATCHES "iOS" OR IOS)
++        # iOS specific setup
++        # Resources land in <build dir>/resources, which the iOS install step copies into OpenMWAssets.
++        set(OPENMW_RESOURCES_ROOT "${OpenMW_BINARY_DIR}")
++        add_subdirectory(../../files/ ${CMAKE_CURRENT_BINARY_DIR}/files)
++        
++#        set_target_properties(openmw PROPERTIES
++#            MACOSX_BUNDLE TRUE
++#            MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/Info.plist"
++#            RESOURCE "${CMAKE_CURRENT_SOURCE_DIR}/Assets.xcassets"
++#        )
++        
++        find_library(UIKIT_FRAMEWORK UIKit)
++        find_library(FOUNDATION_FRAMEWORK Foundation)
++        find_library(COREGRAPHICS_FRAMEWORK CoreGraphics)
++        find_library(QUARTZCORE_FRAMEWORK QuartzCore)
++        
++        target_link_libraries(openmw
++            ${UIKIT_FRAMEWORK}
++            ${FOUNDATION_FRAMEWORK}
++            ${COREGRAPHICS_FRAMEWORK}
++            ${QUARTZCORE_FRAMEWORK}
++        )
++        
++        if (FFmpeg_FOUND)
++            # iOS uses AVFoundation for media
++            find_library(AVFOUNDATION_FRAMEWORK AVFoundation)
++            find_library(AUDIOTOOLBOX_FRAMEWORK AudioToolbox)
++            find_library(VIDEOTOOLBOX_FRAMEWORK VideoToolbox)
++            find_library(COREMEDIA_FRAMEWORK CoreMedia)
++            find_library(COREVIDEO_FRAMEWORK CoreVideo)
++            
++            target_link_libraries(openmw
++                ${AVFOUNDATION_FRAMEWORK}
++                ${AUDIOTOOLBOX_FRAMEWORK}
++                ${VIDEOTOOLBOX_FRAMEWORK}
++                ${COREMEDIA_FRAMEWORK}
++                ${COREVIDEO_FRAMEWORK}
++            )
++        endif()
++    else()
++        # macOS setup (original code)
++        set(BUNDLE_RESOURCES_DIR "${APP_BUNDLE_DIR}/Contents/Resources")
++        set(OPENMW_RESOURCES_ROOT ${BUNDLE_RESOURCES_DIR})
++        
++        add_subdirectory(../../files/ ${CMAKE_CURRENT_BINARY_DIR}/files)
++        
++        add_custom_command(TARGET openmw
++            POST_BUILD
++            COMMAND cp "${OpenMW_BINARY_DIR}/resources/version" "${BUNDLE_RESOURCES_DIR}/resources")
++        
++        find_library(COCOA_FRAMEWORK Cocoa)
++        find_library(IOKIT_FRAMEWORK IOKit)
++        target_link_libraries(openmw ${COCOA_FRAMEWORK} ${IOKIT_FRAMEWORK})
++        
++        if (FFmpeg_FOUND)
++            target_link_options(openmw PRIVATE "LINKER:SHELL:-framework CoreVideo"
++                                               "LINKER:SHELL:-framework CoreMedia"
++                                               "LINKER:SHELL:-framework VideoToolbox"
++                                               "LINKER:SHELL:-framework AudioToolbox"
++                                               "LINKER:SHELL:-framework VideoDecodeAcceleration")
++        endif()
+     endif()
+ endif()
+ 
+diff --git a/apps/openmw/engine.cpp b/apps/openmw/engine.cpp
+index 334d51e6ea..b115b1aa35 100644
+--- a/apps/openmw/engine.cpp
++++ b/apps/openmw/engine.cpp
+@@ -663,6 +663,12 @@ void OMW::Engine::createWindow(bool hidden)
+     }
+ 
+     Uint32 flags = (hidden ? SDL_WINDOW_HIDDEN : SDL_WINDOW_SHOWN) | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
++#ifdef __APPLE__
++    // On iOS a HiDPI drawable is native-scale (2-3x) while the engine's
++    // viewport math uses window units, leaving the picture in a corner.
++    // Point resolution keeps them equal.
++    flags &= ~SDL_WINDOW_ALLOW_HIGHDPI;
++#endif
+     if (!hidden && windowMode == Settings::WindowMode::Fullscreen)
+         flags |= SDL_WINDOW_FULLSCREEN;
+     else if (!hidden && windowMode == Settings::WindowMode::WindowedFullscreen)
+diff --git a/apps/openmw/mwrender/pingpongcanvas.cpp b/apps/openmw/mwrender/pingpongcanvas.cpp
+index a1f16a465e..e406ffb8ec 100644
+--- a/apps/openmw/mwrender/pingpongcanvas.cpp
++++ b/apps/openmw/mwrender/pingpongcanvas.cpp
+@@ -220,9 +220,13 @@ namespace MWRender
+             }
+             else
+             {
+-                ext->glBindFramebuffer(GL_DRAW_FRAMEBUFFER_EXT, 0);
++                // On iOS the screen is itself a framebuffer object; binding 0
++                // discards the output. Return to the context's default FBO.
++                const GLuint defaultFbo
++                    = state.getGraphicsContext() ? state.getGraphicsContext()->getDefaultFboId() : 0;
++                ext->glBindFramebuffer(GL_DRAW_FRAMEBUFFER_EXT, defaultFbo);
+ 
+-                lastApplied = 0;
++                lastApplied = defaultFbo;
+             }
+         };
+ 
+@@ -362,8 +366,10 @@ namespace MWRender
+ 
+         if (Stereo::getMultiview())
+         {
+-            ext->glBindFramebuffer(GL_DRAW_FRAMEBUFFER_EXT, 0);
+-            lastApplied = 0;
++            const GLuint defaultFbo
++                = state.getGraphicsContext() ? state.getGraphicsContext()->getDefaultFboId() : 0;
++            ext->glBindFramebuffer(GL_DRAW_FRAMEBUFFER_EXT, defaultFbo);
++            lastApplied = defaultFbo;
+ 
+             resolveViewport->apply(state);
+             state.pushStateSet(mMultiviewResolveStateSet);
+diff --git a/cmake/WholeArchive.cmake b/cmake/WholeArchive.cmake
+index 0e4a09c796..6819a965a3 100644
+--- a/cmake/WholeArchive.cmake
++++ b/cmake/WholeArchive.cmake
+@@ -3,7 +3,14 @@ function (get_whole_archive_options OUT_VAR)
+     if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+         set(${OUT_VAR} -Wl,--whole-archive ${ARGN} -Wl,--no-whole-archive PARENT_SCOPE)
+     elseif (CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
+-        set(${OUT_VAR} -Wl,-all_load ${ARGN} -Wl,-noall_load PARENT_SCOPE)
++        # Check if building for iOS
++        if(CMAKE_OSX_SYSROOT MATCHES "iphoneos" OR CMAKE_SYSTEM_NAME MATCHES "iOS" OR IOS)
++            # iOS: don't use -noall_load
++            set(${OUT_VAR} -Wl,-all_load ${ARGN} PARENT_SCOPE)
++        else()
++            # macOS: use both flags
++            set(${OUT_VAR} -Wl,-all_load ${ARGN} -Wl,-noall_load PARENT_SCOPE)
++        endif()
+     else ()
+         message(FATAL_ERROR "get_whole_archive_options not implemented for CMAKE_CXX_COMPILER_ID ${CMAKE_CXX_COMPILER_ID}")
+     endif()
+diff --git a/components/CMakeLists.txt b/components/CMakeLists.txt
+index 399292ea3c..13bc1fcb6c 100644
+--- a/components/CMakeLists.txt
++++ b/components/CMakeLists.txt
+@@ -5,6 +5,11 @@ if(APPLE)
+     set(OPENMW_RESOURCES_ROOT ${BUNDLE_RESOURCES_DIR})
+ endif(APPLE)
+ 
++# Detect iOS
++if(CMAKE_SYSTEM_NAME MATCHES "iOS" OR CMAKE_OSX_SYSROOT MATCHES "iphoneos")
++    set(IOS TRUE)
++endif()
++
+ # Version file
+ set (VERSION_RESOURCE_FILE_IN "${OpenMW_SOURCE_DIR}/files/version.in")
+ set (VERSION_RESOURCE_FILE_RELATIVE "resources/version")
+@@ -421,20 +426,6 @@ add_component_dir (lua_ui
+     )
+ copy_resource_file("lua_ui/content.lua" "${OPENMW_RESOURCES_ROOT}" "resources/lua_libs/content.lua")
+ 
+-
+-if(WIN32)
+-    add_component_dir (crashcatcher
+-        windowscrashcatcher
+-        windowscrashdumppathhelpers
+-        windowscrashmonitor
+-        windowscrashshm
+-    )
+-elseif(NOT ANDROID)
+-    add_component_dir (crashcatcher
+-        crashcatcher
+-    )
+-endif()
+-
+ add_component_dir(detournavigator
+     agentbounds
+     areatype
+diff --git a/components/debug/debugging.cpp b/components/debug/debugging.cpp
+index a0c66cfc29..bccda5a5d0 100644
+--- a/components/debug/debugging.cpp
++++ b/components/debug/debugging.cpp
+@@ -16,7 +16,7 @@
+ #pragma warning(pop)
+ #endif
+ 
+-#include <components/crashcatcher/crashcatcher.hpp>
++//#include <components/crashcatcher/crashcatcher.hpp>
+ #include <components/files/conversion.hpp>
+ #include <components/misc/strings/conversion.hpp>
+ #include <components/misc/strings/lower.hpp>
+@@ -473,23 +473,28 @@ namespace Debug
+ #else
+                 const std::string crashLogName = Misc::StringUtils::lowerCase(appName) + "-crash.log";
+                 // install the crash handler as soon as possible.
+-                crashCatcherInstall(argc, argv, std::filesystem::temp_directory_path() / crashLogName);
++                //crashCatcherInstall(argc, argv, //std::filesystem::temp_directory_path() / crashLogName);
+ #endif
+                 ret = innerApplication(argc, argv);
+             }
+             else
+             {
+                 // Harnesses turn the catcher off and keep the capture.
+-                crashCaptureInstall();
++                //crashCaptureInstall();
+                 ret = innerApplication(argc, argv);
+             }
+         }
+         catch (const std::exception& e)
+         {
+-#if (defined(__APPLE__) || defined(__linux) || defined(__unix) || defined(__posix))
++            // Showing a modal message box on iOS blocks forever (the SDL
++            // window is already gone when we get here), swallowing the fatal
++            // error log below, so it is skipped on Apple platforms.
++#if !defined(__APPLE__)
++#if (defined(__linux) || defined(__unix) || defined(__posix))
+             if (!isatty(fileno(stdin)))
+ #endif
+                 SDL_ShowSimpleMessageBox(0, (std::string(appName) + ": Fatal error").c_str(), e.what(), nullptr);
++#endif
+ 
+             Log(Debug::Error) << "Fatal error: " << e.what();
+ 
+diff --git a/components/files/macospath.cpp b/components/files/macospath.cpp
+index 0b27d385d4..1ed2a73349 100644
+--- a/components/files/macospath.cpp
++++ b/components/files/macospath.cpp
+@@ -97,6 +97,11 @@ namespace Files
+ 
+     std::filesystem::path MacOsPath::getLocalPath() const
+     {
++        // Allow a host app (e.g. an iOS launcher) to point the engine at its
++        // bundled base config + resources, since the executable-relative
++        // default is meaningless inside an iOS app sandbox.
++        if (const char* localDir = getenv("OPENMW_LOCAL_CONFIG_DIR"))
++            return std::filesystem::path(localDir);
+         return getBinaryPath().parent_path().parent_path() / "Resources";
+     }
+ 
+diff --git a/components/sdlutil/sdlcursormanager.cpp b/components/sdlutil/sdlcursormanager.cpp
+index a582103ebc..a006f62700 100644
+--- a/components/sdlutil/sdlcursormanager.cpp
++++ b/components/sdlutil/sdlcursormanager.cpp
+@@ -23,7 +23,7 @@
+ #if defined(OSG_LIBRARY_STATIC) && (!defined(ANDROID) || OSG_VERSION_GREATER_THAN(3, 6, 5))
+ // Sets the default windowing system interface according to the OS.
+ // Necessary for OpenSceneGraph to do some things, like decompression.
+-USE_GRAPHICSWINDOW()
++//USE_GRAPHICSWINDOW()
+ #endif
+ 
+ namespace SDLUtil
+diff --git a/components/sdlutil/sdlgraphicswindow.cpp b/components/sdlutil/sdlgraphicswindow.cpp
+index 4abe01bdea..c68d2d822f 100644
+--- a/components/sdlutil/sdlgraphicswindow.cpp
++++ b/components/sdlutil/sdlgraphicswindow.cpp
+@@ -2,6 +2,10 @@
+ 
+ #include <SDL_video.h>
+ 
++#ifdef __APPLE__
++#include <SDL_syswm.h>
++#endif
++
+ #ifdef OPENMW_GL4ES_MANUAL_INIT
+ #include "gl4esinit.h"
+ #endif
+@@ -149,6 +153,22 @@ namespace SDLUtil
+         openmw_gl4es_init(mWindow);
+ #endif
+ 
++#ifdef __APPLE__
++        // iOS has no OS-provided default framebuffer: SDL renders through a
++        // framebuffer object backed by the screen layer. Tell OSG about it so
++        // render stages unbinding an FBO return to the screen instead of the
++        // nonexistent framebuffer 0 (which silently swallows every frame).
++        {
++            SDL_SysWMinfo wmInfo;
++            SDL_VERSION(&wmInfo.version);
++            if (SDL_GetWindowWMInfo(mWindow, &wmInfo) && wmInfo.subsystem == SDL_SYSWM_UIKIT
++                && wmInfo.info.uikit.framebuffer != 0)
++            {
++                setDefaultFboId(wmInfo.info.uikit.framebuffer);
++            }
++        }
++#endif
++
+         setSwapInterval(mVSyncMode);
+ 
+         // Update traits with what we've actually been given
+diff --git a/components/shader/shadermanager.cpp b/components/shader/shadermanager.cpp
+index 9530cd7b01..219533f919 100644
+--- a/components/shader/shadermanager.cpp
++++ b/components/shader/shadermanager.cpp
+@@ -36,6 +36,10 @@
+ #include <components/settings/values.hpp>
+ #include <components/settings/weather.hpp>
+ 
++#ifdef __APPLE__
++#include <TargetConditionals.h>
++#endif
++
+ namespace
+ {
+     /// Linked module k owns #line files from k * 1000.
+@@ -1895,7 +1899,60 @@ namespace Shader
+         std::vector<std::string>& linkedShaderTemplateNames, const std::string& templateName,
+         const ShaderManager::DefineMap& defines)
+     {
+-        return expandTemplate(source, linkedShaderTemplateNames, templateName, defines, mGlobalDefines);
++        if (!expandTemplate(source, linkedShaderTemplateNames, templateName, defines, mGlobalDefines))
++            return false;
++#if defined(__APPLE__) && TARGET_OS_IPHONE
++        // OpenGL ES cannot link multiple shader objects of the same stage into
++        // one program, so inline the $link'ed library shaders into the main
++        // source instead of attaching them as separate compilation units.
++        std::set<std::string> inlinedTemplates{ templateName };
++        for (size_t i = 0; i < linkedShaderTemplateNames.size(); ++i)
++        {
++            std::string linkedName = linkedShaderTemplateNames[i];
++            if (getRootPrefix(linkedName).empty())
++                linkedName = "compatibility/" + linkedName;
++            if (!inlinedTemplates.insert(linkedName).second)
++                continue;
++
++            TemplateMap::iterator templateIt = mShaderTemplates.find(linkedName);
++            if (templateIt == mShaderTemplates.end())
++            {
++                std::filesystem::path path = mPath / linkedName;
++                std::ifstream stream;
++                stream.open(path);
++                if (stream.fail())
++                {
++                    Log(Debug::Error) << "Failed to open linked shader " << path;
++                    return false;
++                }
++                std::stringstream buffer;
++                buffer << stream.rdbuf();
++                std::string linkedTemplate = buffer.str();
++                int fileNumber = 1;
++                std::set<std::filesystem::path> insertedPaths;
++                if (!addLineDirectivesAfterConditionalBlocks(linkedTemplate)
++                    || !parseIncludes(mPath, linkedTemplate, linkedName, fileNumber, {}, insertedPaths))
++                    return false;
++                templateIt = mShaderTemplates.insert(std::make_pair(linkedName, std::move(linkedTemplate))).first;
++            }
++
++            std::string linkedSource = templateIt->second;
++            std::vector<std::string> nestedLinks;
++            if (!expandTemplate(linkedSource, nestedLinks, linkedName, defines, mGlobalDefines))
++                return false;
++            for (auto& nested : nestedLinks)
++                linkedShaderTemplateNames.push_back(std::move(nested));
++
++            // The combined source keeps the main shader's #version directive.
++            size_t versionPos = linkedSource.find("#version");
++            if (versionPos != std::string::npos)
++                linkedSource.replace(versionPos, 1, "//");
++            source += "\n";
++            source += linkedSource;
++        }
++        linkedShaderTemplateNames.clear();
++#endif
++        return true;
+     }
+ 
+     void ShaderManager::getLinkedShaders(const osg::ref_ptr<osg::Shader>& shader,

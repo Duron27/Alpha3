@@ -1,0 +1,60 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Alpha3 <noreply@alpha3.invalid>
+Date: Sat, 24 Oct 2026 20:07:39 -0400
+Subject: [PATCH 10/17] Shadow casters smaller than a few texels are culled
+
+The shadow cameras had small feature culling off. With ordinary (not perspective)
+shadow maps, anything under three shadow map pixels is not drawn into the cascade.
+---
+ components/sceneutil/mwshadowtechnique.cpp | 24 ++++++++++++++++++++++
+ 1 file changed, 24 insertions(+)
+
+diff --git a/components/sceneutil/mwshadowtechnique.cpp b/components/sceneutil/mwshadowtechnique.cpp
+index 15ad02dec1..0a9ae35fb3 100644
+--- a/components/sceneutil/mwshadowtechnique.cpp
++++ b/components/sceneutil/mwshadowtechnique.cpp
+@@ -26,6 +26,7 @@
+ #include <osg/Depth>
+ #include <osg/ClipControl>
+ 
++#include <cstdlib>
+ #include <sstream>
+ #include <vector>
+ 
+@@ -40,6 +41,17 @@ namespace {
+ using namespace osgShadow;
+ using namespace SceneUtil;
+ 
++// Shadow casters smaller than this many shadow map pixels are not drawn; OPENMW_SHADOW_SMALL_FEATURE_PX=0 turns it off
++float getShadowCasterSmallFeaturePixelSize()
++{
++    static const float size = [] {
++        if (const char* value = std::getenv("OPENMW_SHADOW_SMALL_FEATURE_PX"))
++            return std::strtof(value, nullptr);
++        return 3.f;
++    }();
++    return size;
++}
++
+ #define dbl_max std::numeric_limits<double>::max()
+ 
+ //////////////////////////////////////////////////////////////////
+@@ -1428,6 +1440,18 @@ void MWShadowTechnique::cull(osgUtil::CullVisitor& cv)
+             else
+                 camera->setCullingMode(camera->getCullingMode() & ~osg::CullSettings::CLUSTER_CULLING);
+ 
++            // A caster only a few texels across in the shadow map costs a draw call and casts no shadow anyone can
++            // see. The map is not stretched after culling unless it is a perspective shadow map, which is why the
++            // template camera has this off.
++            if (settings->getShadowMapProjectionHint() == ShadowSettings::PERSPECTIVE_SHADOW_MAP
++                || getShadowCasterSmallFeaturePixelSize() <= 0.f)
++                camera->setCullingMode(camera->getCullingMode() & ~osg::CullSettings::SMALL_FEATURE_CULLING);
++            else
++            {
++                camera->setCullingMode(camera->getCullingMode() | osg::CullSettings::SMALL_FEATURE_CULLING);
++                camera->setSmallFeatureCullingPixelSize(getShadowCasterSmallFeaturePixelSize());
++            }
++
+             // transform polytope in model coords into light spaces eye coords.
+             osg::Matrixd invertModelView;
+             invertModelView.invert(camera->getViewMatrix());

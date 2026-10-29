@@ -1,0 +1,189 @@
+From 9ca9ed94a30c4726369bf5cdc2cef1686d4893d7 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Wed, 7 Oct 2026 02:31:47 -0400
+Subject: [PATCH] Fix chat focus, always-visible chat log, and avatar menu
+ being replaced by NPC dialogue
+
+- chat: Interface mode with pausing disabled (setPauseOnMode) so the text box gets keyboard focus and the game keeps running
+- chat log stays on screen (dimmed when idle) and HUD elements are rebuilt after any UI mode change
+- block standard NPC dialogue/pickpocket on avatars and proxies through the Activation interface
+  (the global onActivate engine handler only observes)
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ multiplayer/mod/scripts/mp/global.lua  | 19 ++++++-------
+ multiplayer/mod/scripts/mp/player.lua  | 38 +++++++++++++++++---------
+ multiplayer/mod/scripts/mp/proxies.lua |  1 +
+ 3 files changed, 35 insertions(+), 23 deletions(-)
+
+diff --git a/multiplayer/mod/scripts/mp/global.lua b/multiplayer/mod/scripts/mp/global.lua
+index 38dcb893c3..3d1da2104b 100644
+--- a/multiplayer/mod/scripts/mp/global.lua
++++ b/multiplayer/mod/scripts/mp/global.lua
+@@ -72,6 +72,7 @@ proxies.init({
+     send = function(t) net.send(net.encodeJson(t)) end,
+     log = log,
+     dlog = dlog,
++    blockActivation = function(obj) I.Activation.addHandlerForObject(obj, function() return false end) end,
+     player = player,
+     cellKey = cellKey,
+     myId = function() return myId end,
+@@ -89,6 +90,7 @@ local function connect()
+ end
+ 
+ local clearRemotes
++local onAvatarActivated
+ 
+ settings:subscribe(async:callback(function()
+     clearRemotes()
+@@ -170,6 +172,12 @@ local function spawnRemote(r)
+     local record = world.createRecord(draft)
+     r.obj = world.createObject(record.id, 1)
+     avatarIds[r.obj.id] = r.id
++    -- Block the standard NPC dialogue and show our player menu instead. (The global onActivate *engine*
++    -- handler only observes; blocking has to go through the Activation interface.)
++    I.Activation.addHandlerForObject(r.obj, function()
++        onAvatarActivated(r.id)
++        return false
++    end)
+     r.obj:addScript(REMOTE_SCRIPT, {})
+     placeRemote(r)
+     r.equipSent = false
+@@ -341,7 +349,7 @@ local function resolveInviter(name)
+     return best
+ end
+ 
+-local function onAvatarActivated(rid)
++onAvatarActivated = function(rid)
+     dlog('avatar activated', tostring(rid))
+     local expIn = invitesIn[rid]
+     local expOut = invitesOut[rid]
+@@ -469,15 +477,6 @@ return {
+                 pushUi()
+             end
+         end,
+-        onActivate = function(obj)
+-            -- stand-ins and proxies are not real inhabitants of this world: no dialogue, pickpocketing, etc.
+-            local rid = avatarIds[obj.id]
+-            if rid ~= nil then
+-                onAvatarActivated(rid)
+-                return false
+-            end
+-            if proxies.isProxy(obj) then return false end
+-        end,
+         onNetConnected = function() log('connected'); retry = 0; pushUi() end,
+         onNetDisconnected = function(reason)
+             log('disconnected: ' .. tostring(reason))
+diff --git a/multiplayer/mod/scripts/mp/player.lua b/multiplayer/mod/scripts/mp/player.lua
+index caa4067125..5e0ac29653 100644
+--- a/multiplayer/mod/scripts/mp/player.lua
++++ b/multiplayer/mod/scripts/mp/player.lua
+@@ -100,12 +100,8 @@ local function setTab(t)
+ end
+ 
+ local function renderChat()
+-    local visible = chatOpen or (now() - lastMsgTime < FADE_AFTER)
+-    logVisible = visible
+-    if not visible then
+-        logEl = destroy(logEl)
+-        return
+-    end
++    local active = chatOpen or (now() - lastMsgTime < FADE_AFTER)
++    logVisible = active
+     local scr = screen()
+     local height = 28 + LINES * LINE_H + 6
+     local content = {}
+@@ -134,7 +130,7 @@ local function renderChat()
+     end
+     local layout = {
+         layer = 'HUD', type = ui.TYPE.Widget,
+-        props = { position = V2(10, scr.y * 0.5 - height / 2), size = V2(CHAT_W, height) },
++        props = { position = V2(10, scr.y * 0.5 - height / 2), size = V2(CHAT_W, height), alpha = active and 1 or 0.45 },
+         content = ui.content({ background(chatOpen and 0.6 or 0.35), table.unpack(content) }),
+     }
+     if logEl then
+@@ -150,7 +146,7 @@ end
+ trade.init({
+     send = function(msg) core.sendGlobalEvent('MpCmd', { cmd = 'trade_send', msg = msg }) end,
+     notice = function(str) addLine('system', '* ' .. str) end,
+-    setMode = function() I.UI.setMode('Interface', { windows = {} }) end,
++    setMode = function() I.UI.setPauseOnMode('Interface', true); I.UI.setMode('Interface', { windows = {} }) end,
+     unsetMode = function() I.UI.setMode() end,
+ })
+ 
+@@ -184,8 +180,9 @@ local function openChat()
+     unread[tab] = 0
+     local scr = screen()
+     local height = 28 + LINES * LINE_H + 6
+-    -- No UI mode: the game keeps running. The focused text box makes the engine route typing to it
+-    -- (movement/hotkeys are suppressed while it has keyboard focus).
++    -- A UI mode is needed for keyboard focus and the cursor, but this one must not pause the game.
++    I.UI.setPauseOnMode('Interface', false)
++    I.UI.setMode('Interface', { windows = {} })
+     inputEl = ui.create {
+         layer = 'HUD', type = ui.TYPE.Widget,
+         props = { position = V2(10, scr.y * 0.5 + height / 2 + 4), size = V2(CHAT_W, 26) },
+@@ -221,6 +218,8 @@ closeChat = function()
+     if not chatOpen then return end
+     chatOpen = false
+     inputEl = destroy(inputEl) -- also drops keyboard focus
++    I.UI.setMode()
++    I.UI.setPauseOnMode('Interface', true) -- menus and trades pause as usual
+     dirty.chat = true
+ end
+ 
+@@ -363,6 +362,7 @@ local function openMenu(d)
+     local w, h = 300, 22 + (#options + 1) * 26 + 10
+     local scr = screen()
+     menuOpen = true
++    I.UI.setPauseOnMode('Interface', true)
+     I.UI.setMode('Interface', { windows = {} })
+     menuEl = ui.create {
+         layer = 'Windows', type = ui.TYPE.Widget,
+@@ -420,6 +420,7 @@ return {
+         MpTrade = function(msg) trade.onMessage(msg) end,
+         MpTradeResult = function(r) trade.onResult(r) end,
+         MpUiOpenChat = function() openChat() end, -- for tests/macros
++        MpUiAvatar = function(d) openMenu(d) end, -- for tests/macros
+         MpUiTrade = function(d) trade.request(d.id, d.name) end, -- for tests/macros
+         MpUiTradeDebug = function(d) -- for tests/macros
+             if d.action == 'accept' then trade.debugAccept() else trade.debugEdit(d.action, d.rid, d.n) end
+@@ -427,9 +428,20 @@ return {
+         -- Another window opened, or Escape closed our menu's Interface mode: drop our widgets.
+         -- (I.UI.getMode() lags a frame behind setMode, so it can't be polled for this.)
+         UiModeChanged = function(d)
+-            if d.newMode ~= nil and chatOpen then chatOpen = false; inputEl = destroy(inputEl); dirty.chat = true end
+-            trade.onMode(d.newMode)
+-            if d.newMode ~= 'Interface' and menuOpen then menuOpen = false; menuEl = destroy(menuEl) end
++            print('[mp-ui] mode ' .. tostring(d.oldMode) .. ' -> ' .. tostring(d.newMode) .. ' chatOpen=' .. tostring(chatOpen) .. ' menuOpen=' .. tostring(menuOpen))
++            -- Escape ended our Interface mode, or another window replaced it
++            if d.newMode ~= 'Interface' then
++                if chatOpen then
++                    chatOpen = false
++                    inputEl = destroy(inputEl)
++                    I.UI.setPauseOnMode('Interface', true)
++                end
++                trade.onMode(d.newMode)
++                if menuOpen then menuOpen = false; menuEl = destroy(menuEl) end
++            end
++            -- the engine may have hidden/rebuilt the HUD while a menu was open: rebuild ours
++            logEl, partyEl, inviteEl = destroy(logEl), destroy(partyEl), destroy(inviteEl)
++            dirty.chat, dirty.party, dirty.invites = true, true, true
+         end,
+     },
+ }
+diff --git a/multiplayer/mod/scripts/mp/proxies.lua b/multiplayer/mod/scripts/mp/proxies.lua
+index 3f0d1b4a60..c11af0f1e0 100644
+--- a/multiplayer/mod/scripts/mp/proxies.lua
++++ b/multiplayer/mod/scripts/mp/proxies.lua
+@@ -169,6 +169,7 @@ local function spawn(owner, e, key)
+     if not rec then return nil end
+     local obj = world.createObject(rec.id, 1)
+     obj:addScript(REMOTE_SCRIPT, { proxy = true, key = key })
++    ctx.blockActivation(obj) -- no dialogue/pickpocket on a stand-in
+     local px = { owner = owner, obj = obj, key = key, last = e }
+     proxies[key] = px
+     proxyById[obj.id] = px
+-- 
+2.55.0
+

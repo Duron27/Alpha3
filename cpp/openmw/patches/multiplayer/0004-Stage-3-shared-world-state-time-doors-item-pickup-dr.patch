@@ -1,0 +1,379 @@
+From 1addb37d3ac8f9de9c3e60116c14caed49e0c819 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Wed, 7 Oct 2026 01:42:06 -0400
+Subject: [PATCH] Stage 3: shared world state (time, doors, item pickup/drop)
+ with relay-side change log
+
+- worldsync.lua: content-file-stable object ids, deferred application for unloaded objects
+- relay: records doors/takes/drops/time, replays to late joiners, elects a host for time authority
+- block activation of remote-player stand-in NPCs
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ multiplayer/README.md                    |   9 ++
+ multiplayer/mod/scripts/mp/global.lua    |  22 +++
+ multiplayer/mod/scripts/mp/worldsync.lua | 186 +++++++++++++++++++++++
+ multiplayer/server/relay.py              |  39 +++++
+ 4 files changed, 256 insertions(+)
+ create mode 100644 multiplayer/mod/scripts/mp/worldsync.lua
+
+diff --git a/multiplayer/README.md b/multiplayer/README.md
+index da5b8fa54c..ad0e567b57 100644
+--- a/multiplayer/README.md
++++ b/multiplayer/README.md
+@@ -7,3 +7,12 @@
+ 
+ Run: `multiplayer/run-test.sh [path/to/openmw]`, then load a save. Watch `openmw.log` for `[mp]` lines.
+ Protocol: one JSON object per line, `{"t":"state","name","cell","pos":[x,y,z],"yaw"}`; the server adds `id`.
++
++## Shared world state (stage 3)
++`mod/scripts/mp/worldsync.lua` syncs, through the relay's replayed change log:
++- game time (the lowest-id client is "host" and publishes it every 5 s),
++- non-teleport doors (open/close), picked-up items, and items dropped at runtime.
++Objects from content files are addressed as `<file>:<index>` (load-order independent); runtime drops as `<senderId>/<localId>`.
++Changes for objects that are not loaded yet are applied when the object becomes active.
++Not synced yet: container contents, NPC/creature deaths and combat, quests/globals, weather, locks.
++Remote-player stand-ins can't be activated (no dialogue/pickpocket).
+diff --git a/multiplayer/mod/scripts/mp/global.lua b/multiplayer/mod/scripts/mp/global.lua
+index 670f525613..87cc5ce6e1 100644
+--- a/multiplayer/mod/scripts/mp/global.lua
++++ b/multiplayer/mod/scripts/mp/global.lua
+@@ -5,6 +5,7 @@ local world = require('openmw.world')
+ local util = require('openmw.util')
+ local types = require('openmw.types')
+ local markup = require('openmw.markup')
++local worldsync = require('scripts/mp/worldsync')
+ 
+ local HOST = '127.0.0.1'
+ local PORT = 25565
+@@ -22,6 +23,12 @@ local function log(...) print('[mp]', ...) end
+ 
+ local function player() return world.players[1] end
+ 
++worldsync.init({
++    send = function(t) net.send(net.encodeJson(t)) end,
++    log = log,
++    myId = function() return myId end,
++})
++
+ local function cellKey(cell) return cell.isExterior and '' or cell.name end
+ 
+ ------------------------------------------------------------------ outbound
+@@ -150,6 +157,8 @@ end
+ ------------------------------------------------------------------ messages
+ 
+ local function onMessage(msg)
++    if msg.t == 'host' then worldsync.setHost(msg.id == myId) return end
++    if worldsync.onMessage(msg) then return end
+     if msg.t == 'hello' then
+         myId = msg.id
+         log('my id is ' .. tostring(myId))
+@@ -188,11 +197,13 @@ return {
+         onLoad = function(saved)
+             remotes = {}
+             lastEquipJson = nil
++            worldsync.reset()
+             for _, obj in ipairs(saved and saved.objs or {}) do
+                 if obj:isValid() then pcall(function() obj:remove() end) end
+             end
+         end,
+         onUpdate = function(dt)
++            worldsync.onUpdate(dt)
+             for _, r in pairs(remotes) do updateRemote(r) end
+             if net.isConnected() then
+                 sendTimer = sendTimer + dt
+@@ -207,10 +218,21 @@ return {
+                 end
+             end
+         end,
++        onActivate = function(obj, actor)
++            -- remote players are stand-ins: no dialogue, pickpocketing, etc.
++            for _, r in pairs(remotes) do
++                if r.obj and r.obj == obj then return false end
++            end
++            worldsync.onActivate(obj, actor)
++        end,
++        onDropped = worldsync.onDropped,
++        onPlaced = worldsync.onDropped,
++        onObjectActive = worldsync.onObjectActive,
+         onNetConnected = function() log('connected'); retry = 0 end,
+         onNetDisconnected = function(reason)
+             log('disconnected: ' .. tostring(reason))
+             clearRemotes()
++            worldsync.setHost(false)
+         end,
+         onNetMessage = function(line)
+             local ok, msg = pcall(markup.decodeYaml, line)
+diff --git a/multiplayer/mod/scripts/mp/worldsync.lua b/multiplayer/mod/scripts/mp/worldsync.lua
+new file mode 100644
+index 0000000000..97aec82f53
+--- /dev/null
++++ b/multiplayer/mod/scripts/mp/worldsync.lua
+@@ -0,0 +1,186 @@
++-- Shared world state for the multiplayer test mod: game time, doors, picked-up items, dropped items.
++-- The relay server is the source of truth for the log of changes and replays it to late joiners.
++-- Objects are addressed by GameObject.id (identical on every client for content-file objects) or,
++-- for items dropped at runtime, by a canonical id "<senderId>/<senderLocalId>".
++local core = require('openmw.core')
++local world = require('openmw.world')
++local types = require('openmw.types')
++local util = require('openmw.util')
++
++local M = {}
++
++local ACTIVATION_CHECK_DELAY = 0.15
++local TIME_INTERVAL = 5
++local TIME_TOLERANCE = 0.05 -- game hours
++
++local ctx -- { send = function(table), log = function(...), myId = function() }
++local isHost = false
++local timeTimer = 0
++local checks = {} -- { obj, kind, wait }
++local pending = {} -- object id -> { take = true } | { door = bool }  (waiting for the object to load)
++local canon = {} -- local object id -> canonical id
++local byCanon = {} -- canonical id -> local object
++
++function M.init(context) ctx = context end
++
++function M.reset()
++    checks, pending, canon, byCanon = {}, {}, {}, {}
++    timeTimer = 0
++end
++
++function M.setHost(v) isHost = v end
++
++-- Stable cross-client id for an object defined by a content file: "<file>:<index within file>".
++-- GameObject.id embeds the load-order index of the file, so it can't be shared as is.
++local function contentId(obj)
++    local n = tonumber(obj.id)
++    if not obj.contentFile or not n then return nil end
++    return obj.contentFile .. ':' .. (n % 0x1000000)
++end
++
++local function netId(obj) return canon[obj.id] or contentId(obj) end
++
++local function objectById(id)
++    local file, index = tostring(id):match('^(.+):(%d+)$')
++    if not file then return nil end
++    local ok, obj = pcall(function() return world.getObjectByFormId(core.getFormId(file, tonumber(index))) end)
++    if ok and obj and obj:isValid() then return obj end
++    return nil
++end
++
++local function resolve(id)
++    local obj = byCanon[id]
++    if obj and obj:isValid() then return obj end
++    return objectById(id)
++end
++
++local function cellKey(cell) return cell.isExterior and '' or cell.name end
++
++------------------------------------------------------------------ outbound (local player actions)
++
++-- Called from the global onActivate handler. Never blocks activation.
++function M.onActivate(obj, actor)
++    if actor.type ~= types.Player or not netId(obj) then return end
++    if obj.type == types.Door then
++        if not types.Door.isTeleport(obj) then
++            checks[#checks + 1] = { obj = obj, kind = 'door', wait = ACTIVATION_CHECK_DELAY }
++        end
++    elseif types.Item.objectIsInstance(obj) then
++        checks[#checks + 1] = { obj = obj, kind = 'take', wait = ACTIVATION_CHECK_DELAY, nid = netId(obj) }
++    end
++end
++
++function M.onDropped(obj, actor, position, rotation)
++    if actor.type ~= types.Player then return end
++    local cid = tostring(ctx.myId()) .. '/' .. obj.id
++    canon[obj.id] = cid
++    byCanon[cid] = obj
++    ctx.send({
++        t = 'drop', cid = cid, rec = obj.recordId, count = obj.count,
++        cell = cellKey(actor.cell), pos = { position.x, position.y, position.z },
++        yaw = rotation:getYaw(),
++    })
++end
++
++local function runChecks(dt)
++    for i = #checks, 1, -1 do
++        local c = checks[i]
++        c.wait = c.wait - dt
++        if c.wait <= 0 then
++            table.remove(checks, i)
++            if c.kind == 'door' then
++                if c.obj:isValid() then
++                    local state = types.Door.getDoorState(c.obj)
++                    if state ~= types.Door.STATE.Idle then
++                        ctx.send({ t = 'door', oid = netId(c.obj), open = state == types.Door.STATE.Opening })
++                    end
++                end
++            elseif c.kind == 'take' then
++                if not c.obj:isValid() or c.obj.count == 0 then
++                    ctx.send({ t = 'take', oid = c.nid })
++                end
++            end
++        end
++    end
++end
++
++------------------------------------------------------------------ inbound
++
++local function applyDoor(obj, open)
++    if (open and types.Door.isClosed(obj)) or (not open and types.Door.isOpen(obj)) then
++        types.Door.activateDoor(obj, open)
++    end
++end
++
++local function applyTime(msg)
++    local ok, g = pcall(function() return world.mwscript.getGlobalVariables() end)
++    if not ok then return end
++    pcall(function()
++        local hourDiff = math.abs((g.gamehour or 0) - msg.hour)
++        if g.day ~= msg.day or g.month ~= msg.month or g.year ~= msg.year or hourDiff > TIME_TOLERANCE then
++            g.year, g.month, g.day, g.gamehour = msg.year, msg.month, msg.day, msg.hour
++        end
++    end)
++end
++
++local function sendTime()
++    local ok, g = pcall(function() return world.mwscript.getGlobalVariables() end)
++    if not ok then return end
++    ctx.send({ t = 'time', hour = g.gamehour, day = g.day, month = g.month, year = g.year })
++end
++
++-- Returns true if the message was a world-state message.
++function M.onMessage(msg)
++    if msg.t == 'door' then
++        local obj = objectById(msg.oid)
++        if obj then applyDoor(obj, msg.open) else pending[msg.oid] = { door = msg.open } end
++        return true
++    elseif msg.t == 'take' then
++        local obj = resolve(msg.oid)
++        if obj then
++            obj:remove()
++        else
++            pending[msg.oid] = { take = true }
++        end
++        return true
++    elseif msg.t == 'drop' then
++        if resolve(msg.cid) then return true end
++        local ok, obj = pcall(world.createObject, msg.rec, msg.count or 1)
++        if not ok then ctx.log('cannot create dropped item ' .. tostring(msg.rec)) return true end
++        canon[obj.id] = msg.cid
++        byCanon[msg.cid] = obj
++        obj:teleport(msg.cell or '', util.vector3(msg.pos[1], msg.pos[2], msg.pos[3]),
++            { rotation = util.transform.rotateZ(msg.yaw or 0) })
++        return true
++    elseif msg.t == 'time' then
++        applyTime(msg)
++        return true
++    end
++    return false
++end
++
++-- An object finished loading: apply changes that arrived while it was unloaded.
++function M.onObjectActive(obj)
++    local nid = netId(obj)
++    local p = nid and pending[nid]
++    if not p then return end
++    pending[nid] = nil
++    if p.take then
++        obj:remove()
++    elseif p.door ~= nil and obj.type == types.Door then
++        applyDoor(obj, p.door)
++    end
++end
++
++function M.onUpdate(dt)
++    runChecks(dt)
++    if isHost then
++        timeTimer = timeTimer + dt
++        if timeTimer >= TIME_INTERVAL then
++            timeTimer = 0
++            sendTime()
++        end
++    end
++end
++
++return M
+diff --git a/multiplayer/server/relay.py b/multiplayer/server/relay.py
+index c4cf82d88d..555dd00341 100644
+--- a/multiplayer/server/relay.py
++++ b/multiplayer/server/relay.py
+@@ -12,6 +12,7 @@ import sys
+ MIRROR = "--mirror" in sys.argv
+ sys.argv = [a for a in sys.argv if a != "--mirror"]
+ clients = {}  # id -> StreamWriter
++world = {"doors": {}, "takes": set(), "drops": {}, "time": None}  # replayed to late joiners
+ last = {}  # id -> {type: last message}, replayed to late joiners
+ next_id = 1
+ 
+@@ -23,6 +24,37 @@ async def broadcast(msg, exclude=None):
+             w.write(data)
+ 
+ 
++def world_replay():
++    for oid, open_ in world["doors"].items():
++        yield {"t": "door", "oid": oid, "open": open_}
++    for oid in world["takes"]:
++        yield {"t": "take", "oid": oid}
++    yield from world["drops"].values()
++    if world["time"]:
++        yield world["time"]
++
++
++def record_world(msg):
++    t = msg.get("t")
++    if t == "door" and "oid" in msg:
++        world["doors"][msg["oid"]] = bool(msg.get("open"))
++    elif t == "take" and "oid" in msg:
++        world["takes"].add(msg["oid"])
++        world["drops"].pop(msg["oid"], None)
++    elif t == "drop" and "cid" in msg:
++        world["drops"][msg["cid"]] = msg
++    elif t == "time":
++        world["time"] = msg
++    else:
++        return False
++    return True
++
++
++async def elect_host():
++    if clients:
++        await broadcast({"t": "host", "id": min(clients)})
++
++
+ async def handle(reader, writer):
+     global next_id
+     cid, next_id = next_id, next_id + 1
+@@ -34,6 +66,9 @@ async def handle(reader, writer):
+         if other != cid:
+             for m in msgs.values():
+                 writer.write((json.dumps(m, separators=(",", ":")) + "\n").encode())
++    for m in world_replay():
++        writer.write((json.dumps(m, separators=(",", ":")) + "\n").encode())
++    await elect_host()
+     try:
+         async for line in reader:
+             try:
+@@ -43,6 +78,9 @@ async def handle(reader, writer):
+             if not isinstance(msg, dict):
+                 continue
+             msg["id"] = cid
++            if record_world(msg):
++                await broadcast(msg, exclude=cid)
++                continue
+             if msg.get("t") in ("profile", "equip", "state"):
+                 last[cid][msg["t"]] = msg
+             await broadcast(msg, exclude=cid)
+@@ -60,6 +98,7 @@ async def handle(reader, writer):
+         writer.close()
+         print(f"- client {cid}", flush=True)
+         await broadcast({"t": "leave", "id": cid})
++        await elect_host()
+ 
+ 
+ async def main(host, port):
+-- 
+2.55.0
+

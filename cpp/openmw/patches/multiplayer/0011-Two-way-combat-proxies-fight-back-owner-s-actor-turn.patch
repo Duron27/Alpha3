@@ -1,0 +1,173 @@
+From 5a065afbb4a1881fcea0c2c5516f597fa5f3a17f Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Wed, 7 Oct 2026 02:56:35 -0400
+Subject: [PATCH] Two-way combat: proxies fight back, owner's actor turns on
+ its owner, avatars are unhurtable
+
+- remote.lua: a proxy hit by the guest enables its AI and starts Combat against the local player
+- damage.lua: damage forwarded to a real actor also makes it fight the local player
+- avatars of other players keep full health; hitting one reports to the crime guard (no bounty)
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ multiplayer/README.md                  |  5 ++++-
+ multiplayer/mod/scripts/mp/damage.lua  | 15 +++++++++++--
+ multiplayer/mod/scripts/mp/global.lua  |  1 +
+ multiplayer/mod/scripts/mp/proxies.lua |  5 +++++
+ multiplayer/mod/scripts/mp/remote.lua  | 30 ++++++++++++++++++++++----
+ 5 files changed, 49 insertions(+), 7 deletions(-)
+
+diff --git a/multiplayer/README.md b/multiplayer/README.md
+index 0e4d9f3368..f6cde39d80 100644
+--- a/multiplayer/README.md
++++ b/multiplayer/README.md
+@@ -24,5 +24,8 @@ Every player keeps their **own** world; nothing a group member does changes your
+ Test with one client: `run-test.sh [--cheat]` starts the relay, a "Bot" player (auto-accepts party invites and trades,
+ owns a scrib that doesn't exist in your world) and OpenMW. `server/owner_bot.py --help` lists bot options.
+ 
+-Not done: members' attacks on you, shared fights where both worlds have the actor alive, container contents,
++Combat is two-way: hitting a proxy turns on its AI so it fights you in your world, the owner's real actor takes the damage
++and turns on its owner, and other players' avatars can't be hurt (and hitting one gives no bounty).
++
++Not done: shared fights where both worlds have the actor alive, container contents,
+ weather/time, proxies for actors that are alive-but-unloaded in your world, trade of enchanted/generated items.
+diff --git a/multiplayer/mod/scripts/mp/damage.lua b/multiplayer/mod/scripts/mp/damage.lua
+index bd32775b8c..4d8ca6f499 100644
+--- a/multiplayer/mod/scripts/mp/damage.lua
++++ b/multiplayer/mod/scripts/mp/damage.lua
+@@ -1,7 +1,10 @@
+--- Attached on demand to a real NPC/creature in *this* world when a group member
+--- hurts that actor's proxy in their own world. Applies the damage as a fraction of max health.
++-- Attached on demand to a real NPC/creature in *this* world when a group member hurts that actor's
++-- proxy in their own world. Applies the damage as a fraction of max health and makes the actor turn on
++-- the local player, so a fight started by a guest becomes a shared fight.
+ local self = require('openmw.self')
+ local types = require('openmw.types')
++local nearby = require('openmw.nearby')
++local I = require('openmw.interfaces')
+ 
+ return {
+     eventHandlers = {
+@@ -9,6 +12,14 @@ return {
+             local health = types.Actor.stats.dynamic.health(self)
+             local max = health.base + health.modifier
+             health.current = math.max(0, health.current - d.frac * max)
++            if health.current > 0 then
++                pcall(function()
++                    local pkg = I.AI.getActivePackage()
++                    if not (pkg and pkg.type == 'Combat') then
++                        I.AI.startPackage({ type = 'Combat', target = nearby.players[1] })
++                    end
++                end)
++            end
+         end,
+     },
+ }
+diff --git a/multiplayer/mod/scripts/mp/global.lua b/multiplayer/mod/scripts/mp/global.lua
+index 7a8ce73119..5f947f1fd2 100644
+--- a/multiplayer/mod/scripts/mp/global.lua
++++ b/multiplayer/mod/scripts/mp/global.lua
+@@ -576,6 +576,7 @@ return {
+             end
+         end,
+         MpProxyDamage = proxies.onProxyDamage,
++        MpAvatarHit = proxies.onAvatarHit,
+         -- Player-to-player trade: d.give / d.get are { [recordId] = count }. Items leave this world's
+         -- inventory and are recreated from their record id on the other side (conditions/enchant charges reset,
+         -- generated records can't be traded).
+diff --git a/multiplayer/mod/scripts/mp/proxies.lua b/multiplayer/mod/scripts/mp/proxies.lua
+index c11af0f1e0..071292c2d5 100644
+--- a/multiplayer/mod/scripts/mp/proxies.lua
++++ b/multiplayer/mod/scripts/mp/proxies.lua
+@@ -302,6 +302,11 @@ function M.onUpdate(dt)
+     end
+ end
+ 
++-- A group member's avatar was hit in this world: it can't be hurt, and it must not cost us a bounty.
++function M.onAvatarHit()
++    crimeGuard = CRIME_WINDOW + 0.5
++end
++
+ -- A proxy fell too far from where its owner's actor is.
+ function M.onSnap(actor)
+     local px = proxyById[actor.id]
+diff --git a/multiplayer/mod/scripts/mp/remote.lua b/multiplayer/mod/scripts/mp/remote.lua
+index fc50d175ae..5f4ffcda22 100644
+--- a/multiplayer/mod/scripts/mp/remote.lua
++++ b/multiplayer/mod/scripts/mp/remote.lua
+@@ -6,6 +6,8 @@
+ local self = require('openmw.self')
+ local core = require('openmw.core')
+ local types = require('openmw.types')
++local nearby = require('openmw.nearby')
++local I = require('openmw.interfaces')
+ 
+ local Actor = types.Actor
+ 
+@@ -22,6 +24,7 @@ local desiredEquip
+ local equipTimer = 0
+ local snapTimer = 0
+ local aiOff = false
++local aggro = false -- proxies: once the guest hits one it fights back with its own AI
+ local lastHp
+ local pendingDamage = 0
+ local damageTimer = 0
+@@ -44,11 +47,30 @@ end
+ local function healthStat() return Actor.stats.dynamic.health(self) end
+ local function maxHealth(h) return math.max(1, h.base + h.modifier) end
+ 
++-- A proxy that was hit fights back in this world, so the guest takes damage from it too.
++local function startAggro()
++    if aggro then return end
++    aggro = true
++    self:enableAI(true)
++    pcall(function() I.AI.startPackage({ type = 'Combat', target = nearby.players[1] }) end)
++end
++
++-- Avatars of other players are stand-ins: they can't be hurt, and hitting one is not a crime.
++local function keepAvatarUnhurt()
++    local h = healthStat()
++    local max = maxHealth(h)
++    if h.current < max - 0.01 then
++        h.current = max
++        core.sendGlobalEvent('MpAvatarHit', {})
++    end
++end
++
+ local function trackHealth(dt)
+     local h = healthStat()
+     if lastHp == nil then lastHp = h.current end
+     if h.current < lastHp - 0.001 then
+         pendingDamage = pendingDamage + (lastHp - h.current) / maxHealth(h)
++        if not Actor.isDead(self) then startAggro() end
+     end
+     lastHp = h.current
+     damageTimer = damageTimer - dt
+@@ -72,12 +94,12 @@ return {
+         onInit = function(d)
+             if d then isProxy, key = d.proxy, d.key end
+         end,
+-        onActive = function() self:enableAI(false); aiOff = true end,
++        onActive = function() if not aggro then self:enableAI(false); aiOff = true end end,
+         onUpdate = function(dt)
+-            if not aiOff then self:enableAI(false); aiOff = true end
++            if not aiOff and not aggro then self:enableAI(false); aiOff = true end
+             local c = self.controls
+ 
+-            if isProxy then trackHealth(dt) end
++            if isProxy then trackHealth(dt) else keepAvatarUnhurt() end
+ 
+             if desiredEquip then
+                 equipTimer = equipTimer - dt
+@@ -87,7 +109,7 @@ return {
+                 end
+             end
+ 
+-            if not target or Actor.isDead(self) then return end
++            if not target or aggro or Actor.isDead(self) then return end
+             snapTimer = snapTimer - dt
+ 
+             local delta = target.pos - self.position
+-- 
+2.55.0
+

@@ -1,0 +1,459 @@
+From: Duron27 <duron27@gmail.com>
+Subject: [PATCH] Remove the obsolete Python relay and bots and the smoke-test script that needed them
+
+server/relay.py, bot.py and owner_bot.py predate the join handshake (they never send "join" or a protocol version, so
+the relay ignores them) and run-test.sh depended on them and on a hardcoded scratch path. The dedicated server
+(openmw-mp-server) replaces the relay; the in-game test bot (bot.lua) replaces the Python bots.
+
+---
+diff --git a/multiplayer/README.md b/multiplayer/README.md
+index f7b5907..fe93064 100644
+--- a/multiplayer/README.md
++++ b/multiplayer/README.md
+@@ -18,7 +18,7 @@ mod/scripts/mp/
+   proxies.lua            stand-ins for party members' actors, shared kills, no duplicate NPCs
+   items.lua              describes, keys and rebuilds items made while playing (enchanted gear, potions, scrolls)
+   trade.lua, damage.lua  trade window, damage/kill delivery to real actors
+-server/server.lua        what the dedicated server runs (apps/mpserver loads it); the rest of that folder is the old Python relay (obsolete)
++server/server.lua        what the dedicated server runs (apps/mpserver loads it)
+ test/server_test.py      starts the real dedicated server (terminal and, offscreen, the window) and plays clients against it
+ test/relay_test.lua      runs the relay logic without the game:  luajit multiplayer/test/relay_test.lua
+ test/items_test.lua      the same for item descriptions:  luajit multiplayer/test/items_test.lua
+diff --git a/multiplayer/mod/scripts/mp/relay.lua b/multiplayer/mod/scripts/mp/relay.lua
+index 09f9227..be4212e 100644
+--- a/multiplayer/mod/scripts/mp/relay.lua
++++ b/multiplayer/mod/scripts/mp/relay.lua
+@@ -1,4 +1,4 @@
+--- In-game relay: lets the host's game act as the multiplayer server (same protocol as server/relay.py).
++-- The relay: lets the host's game act as the multiplayer server, or runs on its own in openmw-mp-server (apps/mpserver).
+ -- Everyone connected shares a global channel (presence and global chat). Parties (max 3) are formed
+ -- with invites and additionally share party chat, vitals, and actor rosters/damage. Every player keeps
+ -- their own world; the relay only routes messages. The host plays through an ordinary loopback client.
+diff --git a/multiplayer/run-test.sh b/multiplayer/run-test.sh
+deleted file mode 100755
+index 3c07638..0000000
+--- a/multiplayer/run-test.sh
++++ /dev/null
+@@ -1,25 +0,0 @@
+-#!/usr/bin/env bash
+-# Smoke test: relay + fake player ("Bot") + OpenMW with the mp mod.
+-# usage: multiplayer/run-test.sh [--cheat] [--bot-invite] [path/to/openmw] [-- extra openmw args]
+-#   --cheat       also load debug/ (max stats + daedric longsword) for testing combat
+-#   --bot-invite  make the bot invite you immediately (otherwise activate the Bot avatar and invite it)
+-set -e
+-HERE="$(cd "$(dirname "$0")" && pwd)"
+-CHEAT=0; BOTARGS=(--say "hello from the bot")
+-OPENMW=/tmp/claude-1000/-home-arinmal-AndroidStudioProjects-openmw3/46de22f9-4029-44ad-89e9-b4b5c94bec0b/scratchpad/build/openmw
+-while [ $# -gt 0 ]; do
+-  case "$1" in
+-    --cheat) CHEAT=1 ;;
+-    --bot-invite) BOTARGS+=(--invite) ;;
+-    --) shift; break ;;
+-    *) OPENMW="$1" ;;
+-  esac
+-  shift
+-done
+-DATA=(--data "$HERE/mod" --content mp.omwscripts)
+-[ "$CHEAT" = 1 ] && DATA+=(--data "$HERE/debug" --content cheat.omwscripts)
+-python3 "$HERE/server/relay.py" & RELAY=$!
+-trap 'kill $RELAY ${BOT:-} 2>/dev/null' EXIT
+-sleep 1
+-python3 "$HERE/server/owner_bot.py" "${BOTARGS[@]}" & BOT=$!
+-"$OPENMW" "${DATA[@]}" "$@" || true
+diff --git a/multiplayer/server/bot.py b/multiplayer/server/bot.py
+deleted file mode 100644
+index 837c7ce..0000000
+--- a/multiplayer/server/bot.py
++++ /dev/null
+@@ -1,28 +0,0 @@
+-#!/usr/bin/env python3
+-"""Fake second player: walks in a circle around (cx, cy, z) so you can test with one game client.
+-
+-usage: bot.py [host] [port] [cx cy z] [cell]   (cell "" = exterior)
+-Get your coordinates from the position line the mod prints in openmw.log.
+-"""
+-import json
+-import math
+-import socket
+-import sys
+-import time
+-
+-host = sys.argv[1] if len(sys.argv) > 1 else "127.0.0.1"
+-port = int(sys.argv[2]) if len(sys.argv) > 2 else 25565
+-cx, cy, z = (float(v) for v in sys.argv[3:6]) if len(sys.argv) >= 6 else (0.0, 0.0, 0.0)
+-cell = sys.argv[6] if len(sys.argv) > 6 else ""
+-
+-s = socket.create_connection((host, port))
+-s.sendall((json.dumps({"t": "profile", "name": "Bot", "race": "dark elf", "class": "acrobat",
+-                      "head": "b_n_dark elf_m_head_01", "hair": "b_n_dark elf_m_hair_01", "isMale": True}) + "\n").encode())
+-t = 0.0
+-while True:
+-    msg = {"t": "state", "cell": cell,
+-           "pos": [cx + 300 * math.cos(t), cy + 300 * math.sin(t), z],
+-           "yaw": t + math.pi / 2}
+-    s.sendall((json.dumps(msg) + "\n").encode())
+-    t += 0.1
+-    time.sleep(0.2)
+diff --git a/multiplayer/server/owner_bot.py b/multiplayer/server/owner_bot.py
+deleted file mode 100644
+index 1f9f2da..0000000
+--- a/multiplayer/server/owner_bot.py
++++ /dev/null
+@@ -1,99 +0,0 @@
+-#!/usr/bin/env python3
+-"""Fake second player for testing with one game client.
+-
+-Connects as a normal player (profile + state near the game player), auto-accepts party invites,
+-sends vitals, and once in a party owns a living actor (default: a scrib) that doesn't exist in the
+-game's world. Accepts trade requests (offers a few items and accepts every deal). Prints invites, chat and damage reported against its actor.
+-
+-usage: owner_bot.py [host] [port] [--rec scrib] [--invite] [--hurt <file>:<index>] [--say "text"]
+-  --invite  invite the game player as soon as it is seen
+-  --hurt    once in a party, damage that real actor of the game's world by 30%
+-  --say     send this global chat message when the game player is first seen
+-"""
+-import json
+-import math
+-import socket
+-import sys
+-import time
+-
+-args = list(sys.argv[1:])
+-def opt(name, default=None, flag=False):
+-    if name in args:
+-        i = args.index(name)
+-        if flag:
+-            del args[i]; return True
+-        v = args[i + 1]; del args[i:i + 2]; return v
+-    return default
+-rec = opt("--rec", "scrib")
+-hurt = opt("--hurt")
+-do_invite = opt("--invite", False, flag=True)
+-say = opt("--say")
+-host = args[0] if len(args) > 0 else "127.0.0.1"
+-port = int(args[1]) if len(args) > 1 else 25565
+-
+-BOT_ITEMS = {"gold_001": 500, "iron dagger": 2, "ingred_bread_01": 5, "p_restore_health_c": 3, "misc_com_bottle_01": 4}
+-s = socket.create_connection((host, port))
+-f = s.makefile("rwb", buffering=0)
+-def send(m): f.write((json.dumps(m) + "\n").encode())
+-
+-send({"t": "profile", "name": "Bot", "race": "dark elf", "class": "acrobat",
+-      "head": "b_n_dark elf_m_head_01", "hair": "b_n_dark elf_m_hair_01", "isMale": True})
+-me, peer, cell, pos0 = None, None, None, None
+-party = []
+-hp = 1.0
+-t0 = time.time()
+-did = {"invite": False, "say": False, "hurt": False}
+-s.settimeout(0.2)
+-buf = b""
+-while True:
+-    try:
+-        d = s.recv(65536)
+-        if not d: break
+-        buf += d
+-    except socket.timeout:
+-        pass
+-    while b"\n" in buf:
+-        line, buf = buf.split(b"\n", 1)
+-        m = json.loads(line)
+-        t = m["t"]
+-        if t == "hello": me = m["id"]
+-        elif t == "state" and m["id"] > 0:
+-            peer, cell = m["id"], m["cell"]
+-            if pos0 is None: pos0 = list(m["pos"])  # anchor: stay put, don't follow the player
+-        elif t == "invite":
+-            print(f"invite from {m['from']} -> accepting", flush=True); send({"t": "accept", "from": m["from"]})
+-        elif t == "party": party = m["members"]; print("party", m, flush=True)
+-        elif t == "chat": print(f"chat[{m['scope']}] {m['id']}: {m['text']}", flush=True)
+-        elif t == "invite_result": print("invite_result", m, flush=True)
+-        elif t == "trade_request":
+-            print("trade request from", m["id"], "-> accepting", flush=True)
+-            send({"t": "trade_accept", "to": m["id"]})
+-            send({"t": "trade_inv", "to": m["id"], "items": BOT_ITEMS})
+-        elif t == "trade_inv": print("trade: their inventory has", len(m["items"]), "item types", flush=True)
+-        elif t == "trade_deal":
+-            print("trade deal rev", m["rev"], "they give", m["a"], "I give", m["b"], "-> accepting", flush=True)
+-            send({"t": "trade_ok", "to": m["id"], "rev": m["rev"]})
+-        elif t == "trade_ok": print("trade: peer accepted rev", m["rev"], flush=True)
+-        elif t == "trade_cancel": print("trade cancelled by peer", flush=True)
+-        elif t == "trade_done": print("trade done", flush=True)
+-        elif t == "dmg":
+-            hp = max(0.0, hp - m["frac"]); print(f"damage {m['frac']:.2f} -> hp {hp:.2f}", flush=True)
+-    if pos0 is not None:
+-        a = time.time() - t0
+-        send({"t": "state", "cell": cell, "pos": [pos0[0] + 200, pos0[1] + 200, pos0[2]], "yaw": 0, "stance": 0})
+-        if do_invite and not did["invite"]:
+-            did["invite"] = True; send({"t": "invite", "to": peer})
+-        if say and not did["say"]:
+-            did["say"] = True; send({"t": "chat", "scope": "global", "text": say})
+-        if len(party) > 1:
+-            # The bot's own character vitals, independent of the creature it owns (they just wobble so the panel moves).
+-            send({"t": "vitals", "h": 80, "hm": 80, "m": 30 + int(20 * (1 + math.sin(a / 4))), "mm": 70,
+-                  "f": 70 + int(25 * (1 + math.sin(a / 6))), "fm": 120})
+-            lst = [{"n": "morrowind.esm:16777000", "r": rec, "h": hp,
+-                    "p": [pos0[0] + 200 + 80 * math.cos(a), pos0[1] + 200 + 80 * math.sin(a), pos0[2]], "y": 0}] if hp > 0 else []
+-            send({"t": "actors", "cell": cell, "list": lst, "dead": [] if hp > 0 else ["morrowind.esm:16777000"]})
+-            if hurt and not did["hurt"]:
+-                did["hurt"] = True; send({"t": "dmg", "to": peer, "nid": hurt, "frac": 0.3})
+-            if int(a) % 7 == 0:
+-                send({"t": "chat", "scope": "party", "text": "party hello"}) if not did.get("p%d" % int(a)) and did.update({"p%d" % int(a): 1}) is None else None
+-    time.sleep(0.25)
+diff --git a/multiplayer/server/relay.py b/multiplayer/server/relay.py
+deleted file mode 100644
+index 0e06db5..0000000
+--- a/multiplayer/server/relay.py
++++ /dev/null
+@@ -1,252 +0,0 @@
+-#!/usr/bin/env python3
+-"""OpenMW multiplayer relay: newline-delimited JSON over TCP.
+-
+-Everyone connected shares a global channel (presence and global chat). Parties (max 3) are
+-formed with invites and additionally share party chat, vitals, and actor rosters/damage.
+-Every player keeps their own world; the relay only routes messages.
+-
+-Client -> server (anything else is stamped with the sender's "id" and routed by type):
+-  {"t":"invite","to":ID}   {"t":"accept","from":ID}   {"t":"decline","from":ID}   {"t":"leave_party"}
+-  {"t":"chat","scope":"global"|"party","text":"..."}
+-  global routing : profile, equip, state, chat(global)         -> everyone else
+-  party routing  : actors, vitals, dmg, chat(party)             -> other party members
+-  trade_*        : any message with "to":ID is forwarded to that player (trade request/inv/deal/ok/cancel)
+-  any message with "to":ID goes only to that player (if allowed for its type)
+-Server -> client:
+-  {"t":"hello","id":N}  {"t":"leave","id":N} (disconnect)  {"t":"party","members":[..],"leader":ID}
+-  {"t":"invite","from":ID}  {"t":"invite_result","ok":bool,"to":ID,"reason":".."}  {"t":"declined","id":ID}
+-  {"t":"notice","text":".."}
+---mirror: each client also sees a ghost copy of itself (id -N) for one-client testing.
+-"""
+-import asyncio
+-import json
+-import sys
+-import time
+-
+-MIRROR = "--mirror" in sys.argv
+-sys.argv = [a for a in sys.argv if a != "--mirror"]
+-
+-MAX_PARTY = 3
+-INVITE_TTL = 60
+-CHAT_MAX = 240
+-GLOBAL_TYPES = ("profile", "equip", "state")
+-PARTY_TYPES = ("actors", "vitals", "dmg")
+-CACHED = GLOBAL_TYPES + ("actors", "vitals")
+-
+-clients = {}   # id -> {"w", "party": id|None, "last": {type: msg}, "bucket": [tokens, time]}
+-parties = {}   # party id -> {"members": [ids], "leader": id}
+-invites = {}   # (from, to) -> expiry time
+-next_id = 1
+-next_party = 1
+-
+-
+-def enc(msg):
+-    return (json.dumps(msg, separators=(",", ":")) + "\n").encode()
+-
+-
+-def send_to(cid, msg):
+-    c = clients.get(cid)
+-    if c:
+-        c["w"].write(enc(msg))
+-
+-
+-def party_members(cid):
+-    p = clients[cid]["party"] if cid in clients else None
+-    return list(parties[p]["members"]) if p else []
+-
+-
+-def to_party(cid, msg):
+-    for m in party_members(cid):
+-        if m != cid:
+-            send_to(m, msg)
+-
+-
+-def announce_party(pid):
+-    p = parties.get(pid)
+-    if p:
+-        for m in p["members"]:
+-            send_to(m, {"t": "party", "members": p["members"], "leader": p["leader"]})
+-
+-
+-def remove_from_party(cid):
+-    c = clients.get(cid)
+-    pid = c["party"] if c else None
+-    if not pid:
+-        return
+-    p = parties[pid]
+-    p["members"].remove(cid)
+-    c["party"] = None
+-    send_to(cid, {"t": "party", "members": [], "leader": None})
+-    if len(p["members"]) <= 1:  # a party of one is no party
+-        for m in p["members"]:
+-            clients[m]["party"] = None
+-            send_to(m, {"t": "party", "members": [], "leader": None})
+-        del parties[pid]
+-    else:
+-        if p["leader"] == cid:
+-            p["leader"] = p["members"][0]
+-        announce_party(pid)
+-
+-
+-def pending_to(cid):
+-    return [t for (f, t), exp in invites.items() if f == cid and exp > time.time()]
+-
+-
+-def purge_invites():
+-    now = time.time()
+-    for k in [k for k, exp in invites.items() if exp <= now]:
+-        del invites[k]
+-
+-
+-def handle_invite(cid, msg):
+-    purge_invites()
+-    to = msg.get("to")
+-    def fail(reason):
+-        send_to(cid, {"t": "invite_result", "ok": False, "to": to, "reason": reason})
+-    if to not in clients or to == cid:
+-        return fail("unknown")
+-    if clients[to]["party"] is not None:
+-        return fail("busy")  # already in a party: they must leave first
+-    size = len(party_members(cid)) or 1
+-    waiting = {t for t in pending_to(cid)} | ({t for m in party_members(cid) for t in pending_to(m)})
+-    if size + len(waiting - {to}) >= MAX_PARTY:
+-        return fail("full")
+-    invites[(cid, to)] = time.time() + INVITE_TTL
+-    send_to(to, {"t": "invite", "from": cid})
+-    send_to(cid, {"t": "invite_result", "ok": True, "to": to})
+-
+-
+-def handle_accept(cid, msg):
+-    purge_invites()
+-    frm = msg.get("from")
+-    if (frm, cid) not in invites or frm not in clients:
+-        return send_to(cid, {"t": "invite_result", "ok": False, "to": frm, "reason": "expired"})
+-    del invites[(frm, cid)]
+-    if clients[cid]["party"] is not None:
+-        return send_to(cid, {"t": "invite_result", "ok": False, "to": frm, "reason": "busy"})
+-    members = party_members(frm)
+-    if len(members) >= MAX_PARTY:
+-        return send_to(cid, {"t": "invite_result", "ok": False, "to": frm, "reason": "full"})
+-    global next_party
+-    if not members:
+-        pid, next_party = next_party, next_party + 1
+-        parties[pid] = {"members": [frm], "leader": frm}
+-        clients[frm]["party"] = pid
+-    pid = clients[frm]["party"]
+-    parties[pid]["members"].append(cid)
+-    clients[cid]["party"] = pid
+-    for k in [k for k in invites if k[1] == cid]:
+-        del invites[k]
+-    announce_party(pid)
+-    # bring everyone up to date on each other's actors/vitals
+-    for m in parties[pid]["members"]:
+-        for t in ("actors", "vitals"):
+-            if t in clients[m]["last"]:
+-                for o in parties[pid]["members"]:
+-                    if o != m:
+-                        send_to(o, clients[m]["last"][t])
+-
+-
+-def handle_decline(cid, msg):
+-    frm = msg.get("from")
+-    if invites.pop((frm, cid), None) is not None:
+-        send_to(frm, {"t": "declined", "id": cid})
+-
+-
+-def allow_chat(c):
+-    now = time.time()
+-    tokens, last = c["bucket"]
+-    tokens = min(5.0, tokens + (now - last) * 1.5)
+-    if tokens < 1:
+-        c["bucket"] = [tokens, now]
+-        return False
+-    c["bucket"] = [tokens - 1, now]
+-    return True
+-
+-
+-async def handle(reader, writer):
+-    global next_id
+-    cid, next_id = next_id, next_id + 1
+-    clients[cid] = {"w": writer, "party": None, "last": {}, "bucket": [5.0, time.time()]}
+-    print(f"+ client {cid} from {writer.get_extra_info('peername')}", flush=True)
+-    send_to(cid, {"t": "hello", "id": cid})
+-    for other, oc in clients.items():  # replay global presence
+-        if other != cid:
+-            for t in GLOBAL_TYPES:
+-                if t in oc["last"]:
+-                    send_to(cid, oc["last"][t])
+-    try:
+-        async for line in reader:
+-            try:
+-                msg = json.loads(line)
+-            except ValueError:
+-                continue
+-            if not isinstance(msg, dict):
+-                continue
+-            t = msg.get("t")
+-            if t in ("invite", "accept", "decline", "leave_party"):
+-                print(f"  {t} from {cid}: {msg}", flush=True)
+-            if t == "invite": handle_invite(cid, msg); continue
+-            if t == "accept": handle_accept(cid, msg); continue
+-            if t == "decline": handle_decline(cid, msg); continue
+-            if t == "leave_party": remove_from_party(cid); continue
+-            msg["id"] = cid
+-            if isinstance(t, str) and t.startswith("trade_"):
+-                target = msg.get("to")  # trades are between two players, party or not
+-                if target in clients and target != cid:
+-                    send_to(target, msg)
+-                continue
+-            if t in CACHED:
+-                clients[cid]["last"][t] = msg
+-            if t == "chat":
+-                text = str(msg.get("text", ""))[:CHAT_MAX].strip()
+-                if not text or not allow_chat(clients[cid]):
+-                    continue
+-                msg = {"t": "chat", "id": cid, "text": text, "scope": msg.get("scope")}
+-                if msg["scope"] == "party":
+-                    to_party(cid, msg)
+-                else:
+-                    msg["scope"] = "global"
+-                    for o in clients:
+-                        if o != cid:
+-                            send_to(o, msg)
+-                continue
+-            if t in GLOBAL_TYPES:
+-                for o in clients:
+-                    if o != cid:
+-                        send_to(o, msg)
+-                if MIRROR:
+-                    ghost = dict(msg, id=-cid)
+-                    if t == "state" and isinstance(msg.get("pos"), list) and len(msg["pos"]) == 3:
+-                        ghost["pos"] = [msg["pos"][0] + 300, msg["pos"][1], msg["pos"][2]]
+-                    send_to(cid, ghost)
+-            elif t in PARTY_TYPES:
+-                target = msg.get("to")
+-                if target is not None:
+-                    if target in party_members(cid) and target != cid:
+-                        send_to(target, msg)
+-                else:
+-                    to_party(cid, msg)
+-    except (ConnectionError, asyncio.LimitOverrunError):
+-        pass
+-    finally:
+-        remove_from_party(cid)
+-        for k in [k for k in invites if cid in k]:
+-            del invites[k]
+-        del clients[cid]
+-        writer.close()
+-        print(f"- client {cid}", flush=True)
+-        for o in clients:
+-            send_to(o, {"t": "leave", "id": cid})
+-
+-
+-async def main(host, port):
+-    server = await asyncio.start_server(handle, host, port)
+-    print(f"relay listening on {host}:{port}", flush=True)
+-    async with server:
+-        await server.serve_forever()
+-
+-
+-if __name__ == "__main__":
+-    asyncio.run(main(sys.argv[1] if len(sys.argv) > 1 else "127.0.0.1",
+-                     int(sys.argv[2]) if len(sys.argv) > 2 else 25565))

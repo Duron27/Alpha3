@@ -1,0 +1,179 @@
+From 6cec9a7a331409962812ed24d427407b5f64ab60 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Thu, 15 Oct 2026 14:30:26 -0400
+Subject: [PATCH 62/63] Floating players: the avatar levitates and follows
+ their height; a jump needs a moment on the ground first
+
+- player.lua sends fly = off the ground for 0.8 s or more (levitation, flying cheats), and counts a take-off as a jump
+  only after the player stood on the ground for 0.1 s, so flickering on and off the ground is not a string of jumps
+- global.lua: while a player flies, their avatar's height eases toward theirs (it walks sideways as usual) instead of
+  falling and being snapped back over and over
+- remote.lua: MpFloat gives the avatar the effect of a levitation potion (p_levitation_*) for as long as that lasts
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ multiplayer/mod/scripts/mp/global.lua | 20 ++++++++++++-
+ multiplayer/mod/scripts/mp/player.lua | 17 +++++++++--
+ multiplayer/mod/scripts/mp/remote.lua | 41 +++++++++++++++++++++++++++
+ 3 files changed, 74 insertions(+), 4 deletions(-)
+
+diff --git a/multiplayer/mod/scripts/mp/global.lua b/multiplayer/mod/scripts/mp/global.lua
+index 53d3d983a9..235d5aa5f5 100644
+--- a/multiplayer/mod/scripts/mp/global.lua
++++ b/multiplayer/mod/scripts/mp/global.lua
+@@ -335,7 +335,7 @@ local function sendState()
+         yaw = p.rotation:getYaw(),
+         stance = types.Actor.getStance(p),
+         rs = types.Actor.getRunSpeed(p),
+-        sneak = myInput.sneak, atk = myInput.atk, seq = myInput.seq, jseq = myInput.jseq,
++        sneak = myInput.sneak, fly = myInput.fly or nil, atk = myInput.atk, seq = myInput.seq, jseq = myInput.jseq,
+         rkind = myInput.rkind, rseq = myInput.rseq, str = myInput.str,
+         reading = myInput.reading, pitch = myInput.pitch,
+     }))
+@@ -469,6 +469,7 @@ local function setHidden(r, hidden, reason)
+ end
+ 
+ local DRIFT_NEAR, DRIFT_FAR, DRIFT_TIME = 60, 220, 0.5
++local FLOAT_HOLD, FLOAT_EASE = 6, 10 -- units of height difference that are put right / how fast the height eases (per second)
+ 
+ -- Desync protection: the avatar walks toward the predicted position, but collisions, steps or a bad
+ -- connection can leave it behind. Snap it back when it is far off, or somewhat off for too long.
+@@ -484,6 +485,23 @@ local function checkDrift(r, dt)
+             r.metric = nil
+         end
+     end
++    -- A player who is off the ground for a while (levitating, flying) is shown with an avatar that levitates too, and its
++    -- height eases toward theirs, up and down: a walking avatar would just fall and be put back over and over.
++    local flying = r.state.fly and true or false
++    if flying ~= (r.floating or false) then
++        r.floating = flying
++        dlog('avatar', tostring(r.id), flying and 'airborne: levitating' or 'back on the ground')
++        r.obj:sendEvent('MpFloat', { on = flying })
++    end
++    if flying then
++        local gap = want.z - r.obj.position.z
++        if math.abs(gap) > FLOAT_HOLD then
++            local z = r.obj.position.z + gap * math.min(1, dt * FLOAT_EASE)
++            r.obj:teleport(r.state.cell, util.vector3(r.obj.position.x, r.obj.position.y, z), { rotation = r.obj.rotation })
++        end
++        -- (sideways it walks as usual: only a big miss is snapped back, below)
++        if math.abs(gap) < DRIFT_NEAR then off = (util.vector2(r.obj.position.x - want.x, r.obj.position.y - want.y)):length() end
++    end
+     if off > DRIFT_FAR then
+         r.offTime = DRIFT_TIME
+     elseif off > DRIFT_NEAR then
+diff --git a/multiplayer/mod/scripts/mp/player.lua b/multiplayer/mod/scripts/mp/player.lua
+index 66bf38a023..5e45fe3533 100644
+--- a/multiplayer/mod/scripts/mp/player.lua
++++ b/multiplayer/mod/scripts/mp/player.lua
+@@ -52,6 +52,7 @@ local function playSound(id) pcall(ambient.playSound, id) end -- a missing sound
+ local playerList, myPlayerId = {}, nil
+ local self = require('openmw.self')
+ local types = require('openmw.types')
++local groundTime, airTime = 0, 0
+ local wasUsing, wasAir, attackSeq, jumpSeq, lastAttack, lastInputSig = false, false, 0, 0, nil, ''
+ local releaseSeq, releaseKind, releaseStrength, pressedAt, holding = 0, nil, 0, 0, false
+ local inputData = { sneak = false, reading = false, pitch = 0, mode = nil }
+@@ -60,12 +61,12 @@ local inputSentAt = -10
+ -- Sends our animation-relevant input to the global script when it changed (and once a second regardless).
+ local function pushInput(force)
+     inputData.atk, inputData.seq, inputData.jseq = lastAttack, attackSeq, jumpSeq
+-    local sig = table.concat({ tostring(inputData.sneak), tostring(inputData.reading), tostring(inputData.mode), attackSeq, releaseSeq, jumpSeq,
++    local sig = table.concat({ tostring(inputData.sneak), tostring(inputData.reading), tostring(inputData.mode), tostring(inputData.fly), attackSeq, releaseSeq, jumpSeq,
+         math.floor(inputData.pitch * 20 + 0.5) }, '|')
+     local t = core.getRealTime()
+     if force or sig ~= lastInputSig or t - inputSentAt > 1 then
+         lastInputSig, inputSentAt = sig, t
+-        core.sendGlobalEvent('MpInput', { sneak = inputData.sneak, reading = inputData.reading, pitch = inputData.pitch, mode = inputData.mode,
++        core.sendGlobalEvent('MpInput', { sneak = inputData.sneak, reading = inputData.reading, pitch = inputData.pitch, mode = inputData.mode, fly = inputData.fly,
+             atk = lastAttack, seq = attackSeq, jseq = jumpSeq, rkind = releaseKind, rseq = releaseSeq, str = releaseStrength })
+     end
+ end
+@@ -666,7 +667,17 @@ return {
+             end
+             wasUsing = using
+             local air = not types.Actor.isOnGround(self) and not types.Actor.isSwimming(self)
+-            if air and not wasAir then jumpSeq = jumpSeq + 1 end
++            -- a jump is a take-off after standing on the ground for a moment; flickering on and off the ground while
++            -- floating (levitation, flying cheats) is not a string of jumps
++            if air then
++                if not wasAir and groundTime >= 0.1 then jumpSeq = jumpSeq + 1 end
++                groundTime = 0
++                airTime = airTime + dt
++            else
++                groundTime = groundTime + dt
++                airTime = 0
++            end
++            inputData.fly = airTime >= 0.8 -- off the ground for good (levitation, flying), not just a jump
+             wasAir = air
+             inputData.sneak = self.controls.sneak and true or false
+             pushInput(false)
+diff --git a/multiplayer/mod/scripts/mp/remote.lua b/multiplayer/mod/scripts/mp/remote.lua
+index cef69a1f04..ecd831aea3 100644
+--- a/multiplayer/mod/scripts/mp/remote.lua
++++ b/multiplayer/mod/scripts/mp/remote.lua
+@@ -12,6 +12,35 @@ local anim = require('openmw.animation')
+ 
+ local Actor = types.Actor
+ 
++-- A player who floats in place (levitating, flying) is shown by giving the avatar the effect of a levitation potion, so
++-- it hangs there instead of falling and being put back. Whichever of these potions the loaded content has.
++local LEVITATE_POTIONS = { 'p_levitation_s', 'p_levitation_q', 'p_levitation_e', 'p_levitation_c', 'p_levitation_b' }
++local floatOn, floatCheck = false, 0
++
++local function levitatePotion()
++    for _, id in ipairs(LEVITATE_POTIONS) do
++        local ok, rec = pcall(function() return types.Potion.records[id] end)
++        if ok and rec then return id end
++    end
++    return nil
++end
++
++local function applyFloat(on)
++    local id = levitatePotion()
++    if not id then return end
++    local spells = Actor.activeSpells(self)
++    pcall(function()
++        local active = spells:isSpellActive(id)
++        if on and not active then
++            spells:add({ id = id, effects = { 0 }, quiet = true })
++        elseif not on and active then
++            for _, spell in pairs(spells) do
++                if spell.id == id and spell.temporary then spells:remove(spell.activeSpellId) end
++            end
++        end
++    end)
++end
++
+ local WALK_START, WALK_STOP = 18, 6 -- distance hysteresis (game units); the target is already extrapolated
+ local RUN_SPEED = 230 -- the player's speed (units/s) above which they are shown running
+ local SNAP_DIST = 350
+@@ -270,6 +299,13 @@ return {
+         end,
+         onActive = function() if not aggro then self:enableAI(false); aiOff = true end end,
+         onUpdate = function(dt)
++            if floatOn then
++                floatCheck = floatCheck - dt
++                if floatCheck <= 0 then
++                    floatCheck = 2 -- (the potion wears off after a while: put it back)
++                    applyFloat(true)
++                end
++            end
+             if not aiOff and not aggro then self:enableAI(false); aiOff = true end
+             local c = self.controls
+             if attackGroup then
+@@ -369,6 +405,11 @@ return {
+         -- Another player attacked or cast: show the animation only. (The avatar has no AI and never deals damage.)
+         MpAttack = function(d) playAttack(d) end,
+         MpJump = function() jumpLeft = 0.15 end,
++        MpFloat = function(d)
++            floatOn = d.on and true or false
++            floatCheck = 0
++            applyFloat(floatOn)
++        end,
+         -- The player cast a spell: its cast effect on their hands, or its effect on themselves
+         MpCastVfx = function(d)
+             local function static(id)
+-- 
+2.55.0
+

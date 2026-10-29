@@ -1,0 +1,660 @@
+diff --git a/include/vulkan/vk_android_native_buffer.h b/include/vulkan/vk_android_native_buffer.h
+index 21f82ef57..3b6bb636a 100644
+--- a/include/vulkan/vk_android_native_buffer.h
++++ b/include/vulkan/vk_android_native_buffer.h
+@@ -17,7 +17,7 @@
+  * system rather the build target.
+  */
+ 
+-#if defined(__ANDROID__) || defined(ANDROID)
++#if 0 /* Alpha3: cutils is not a public NDK library, use the host-style typedef below */
+ 
+ #include <cutils/native_handle.h>
+ #if ANDROID_API_LEVEL < 28
+diff --git a/src/gallium/auxiliary/target-helpers/inline_sw_helper.h b/src/gallium/auxiliary/target-helpers/inline_sw_helper.h
+index ddb67b3a2..193745925 100644
+--- a/src/gallium/auxiliary/target-helpers/inline_sw_helper.h
++++ b/src/gallium/auxiliary/target-helpers/inline_sw_helper.h
+@@ -29,6 +29,10 @@
+ #include "d3d12/d3d12_public.h"
+ #endif
+ 
++#ifdef GALLIUM_ZINK
++#include "zink/zink_public.h"
++#endif
++
+ static inline struct pipe_screen *
+ sw_screen_create_named(struct sw_winsys *winsys, const char *driver)
+ {
+diff --git a/src/gallium/drivers/zink/zink_device_info.py b/src/gallium/drivers/zink/zink_device_info.py
+index 0af02cc08..4be0e68cd 100644
+--- a/src/gallium/drivers/zink/zink_device_info.py
++++ b/src/gallium/drivers/zink/zink_device_info.py
+@@ -679,8 +679,15 @@ zink_get_physical_device_info(struct zink_screen *screen)
+             conditions += "&& (" + cond + ")\\n"
+     conditions = conditions.strip()
+ %>\
++
++%if ext.core_since:
++      /* Alpha3: Android's loader does not list extensions that the driver only has as core, count those as present */
++      info->have_${ext.name_with_vendor()} |= (support_${ext.name_with_vendor()} || info->have_vulkan${ext.core_since.struct()})
++         ${conditions};
++%else:
+       info->have_${ext.name_with_vendor()} |= support_${ext.name_with_vendor()}
+          ${conditions};
++%endif
+ </%helpers:guard>
+         %endfor
+    }
+@@ -694,7 +701,7 @@ zink_get_physical_device_info(struct zink_screen *screen)
+        info->extensions[num_extensions++] = "${ext.name}";
+ %if ext.is_required:
+    } else {
+-       debug_printf("ZINK: ${ext.name} required!\\n");
++       mesa_loge("ZINK: ${ext.name} required!");
+        goto fail;
+ %endif
+    }
+@@ -703,6 +710,26 @@ zink_get_physical_device_info(struct zink_screen *screen)
+ 
+    info->num_extensions = num_extensions;
+ 
++   /* Alpha3: only enable names the driver lists (a core-only extension counted as present above has no name to enable) */
++   {
++      uint32_t listed_count = 0;
++      screen->vk.EnumerateDeviceExtensionProperties(screen->pdev, NULL, &listed_count, NULL);
++      VkExtensionProperties *listed = MALLOC(sizeof(VkExtensionProperties) * (listed_count + 1));
++      if (listed) {
++         screen->vk.EnumerateDeviceExtensionProperties(screen->pdev, NULL, &listed_count, listed);
++         uint32_t kept = 0;
++         for (uint32_t i = 0; i < info->num_extensions; i++) {
++            bool found = false;
++            for (uint32_t j = 0; j < listed_count && !found; j++)
++               found = !strcmp(info->extensions[i], listed[j].extensionName);
++            if (found)
++               info->extensions[kept++] = info->extensions[i];
++         }
++         info->num_extensions = kept;
++         FREE(listed);
++      }
++   }
++
+    info->feats.pNext = NULL;
+ 
+ %for version in versions:
+diff --git a/src/gallium/drivers/zink/zink_screen.c b/src/gallium/drivers/zink/zink_screen.c
+index ac9e72663..f4316942f 100644
+--- a/src/gallium/drivers/zink/zink_screen.c
++++ b/src/gallium/drivers/zink/zink_screen.c
+@@ -1593,7 +1593,7 @@ zink_destroy_screen(struct pipe_screen *pscreen)
+ 
+    util_idalloc_mt_fini(&screen->buffer_ids);
+ 
+-   if (screen->loader_lib)
++   if (screen->loader_lib && !screen->loader_lib_borrowed)
+       util_dl_close(screen->loader_lib);
+ 
+    if (screen->drm_fd != -1)
+@@ -2493,6 +2493,13 @@ zink_get_loader_version(struct zink_screen *screen)
+       }
+    }
+ 
++#ifdef __ANDROID__
++   /* Alpha3: Android 12's loader reports 1.1, and with a 1.1 instance the driver (Turnip) hides what 1.2/1.3 added
++    * (imageless framebuffers, timeline semaphores, dynamic rendering, ...). Ask for 1.3, the driver supports it. */
++   if (getenv("ALPHA3_VULKAN_HANDLE") && loader_version < VK_API_VERSION_1_3)
++      loader_version = VK_API_VERSION_1_3;
++#endif
++
+    return loader_version;
+ }
+ 
+@@ -3275,14 +3282,14 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
+ {
+    if (getenv("ZINK_USE_LAVAPIPE")) {
+       mesa_loge("ZINK_USE_LAVAPIPE is obsolete. Use LIBGL_ALWAYS_SOFTWARE\n");
+-      return NULL;
++      { mesa_loge("ZINK: creating the screen failed (zink_screen.c:%d)", __LINE__); return NULL; }
+    }
+ 
+    struct zink_screen *screen = rzalloc(NULL, struct zink_screen);
+    if (!screen) {
+       if (!config || !config->driver_name_is_inferred)
+          mesa_loge("ZINK: failed to allocate screen");
+-      return NULL;
++      { mesa_loge("ZINK: creating the screen failed (zink_screen.c:%d)", __LINE__); return NULL; }
+    }
+ 
+    screen->driver_name_is_inferred = config && config->driver_name_is_inferred;
+@@ -3303,11 +3310,23 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
+ 
+    u_trace_state_init();
+ 
+-   screen->loader_lib = util_dl_open(VK_LIBNAME);
++#ifdef __ANDROID__
++   /* Alpha3: the app opens its custom Vulkan driver (Turnip, via libadrenotools) and hands the dlopen handle
++    * over as hex text in ALPHA3_VULKAN_HANDLE. Borrow it instead of loading the system libvulkan. */
++   {
++      const char *handle_text = getenv("ALPHA3_VULKAN_HANDLE");
++      if (handle_text && *handle_text) {
++         screen->loader_lib = (struct util_dl_library *)(uintptr_t)strtoull(handle_text, NULL, 16);
++         screen->loader_lib_borrowed = true;
++      }
++   }
++#endif
++   if (!screen->loader_lib)
++      screen->loader_lib = util_dl_open(VK_LIBNAME);
+    if (!screen->loader_lib) {
+       if (!screen->driver_name_is_inferred)
+          mesa_loge("ZINK: failed to load "VK_LIBNAME);
+-      goto fail;
++      { mesa_loge("ZINK: creating the screen failed (zink_screen.c:%d)", __LINE__); goto fail; }
+    }
+ 
+    screen->vk_GetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)util_dl_get_proc_address(screen->loader_lib, "vkGetInstanceProcAddr");
+@@ -3316,7 +3335,7 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
+        !screen->vk_GetDeviceProcAddr) {
+       if (!screen->driver_name_is_inferred)
+          mesa_loge("ZINK: failed to get proc address");
+-      goto fail;
++      { mesa_loge("ZINK: creating the screen failed (zink_screen.c:%d)", __LINE__); goto fail; }
+    }
+ 
+    if (config) {
+@@ -3333,7 +3352,7 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
+       instance_info.loader_version = zink_get_loader_version(screen);
+       instance = zink_create_instance(screen, &instance_info);
+       if (!instance)
+-         goto fail;
++         { mesa_loge("ZINK: creating the screen failed (zink_screen.c:%d)", __LINE__); goto fail; }
+    } else {
+       assert(instance);
+    }
+@@ -3346,7 +3365,7 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
+           !screen->instance_info->have_layer_LUNARG_standard_validation) {
+          if (!screen->driver_name_is_inferred)
+             mesa_loge("Failed to load validation layer");
+-         goto fail;
++         { mesa_loge("ZINK: creating the screen failed (zink_screen.c:%d)", __LINE__); goto fail; }
+       }
+    }
+ 
+@@ -3369,7 +3388,7 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
+    if (screen->pdev == VK_NULL_HANDLE) {
+       if (!screen->driver_name_is_inferred)
+          mesa_loge("ZINK: failed to choose pdev");
+-      goto fail;
++      { mesa_loge("ZINK: creating the screen failed (zink_screen.c:%d)", __LINE__); goto fail; }
+    }
+    screen->is_cpu = screen->info.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU;
+ 
+@@ -3383,15 +3402,24 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
+                                               VK_FORMAT_D32_SFLOAT_S8_UINT);
+    screen->have_dynamic_state_vertex_input_binding_stride = true;
+ 
++   {
++      VkPhysicalDeviceProperties dbg_props;
++      VKSCR(GetPhysicalDeviceProperties)(screen->pdev, &dbg_props);
++      mesa_logi("ZINK: Vulkan device \"%s\" api %u.%u.%u driver 0x%x (loader %s)", dbg_props.deviceName,
++                VK_VERSION_MAJOR(dbg_props.apiVersion), VK_VERSION_MINOR(dbg_props.apiVersion),
++                VK_VERSION_PATCH(dbg_props.apiVersion), dbg_props.driverVersion,
++                screen->loader_lib_borrowed ? "ALPHA3_VULKAN_HANDLE" : VK_LIBNAME);
++   }
++
+    if (!zink_get_physical_device_info(screen)) {
+       if (!screen->driver_name_is_inferred)
+          debug_printf("ZINK: failed to detect features\n");
+-      goto fail;
++      { mesa_loge("ZINK: creating the screen failed (zink_screen.c:%d)", __LINE__); goto fail; }
+    }
+ 
+    if (zink_set_driver_strings(screen)) {
+       mesa_loge("ZINK: failed to set driver strings\n");
+-      goto fail;
++      { mesa_loge("ZINK: creating the screen failed (zink_screen.c:%d)", __LINE__); goto fail; }
+    }
+ 
+    memset(&screen->heap_map, UINT8_MAX, sizeof(screen->heap_map));
+@@ -3439,20 +3467,20 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
+    if (screen->threaded_submit && !util_queue_init(&screen->flush_queue, "zfq", 8, 1, UTIL_QUEUE_INIT_RESIZE_IF_FULL, screen)) {
+       if (!screen->driver_name_is_inferred)
+          mesa_loge("zink: Failed to create flush queue.\n");
+-      goto fail;
++      { mesa_loge("ZINK: creating the screen failed (zink_screen.c:%d)", __LINE__); goto fail; }
+    }
+ 
+    zink_internal_setup_moltenvk(screen);
+    if (!screen->info.have_KHR_timeline_semaphore && !screen->info.feats12.timelineSemaphore) {
+       if (!screen->driver_name_is_inferred)
+          mesa_loge("zink: KHR_timeline_semaphore is required");
+-      goto fail;
++      { mesa_loge("ZINK: creating the screen failed (zink_screen.c:%d)", __LINE__); goto fail; }
+    }
+ 
+    if (zink_driverid(screen) == VK_DRIVER_ID_IMAGINATION_PROPRIETARY && !screen->info.feats.features.geometryShader) {
+       if (!screen->driver_name_is_inferred)
+          mesa_loge("zink: Imagination proprietary driver w/o geometryShader is unsupported");
+-      goto fail;
++      { mesa_loge("ZINK: creating the screen failed (zink_screen.c:%d)", __LINE__); goto fail; }
+    }
+ 
+    if (zink_debug & ZINK_DEBUG_MEM) {
+@@ -3466,7 +3494,7 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
+ 
+    screen->dev = zink_create_logical_device(screen);
+    if (!screen->dev)
+-      goto fail;
++      { mesa_loge("ZINK: creating the screen failed (zink_screen.c:%d)", __LINE__); goto fail; }
+ 
+    vk_device_uncompacted_dispatch_table_load(&screen->vk.device,
+                                              screen->vk_GetDeviceProcAddr,
+@@ -3499,7 +3527,7 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
+    }
+ 
+    if (screen->info.have_EXT_calibrated_timestamps && !check_have_device_time(screen))
+-      goto fail;
++      { mesa_loge("ZINK: creating the screen failed (zink_screen.c:%d)", __LINE__); goto fail; }
+ 
+    screen->have_triangle_fans = true;
+ #if defined(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME)
+@@ -3568,11 +3596,11 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
+    }
+ 
+    if (!zink_screen_resource_init(&screen->base))
+-      goto fail;
++      { mesa_loge("ZINK: creating the screen failed (zink_screen.c:%d)", __LINE__); goto fail; }
+    if (!zink_bo_init(screen)) {
+       if (!screen->driver_name_is_inferred)
+          mesa_loge("ZINK: failed to initialize suballocator");
+-      goto fail;
++      { mesa_loge("ZINK: creating the screen failed (zink_screen.c:%d)", __LINE__); goto fail; }
+    }
+    zink_screen_fence_init(&screen->base);
+ 
+@@ -3582,11 +3610,11 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
+    if (!disk_cache_init(screen)) {
+       if (!screen->driver_name_is_inferred)
+          mesa_loge("ZINK: failed to initialize disk cache");
+-      goto fail;
++      { mesa_loge("ZINK: creating the screen failed (zink_screen.c:%d)", __LINE__); goto fail; }
+    }
+    if (!util_queue_init(&screen->cache_get_thread, "zcfq", 8, 4,
+                         UTIL_QUEUE_INIT_RESIZE_IF_FULL, screen))
+-      goto fail;
++      { mesa_loge("ZINK: creating the screen failed (zink_screen.c:%d)", __LINE__); goto fail; }
+    populate_format_props(screen);
+ 
+    slab_create_parent(&screen->transfer_pool, sizeof(struct zink_transfer), 16);
+@@ -3598,13 +3626,13 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
+    if (!os_get_total_physical_memory(&screen->total_mem)) {
+       if (!screen->driver_name_is_inferred)
+          mesa_loge("ZINK: failed to get total physical memory");
+-      goto fail;
++      { mesa_loge("ZINK: creating the screen failed (zink_screen.c:%d)", __LINE__); goto fail; }
+    }
+ 
+    if (!zink_screen_init_semaphore(screen)) {
+       if (!screen->driver_name_is_inferred)
+          mesa_loge("zink: failed to create timeline semaphore");
+-      goto fail;
++      { mesa_loge("ZINK: creating the screen failed (zink_screen.c:%d)", __LINE__); goto fail; }
+    }
+ 
+    bool can_db = true;
+@@ -3613,7 +3641,7 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
+          if (zink_descriptor_mode == ZINK_DESCRIPTOR_MODE_DB) {
+             if (!screen->driver_name_is_inferred)
+                mesa_loge("Cannot use db descriptor mode without EXT_descriptor_buffer");
+-            goto fail;
++            { mesa_loge("ZINK: creating the screen failed (zink_screen.c:%d)", __LINE__); goto fail; }
+          }
+          can_db = false;
+       }
+@@ -3621,7 +3649,7 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
+          if (zink_descriptor_mode == ZINK_DESCRIPTOR_MODE_DB) {
+             if (!screen->driver_name_is_inferred)
+                mesa_loge("Cannot use db descriptor mode without resizable bar");
+-            goto fail;
++            { mesa_loge("ZINK: creating the screen failed (zink_screen.c:%d)", __LINE__); goto fail; }
+          }
+          can_db = false;
+       }
+@@ -3629,7 +3657,7 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
+          if (zink_descriptor_mode == ZINK_DESCRIPTOR_MODE_DB) {
+             if (!screen->driver_name_is_inferred)
+                mesa_loge("Cannot use db descriptor mode without EXT_non_seamless_cube_map");
+-            goto fail;
++            { mesa_loge("ZINK: creating the screen failed (zink_screen.c:%d)", __LINE__); goto fail; }
+          }
+          can_db = false;
+       }
+@@ -3637,7 +3665,7 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
+          if (zink_descriptor_mode == ZINK_DESCRIPTOR_MODE_DB) {
+             if (!screen->driver_name_is_inferred)
+                mesa_loge("Cannot use db descriptor mode without robustness2.nullDescriptor");
+-            goto fail;
++            { mesa_loge("ZINK: creating the screen failed (zink_screen.c:%d)", __LINE__); goto fail; }
+          }
+          can_db = false;
+       }
+@@ -3645,7 +3673,7 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
+          if (zink_descriptor_mode == ZINK_DESCRIPTOR_MODE_DB) {
+             if (!screen->driver_name_is_inferred)
+                mesa_loge("Cannot use db descriptor mode with inputAttachmentDescriptorSize(%u) > %u", (unsigned)screen->info.db_props.inputAttachmentDescriptorSize, ZINK_FBFETCH_DESCRIPTOR_SIZE);
+-            goto fail;
++            { mesa_loge("ZINK: creating the screen failed (zink_screen.c:%d)", __LINE__); goto fail; }
+          }
+          mesa_logw("zink: bug detected: inputAttachmentDescriptorSize(%u) > %u", (unsigned)screen->info.db_props.inputAttachmentDescriptorSize, ZINK_FBFETCH_DESCRIPTOR_SIZE);
+          can_db = false;
+@@ -3710,13 +3738,13 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
+    if (!init_layouts(screen)) {
+       if (!screen->driver_name_is_inferred)
+          mesa_loge("ZINK: failed to initialize layouts");
+-      goto fail;
++      { mesa_loge("ZINK: creating the screen failed (zink_screen.c:%d)", __LINE__); goto fail; }
+    }
+ 
+    if (!zink_descriptor_layouts_init(screen)) {
+       if (!screen->driver_name_is_inferred)
+          mesa_loge("ZINK: failed to initialize descriptor layouts");
+-      goto fail;
++      { mesa_loge("ZINK: creating the screen failed (zink_screen.c:%d)", __LINE__); goto fail; }
+    }
+ 
+    simple_mtx_init(&screen->copy_context_lock, mtx_plain);
+@@ -3733,7 +3761,7 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
+ 
+ fail:
+    zink_destroy_screen(&screen->base);
+-   return NULL;
++   { mesa_loge("ZINK: creating the screen failed (zink_screen.c:%d)", __LINE__); return NULL; }
+ }
+ 
+ struct pipe_screen *
+diff --git a/src/gallium/drivers/zink/zink_types.h b/src/gallium/drivers/zink/zink_types.h
+index c34b9a222..7ef2a0d07 100644
+--- a/src/gallium/drivers/zink/zink_types.h
++++ b/src/gallium/drivers/zink/zink_types.h
+@@ -1389,6 +1389,7 @@ struct zink_screen {
+    const char *device_name;
+ 
+    struct util_dl_library *loader_lib;
++   bool loader_lib_borrowed;
+    PFN_vkGetInstanceProcAddr vk_GetInstanceProcAddr;
+    PFN_vkGetDeviceProcAddr vk_GetDeviceProcAddr;
+ 
+diff --git a/src/gallium/frontends/osmesa/osmesa.c b/src/gallium/frontends/osmesa/osmesa.c
+index 6d6167766..563f045ee 100644
+--- a/src/gallium/frontends/osmesa/osmesa.c
++++ b/src/gallium/frontends/osmesa/osmesa.c
+@@ -62,6 +62,7 @@
+ #include <c11/threads.h>
+ 
+ #include "state_tracker/st_context.h"
++#include "main/glthread.h"
+ 
+ #include "glapi/glapi.h"  /* for OSMesaGetProcAddress below */
+ 
+@@ -96,6 +97,14 @@ struct osmesa_buffer
+ 
+    struct pipe_resource *textures[ST_ATTACHMENT_COUNT];
+ 
++   /* Alpha3: pipelined color read-back. The color buffer is copied (GPU side, no wait) into one of two linear staging
++    * textures each frame, and the previous frame's already finished copy is handed to the user. Reading the render
++    * target directly made every frame wait for the GPU, so the CPU and GPU took turns instead of overlapping. */
++   struct pipe_resource *staging[2];
++   struct pipe_fence_handle *staging_fence[2];
++   unsigned staging_cur;
++   bool staging_primed;
++
+    void *map;
+ 
+    struct osmesa_buffer *next;  /**< next in linked list */
+@@ -140,6 +149,12 @@ osmesa_st_get_param(struct pipe_frontend_screen *fscreen, enum st_manager_param
+    return 0;
+ }
+ 
++/* Alpha3: called when glthread starts its thread; OSMesa has no loader or HUD to tell */
++static void
++osmesa_st_set_background_context(struct st_context *st, struct util_queue_monitoring *queue_info)
++{
++}
++
+ static struct pipe_frontend_screen *global_fscreen = NULL;
+ 
+ static void
+@@ -163,6 +178,7 @@ create_st_manager(void)
+       global_fscreen->screen = osmesa_create_screen();
+       global_fscreen->get_param = osmesa_st_get_param;
+       global_fscreen->get_egl_image = NULL;
++      global_fscreen->set_background_context = osmesa_st_set_background_context;
+    }
+ }
+ 
+@@ -343,6 +359,91 @@ drawable_to_osbuffer(struct pipe_frontend_drawable *drawable)
+ }
+ 
+ 
++static void
++osmesa_free_staging(struct osmesa_buffer *osbuffer, struct pipe_screen *screen)
++{
++   for (unsigned i = 0; i < 2; i++) {
++      if (osbuffer->staging_fence[i])
++         screen->fence_reference(screen, &osbuffer->staging_fence[i], NULL);
++      pipe_resource_reference(&osbuffer->staging[i], NULL);
++   }
++   osbuffer->staging_cur = 0;
++   osbuffer->staging_primed = false;
++}
++
++
++/* Copies the color buffer to the user's memory one frame late (see struct osmesa_buffer). Returns false when the staging
++ * textures cannot be had, so that the caller can fall back to the plain read. */
++static bool
++osmesa_read_color_pipelined(OSMesaContext osmesa, struct osmesa_buffer *osbuffer, struct pipe_resource *res,
++                            void *dst, int dst_stride, bool y_up)
++{
++   struct pipe_context *pipe = osmesa->st->pipe;
++   struct pipe_screen *screen = pipe->screen;
++
++   if (osbuffer->staging[0] &&
++       (osbuffer->staging[0]->width0 != res->width0 || osbuffer->staging[0]->height0 != res->height0 ||
++        osbuffer->staging[0]->format != res->format))
++      osmesa_free_staging(osbuffer, screen);
++
++   if (!osbuffer->staging[0]) {
++      struct pipe_resource templ;
++      memset(&templ, 0, sizeof(templ));
++      templ.target = PIPE_TEXTURE_2D;
++      templ.format = res->format;
++      templ.width0 = res->width0;
++      templ.height0 = res->height0;
++      templ.depth0 = 1;
++      templ.array_size = 1;
++      templ.usage = PIPE_USAGE_STAGING;
++      templ.bind = PIPE_BIND_LINEAR;
++      for (unsigned i = 0; i < 2; i++)
++         osbuffer->staging[i] = screen->resource_create(screen, &templ);
++      if (!osbuffer->staging[0] || !osbuffer->staging[1]) {
++         osmesa_free_staging(osbuffer, screen);
++         return false;
++      }
++   }
++
++   const unsigned cur = osbuffer->staging_cur;
++   struct pipe_box box;
++   u_box_2d(0, 0, res->width0, res->height0, &box);
++   pipe->resource_copy_region(pipe, osbuffer->staging[cur], 0, 0, 0, 0, res, 0, &box);
++
++   struct pipe_fence_handle *fence = NULL;
++   pipe->flush(pipe, &fence, PIPE_FLUSH_ASYNC);
++   osbuffer->staging_fence[cur] = fence;
++
++   /* The previous frame's snapshot, or this one the very first time. */
++   const unsigned show = osbuffer->staging_primed ? cur ^ 1 : cur;
++   if (osbuffer->staging_fence[show]) {
++      screen->fence_finish(screen, pipe, osbuffer->staging_fence[show], OS_TIMEOUT_INFINITE);
++      screen->fence_reference(screen, &osbuffer->staging_fence[show], NULL);
++   }
++
++   struct pipe_transfer *transfer = NULL;
++   const uint8_t *src = pipe->texture_map(pipe, osbuffer->staging[show], 0, PIPE_MAP_READ, &box, &transfer);
++   if (!src)
++      return false;
++
++   if (y_up) {
++      dst = (uint8_t *)dst + (res->height0 - 1) * dst_stride;
++      dst_stride = -dst_stride;
++   }
++   const unsigned bpp = util_format_get_blocksize(res->format);
++   for (unsigned y = 0; y < res->height0; y++) {
++      memcpy(dst, src, bpp * res->width0);
++      dst = (uint8_t *)dst + dst_stride;
++      src += transfer->stride;
++   }
++   pipe->texture_unmap(pipe, transfer);
++
++   osbuffer->staging_cur = cur ^ 1;
++   osbuffer->staging_primed = true;
++   return true;
++}
++
++
+ /**
+  * Called via glFlush/glFinish.  This is where we copy the contents
+  * of the driver's color buffer into the user-specified buffer.
+@@ -390,7 +491,8 @@ osmesa_st_framebuffer_flush_front(struct st_context *st,
+    else
+       dst_stride = bpp * osbuffer->width;
+ 
+-   osmesa_read_buffer(osmesa, res, osbuffer->map, dst_stride, osmesa->y_up);
++   if (!osmesa_read_color_pipelined(osmesa, osbuffer, res, osbuffer->map, dst_stride, osmesa->y_up))
++      osmesa_read_buffer(osmesa, res, osbuffer->map, dst_stride, osmesa->y_up);
+ 
+    /* If the user has requested the Z/S buffer, then snapshot that one too. */
+    if (osmesa->zs) {
+@@ -504,6 +606,9 @@ osmesa_destroy_buffer(struct osmesa_buffer *osbuffer)
+     */
+    st_api_destroy_drawable(&osbuffer->base);
+ 
++   if (osbuffer->staging[0] || osbuffer->staging[1])
++      osmesa_free_staging(osbuffer, get_st_manager()->screen);
++
+    FREE(osbuffer);
+ }
+ 
+@@ -637,6 +742,11 @@ OSMesaCreateContextAttribs(const int *attribList, OSMesaContext sharelist)
+       }
+    }
+ 
++   /* Alpha3: the screen can fail to start (Zink on a Vulkan driver that lacks what it needs); that is an error for the
++    * caller to handle, not something to dereference. */
++   if (!get_st_manager() || !get_st_manager()->screen)
++      return NULL;
++
+    osmesa = (OSMesaContext) CALLOC_STRUCT(osmesa_context);
+    if (!osmesa)
+       return NULL;
+@@ -686,6 +796,12 @@ OSMesaCreateContextAttribs(const int *attribList, OSMesaContext sharelist)
+ 
+    osmesa->st->frontend_context = osmesa;
+ 
++   /* Alpha3: GL calls are queued for a second thread (glthread), so Mesa's GL front end works while the application
++    * builds the next draws. Off with mesa_glthread=false. The caller has to sync before it reads the color buffer: a
++    * glFlush returns before the copy into it has run, a call that returns a value (glGetError) waits for it. */
++   if (debug_get_bool_option("mesa_glthread", true))
++      _mesa_glthread_init(osmesa->st->ctx);
++
+    osmesa->format = format;
+    osmesa->user_row_length = 0;
+    osmesa->y_up = GL_TRUE;
+@@ -740,6 +856,11 @@ OSMesaMakeCurrent(OSMesaContext osmesa, void *buffer, GLenum type,
+ {
+    enum pipe_format color_format;
+ 
++   /* Alpha3: glthread has to be done with the current context before it changes hands or buffers */
++   struct st_context *current = st_api_get_current();
++   if (current)
++      _mesa_glthread_finish(current->ctx);
++
+    if (!osmesa && !buffer) {
+       st_api_make_current(NULL, NULL, NULL);
+       return GL_TRUE;
+diff --git a/src/gallium/targets/osmesa/meson.build b/src/gallium/targets/osmesa/meson.build
+index 3c371616e..eec8ff30a 100644
+--- a/src/gallium/targets/osmesa/meson.build
++++ b/src/gallium/targets/osmesa/meson.build
+@@ -2,7 +2,7 @@
+ # SPDX-License-Identifier: MIT
+ 
+ osmesa_link_with = []
+-osmesa_link_args = []
++osmesa_link_args = ['-llog', '-Wl,--build-id=sha1']  # Alpha3: __android_log_print; build id for the shader cache
+ osmesa_link_deps = []
+ 
+ if with_shared_glapi
+@@ -38,7 +38,7 @@ libosmesa = shared_library(
+     libmesa, libgallium, libws_null, osmesa_link_with,
+   ],
+   dependencies : [
+-    dep_ws2_32, dep_thread, dep_clock, dep_unwind, driver_swrast, idep_mesautil,
++    dep_ws2_32, dep_thread, dep_clock, dep_unwind, driver_swrast, driver_zink, idep_xmlconfig, idep_mesautil,
+   ],
+   name_prefix : host_machine.system() == 'windows' ? '' : [],  # otherwise mingw will create libosmesa.dll
+   soversion : host_machine.system() == 'windows' ? '' : '8',
+diff --git a/src/util/os_misc.c b/src/util/os_misc.c
+index 4b7916634..cae4e8056 100644
+--- a/src/util/os_misc.c
++++ b/src/util/os_misc.c
+@@ -55,8 +55,10 @@
+ #if DETECT_OS_ANDROID
+ #  define LOG_TAG "MESA"
+ #  include <unistd.h>
+-#  include <log/log.h>
+-#  include <cutils/properties.h>
++#  include <android/log.h>
++#  include <sys/system_properties.h>  /* Alpha3: libcutils is not a public NDK library */
++#  define PROPERTY_KEY_MAX PROP_NAME_MAX
++#  define PROPERTY_VALUE_MAX PROP_VALUE_MAX
+ #elif DETECT_OS_LINUX || DETECT_OS_CYGWIN || DETECT_OS_SOLARIS || DETECT_OS_HURD || DETECT_OS_MANAGARM
+ #  include <unistd.h>
+ #elif DETECT_OS_OPENBSD || DETECT_OS_FREEBSD
+@@ -131,7 +133,7 @@ os_log_message(const char *message)
+    fputs(message, fout);
+    fflush(fout);
+ #  if DETECT_OS_ANDROID
+-   LOG_PRI(ANDROID_LOG_ERROR, LOG_TAG, "%s", message);
++   __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, "%s", message);
+ #  endif
+ #endif
+ }
+@@ -179,13 +181,14 @@ os_get_android_option(const char *name)
+    }
+ 
+    /* prefixes to search sorted by preference */
+-   const char *prefices[] = { "debug.", "vendor.", "" };
++   /* Alpha3: an app may only read debug.* properties; asking for the others is refused and logged, every time */
++   const char *prefices[] = { "debug." };
+    char full_key[PROPERTY_KEY_MAX];
+    int len = 0;
+    for (int i = 0; i < ARRAY_SIZE(prefices); i++) {
+       strlcpy(full_key, prefices[i], PROPERTY_KEY_MAX);
+       strlcat(full_key, key, PROPERTY_KEY_MAX);
+-      len = property_get(full_key, os_android_option_value, NULL);
++      len = __system_property_get(full_key, os_android_option_value);
+       if (len > 0)
+          return os_android_option_value;
+    }
+diff --git a/src/util/perf/cpu_trace.h b/src/util/perf/cpu_trace.h
+index c495dd529..58a0d1c9a 100644
+--- a/src/util/perf/cpu_trace.h
++++ b/src/util/perf/cpu_trace.h
+@@ -58,7 +58,7 @@
+  *
+  *   https://github.com/android/ndk/issues/1178
+  */
+-#elif DETECT_OS_ANDROID && !defined(__cplusplus)
++#elif 0 /* Alpha3: libcutils is not a public NDK library */
+ 
+ #include <cutils/trace.h>
+ 

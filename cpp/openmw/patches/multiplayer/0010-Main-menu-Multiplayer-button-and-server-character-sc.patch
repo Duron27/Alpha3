@@ -1,0 +1,674 @@
+From c5d078d81aeeda699f7287d00b85a40bc870ba15 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Wed, 7 Oct 2026 02:48:46 -0400
+Subject: [PATCH] Main menu Multiplayer button and server/character screen
+
+- engine: 'multiplayer' button in the main menu (TGA textures shipped in files/data/textures) that calls a new
+  onMainMenuButton menu-script handler; explains itself if no script handles it
+- menu.lua: Modal screen with server/port, New/Load character (or apply+reconnect in game); stored in the
+  permanent player section MpConnect and forwarded to the global script by player.lua
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ apps/openmw/mwbase/luamanager.hpp             |   2 +
+ apps/openmw/mwgui/mainmenu.cpp                |  20 ++-
+ apps/openmw/mwlua/luamanagerimp.hpp           |   1 +
+ apps/openmw/mwlua/menuscripts.hpp             |  10 +-
+ files/data/CMakeLists.txt                     |   3 +
+ files/data/textures/menu_multiplayer.tga      | Bin 0 -> 65580 bytes
+ files/data/textures/menu_multiplayer_over.tga | Bin 0 -> 65580 bytes
+ .../textures/menu_multiplayer_pressed.tga     | Bin 0 -> 65580 bytes
+ multiplayer/mod/mp.omwscripts                 |   1 +
+ multiplayer/mod/scripts/mp/global.lua         |   3 +
+ multiplayer/mod/scripts/mp/menu.lua           | 166 ++++++++++++++++++
+ multiplayer/mod/scripts/mp/player.lua         |   6 +
+ 12 files changed, 207 insertions(+), 5 deletions(-)
+ create mode 100644 files/data/textures/menu_multiplayer.tga
+ create mode 100644 files/data/textures/menu_multiplayer_over.tga
+ create mode 100644 files/data/textures/menu_multiplayer_pressed.tga
+ create mode 100644 multiplayer/mod/scripts/mp/menu.lua
+
+diff --git a/apps/openmw/mwbase/luamanager.hpp b/apps/openmw/mwbase/luamanager.hpp
+index d38204d852..e1f0ee5043 100644
+--- a/apps/openmw/mwbase/luamanager.hpp
++++ b/apps/openmw/mwbase/luamanager.hpp
+@@ -109,6 +109,8 @@ namespace MWBase
+         virtual void questUpdated(const ESM::RefId& questId, int stage) = 0;
+         // `arg` is either forwarded from MWGui::pushGuiMode or empty
+         virtual void uiModeChanged(const MWWorld::Ptr& arg) = 0;
++        // A main menu button without built-in behaviour was clicked. Returns false if no script handles it.
++        virtual bool mainMenuButton(const std::string& id) = 0;
+         virtual void viewportResized(int width, int height) = 0;
+         virtual void savePermanentStorage(const std::filesystem::path& userConfigPath) = 0;
+         virtual void applyMagicEffects(ESM::RefId id, const MWWorld::Ptr& caster, ESM::RefNum item,
+diff --git a/apps/openmw/mwgui/mainmenu.cpp b/apps/openmw/mwgui/mainmenu.cpp
+index 010159be00..ca33da708c 100644
+--- a/apps/openmw/mwgui/mainmenu.cpp
++++ b/apps/openmw/mwgui/mainmenu.cpp
+@@ -12,6 +12,7 @@
+ #include <components/widgets/imagebutton.hpp>
+ 
+ #include "../mwbase/environment.hpp"
++#include "../mwbase/luamanager.hpp"
+ #include "../mwbase/statemanager.hpp"
+ #include "../mwbase/windowmanager.hpp"
+ #include "../mwbase/world.hpp"
+@@ -172,6 +173,12 @@ namespace MWGui
+         winMgr->playSound(ESM::RefId::stringRefId("Menu Click"));
+         if (name == "return")
+             winMgr->removeGuiMode(GM_MainMenu);
++        else if (name == "multiplayer")
++        {
++            // Provided by a menu script (the multiplayer mod); without one the button explains itself.
++            if (!MWBase::Environment::get().getLuaManager()->mainMenuButton(name))
++                winMgr->messageBox("Multiplayer is not available: the multiplayer mod is not enabled.");
++        }
+         else if (name == "credits")
+             winMgr->playVideo("mw_credits.bik", true);
+         else if (name == "exitgame")
+@@ -326,6 +333,8 @@ namespace MWGui
+             != MWBase::Environment::get().getStateManager()->characterEnd())
+             buttons.emplace_back("loadgame");
+ 
++        buttons.emplace_back("multiplayer");
++
+         buttons.emplace_back("options");
+ 
+         if (state == MWBase::StateManager::State_NoGame)
+@@ -334,16 +343,19 @@ namespace MWGui
+         buttons.emplace_back("exitgame");
+ 
+         // Create new buttons if needed
+-        for (std::string_view id : { "return", "newgame", "savegame", "loadgame", "options", "credits", "exitgame" })
++        for (std::string_view id :
++            { "return", "newgame", "savegame", "loadgame", "multiplayer", "options", "credits", "exitgame" })
+         {
+             if (mButtons.find(id) == mButtons.end())
+             {
+                 Gui::ImageButton* button = mButtonBox->createWidget<Gui::ImageButton>(
+                     "ImageBox", MyGUI::IntCoord(0, curH, 0, 0), MyGUI::Align::Default);
+                 const std::string& buttonId = mButtons.emplace(id, button).first->first;
+-                button->setProperty("ImageHighlighted", "textures\\menu_" + buttonId + "_over.dds");
+-                button->setProperty("ImageNormal", "textures\\menu_" + buttonId + ".dds");
+-                button->setProperty("ImagePushed", "textures\\menu_" + buttonId + "_pressed.dds");
++                // The multiplayer button's textures ship with OpenMW (TGA); the others come from the game data.
++                const std::string ext = buttonId == "multiplayer" ? ".tga" : ".dds";
++                button->setProperty("ImageHighlighted", "textures\\menu_" + buttonId + "_over" + ext);
++                button->setProperty("ImageNormal", "textures\\menu_" + buttonId + ext);
++                button->setProperty("ImagePushed", "textures\\menu_" + buttonId + "_pressed" + ext);
+                 button->eventMouseButtonClick += MyGUI::newDelegate(this, &MainMenu::onButtonClicked);
+                 button->setUserData(buttonId);
+             }
+diff --git a/apps/openmw/mwlua/luamanagerimp.hpp b/apps/openmw/mwlua/luamanagerimp.hpp
+index becfb85afb..5d8d638f0c 100644
+--- a/apps/openmw/mwlua/luamanagerimp.hpp
++++ b/apps/openmw/mwlua/luamanagerimp.hpp
+@@ -168,6 +168,7 @@ namespace MWLua
+         void objectTeleported(const MWWorld::Ptr& ptr) override;
+         void questUpdated(const ESM::RefId& questId, int stage) override;
+         void uiModeChanged(const MWWorld::Ptr& arg) override;
++        bool mainMenuButton(const std::string& id) override { return mMenuScripts.mainMenuButton(id); }
+         void viewportResized(int width, int height) override;
+         void actorDied(const MWWorld::Ptr& actor) override;
+         void onDialogueResponse(
+diff --git a/apps/openmw/mwlua/menuscripts.hpp b/apps/openmw/mwlua/menuscripts.hpp
+index 4eb56b8ac0..c71a928947 100644
+--- a/apps/openmw/mwlua/menuscripts.hpp
++++ b/apps/openmw/mwlua/menuscripts.hpp
+@@ -26,7 +26,7 @@ namespace MWLua
+             , mInputProcessor(this)
+         {
+             registerEngineHandlers({ &mOnFrameHandlers, &mStateChanged, &mConsoleCommandHandlers,
+-                &mViewportResizedHandlers, &mUiModeChanged });
++                &mViewportResizedHandlers, &mUiModeChanged, &mMainMenuButton });
+         }
+ 
+         void processInputEvent(const MWBase::LuaManager::InputEvent& event)
+@@ -48,6 +48,13 @@ namespace MWLua
+ 
+         void uiModeChanged() { callEngineHandlers(mUiModeChanged); }
+ 
++        // Returns whether any script handles main menu buttons that the engine doesn't implement itself.
++        bool mainMenuButton(const std::string& id)
++        {
++            callEngineHandlers(mMainMenuButton, id);
++            return !mMainMenuButton.mList.empty();
++        }
++
+     private:
+         friend class MWLua::InputProcessor<MenuScripts>;
+         MWLua::InputProcessor<MenuScripts> mInputProcessor;
+@@ -56,6 +63,7 @@ namespace MWLua
+         EngineHandlerList mConsoleCommandHandlers{ "onConsoleCommand" };
+         EngineHandlerList mViewportResizedHandlers{ "onViewportResized" };
+         EngineHandlerList mUiModeChanged{ "_onUiModeChanged" };
++        EngineHandlerList mMainMenuButton{ "onMainMenuButton" };
+     };
+ }
+ 
+diff --git a/files/data/CMakeLists.txt b/files/data/CMakeLists.txt
+index 8506b51f11..e1440a29de 100644
+--- a/files/data/CMakeLists.txt
++++ b/files/data/CMakeLists.txt
+@@ -4,6 +4,9 @@ endif()
+ 
+ set(BUILTIN_DATA_FILES
+     textures/omw_map_color_palette.dds
++    textures/menu_multiplayer.tga
++    textures/menu_multiplayer_over.tga
++    textures/menu_multiplayer_pressed.tga
+     textures/omw_menu_scroll_down.dds
+     textures/omw_menu_scroll_up.dds
+     textures/omw_menu_scroll_left.dds
+diff --git a/files/data/textures/menu_multiplayer.tga b/files/data/textures/menu_multiplayer.tga
+new file mode 100644
+index 0000000000000000000000000000000000000000..2a7693945165e154429298defc49f645e8641778
+GIT binary patch
+literal 65580
+zcmeI43wVu38pkJSj36!<A(G~%?nLB5M1({_g2+X}DP6W&EoD=eXw{`b$?B$VQ4;qM
+z4tk-gC|yyv7S*`b*_+*^mQ}rJw@Y2hKL78`eEA~hoE)@Um-qKP=Q&UE%{SkCbLKzu
+z&O7f6W0jbWOBd$P^}h&$AP9mW2!bF8f*=TjAP9mW2!bF8f*=TjAP9mW2!bF8f*=Tj
+zAP9mW2!bF8f*=TjAP9mW2!bGpUj{A`7#D9cE{YAG4UCIC#)a!I^Uw<5B7||VmT|G2
+zaj}tcF@bU6QNdjVK{$hL%`5$H`&G1Gs`(EX7dvEM1pTj&{nHza3r}ZWk01!gn9P<Z
+zlNap%!DP1FRG-vEA771|vhI}0Z2AA62g^ll{gCbld(YeXUEiW(H_{d#xY{8z?`*XO
+z&EAvxFJN5EcKlWZK{yQ;MR8N#xCs4s$jm!0$J}3Q{EzkR+;3$@Vab)SAvvepJ~`!d
+z@A<oaOrF2%l3T+TMU0Er85dg_7ag5`KY}3a!$n@)lyy@7bCv#IvVX%b2p6?{JNFwL
+z_RNeeQs*NdspB^h{ZnkV`76f7`;3d}jEnqVuoMLG@L*g2S-(~Vn9LTzJsYPnE=H*`
+zxOp|7l2Lg0x_5_^y^M<`(ne{nt`o#<!$m#mUsir5<@<V<abYTxAAC++EMr`_-12`f
+zJ9!{4*wEQ!(gQA{7#9oW__m&Lk;Ay?#ki=>xEOBmzprLo#4s+x8Q12$7!y?)|H!yl
+z$+&o0&)<6gMCmJszdWCDF^F+dm2nX)|K5B{9<Zt3P~(5Z@8+oSe~r}HCdM^i9KK<D
+zr!p?8=+CsikF(|L!MIo|$MAO;7r$p*L}+!&^>;)0ros+jT-4T|!-Y@C;HhW2O<(_=
+zq5Na?>yF@}j#f`xEMi>1j{x5y>OGfn(T8#2rrpj(J6Wg3_JDMAv^<FWAN!hDx<Wg*
+zYQI$T^<{fOnn=bSYF_1oHa1zWuu{##m#xyEouRLRR@ML1H_}1>uy@t}jNfm`HjO?5
+znnyn96I2@fy<FyPFAucsp~msQ-LTwqhCEbW=*Q64U@Z>+L%$L&`y_jLtMVz$8_S0G
+zh9BSfKlQAcdYu{JBB-Wc@W=2`c(jN<B+CIU+xAhGYJQcC_rY(2cbPByIOJp0yebRQ
+zk@g=jOlFHu?|C~vH?2N#L;1Y%ownrQRg>BBg8sT(40dbSVqaqJ<_oM^J=G@W;=0Lf
+z3AB|5^69(s=uaI-FW6zorzP5;Ph{Hh?lU(2C!?_BdP>2*E79YYUTD;Pu;r0De#LE{
+zobtIUOH$sB%f8WlH=E3s?%i@Wl%y{&xvsADTlLwEp0l?7H)z24wOamM41c7K-|i02
+z=bcYmeBfHz;{8{<<*fg%Rll*@E4zEY;u##D+AU}Oq4edSmdT^noDVJq56a#k^U&x2
+zN%M*?C;Z{PANnl)<VwF)$FJi%?v*z$HtF^3iApuRK9n{K>S9WT<>R6Y-a9aU(4P`>
+zH~)~a;>b^_i}qiQ9=Gg5!*)q~QK#zNP`;?Ff(wj`$MkwL!o~P{L0wBw58=<gde)%n
+z1Y<G{E}AedHgM0zdxHjyKZQE)v-Fc|{Z<{nk-G4s%P|vIo^O&g^pi*G_#w7ooXKoS
+z=s9cKSEkh`O4mRZess0#<TYnaW=s8Y`4jg)T-2-V?(=@fQS-k@TXOIk+KOybR@)yo
+zE*EbH^&f|Iu$$fy$;S+B&N}bp!mF~o_tvmyW}uyDZO1=$fW@Vn=S~^3VzvFb7%y6N
+z`BbHW4&tV)`!;6Mstes`Y&@S*u<sIdhwHJ~=5OV5Fs{P(k9Mu=zgyiK(DgSKd0maK
+zON@O-rxzA~+4i@SPeqQJf6~pn<!EX9hgYuI@I#fyV+l|FMdnd%{D+^-E3C(nI!z;Y
+z)oK*}p-*J$5!l?gx7+mf7hOF9_ZaHou?ot!#<x?(XX?4V=Kk?g#P8;ui^?iEmy*Bt
+zQm3(tzEs!hH0f|q=39RJ=b|R&QXMkqo=5uhWrwa;spYdv+Vfg}tYiJ%R@H6R@e{0L
+zYWc4|akJ~>HD87e$vG7~DEm~qVY#PbCKjEJ7%>a|nX>(7M~-~`3#5;q_LiDs(D?r#
+z!$nrRVY#PM7w!L1w!Mw|>vGW*;~mCnw27{h*D772O_a{*xfs&si3z8*c4oHR^a}5J
+zMCR4rkk@?Gb}{z52ZZjIb5M*wGhN*3Z|eNgvafKzLI2h@ZZ2xr(Z6-v<Kiuh*SNRy
+z_`<K{voWWCj&bp_oWr=<(SMRwM%(_snT(6ZjEjKE?%tUgzwwNyG1?fdY@xvp%g4pq
+z*q2v-i~D-cdjG#D1LNBK>LnL9&$&&LhW!oK@G<DW{P@pBI{F>hRVuyg2bCZ2QA1rv
+zRjS@#C+r)fMIRvN3$X8D%a4?Ep0SLJ*D(IeI+$cb|MT^Hi3bm>{!bb7|Bn8WT;%z6
+zF`ZED4d1dI!3T)8<fWyxum5(2yjEaLK^`5)<io~=ekK^MPsaao{SNg1c1r$Ut&a*G
+z`0{C)_YggA!0$-^<MlkasNvVSv@Q%<h2PSC|HQ@G-t%^9c1`f0?9XM{7RWNSuGczN
+zw}}jS+R}ev)85bNeFbcsu2a@tl=;Cg@vNb&nV4s(-_1Yv3D`^UGdNx=;H3YD4tx6N
+zq7mAb@`<A@Ar`IU=mpR&v=1M3rfkRd#{V+<$M}bQLZ6=gFWGLb_XB>H`j<8e>=2pv
+z&#QmNm}_1CjY?CkA0PKm`J4q6=zo%~e{0{Q{CzKC9l<I6bI}IR>M_$=f6zVp3Y4X$
+ze+cFPvoTL&TvV2IITLk^>zMCXsr4w*V6GHU!Dlj!{|_1V^*^R|;|Q&dp&j*p{lgzy
+zW{mzvztx}JsPSkJ`~+A>LJXR_v*Z8$u7Acwp|Ufg$1O!14r~~#VLBTBy(34yeg<`D
+zm{Y@k!W!TPC-pzUvrU}l_d`DLC1R~GF?aKK!2>6uzr)%I`s667|AjG=R(+%WZu53t
+zmgQ9Q6-VE5NdFHRw)AgZL*D`)GujY7Ez(E*-L<a&&h%x6u7y55{fu0b!}{EB9wPlO
+zS7UJe^tY9N4D)CE`e%&Q@NLru{!P?l`{A?Bc?QQHs_xxtUsVyfr+!GnVO7UA?SE_k
+zx(zYONC)3ZmD;`-&!2Cent3v%VBcjIxBBq4F4kfK0T&Cq|Nfotk-q2b?U!mb3P0fJ
+zBkcq93$sZ74;i-g-v{eyYF!FGC%HB-zU`pwQ)q)#MIhQB+MMP;x8whNpzMF_z3K7V
+z7R?6;eaUe(vm*TiSC4=eEi=ZPfG;p9ulSp^#rrR26dwK&_EZJ>&p<z+{C*K5X8l`^
+z_0_92XqJ!reIip2%ijWX3lI2HmHt)Uj=l~4+8Lz(hYZ{LU(qCK=wDTvk@0Y_FKfFs
+zY%v3VfR-6!PRe*2j2o{$@cOr|zZECv@6r5>F%yfvk@`pMp2P89$C?NF3-p_2#NpYo
+z|NRX2tZ14%T=)BV2FI6Z_X95CyG&U5b@Yo%zLb3eVj~B@FQe>#tT)=S|GmO{9aX=t
+z%oA&^FIT94>pKkA%SYVbl-K`zh)Gd%b+i$WmYor6Hcxv|E&|aXz~3g<vJhYQ&O@O8
+zB&@$F&4fNRP0fKSRj7Y10vQ*f^7|Qm?=BZ%HuR4%yqc_Q&F`mv3&cdp7_3-%o%_cQ
+zID&YnY7Lt0mOdH8`bDCAC@W%$4Endmb#d`q-_HH?m<0F0umg;XX?Fbo@bhMAahzO>
+z;ex;Owfno#6FTMfzuh<|?Uu7a*||aLp4yGuFGt%#+@6eKExrf!Kb~>XT7G=*aQzSd
+z&3UrzZ$-?I(tpEtNk_GqV^Gof&qaLg#_fw5geJh}Unt`qU<Zt95Sn;I<tcSIRn;@{
+zH~Rfr^&9&Sxt~Jce^I5DPj>q9Pp`p0Bi8_6kA-+gB!8gt#oXTzvj{D(X>EGppSX@V
+zA{RF;R;#%k{bSu=xvNLuF2sS!zJ&Dupio}_#Zg%c^_aAPxPkCBzg^~axd`bpVa3-N
+zm*jZ#?ysbO*t*d8CL8O2MnCuDJJdhyX`KJH1KL!vbP2C+`j6C1gjO$3=-)r4|7Wq;
+zX2k4b9)&#(IA?4}vy>4hp+mzuU7*Yp>nht2)2!)u^@*F+eOi4a^@n?(lj%YuM$G;<
+zVtwRqf%o3(;^sLsF?X}(18hHhCVU3?KWu|7@E7)&xz)H9i!mN{j2{03y8$-DqaFJk
+zNB@C+M{>>spYMz^?SZ&|xkdko^@lx)HitNRY2%mO2gn$!AJY9jr16eO#(dPi{cqh{
+zrk$y$>{z+}zeKAv>)sn}Pt7gyKkw?5YF}Sj?tx+JU_+y<C{KsXx##gWKJEb_h%tor
+zvBzzbjrc#DrHB3lv4VQ6Lq_4@pW>#z@lCs7xo6rA%03-6rr-<2D<gmOGjg0p++8L4
+z4vy#lTr~2J>Awyd$J$B#w%tmwkH;r6^;qh{k2HTm*pM8=L?EuR8snlrd;><mpCKj+
+z>->mo^p|^(wkmr~&f{UTXf}j<U|2+Q{vIv%D17K2&T91%)b-P-tO6~@x5sN+zDHc8
+zJWBvEM8#_Uk2uPvNyGkvy$^VAd}1aRA@-v*K8(2kxkdjf)*rvOTw6weU;gY%E@I(h
+zRxxOf#($I9GSXzW=xd2m|9b3?$!y6rnJxO>AKBJR&$qI#{{)lSGN@b5hI6Wo8oxV^
+z$%meN@gtecmhC39MLXXEX=MDr7W->5TRNG{7Tw3zc2M@`0dWJ5#Y`+ZleYN4rM@eV
+zUQ5c`@onf+(@yjHO%VHlH4meY&awWj&u<ekV%GNVGd6yoQn2s)zD38bWfYcNN_h3%
+zzcou4aa^w9jZ_WFWVXCyGF!BGN%c<2`FpVTFw2mprO9kTjE1%*fpwXvtcAtuI;bid
+zwQcjngg;~5BBQY6YDQtn<;2|0CtE-M;%=<*$o-Kuu>Z$ow&*_J$mi#M0l%)RN5H`5
+zY0q1*e+co}H1~hNDAoTJW2`^cm8$!+hP_!D=Wm3IN`9S9`_MK$T0|doq<;;A9UyH{
+zUH|er_TZ|$wMgTX{^h*`;FCmIP!5^DdX91bv1SJtu3KaOfx!-t*N4foL9xD%_!_kr
+z8T0nK+C2&f{gX<fVU4LACu4@thagXk*H{netH<vtq#a-=FUnSG`-4(DK%I-AkN-N>
+za|DJ+t>ZdAh(UT%-}__DOYQwvbudx>AA64;m;Obv{U0Ps^?%hE>mU8%5*6QOjq$gE
+zi<@V9QeN?8*zFbS|88(XU$q*A7hsMo^^d*zHSInU`)jRz4Q$?qcGEeF6Xhd_dlIYu
+z&tgxyG1edZU$rs95nS*ly@no#t$=+2%1$-Jlf;!fE9g#eMqgaGbsD>9N1G=mz(+m2
+z++#{Lk28JLSc!3NV7auni!<dTh<gpp>$#YQ^KO*S4;n_ysPrXAS5)LGwS0!b_h!7`
+zpnvEKaV56r5YFPHzD#CIO;?Wq*!X4l{s1mA5nqdVc$^(l!?(@H(*Ab5C(aq1EFVGK
+z6By3_f=^ueeAW1kJ?V0-NMC2R3m3J6`j7j&x)<MmT^>In&;Pi4?StFV7tXS<W&3jx
+z9{SWY-N)FnZx+_l<L$oJ?QlEgBZzwdod0DqTX1HF9)Aw)BIaMN3H5Qdm?pEuGh@XO
+z>p3%Wttex~kt-cXFL=}0JZw^W=I2%$=YQPx*}Pt1JyQFwJbE4PD9<stJKO(fE+0Ys
+zUoqGLxA>SbKdy0GWx+YM<<IH7>+v7w>zT}!LngCDi)BIoBG0`k>sxn{sv<DXwXQ$r
+zC3wfXw*7zZ@(~1a3#H?%aV_kQ^siyvQ+s>;n<IYi@(~0<5ClOG1VIo4K@bE%5ClOG
+z1VIo4K@bE%5ClOG1VIo4K@bE%5ClOG1VIpGNKea%@0-{sF}ZhZQ@6xk@j>i=XjE^j
+
+literal 0
+HcmV?d00001
+
+diff --git a/files/data/textures/menu_multiplayer_over.tga b/files/data/textures/menu_multiplayer_over.tga
+new file mode 100644
+index 0000000000000000000000000000000000000000..029f22e59f5e3a7034470189ae46f10a1e383f30
+GIT binary patch
+literal 65580
+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
+Ze01^a>J{MY@7wVmkM3{#w)d*5{6BS~Bd`Df
+
+literal 0
+HcmV?d00001
+
+diff --git a/files/data/textures/menu_multiplayer_pressed.tga b/files/data/textures/menu_multiplayer_pressed.tga
+new file mode 100644
+index 0000000000000000000000000000000000000000..306299eb2ac923136efda81bb1b76fbff195cd17
+GIT binary patch
+literal 65580
+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
+
+literal 0
+HcmV?d00001
+
+diff --git a/multiplayer/mod/mp.omwscripts b/multiplayer/mod/mp.omwscripts
+index f99df18ebc..7ea885e01a 100644
+--- a/multiplayer/mod/mp.omwscripts
++++ b/multiplayer/mod/mp.omwscripts
+@@ -1,3 +1,4 @@
++MENU: scripts/mp/menu.lua
+ GLOBAL: scripts/mp/global.lua
+ PLAYER: scripts/mp/player.lua
+ CUSTOM: scripts/mp/remote.lua
+diff --git a/multiplayer/mod/scripts/mp/global.lua b/multiplayer/mod/scripts/mp/global.lua
+index e1f9662b4e..7a8ce73119 100644
+--- a/multiplayer/mod/scripts/mp/global.lua
++++ b/multiplayer/mod/scripts/mp/global.lua
+@@ -393,6 +393,9 @@ local function onCommand(d)
+         net.send(net.encodeJson({ t = 'leave_party' }))
+     elseif cmd == 'sync' then
+         pushUi()
++    elseif cmd == 'configure' then
++        if d.host and d.host ~= settings:get('Host') then settings:set('Host', d.host) end
++        if d.port and d.port ~= settings:get('Port') then settings:set('Port', d.port) end
+     elseif cmd == 'trade_send' then
+         if net.isConnected() then net.send(net.encodeJson(d.msg)) end
+     end
+diff --git a/multiplayer/mod/scripts/mp/menu.lua b/multiplayer/mod/scripts/mp/menu.lua
+new file mode 100644
+index 0000000000..160ffe2846
+--- /dev/null
++++ b/multiplayer/mod/scripts/mp/menu.lua
+@@ -0,0 +1,166 @@
++-- Main menu "Multiplayer" screen (the button itself is built into the engine's main menu).
++-- Lets you set the server, then start a new character or load a save; the connection is made
++-- automatically once the game is running. Settings go to the permanent player storage section
++-- 'MpConnect', which player.lua forwards to the global script.
++local ui = require('openmw.ui')
++local util = require('openmw.util')
++local menu = require('openmw.menu')
++local storage = require('openmw.storage')
++local async = require('openmw.async')
++local I = require('openmw.interfaces')
++
++local V2, rgb = util.vector2, util.color.rgb
++local WHITE = ui.texture { path = 'white' }
++local section = storage.playerSection('MpConnect')
++
++local W, H = 640, 470
++local TEXT_SIZE = 18
++local C = {
++    text = rgb(0.92, 0.92, 0.92), head = rgb(1, 0.85, 0.35), dim = rgb(0.65, 0.65, 0.65),
++    button = rgb(1, 1, 1), err = rgb(1, 0.5, 0.4), ok = rgb(0.5, 0.95, 0.55), panel = rgb(0.1, 0.08, 0.06),
++    field = rgb(0.03, 0.03, 0.03),
++}
++
++local el
++local view = 'main' -- 'main' | 'load'
++local hostBuf, portBuf = nil, nil
++local message, messageColor = nil, C.dim
++
++local function text(props, events)
++    props.textSize = props.textSize or TEXT_SIZE
++    return { template = I.MWUI.templates.textNormal, props = props, events = events }
++end
++
++local function close()
++    if el then el:destroy() el = nil end
++    view = 'main'
++end
++
++local render
++
++local function apply()
++    local host = (hostBuf or ''):gsub('^%s+', ''):gsub('%s+$', '')
++    local port = tonumber(portBuf)
++    if host == '' then message, messageColor = 'Enter the server address.', C.err render() return false end
++    if not port or port < 1 or port > 65535 or port ~= math.floor(port) then
++        message, messageColor = 'The port must be a number from 1 to 65535.', C.err render() return false
++    end
++    section:set('Host', host)
++    section:set('Port', port)
++    return true
++end
++
++local function button(x, y, label, fn, color)
++    return text({ position = V2(x, y), text = '[ ' .. label .. ' ]', textColor = color or C.button, textSize = 20 },
++        { mouseClick = async:callback(fn) })
++end
++
++local function field(x, y, w, initial, onChange)
++    return {
++        type = ui.TYPE.Widget, props = { position = V2(x, y), size = V2(w, 28) },
++        content = ui.content {
++            { type = ui.TYPE.Image, props = { resource = WHITE, relativeSize = V2(1, 1), color = C.field, alpha = 0.9 } },
++            {
++                type = ui.TYPE.TextEdit,
++                props = { position = V2(6, 3), size = V2(w - 12, 22), textSize = TEXT_SIZE, textColor = rgb(1, 1, 1),
++                    multiline = false, text = initial },
++                events = { textChanged = async:callback(onChange) },
++            },
++        },
++    }
++end
++
++local function saveList()
++    local list = {}
++    local ok, all = pcall(menu.getAllSaves)
++    if not ok then return list end
++    for dir, slots in pairs(all) do
++        for slot, info in pairs(slots) do
++            list[#list + 1] = { dir = dir, slot = slot, info = info }
++        end
++    end
++    table.sort(list, function(a, b) return (a.info.creationTime or 0) > (b.info.creationTime or 0) end)
++    return list
++end
++
++render = function()
++    local content = {
++        { type = ui.TYPE.Image, props = { resource = WHITE, relativeSize = V2(1, 1), color = C.panel, alpha = 0.96 } },
++        text({ position = V2(24, 16), text = 'Multiplayer', textColor = C.head, textSize = 28 }),
++    }
++    local running = menu.getState() == menu.STATE.Running
++    if view == 'main' then
++        content[#content + 1] = text({ position = V2(24, 70), text = 'Server', textColor = C.text })
++        content[#content + 1] = field(140, 66, 300, hostBuf, function(t) hostBuf = t end)
++        content[#content + 1] = text({ position = V2(24, 112), text = 'Port', textColor = C.text })
++        content[#content + 1] = field(140, 108, 120, portBuf, function(t) portBuf = t end)
++        local info = {
++            "Your character's name, look and gear are shared with other players automatically.",
++            'Everyone keeps their own world; you only share a world state inside a party.',
++            'To host, run multiplayer/server/relay.py on a machine the others can reach',
++            '(default port 25565) and give them its address.',
++        }
++        for i, line in ipairs(info) do
++            content[#content + 1] = text({ position = V2(24, 160 + (i - 1) * 22), text = line, textColor = C.dim, textSize = 15 })
++        end
++        if message then content[#content + 1] = text({ position = V2(24, 250), text = message, textColor = messageColor }) end
++        if running then
++            content[#content + 1] = button(24, 300, 'Apply and reconnect', function()
++                if apply() then message, messageColor = 'Saved. Reconnecting in the game.', C.ok render() end
++            end)
++        else
++            content[#content + 1] = button(24, 300, 'New character', function()
++                if apply() then close() menu.newGame() end
++            end)
++            content[#content + 1] = button(24, 340, 'Load character', function()
++                if apply() then view = 'load' render() end
++            end)
++        end
++        content[#content + 1] = button(24, H - 50, 'Close', close)
++    else
++        content[#content + 1] = text({ position = V2(24, 64), text = 'Choose a save to join with', textColor = C.text })
++        local list = saveList()
++        if #list == 0 then
++            content[#content + 1] = text({ position = V2(24, 110), text = 'No saves found.', textColor = C.dim })
++        end
++        for i = 1, math.min(#list, 11) do
++            local s = list[i]
++            local label = tostring(s.info.playerName or s.dir) .. '  (level ' .. tostring(s.info.playerLevel or '?') .. ')  '
++                .. tostring(s.info.description or s.slot)
++            content[#content + 1] = text({ position = V2(32, 94 + (i - 1) * 28), text = label, textColor = C.text },
++                { mouseClick = async:callback(function() close() menu.loadGame(s.dir, s.slot) end) })
++        end
++        content[#content + 1] = button(24, H - 50, 'Back', function() view = 'main' render() end)
++    end
++
++    local scr = ui.screenSize()
++    local layout = {
++        layer = 'Modal', type = ui.TYPE.Widget,
++        props = { position = V2(math.max(0, (scr.x - W) / 2), math.max(0, (scr.y - H) / 2)), size = V2(W, H) },
++        content = ui.content(content),
++    }
++    if el then
++        el.layout = layout
++        el:update()
++    else
++        el = ui.create(layout)
++    end
++end
++
++local function open()
++    hostBuf = hostBuf or section:get('Host') or '127.0.0.1'
++    portBuf = portBuf or tostring(section:get('Port') or 25565)
++    view, message = 'main', nil
++    render()
++end
++
++return {
++    interfaceName = 'MultiplayerMenu',
++    interface = { version = 1, open = open },
++    engineHandlers = {
++        onMainMenuButton = function(id)
++            if id == 'multiplayer' then open() end
++        end,
++        onStateChanged = function() close() end,
++    },
++}
+diff --git a/multiplayer/mod/scripts/mp/player.lua b/multiplayer/mod/scripts/mp/player.lua
+index 5e0ac29653..33204f6ef5 100644
+--- a/multiplayer/mod/scripts/mp/player.lua
++++ b/multiplayer/mod/scripts/mp/player.lua
+@@ -7,6 +7,7 @@ local input = require('openmw.input')
+ local async = require('openmw.async')
+ local I = require('openmw.interfaces')
+ local trade = require('scripts/mp/trade')
++local storage = require('openmw.storage')
+ 
+ I.Settings.registerPage {
+     key = 'MultiplayerPage', l10n = 'Multiplayer', name = 'Multiplayer',
+@@ -379,6 +380,11 @@ return {
+             if not synced then
+                 synced = true
+                 core.sendGlobalEvent('MpCmd', { cmd = 'sync' })
++                -- server chosen on the main menu screen (menu.lua) -> global script
++                local conn = storage.playerSection('MpConnect')
++                if conn:get('Host') then
++                    core.sendGlobalEvent('MpCmd', { cmd = 'configure', host = conn:get('Host'), port = conn:get('Port') })
++                end
+             end
+             local shouldShow = chatOpen or (now() - lastMsgTime < FADE_AFTER)
+             if shouldShow ~= logVisible then dirty.chat = true end
+-- 
+2.55.0
+

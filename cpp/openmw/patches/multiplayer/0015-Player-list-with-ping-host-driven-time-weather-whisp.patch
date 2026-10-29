@@ -1,0 +1,796 @@
+From 78d349cb8938b5ededd98d3e3edd9b76b912d38f Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Fri, 9 Oct 2026 07:50:51 -0400
+Subject: [PATCH] Player list with ping, host-driven time/weather, whispers,
+ join/leave notices, smoother avatar movement, synced sneak/jump/attacks,
+ guests can't kill owners' actors; two-instance test script
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ multiplayer/README.md                         |  12 ++
+ multiplayer/debug/autohost.omwscripts         |   1 +
+ multiplayer/debug/autojoin.omwscripts         |   1 +
+ .../debug/scripts/mp_debug/autohost.lua       |  12 ++
+ .../debug/scripts/mp_debug/autojoin.lua       |  24 ++++
+ multiplayer/mod/scripts/mp/damage.lua         |   9 +-
+ multiplayer/mod/scripts/mp/global.lua         | 125 +++++++++++++++++-
+ multiplayer/mod/scripts/mp/menu.lua           |  16 +++
+ multiplayer/mod/scripts/mp/player.lua         |  67 +++++++++-
+ multiplayer/mod/scripts/mp/relay.lua          |  67 +++++++++-
+ multiplayer/mod/scripts/mp/remote.lua         |  54 +++++++-
+ multiplayer/run-two.sh                        |  18 +++
+ 12 files changed, 384 insertions(+), 22 deletions(-)
+ create mode 100644 multiplayer/debug/autohost.omwscripts
+ create mode 100644 multiplayer/debug/autojoin.omwscripts
+ create mode 100644 multiplayer/debug/scripts/mp_debug/autohost.lua
+ create mode 100644 multiplayer/debug/scripts/mp_debug/autojoin.lua
+ create mode 100755 multiplayer/run-two.sh
+
+diff --git a/multiplayer/README.md b/multiplayer/README.md
+index fe1da2f9e8..1c8bf1d9d9 100644
+--- a/multiplayer/README.md
++++ b/multiplayer/README.md
+@@ -15,6 +15,11 @@ through a loopback connection to it, so any number of players can join you. You
+ time, and while hosting you cannot join another server; to switch, return to the main menu and load again.
+ `server/relay.py` is still there for a dedicated server.
+ 
++## Testing with two real instances
++`multiplayer/run-two.sh <openmw> <save.omwsave>` starts one instance that hosts and a second that joins it (the "fake second
++player"), each with its own user-data dir, and logs to `$TMPDIR/mp-two/{host,join}.log`. The joiner also fakes attacks,
++jumps and sneaking so the host can check the avatar animations. Note both share `~/.config/openmw` settings.
++
+ ## How it works
+ Every player keeps their **own** world; nothing a group member does changes yours.
+ - **Presence:** everyone online appears as a stand-in NPC (look + gear) when you share a cell. Activate one for a menu:
+@@ -34,5 +39,12 @@ owns a scrib that doesn't exist in your world) and OpenMW. `server/owner_bot.py
+ Combat is two-way: hitting a proxy turns on its AI so it fights you in your world, the owner's real actor takes the damage
+ and turns on its owner, and other players' avatars can't be hurt (and hitting one gives no bounty).
+ 
++Quest safety: a guest hitting a proxy only ever *wounds* the owner's real actor (it never drops below 1 health and
++then stands down), so nobody can kill an NPC another player still needs. The guest's own copy dies in their world.
++Players list: Esc > Options > Scripts > Multiplayer shows everyone online with latency (also `/players`, whisper with
++`/w name text`). The host's clock and the weather in the host's region are shared with joiners.
++Avatars mirror sneaking, jumping, attacks and spell casts (animation only, they never deal damage in your world) and are
++moved with velocity extrapolation at 20 updates/s.
++
+ Not done: shared fights where both worlds have the actor alive, container contents,
+ weather/time, proxies for actors that are alive-but-unloaded in your world, trade of enchanted/generated items.
+diff --git a/multiplayer/debug/autohost.omwscripts b/multiplayer/debug/autohost.omwscripts
+new file mode 100644
+index 0000000000..a3d659e287
+--- /dev/null
++++ b/multiplayer/debug/autohost.omwscripts
+@@ -0,0 +1 @@
++GLOBAL: scripts/mp_debug/autohost.lua
+diff --git a/multiplayer/debug/autojoin.omwscripts b/multiplayer/debug/autojoin.omwscripts
+new file mode 100644
+index 0000000000..025e815761
+--- /dev/null
++++ b/multiplayer/debug/autojoin.omwscripts
+@@ -0,0 +1 @@
++GLOBAL: scripts/mp_debug/autojoin.lua
+diff --git a/multiplayer/debug/scripts/mp_debug/autohost.lua b/multiplayer/debug/scripts/mp_debug/autohost.lua
+new file mode 100644
+index 0000000000..2f4dedddd7
+--- /dev/null
++++ b/multiplayer/debug/scripts/mp_debug/autohost.lua
+@@ -0,0 +1,12 @@
++-- Test helper: sets this instance to 'host' mode without touching the menu.
++local core = require('openmw.core')
++local done = false
++return {
++    engineHandlers = {
++        onUpdate = function()
++            if done then return end
++            done = true
++            core.sendGlobalEvent('MpCmd', { cmd = 'configure', mode = 'host', host = '127.0.0.1', port = 25565 })
++        end,
++    },
++}
+diff --git a/multiplayer/debug/scripts/mp_debug/autojoin.lua b/multiplayer/debug/scripts/mp_debug/autojoin.lua
+new file mode 100644
+index 0000000000..55190cf1ad
+--- /dev/null
++++ b/multiplayer/debug/scripts/mp_debug/autojoin.lua
+@@ -0,0 +1,24 @@
++-- Test helper: sets this instance to 'join' mode without touching the menu, and fakes player input
++-- (alternating attacks, jumping, sneaking) so the host can check the avatar animations.
++local core = require('openmw.core')
++local done, t, seq = false, 0, 0
++local kinds = { 'chop', 'slash', 'thrust' }
++return {
++    engineHandlers = {
++        onUpdate = function(dt)
++            if not done then
++                done = true
++                core.sendGlobalEvent('MpCmd', { cmd = 'configure', mode = 'join', host = '127.0.0.1', port = 25565 })
++            end
++            t = t + dt
++            if t > 30 then -- give both sides time to connect
++                local step = math.floor((t - 30) / 4)
++                if step ~= seq then
++                    seq = step
++                    core.sendGlobalEvent('MpInput', { sneak = step % 2 == 1, air = step % 3 == 0,
++                        atk = kinds[step % 3 + 1], seq = step })
++                end
++            end
++        end,
++    },
++}
+diff --git a/multiplayer/mod/scripts/mp/damage.lua b/multiplayer/mod/scripts/mp/damage.lua
+index 4d8ca6f499..03957fedfe 100644
+--- a/multiplayer/mod/scripts/mp/damage.lua
++++ b/multiplayer/mod/scripts/mp/damage.lua
+@@ -11,8 +11,13 @@ return {
+         MpDamage = function(d)
+             local health = types.Actor.stats.dynamic.health(self)
+             local max = health.base + health.modifier
+-            health.current = math.max(0, health.current - d.frac * max)
+-            if health.current > 0 then
++            -- A guest must never be able to kill an actor the owner may still need for a quest: their copy of the
++            -- actor dies in their own world, ours is only wounded and stands down.
++            local floor = math.min(max, 1)
++            health.current = math.max(floor, health.current - d.frac * max)
++            if health.current <= floor then
++                pcall(function() I.AI.removePackages('Combat') end)
++            else
+                 pcall(function()
+                     local pkg = I.AI.getActivePackage()
+                     if not (pkg and pkg.type == 'Combat') then
+diff --git a/multiplayer/mod/scripts/mp/global.lua b/multiplayer/mod/scripts/mp/global.lua
+index 2590801206..d48006b164 100644
+--- a/multiplayer/mod/scripts/mp/global.lua
++++ b/multiplayer/mod/scripts/mp/global.lua
+@@ -15,7 +15,7 @@ local proxies = require('scripts/mp/proxies')
+ local relay = require('scripts/mp/relay')
+ 
+ local SETTINGS = 'SettingsGlobalMultiplayer'
+-local SEND_INTERVAL = 0.1
++local SEND_INTERVAL = 0.05
+ local EQUIP_INTERVAL = 1
+ local RETRY_INTERVAL = 3
+ local REMOTE_SCRIPT = 'scripts/mp/remote.lua'
+@@ -42,6 +42,10 @@ local settings = storage.globalSection(SETTINGS)
+ 
+ local sendTimer, equipTimer, retry = 0, 0, 0
+ local hostErrorShown = false
++local players = {} -- latest list from the relay: { id, name, ping, host }
++local worldTimer = 0
++local savedTimeScale -- our game time scale while we wait for the host's clock to catch up
++local WORLD_INTERVAL = 5
+ local lastEquipJson
+ local myId
+ local remotes = {} -- id -> { profile, state, equip, obj, equipSent }  (group members' avatars)
+@@ -128,6 +132,46 @@ settings:subscribe(async:callback(function()
+     retry = RETRY_INTERVAL
+ end))
+ 
++------------------------------------------------------------------ time and weather (the host is the clock)
++
++local function releaseClock()
++    if savedTimeScale then
++        pcall(world.setGameTimeScale, savedTimeScale)
++        savedTimeScale = nil
++    end
++end
++
++local function sendWorld()
++    local p = player()
++    if not p then return end
++    local msg = { t = 'world', time = core.getGameTime() % 86400 }
++    local ok, w = pcall(function() return core.weather.getCurrent(p.cell) end)
++    if ok and w then msg.weather, msg.region = w.recordId, p.cell.region end
++    net.send(net.encodeJson(msg))
++end
++
++local function applyWorld(msg)
++    -- time of day: jump forward if we are behind; stand still if we are ahead until the host catches up
++    if type(msg.time) == 'number' then
++        local diff = (msg.time - core.getGameTime() % 86400) % 86400 -- seconds we are behind, 0..86400
++        if diff > 43200 then diff = diff - 86400 end -- negative: we are ahead
++        if math.abs(diff) < 30 then
++            releaseClock()
++        elseif diff > 0 then
++            releaseClock()
++            world.advanceTime(diff / 3600)
++        elseif not savedTimeScale then
++            savedTimeScale = world.getGameTimeScale()
++            pcall(world.setGameTimeScale, 0)
++        end
++    end
++    -- weather in the host's region follows the host
++    if msg.weather and msg.region and msg.region ~= '' then
++        local ok, rec = pcall(function() return core.weather.records[msg.weather] end)
++        if ok and rec then pcall(core.weather.changeWeather, msg.region, rec) end
++    end
++end
++
+ ------------------------------------------------------------------ outbound player state
+ 
+ local function contentList()
+@@ -183,26 +227,54 @@ local function sendEquipment(force)
+     end
+ end
+ 
++local myInput = { sneak = false, air = false, seq = 0 } -- from player.lua (MpInput)
++local lastSent -- { pos, time, cell } of the previous state message, for the velocity estimate
++
+ local function sendState()
+     local p = player()
+     if not p then return end
+     local pos = p.position
++    local cell = cellKey(p.cell)
++    local now = core.getRealTime()
++    local vel = { 0, 0, 0 }
++    if lastSent and lastSent.cell == cell and now > lastSent.time then
++        local dt = now - lastSent.time
++        local v = (pos - lastSent.pos) / dt
++        if v:length() < 1500 then vel = { v.x, v.y, v.z } end -- bigger means a teleport
++    end
++    lastSent = { pos = pos, time = now, cell = cell }
+     net.send(net.encodeJson({
+         t = 'state',
+-        cell = cellKey(p.cell),
++        cell = cell,
+         pos = { pos.x, pos.y, pos.z },
++        vel = vel,
+         yaw = p.rotation:getYaw(),
+         stance = types.Actor.getStance(p),
++        sneak = myInput.sneak, air = myInput.air, atk = myInput.atk, seq = myInput.seq,
+     }))
+ end
+ 
+ ------------------------------------------------------------------ avatars of group members
+ 
++local MAX_EXTRAPOLATION = 0.25 -- seconds; beyond this we assume the player stopped
++
+ local function stateVectors(r)
+     local s = r.state
+     return util.vector3(s.pos[1], s.pos[2], s.pos[3]), util.transform.rotateZ(s.yaw or 0)
+ end
+ 
++-- Where the player probably is right now: last known position plus velocity * time since the update.
++local function predictedPosition(r)
++    local s = r.state
++    local pos = util.vector3(s.pos[1], s.pos[2], s.pos[3])
++    local v = s.vel
++    if type(v) == 'table' and r.stateAt then
++        local age = math.min(MAX_EXTRAPOLATION, core.getRealTime() - r.stateAt)
++        pos = pos + util.vector3(v[1], v[2], v[3]) * age
++    end
++    return pos
++end
++
+ local function placeRemote(r)
+     r.placing = true -- teleport is applied next frame; it also enables the object
+     local pos, rot = stateVectors(r)
+@@ -293,6 +365,8 @@ clearRemotes = function()
+     for id in pairs(remotes) do ids[#ids + 1] = id end
+     for _, id in ipairs(ids) do removeRemote(id) end
+     proxies.reset()
++    releaseClock()
++    players = {}
+     party = { members = {}, leader = nil }
+     vitals, invitesIn, invitesOut = {}, {}, {}
+ end
+@@ -327,7 +401,18 @@ local function updateRemote(r)
+     end
+     setHidden(r, false)
+     if not r.equipSent and r.equip then stockEquipment(r) end
+-    r.obj:sendEvent('MpTarget', { pos = stateVectors(r), yaw = r.state.yaw, stance = r.state.stance })
++    local v = r.state.vel
++    r.obj:sendEvent('MpTarget', {
++        pos = predictedPosition(r), yaw = r.state.yaw, stance = r.state.stance,
++        speed = type(v) == 'table' and math.sqrt(v[1] * v[1] + v[2] * v[2]) or 0,
++        sneak = r.state.sneak, air = r.state.air,
++    })
++    -- play each new attack once (the first state we ever see only sets the baseline)
++    local seq = r.state.seq
++    if seq and r.lastSeq and seq ~= r.lastSeq and r.state.atk then
++        r.obj:sendEvent('MpAttack', { kind = r.state.atk })
++    end
++    r.lastSeq = seq or r.lastSeq
+ end
+ 
+ ------------------------------------------------------------------ party / ui plumbing
+@@ -410,6 +495,14 @@ local function onCommand(d)
+         if d.scope == 'party' and not inParty() then notice('You are not in a party.') return end
+         net.send(net.encodeJson({ t = 'chat', scope = d.scope, text = d.text }))
+         chatLine(d.scope, 'You', d.text, true)
++    elseif cmd == 'whisper' then
++        local target
++        for _, pl in ipairs(players) do
++            if pl.id ~= myId and tostring(pl.name):lower() == d.to:lower() then target = pl.id end
++        end
++        if not target then notice('No player named ' .. d.to .. ' is online.') return end
++        net.send(net.encodeJson({ t = 'chat', scope = 'whisper', to = target, text = d.text }))
++        chatLine('whisper', 'To ' .. d.to, d.text, true)
+     elseif cmd == 'invite' then
+         net.send(net.encodeJson({ t = 'invite', to = d.id }))
+     elseif cmd == 'accept' then
+@@ -469,6 +562,19 @@ local function onMessage(msg)
+         sendEquipment(true)
+         return
+     end
++    if t == 'ping' then net.send(net.encodeJson({ t = 'pong', n = msg.n })) return end
++    if t == 'players' then
++        players = type(msg.list) == 'table' and msg.list or {}
++        toUi('MpPlayers', { list = players, me = myId })
++        local parts = {}
++        for _, pl in ipairs(players) do parts[#parts + 1] = tostring(pl.name) .. '#' .. tostring(pl.id) .. '=' .. tostring(pl.ping) .. 'ms' end
++        dlog('players: ' .. table.concat(parts, ', '))
++        return
++    end
++    if t == 'world' then
++        if not hosting() then applyWorld(msg) end
++        return
++    end
+     if t == 'party' then onParty(msg) return end
+     if t == 'invite' then
+         invitesIn[msg.from] = clock + INVITE_TTL
+@@ -491,10 +597,12 @@ local function onMessage(msg)
+         return
+     end
+     if t == 'chat' then
+-        chatLine(msg.scope == 'party' and 'party' or 'global', nameOf(msg.id), msg.text, false)
++        chatLine(msg.scope == 'party' and 'party' or msg.scope == 'whisper' and 'whisper' or 'global',
++            nameOf(msg.id), msg.text, false)
+         return
+     end
+     if t == 'leave' then
++        notice(nameOf(msg.id) .. ' left.')
+         toUi('MpTrade', { t = 'trade_cancel', id = msg.id, name = nameOf(msg.id), left = true })
+         invitesIn[msg.id], invitesOut[msg.id] = nil, nil
+         vitals[msg.id] = nil
+@@ -517,6 +625,7 @@ local function onMessage(msg)
+         log('player ' .. tostring(id) .. ' appeared')
+     end
+     if t == 'profile' then
++        if not r.profile then notice(tostring(msg.name) .. ' joined.') end
+         r.profile = msg
+         if not r.contentChecked and type(msg.content) == 'table' then
+             r.contentChecked = true
+@@ -530,7 +639,7 @@ local function onMessage(msg)
+             end
+         end
+     elseif t == 'equip' then r.equip, r.gen, r.equipSent = msg.slots, msg.gen, false
+-    elseif t == 'state' and type(msg.pos) == 'table' then r.state = msg end
++    elseif t == 'state' and type(msg.pos) == 'table' then r.state = msg; r.stateAt = core.getRealTime() end
+ end
+ 
+ ------------------------------------------------------------------ handlers
+@@ -539,6 +648,7 @@ return {
+     engineHandlers = {
+         onPlayerAdded = function() connect() end,
+         onSave = function()
++            releaseClock() -- never save with time stopped
+             -- stand-ins are saved with the world; remember them so they can be cleaned up on load
+             local objs = {}
+             for _, r in pairs(remotes) do if r.obj then objs[#objs + 1] = r.obj end end
+@@ -555,6 +665,10 @@ return {
+         onUpdate = function(dt)
+             clock = clock + dt
+             relay.update(dt)
++            if hosting() and net.isConnected() then
++                worldTimer = worldTimer + dt
++                if worldTimer >= WORLD_INTERVAL then worldTimer = 0; sendWorld() end
++            end
+             proxies.onUpdate(dt)
+             for _, r in pairs(remotes) do updateRemote(r) end
+             if net.isConnected() then
+@@ -601,6 +715,7 @@ return {
+         end,
+     },
+     eventHandlers = {
++        MpInput = function(d) myInput = d end,
+         MpSnap = function(d)
+             if proxies.onSnap(d.actor) then dlog('proxy snapped') return end
+             for _, r in pairs(remotes) do
+diff --git a/multiplayer/mod/scripts/mp/menu.lua b/multiplayer/mod/scripts/mp/menu.lua
+index 20cc5199ce..885ec274a9 100644
+--- a/multiplayer/mod/scripts/mp/menu.lua
++++ b/multiplayer/mod/scripts/mp/menu.lua
+@@ -21,6 +21,22 @@ local C = {
+     field = rgb(0.03, 0.03, 0.03),
+ }
+ 
++-- Settings page: live list of connected players with their latency. Filled by player.lua.
++I.Settings.registerRenderer('mpPlayers', function(list)
++    local rows = {}
++    if type(list) ~= 'table' or #list == 0 then
++        rows[1] = { template = I.MWUI.templates.textNormal, props = { text = 'Not connected.', textColor = C.dim } }
++    else
++        for _, pl in ipairs(list) do
++            rows[#rows + 1] = {
++                template = I.MWUI.templates.textNormal,
++                props = { text = pl.name .. (pl.host and ' (host)' or '') .. '    ' .. (pl.ping and (pl.ping .. ' ms') or '-') },
++            }
++        end
++    end
++    return { type = ui.TYPE.Flex, content = ui.content(rows) }
++end)
++
+ local el
+ local view = 'main' -- 'main' | 'load'
+ local hostBuf, portBuf = nil, nil
+diff --git a/multiplayer/mod/scripts/mp/player.lua b/multiplayer/mod/scripts/mp/player.lua
+index 54d6da52dc..afaff910c5 100644
+--- a/multiplayer/mod/scripts/mp/player.lua
++++ b/multiplayer/mod/scripts/mp/player.lua
+@@ -14,6 +14,13 @@ I.Settings.registerPage {
+     description = 'Connect to a relay server. Press Enter or Y to chat; activate another player to invite them to a party.',
+ }
+ 
++I.Settings.registerGroup {
++    key = 'SettingsMpPlayers', page = 'MultiplayerPage', l10n = 'Multiplayer', name = 'Connected players',
++    permanentStorage = false,
++    settings = { { key = 'List', renderer = 'mpPlayers', name = 'Players', default = {} } },
++}
++local playersSection = storage.playerSection('SettingsMpPlayers')
++
+ local V2, rgb = util.vector2, util.color.rgb
+ local WHITE = ui.texture { path = 'white' }
+ 
+@@ -27,11 +34,15 @@ local MAX_HISTORY = 80
+ local PARTY_W, BAR_W, BAR_H, BLOCK_H = 200, 100, 8, 64
+ 
+ local COLORS = {
+-    global = rgb(0.92, 0.92, 0.92), party = rgb(0.45, 0.95, 0.5), system = rgb(1, 0.85, 0.35),
++    global = rgb(0.92, 0.92, 0.92), party = rgb(0.45, 0.95, 0.5), system = rgb(1, 0.85, 0.35), whisper = rgb(0.9, 0.6, 1),
+     health = rgb(0.78, 0.12, 0.12), magicka = rgb(0.2, 0.3, 0.9), fatigue = rgb(0.15, 0.7, 0.25),
+     bar_bg = rgb(0.08, 0.08, 0.08), tab_on = rgb(1, 1, 1), tab_off = rgb(0.55, 0.55, 0.55),
+ }
+ 
++local playerList, myPlayerId = {}, nil
++local self = require('openmw.self')
++local types = require('openmw.types')
++local inputTimer, wasUsing, attackSeq, lastAttack, lastInputSig = 0, false, 0, nil, ''
+ local tab = 'global'
+ local logs = { global = {}, party = {} }
+ local unread = { global = 0, party = 0 }
+@@ -81,7 +92,7 @@ end
+ 
+ local function addLine(scope, str)
+     local lines = wrap(str, WRAP)
+-    local targets = scope == 'system' and { 'global', 'party' } or { scope }
++    local targets = (scope == 'system' or scope == 'whisper') and { 'global', 'party' } or { scope }
+     for _, t in ipairs(targets) do
+         for i, l in ipairs(lines) do
+             local log = logs[t]
+@@ -164,10 +175,20 @@ local function sendChat(str)
+             core.sendGlobalEvent('MpCmd', { cmd = cmd, name = arg })
+         elseif cmd == 'leave' then
+             core.sendGlobalEvent('MpCmd', { cmd = 'leave' })
++        elseif cmd == 'w' or cmd == 'whisper' then
++            local to, text = (arg or ''):match('^(%S+)%s+(.+)$')
++            if to then core.sendGlobalEvent('MpCmd', { cmd = 'whisper', to = to, text = text })
++            else addLine('system', 'Usage: /w <player> <text>') end
++        elseif cmd == 'players' or cmd == 'who' then
++            if #playerList == 0 then addLine('system', 'Not connected.') end
++            for _, pl in ipairs(playerList) do
++                addLine('system', pl.name .. (pl.host and ' (host)' or '') .. (pl.id == myPlayerId and ' (you)' or '')
++                    .. '  ' .. (pl.ping and (pl.ping .. ' ms') or '-'))
++            end
+         elseif cmd == 'g' or cmd == 'p' then
+             if arg then core.sendGlobalEvent('MpCmd', { cmd = 'chat', scope = cmd == 'g' and 'global' or 'party', text = arg }) end
+         else
+-            addLine('system', 'Commands: /accept [name], /decline [name], /leave, /g <text> (global), /p <text> (party)')
++            addLine('system', 'Commands: /players, /w <player> <text>, /accept [name], /decline [name], /leave, /g <text>, /p <text>')
+         end
+         return
+     end
+@@ -376,6 +397,36 @@ end
+ 
+ return {
+     engineHandlers = {
++        -- What the other players need to animate our avatar: sneaking, being airborne, attacking and casting.
++        -- Attacks are sent as an event with a counter; the receiving side only plays an animation.
++        onUpdate = function(dt)
++            inputTimer = inputTimer - dt
++            local using = I.UI.getMode() == nil and input.isActionPressed(input.ACTION.Use)
++            local attack
++            if using and not wasUsing then
++                local stance = types.Actor.getStance(self)
++                if stance == types.Actor.STANCE.Weapon then
++                    local fwd = input.isActionPressed(input.ACTION.MoveForward) or input.isActionPressed(input.ACTION.MoveBackward)
++                    local side = input.isActionPressed(input.ACTION.MoveLeft) or input.isActionPressed(input.ACTION.MoveRight)
++                    attack = fwd and 'thrust' or side and 'slash' or 'chop'
++                elseif stance == types.Actor.STANCE.Spell then
++                    attack = 'cast'
++                end
++            end
++            wasUsing = using
++            local data = {
++                sneak = self.controls.sneak and true or false,
++                air = not types.Actor.isOnGround(self) and not types.Actor.isSwimming(self),
++            }
++            if attack then attackSeq = attackSeq + 1 end
++            data.atk, data.seq = lastAttack, attackSeq
++            if attack then data.atk = attack; lastAttack = attack end
++            local sig = tostring(data.sneak) .. tostring(data.air) .. attackSeq
++            if sig ~= lastInputSig or inputTimer <= 0 then
++                lastInputSig, inputTimer = sig, 1
++                core.sendGlobalEvent('MpInput', data)
++            end
++        end,
+         onFrame = function()
+             if not synced then
+                 synced = true
+@@ -402,11 +453,11 @@ return {
+     },
+     eventHandlers = {
+         MpChat = function(d)
+-            local label = d.scope == 'party' and 'P' or 'G'
++            local label = d.scope == 'party' and 'P' or d.scope == 'whisper' and 'W' or 'G'
+             if d.scope == 'system' then
+                 addLine('system', '* ' .. d.text)
+             else
+-                addLine(d.scope, '[' .. label .. '] ' .. tostring(d.from) .. ': ' .. d.text)
++                addLine(d.scope == 'whisper' and 'whisper' or d.scope, '[' .. label .. '] ' .. tostring(d.from) .. ': ' .. d.text)
+             end
+         end,
+         MpUiState = function(d)
+@@ -423,6 +474,12 @@ return {
+             state = d
+             if changed then dirty.party = true; dirty.invites = true end
+         end,
++        MpPlayers = function(d)
++            playerList, myPlayerId = d.list, d.me
++            -- shown on the Multiplayer settings page (renderer in menu.lua)
++            local ok, err = pcall(function() playersSection:set('List', d.list) end)
++            if not ok then print('[mp-ui] could not publish player list: ' .. tostring(err)) end
++        end,
+         MpAvatar = function(d) openMenu(d) end,
+         MpTrade = function(msg) trade.onMessage(msg) end,
+         MpTradeResult = function(r) trade.onResult(r) end,
+diff --git a/multiplayer/mod/scripts/mp/relay.lua b/multiplayer/mod/scripts/mp/relay.lua
+index 5c427288a6..f00f615a59 100644
+--- a/multiplayer/mod/scripts/mp/relay.lua
++++ b/multiplayer/mod/scripts/mp/relay.lua
+@@ -4,6 +4,7 @@
+ -- their own world; the relay only routes messages. The host plays through an ordinary loopback client.
+ local net = require('openmw.net')
+ local markup = require('openmw.markup')
++local core = require('openmw.core')
+ 
+ local MAX_PARTY = 3
+ local INVITE_TTL = 60
+@@ -19,6 +20,9 @@ local invites = {} -- 'from:to' -> { from, to, exp }
+ local nextParty = 1
+ local clock = 0
+ local running = false
++local hostId -- the first client after start() is the host's own loopback connection
++local pingTimer, pingSeq = 0, 0
++local PING_INTERVAL = 2
+ 
+ local M = {}
+ 
+@@ -167,9 +171,13 @@ end
+ 
+ function M.onClientConnected(id)
+     if not running then return end
+-    clients[id] = { last = {}, tokens = 5.0, tokenTime = clock }
+-    print('[mp-relay]', '+ client', id)
+-    sendTo(id, { t = 'hello', id = id })
++    clients[id] = { last = {}, tokens = 5.0, tokenTime = clock, pings = {} }
++    if not hostId then hostId = id end
++    print('[mp-relay]', '+ client', id, id == hostId and '(host)' or '')
++    sendTo(id, { t = 'hello', id = id, host = id == hostId })
++    if hostId ~= id and clients[hostId] and clients[hostId].last.world then
++        sendRaw(id, clients[hostId].last.world) -- time and weather
++    end
+     for other, oc in pairs(clients) do -- replay global presence
+         if other ~= id then
+             for _, t in ipairs(GLOBAL_ORDER) do
+@@ -186,6 +194,7 @@ function M.onClientDisconnected(id)
+         if inv.from == id or inv.to == id then invites[k] = nil end
+     end
+     clients[id] = nil
++    if id == hostId then hostId = nil end
+     print('[mp-relay]', '- client', id)
+     local json = enc({ t = 'leave', id = id })
+     for o in pairs(clients) do sendRaw(o, json) end
+@@ -201,8 +210,25 @@ function M.onClientMessage(id, line)
+     if t == 'accept' then return handleAccept(id, msg) end
+     if t == 'decline' then return handleDecline(id, msg) end
+     if t == 'leave_party' then return removeFromParty(id) end
++    if t == 'pong' then
++        local sent = c.pings[msg.n]
++        if sent then
++            c.pings[msg.n] = nil
++            local ms = (core.getRealTime() - sent) * 1000
++            c.ping = c.ping and (c.ping * 0.6 + ms * 0.4) or ms
++        end
++        return
++    end
+     msg.id = id
+     if type(t) ~= 'string' then return end
++    if t == 'world' then -- time and weather: only the host is the clock
++        if id == hostId then
++            c.last.world = enc(msg)
++            broadcastOthers(id, c.last.world)
++        end
++        return
++    end
++    if t == 'profile' and type(msg.name) == 'string' then c.name = msg.name end
+     if t:sub(1, 6) == 'trade_' then -- trades are between two players, party or not
+         local target = msg.to
+         if type(target) == 'number' and clients[target] and target ~= id then sendTo(target, msg) end
+@@ -211,6 +237,13 @@ function M.onClientMessage(id, line)
+     if t == 'chat' then
+         local text = tostring(msg.text or ''):sub(1, CHAT_MAX):match('^%s*(.-)%s*$')
+         if text == '' or not allowChat(c) then return end
++        if msg.scope == 'whisper' then
++            local target = msg.to
++            if type(target) ~= 'number' or not clients[target] or target == id then
++                return sendTo(id, { t = 'invite_result', ok = false, to = target, reason = 'unknown' })
++            end
++            return sendTo(target, { t = 'chat', id = id, text = text, scope = 'whisper' })
++        end
+         local json = enc({ t = 'chat', id = id, text = text, scope = msg.scope == 'party' and 'party' or 'global' })
+         if msg.scope == 'party' then toParty(id, json) else broadcastOthers(id, json) end
+         return
+@@ -240,6 +273,7 @@ function M.start(port)
+     local err = net.listen(port)
+     if err then return err end
+     running = true
++    hostId, pingTimer = nil, 0
+     return nil
+ end
+ 
+@@ -255,6 +289,31 @@ function M.clientCount()
+     for _ in pairs(clients) do n = n + 1 end
+     return n
+ end
+-function M.update(dt) clock = clock + dt end
++-- Pings everyone every PING_INTERVAL seconds and tells everyone the resulting player list.
++function M.update(dt)
++    clock = clock + dt
++    if not running then return end
++    pingTimer = pingTimer + dt
++    if pingTimer < PING_INTERVAL then return end
++    pingTimer = 0
++    local list = {}
++    local ids = {}
++    for id in pairs(clients) do ids[#ids + 1] = id end
++    table.sort(ids)
++    for _, id in ipairs(ids) do
++        local c = clients[id]
++        list[#list + 1] = { id = id, name = c.name or ('Player ' .. id), ping = c.ping and math.floor(c.ping + 0.5) or false,
++            host = id == hostId }
++        pingSeq = pingSeq + 1
++        local now = core.getRealTime()
++        for n, sent in pairs(c.pings) do
++            if now - sent > 10 then c.pings[n] = nil end -- never came back
++        end
++        c.pings[pingSeq] = now
++        sendTo(id, { t = 'ping', n = pingSeq })
++    end
++    local json = enc({ t = 'players', list = list })
++    for _, id in ipairs(ids) do sendRaw(id, json) end
++end
+ 
+ return M
+diff --git a/multiplayer/mod/scripts/mp/remote.lua b/multiplayer/mod/scripts/mp/remote.lua
+index 5f4ffcda22..de8b3d7bfc 100644
+--- a/multiplayer/mod/scripts/mp/remote.lua
++++ b/multiplayer/mod/scripts/mp/remote.lua
+@@ -8,15 +8,17 @@ local core = require('openmw.core')
+ local types = require('openmw.types')
+ local nearby = require('openmw.nearby')
+ local I = require('openmw.interfaces')
++local anim = require('openmw.animation')
+ 
+ local Actor = types.Actor
+ 
+-local WALK_START, WALK_STOP = 70, 30 -- distance hysteresis (game units)
+-local RUN_DIST = 250
+-local SNAP_DIST = 700
+-local TURN_RATE = 8 -- rad/s
++local WALK_START, WALK_STOP = 18, 6 -- distance hysteresis (game units); the target is already extrapolated
++local RUN_SPEED = 230 -- the player's speed (units/s) above which they are shown running
++local SNAP_DIST = 350
++local TURN_RATE = 14 -- rad/s
+ local DAMAGE_REPORT_INTERVAL = 0.2
+ 
++local playAttack
+ local isProxy, key
+ local target -- { pos, yaw, stance, sneak, hp }
+ local walking = false
+@@ -89,6 +91,41 @@ local function trackHealth(dt)
+     end
+ end
+ 
++local Weapon = types.Weapon
++local ONE_HAND = { [Weapon.TYPE.ShortBladeOneHand] = true, [Weapon.TYPE.LongBladeOneHand] = true,
++    [Weapon.TYPE.BluntOneHand] = true, [Weapon.TYPE.AxeOneHand] = true }
++local TWO_HAND = { [Weapon.TYPE.LongBladeTwoHand] = true, [Weapon.TYPE.BluntTwoClose] = true,
++    [Weapon.TYPE.AxeTwoHand] = true }
++local TWO_WIDE = { [Weapon.TYPE.BluntTwoWide] = true, [Weapon.TYPE.SpearTwoWide] = true }
++
++-- animation group and keys for the weapon in hand
++local function attackAnimation(kind)
++    if kind == 'cast' then return 'spellcast', 'self start', 'self stop' end
++    local w = Actor.getEquipment(self)[Actor.EQUIPMENT_SLOT.CarriedRight]
++    local ok, rec = pcall(function() return w and Weapon.record(w) end)
++    local t = ok and rec and rec.type
++    if t == Weapon.TYPE.MarksmanBow then return 'bowandarrow', 'shoot start', 'shoot follow stop' end
++    if t == Weapon.TYPE.MarksmanCrossbow then return 'crossbow', 'shoot start', 'shoot follow stop' end
++    if t == Weapon.TYPE.MarksmanThrown then return 'throwweapon', 'shoot start', 'shoot follow stop' end
++    local group = 'handtohand'
++    if ONE_HAND[t] then group = 'weapononehand' elseif TWO_HAND[t] then group = 'weapontwohand'
++    elseif TWO_WIDE[t] then group = 'weapontwowide' end
++    return group, kind .. ' start', kind .. ' follow stop'
++end
++
++playAttack = function(kind)
++    if Actor.isDead(self) then return end
++    local group, from, to = attackAnimation(kind)
++    local ok = pcall(function()
++        if not anim.hasGroup(self, group) then error('no group') end
++        anim.playBlended(self, group, {
++            startKey = from, stopKey = to, priority = anim.PRIORITY.Weapon, blendMask = anim.BLEND_MASK.UpperBody,
++        })
++    end)
++    if ok then print('[mp-anim] playing ' .. group .. ' ' .. from) end
++    if not ok then print('[mp-anim] could not play ' .. tostring(group) .. ' ' .. tostring(kind)) end
++end
++
+ return {
+     engineHandlers = {
+         onInit = function(d)
+@@ -125,20 +162,25 @@ return {
+                 walking = true
+             end
+ 
++            -- face where we are going while moving, otherwise where the player faces
+             local wantYaw = walking and math.atan2(delta.x, delta.y) or target.yaw
+             local err = wrap(wantYaw - self.rotation:getYaw())
+             local maxTurn = TURN_RATE * dt
+             c.yawChange = math.max(-maxTurn, math.min(maxTurn, err))
+             c.movement = walking and 1 or 0
+-            c.run = walking and dist > RUN_DIST
++            -- run when the player runs, or when we are far behind and need to catch up
++            c.run = walking and ((target.speed or 0) > RUN_SPEED or dist > 120)
+             c.sneak = target.sneak or false
++            c.jump = (target.air or delta.z > 40) and Actor.isOnGround(self)
+         end,
+     },
+     eventHandlers = {
+         MpTarget = function(d)
+-            target = { pos = d.pos, yaw = d.yaw, sneak = d.sneak, hp = d.hp }
++            target = { pos = d.pos, yaw = d.yaw, sneak = d.sneak, hp = d.hp, speed = d.speed, air = d.air }
+             if d.stance and Actor.getStance(self) ~= d.stance then Actor.setStance(self, d.stance) end
+         end,
++        -- Another player attacked or cast: show the animation only. (The avatar has no AI and never deals damage.)
++        MpAttack = function(d) playAttack(d.kind) end,
+         MpEquip = function(d)
+             desiredEquip = d.slots
+             equipTimer = 0
+diff --git a/multiplayer/run-two.sh b/multiplayer/run-two.sh
+new file mode 100755
+index 0000000000..947107c60a
+--- /dev/null
++++ b/multiplayer/run-two.sh
+@@ -0,0 +1,18 @@
++#!/usr/bin/env bash
++# Two real game instances on this machine: one hosts, the other joins it (fake second player).
++# usage: multiplayer/run-two.sh <path/to/openmw> <savegame.omwsave> [-- extra openmw args]
++# Each instance gets its own user-data dir (settings, saves), under $TMPDIR/mp-two.
++set -e
++HERE="$(cd "$(dirname "$0")" && pwd)"
++OPENMW="${1:?path to openmw}"; SAVE="${2:?path to a .omwsave}"; shift 2
++[ "${1:-}" = "--" ] && shift
++OUT="${TMPDIR:-/tmp}/mp-two"; mkdir -p "$OUT/host" "$OUT/join"
++common=(--data "$HERE/mod" --data "$HERE/debug" --load-savegame "$SAVE")
++"$OPENMW" "${common[@]}" --content mp.omwscripts --content autohost.omwscripts --user-data "$OUT/host" "$@" > "$OUT/host.log" 2>&1 &
++HOST=$!
++trap 'kill $HOST ${JOIN:-} 2>/dev/null' EXIT
++sleep 25   # let the host load and start listening
++"$OPENMW" "${common[@]}" --content mp.omwscripts --content autojoin.omwscripts --user-data "$OUT/join" "$@" > "$OUT/join.log" 2>&1 &
++JOIN=$!
++echo "host log: $OUT/host.log   join log: $OUT/join.log"
++wait
+-- 
+2.55.0
+

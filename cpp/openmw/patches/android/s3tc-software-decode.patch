@@ -1,0 +1,218 @@
+diff --git a/components/resource/imagemanager.cpp b/components/resource/imagemanager.cpp
+index 24989978d5..328fde0350 100644
+--- a/components/resource/imagemanager.cpp
++++ b/components/resource/imagemanager.cpp
+@@ -2,10 +2,13 @@
+ 
+ #include <algorithm>
+ #include <array>
++#include <atomic>
+ #include <cassert>
++#include <chrono>
+ #include <cstdint>
+ #include <cstring>
+ #include <optional>
++#include <vector>
+ #include <osgDB/Registry>
+ 
+ #include <components/debug/debuglog.hpp>
+@@ -63,12 +66,158 @@ namespace
+         return false;
+     }
+ 
++    struct Rgb
++    {
++        unsigned char r, g, b;
++    };
++
++    Rgb expand565(unsigned value)
++    {
++        const unsigned r = (value >> 11) & 31, g = (value >> 5) & 63, b = value & 31;
++        return { static_cast<unsigned char>((r << 3) | (r >> 2)), static_cast<unsigned char>((g << 2) | (g >> 4)),
++            static_cast<unsigned char>((b << 3) | (b >> 2)) };
++    }
++
++    // The colour half of a DXT block as four RGBA entries. Only DXT1 changes meaning when the first endpoint is not
++    // the larger one: it then holds three colours and a transparent (or black) fourth.
++    void colourPalette(const unsigned char* block, bool dxt1, bool transparent, unsigned char (&palette)[4][4])
++    {
++        const unsigned c0 = block[0] | (block[1] << 8);
++        const unsigned c1 = block[2] | (block[3] << 8);
++        const Rgb a = expand565(c0), b = expand565(c1);
++        const auto put = [&](int i, int r, int g, int bl, int alpha) {
++            palette[i][0] = static_cast<unsigned char>(r);
++            palette[i][1] = static_cast<unsigned char>(g);
++            palette[i][2] = static_cast<unsigned char>(bl);
++            palette[i][3] = static_cast<unsigned char>(alpha);
++        };
++        put(0, a.r, a.g, a.b, 255);
++        put(1, b.r, b.g, b.b, 255);
++        if (!dxt1 || c0 > c1)
++        {
++            put(2, (2 * a.r + b.r) / 3, (2 * a.g + b.g) / 3, (2 * a.b + b.b) / 3, 255);
++            put(3, (a.r + 2 * b.r) / 3, (a.g + 2 * b.g) / 3, (a.b + 2 * b.b) / 3, 255);
++        }
++        else
++        {
++            put(2, (a.r + b.r) / 2, (a.g + b.g) / 2, (a.b + b.b) / 2, 255);
++            put(3, 0, 0, 0, transparent ? 0 : 255);
++        }
++    }
++
++    // Straight block decode of one mip level into tightly packed RGB(A). OSG's per-texel getColor decodes the whole block
++    // for every pixel and only sees the first level, which is far too slow for a game's worth of textures.
++    void decodeS3TCLevel(
++        GLenum format, const unsigned char* source, int width, int height, unsigned channels, unsigned char* out)
++    {
++        const bool dxt1 = format == GL_COMPRESSED_RGB_S3TC_DXT1_EXT || format == GL_COMPRESSED_RGBA_S3TC_DXT1_EXT;
++        const bool transparent = format == GL_COMPRESSED_RGBA_S3TC_DXT1_EXT;
++        const std::size_t blockBytes = dxt1 ? 8 : 16;
++        unsigned char palette[4][4];
++        unsigned char alphas[16];
++        for (int row = 0; row < height; row += 4)
++            for (int column = 0; column < width; column += 4)
++            {
++                const unsigned char* colourBlock = source + (dxt1 ? 0 : 8);
++                colourPalette(colourBlock, dxt1, transparent, palette);
++                if (format == GL_COMPRESSED_RGBA_S3TC_DXT3_EXT)
++                {
++                    for (int i = 0; i < 16; ++i)
++                    {
++                        const unsigned nibble = (source[i / 2] >> ((i & 1) * 4)) & 15;
++                        alphas[i] = static_cast<unsigned char>(nibble * 17);
++                    }
++                }
++                else if (format == GL_COMPRESSED_RGBA_S3TC_DXT5_EXT)
++                {
++                    unsigned char ramp[8];
++                    ramp[0] = source[0];
++                    ramp[1] = source[1];
++                    if (ramp[0] > ramp[1])
++                        for (int i = 1; i < 7; ++i)
++                            ramp[i + 1] = static_cast<unsigned char>(((7 - i) * ramp[0] + i * ramp[1]) / 7);
++                    else
++                    {
++                        for (int i = 1; i < 5; ++i)
++                            ramp[i + 1] = static_cast<unsigned char>(((5 - i) * ramp[0] + i * ramp[1]) / 5);
++                        ramp[6] = 0;
++                        ramp[7] = 255;
++                    }
++                    std::uint64_t bits = 0;
++                    for (int i = 0; i < 6; ++i)
++                        bits |= std::uint64_t{ source[2 + i] } << (8 * i);
++                    for (int i = 0; i < 16; ++i)
++                        alphas[i] = ramp[(bits >> (3 * i)) & 7];
++                }
++                const unsigned indices = colourBlock[4] | (colourBlock[5] << 8) | (colourBlock[6] << 16)
++                    | (static_cast<unsigned>(colourBlock[7]) << 24);
++                const int rows = std::min(4, height - row), columns = std::min(4, width - column);
++                for (int y = 0; y < rows; ++y)
++                {
++                    unsigned char* pixel = out + (static_cast<std::size_t>(row + y) * width + column) * channels;
++                    for (int x = 0; x < columns; ++x, pixel += channels)
++                    {
++                        const int texel = y * 4 + x;
++                        const unsigned char* colour = palette[(indices >> (2 * texel)) & 3];
++                        pixel[0] = colour[0];
++                        pixel[1] = colour[1];
++                        pixel[2] = colour[2];
++                        if (channels == 4)
++                            pixel[3] = dxt1 ? colour[3] : alphas[texel];
++                    }
++                }
++                source += blockBytes;
++            }
++    }
++
++    // Every mip level the file carried is kept so the GPU does not have to rebuild them.
++    osg::ref_ptr<osg::Image> decompressS3TC(const osg::Image& source)
++    {
++        const GLenum format = source.getPixelFormat();
++        const bool opaque = format == GL_COMPRESSED_RGB_S3TC_DXT1_EXT;
++        const unsigned channels = opaque ? 3 : 4;
++        const std::size_t blockBytes
++            = (format == GL_COMPRESSED_RGB_S3TC_DXT1_EXT || format == GL_COMPRESSED_RGBA_S3TC_DXT1_EXT) ? 8 : 16;
++        const unsigned levels = std::max(1u, source.getNumMipmapLevels());
++
++        std::vector<std::size_t> offsets;
++        std::size_t total = 0, needed = 0;
++        for (unsigned level = 0; level < levels; ++level)
++        {
++            const std::size_t width = std::max(1, source.s() >> level), height = std::max(1, source.t() >> level);
++            offsets.push_back(total);
++            total += width * height * channels;
++            needed += ((width + 3) / 4) * ((height + 3) / 4) * blockBytes;
++        }
++        if (source.getTotalSizeInBytesIncludingMipmaps() < needed)
++            return nullptr;
++
++        auto* data = new unsigned char[total];
++        for (unsigned level = 0; level < levels; ++level)
++            decodeS3TCLevel(format, source.isMipmap() ? source.getMipmapData(level) : source.data(),
++                std::max(1, source.s() >> level), std::max(1, source.t() >> level), channels, data + offsets[level]);
++
++        osg::ref_ptr<osg::Image> result = new osg::Image;
++        const GLenum decoded = opaque ? GL_RGB : GL_RGBA;
++        result->setImage(source.s(), source.t(), 1, decoded, decoded, GL_UNSIGNED_BYTE, data, osg::Image::USE_NEW_DELETE);
++        if (levels > 1)
++            result->setMipmapLevels(osg::Image::MipmapDataType(offsets.begin() + 1, offsets.end()));
++        result->setFileName(source.getFileName());
++        result->setOrigin(source.getOrigin());
++        return result;
++    }
++
+     bool checkSupported(osg::Image* image)
+     {
+         // not bothering with checks for other compression formats right now
+         if (!isS3TC(image))
+             return true;
+ 
++        // Lets the software decode be tried on a GPU that does support S3TC.
++        static const bool forceDecode = getenv("OPENMW_DECOMPRESS_TEXTURES") != nullptr;
++        if (forceDecode)
++            return false;
++
+         // hashtag yolo (CS might not have context when loading assets)
+         if (!SceneUtil::glExtensionsReady())
+             return true;
+@@ -257,28 +406,22 @@ namespace Resource
+             image->setFileName(std::string(resolvedPath.value()));
+             if (!checkSupported(image))
+             {
+-                static bool uncompress = (getenv("OPENMW_DECOMPRESS_TEXTURES") != nullptr);
+-                if (!uncompress)
++                // No S3TC on this GPU (common on Mali): decode once on the loading thread.
++                const auto start = std::chrono::steady_clock::now();
++                osg::ref_ptr<osg::Image> decoded = decompressS3TC(*image);
++                static std::atomic<unsigned> count{ 0 };
++                static std::atomic<std::int64_t> micros{ 0 };
++                micros += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start)
++                              .count();
++                if (++count % 500 == 0)
++                    Log(Debug::Info) << "Software S3TC decode: " << count << " textures, " << micros / 1000 << " ms";
++                if (!decoded)
+                 {
+-                    Log(Debug::Error) << "Error loading " << resolvedPath << ": no S3TC texture compression support installed";
++                    Log(Debug::Error) << "Error loading " << resolvedPath << ": truncated S3TC texture";
+                     mCache->addEntryToObjectCache(resolvedPath.value(), mWarningImage);
+                     return mWarningImage;
+                 }
+-                else
+-                {
+-                    // decompress texture in software if not supported by GPU
+-                    // requires update to getColor() to be released with OSG 3.6
+-                    osg::ref_ptr<osg::Image> newImage = new osg::Image;
+-                    newImage->setFileName(image->getFileName());
+-                    newImage->setOrigin(image->getOrigin());
+-                    newImage->allocateImage(image->s(), image->t(), image->r(),
+-                        image->isImageTranslucent() ? GL_RGBA : GL_RGB, GL_UNSIGNED_BYTE);
+-                    for (int s = 0; s < image->s(); ++s)
+-                        for (int t = 0; t < image->t(); ++t)
+-                            for (int r = 0; r < image->r(); ++r)
+-                                newImage->setColor(image->getColor(s, t, r), s, t, r);
+-                    image = newImage;
+-                }
++                image = decoded;
+             }
+             else if (killAlpha)
+             {

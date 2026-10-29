@@ -1,0 +1,1089 @@
+From 3c9086b9eeefb4edd640d4c265da0dd26e0e841a Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Thu, 15 Oct 2026 15:21:42 -0400
+Subject: [PATCH 70/71] Client mods: openmw.modstore, the clientmods folder
+ loaded at startup, relaunch after a restart request
+
+- components/misc/sha256 and clientmods: <user data>/clientmods/<id>/ with checked names, file types and sizes, and writes
+  that only succeed when the SHA-256 matches; base64 for carrying files over the line based connection
+- openmw.modstore (global scripts): manifest (JSON with hashes), read, write, remove, sha256, base64, restart
+- main.cpp: every mod folder with an .omwscripts file is added to the data directories and its scripts are loaded like
+  builtin.omwscripts; after a restart request the engine is shut down and the program starts itself again (Linux, Windows)
+- unit tests for the hash (reference values), names, base64 and the write rules
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ apps/components_tests/CMakeLists.txt          |   1 +
+ apps/components_tests/misc/testclientmods.cpp | 105 +++++
+ apps/openmw/CMakeLists.txt                    |   2 +-
+ apps/openmw/main.cpp                          |  19 +
+ apps/openmw/mwlua/luabindings.cpp             |   2 +
+ apps/openmw/mwlua/modstorebindings.cpp        |  82 ++++
+ apps/openmw/mwlua/modstorebindings.hpp        |  17 +
+ components/CMakeLists.txt                     |   4 +-
+ components/misc/clientmods.cpp                | 435 ++++++++++++++++++
+ components/misc/clientmods.hpp                |  74 +++
+ components/misc/sha256.cpp                    |  99 ++++
+ components/misc/sha256.hpp                    |  13 +
+ files/lua_api/openmw/modstore.lua             |  63 +++
+ 13 files changed, 913 insertions(+), 3 deletions(-)
+ create mode 100644 apps/components_tests/misc/testclientmods.cpp
+ create mode 100644 apps/openmw/mwlua/modstorebindings.cpp
+ create mode 100644 apps/openmw/mwlua/modstorebindings.hpp
+ create mode 100644 components/misc/clientmods.cpp
+ create mode 100644 components/misc/clientmods.hpp
+ create mode 100644 components/misc/sha256.cpp
+ create mode 100644 components/misc/sha256.hpp
+ create mode 100644 files/lua_api/openmw/modstore.lua
+
+diff --git a/apps/components_tests/CMakeLists.txt b/apps/components_tests/CMakeLists.txt
+index 2782ce67fe..ad3e367619 100644
+--- a/apps/components_tests/CMakeLists.txt
++++ b/apps/components_tests/CMakeLists.txt
+@@ -38,6 +38,7 @@ file(GLOB UNITTEST_SRC_FILES
+     lua/testyaml.cpp
+ 
+     misc/compression.cpp
++    misc/testclientmods.cpp
+     misc/hotcold.cpp
+     misc/progressreporter.cpp
+     misc/testendianness.cpp
+diff --git a/apps/components_tests/misc/testclientmods.cpp b/apps/components_tests/misc/testclientmods.cpp
+new file mode 100644
+index 0000000000..f85a9c022d
+--- /dev/null
++++ b/apps/components_tests/misc/testclientmods.cpp
+@@ -0,0 +1,105 @@
++#include <components/misc/clientmods.hpp>
++#include <components/misc/sha256.hpp>
++
++#include <gtest/gtest.h>
++
++#include <filesystem>
++
++namespace
++{
++    namespace CM = Misc::ClientMods;
++
++    TEST(MiscSha256, knownValues)
++    {
++        EXPECT_EQ(Misc::sha256Hex(""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
++        EXPECT_EQ(Misc::sha256Hex("abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
++        EXPECT_EQ(Misc::sha256Hex("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
++            "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
++        EXPECT_EQ(Misc::sha256Hex(std::string(1000000, 'a')),
++            "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
++    }
++
++    TEST(MiscClientMods, names)
++    {
++        EXPECT_TRUE(CM::validId("my-mod_2"));
++        EXPECT_FALSE(CM::validId(""));
++        EXPECT_FALSE(CM::validId("Upper"));
++        EXPECT_FALSE(CM::validId("../x"));
++        EXPECT_FALSE(CM::validId(std::string(41, 'a')));
++
++        EXPECT_TRUE(CM::validPath("scripts/mp/a.lua"));
++        EXPECT_TRUE(CM::validPath("mymod.omwscripts"));
++        EXPECT_TRUE(CM::validPath("textures/Icon.TGA"));
++        EXPECT_FALSE(CM::validPath("../a.lua"));
++        EXPECT_FALSE(CM::validPath("a/../b.lua"));
++        EXPECT_FALSE(CM::validPath("/etc/a.lua"));
++        EXPECT_FALSE(CM::validPath("a\\b.lua"));
++        EXPECT_FALSE(CM::validPath(".hidden.lua"));
++        EXPECT_FALSE(CM::validPath("a/.b/c.lua"));
++        EXPECT_FALSE(CM::validPath("run.exe"));
++        EXPECT_FALSE(CM::validPath("noextension"));
++        EXPECT_FALSE(CM::validPath("a//b.lua"));
++        EXPECT_FALSE(CM::validPath("a/b/c/d/e/f/g.lua")); // too deep
++    }
++
++    TEST(MiscClientMods, base64)
++    {
++        EXPECT_EQ(CM::base64Encode(""), "");
++        EXPECT_EQ(CM::base64Encode("f"), "Zg==");
++        EXPECT_EQ(CM::base64Encode("fo"), "Zm8=");
++        EXPECT_EQ(CM::base64Encode("foo"), "Zm9v");
++        EXPECT_EQ(CM::base64Encode("foobar"), "Zm9vYmFy");
++        EXPECT_EQ(CM::base64Decode("Zm9vYmFy"), "foobar");
++        EXPECT_EQ(CM::base64Decode("Zm8="), "fo");
++        EXPECT_EQ(CM::base64Decode("Zg=="), "f");
++        EXPECT_FALSE(CM::base64Decode("Zg="));
++        EXPECT_FALSE(CM::base64Decode("Z!=="));
++        std::string binary;
++        for (int i = 0; i < 256; ++i)
++            binary += static_cast<char>(i);
++        EXPECT_EQ(CM::base64Decode(CM::base64Encode(binary)), binary);
++    }
++
++    TEST(MiscClientMods, writeReadRemove)
++    {
++        const std::filesystem::path root = std::filesystem::temp_directory_path() / "omw_clientmods_test";
++        std::filesystem::remove_all(root);
++        CM::setRoot(root);
++
++        const std::string data = "print('hi')\n";
++        const std::string hash = Misc::sha256Hex(data);
++        EXPECT_NE(CM::write("m", "scripts/a.lua", data, "0000"), "");
++        EXPECT_NE(CM::write("m", "../a.lua", data, hash), "");
++        EXPECT_NE(CM::write("m", "a.exe", data, hash), "");
++        EXPECT_NE(CM::write("M", "a.lua", data, hash), "");
++        EXPECT_EQ(CM::write("m", "scripts/a.lua", data, hash), "");
++        EXPECT_EQ(CM::write("m", "m.omwscripts", "GLOBAL: scripts/a.lua\n", Misc::sha256Hex("GLOBAL: scripts/a.lua\n")), "");
++
++        EXPECT_EQ(CM::read("m", "scripts/a.lua"), data);
++        EXPECT_FALSE(CM::read("m", "scripts/missing.lua"));
++
++        const auto mods = CM::installed();
++        ASSERT_EQ(mods.size(), 1u);
++        EXPECT_EQ(mods[0].mId, "m");
++        ASSERT_EQ(mods[0].mFiles.size(), 2u);
++        EXPECT_EQ(mods[0].mFiles[1].mPath, "scripts/a.lua");
++        EXPECT_EQ(mods[0].mFiles[1].mHash, hash);
++
++        std::vector<std::filesystem::path> dirs;
++        std::vector<std::string> scripts;
++        CM::startupEntries(dirs, scripts);
++        ASSERT_EQ(dirs.size(), 1u);
++        ASSERT_EQ(scripts.size(), 1u);
++        EXPECT_EQ(scripts[0], "m.omwscripts");
++
++        EXPECT_EQ(CM::write("m", "big.lua", std::string(CM::sMaxFileSize + 1, 'x'), Misc::sha256Hex(std::string(CM::sMaxFileSize + 1, 'x'))),
++            "file too large");
++
++        EXPECT_EQ(CM::remove("m", "scripts/a.lua"), "");
++        EXPECT_FALSE(CM::read("m", "scripts/a.lua"));
++        EXPECT_EQ(CM::remove("m", ""), "");
++        EXPECT_TRUE(CM::installed().empty());
++        std::filesystem::remove_all(root);
++        CM::setRoot({});
++    }
++}
+diff --git a/apps/openmw/CMakeLists.txt b/apps/openmw/CMakeLists.txt
+index 41100bd8f4..48ceec01f4 100644
+--- a/apps/openmw/CMakeLists.txt
++++ b/apps/openmw/CMakeLists.txt
+@@ -77,7 +77,7 @@ add_openmw_dir (mwlua
+     context menuscripts globalscripts localscripts playerscripts luabindings objectbindings cellbindings coremwscriptbindings
+     mwscriptbindings camerabindings vfsbindings uibindings soundbindings inputbindings nearbybindings dialoguebindings
+     postprocessingbindings stats recordstore debugbindings corebindings worldbindings worker landbindings magicbindings factionbindings
+-    classbindings itemdata inputprocessor animationbindings birthsignbindings racebindings markupbindings netbindings weatherbindings regionbindings
++    classbindings itemdata inputprocessor animationbindings birthsignbindings racebindings markupbindings modstorebindings netbindings weatherbindings regionbindings
+     usertypes directregistry types/types types/door types/item types/actor types/container types/lockable types/weapon types/npc types/bodypart
+     types/creature types/player types/activator types/book types/lockpick types/probe types/apparatus
+     types/potion types/ingredient types/misc types/repair types/armor types/light types/static
+diff --git a/apps/openmw/main.cpp b/apps/openmw/main.cpp
+index 25610ee9ed..8c615e1334 100644
+--- a/apps/openmw/main.cpp
++++ b/apps/openmw/main.cpp
+@@ -3,6 +3,7 @@
+ #include <components/fallback/fallback.hpp>
+ #include <components/fallback/validate.hpp>
+ #include <components/files/configurationmanager.hpp>
++#include <components/misc/clientmods.hpp>
+ #include <components/misc/osgpluginchecker.hpp>
+ #include <components/misc/rng.hpp>
+ #include <components/platform/platform.hpp>
+@@ -92,6 +93,14 @@ bool parseOptions(int argc, char** argv, OMW::Engine& engine, Files::Configurati
+ 
+     cfgMgr.filterOutNonExistingPaths(dataDirs);
+ 
++    // Client mods handed out by servers (multiplayer): installed under the user data folder, loaded like built-in scripts
++    Misc::ClientMods::setRoot(cfgMgr.getUserDataPath() / "clientmods");
++    std::vector<std::filesystem::path> clientModDirs;
++    std::vector<std::string> clientModScripts;
++    Misc::ClientMods::startupEntries(clientModDirs, clientModScripts);
++    for (const std::filesystem::path& dir : clientModDirs)
++        dataDirs.push_back(dir);
++
+     engine.setResourceDir(variables["resources"]
+                               .as<Files::MaybeQuotedPath>()
+                               .u8string()); // This call to u8string is redundant, but required to build on MSVC 14.26
+@@ -112,6 +121,8 @@ bool parseOptions(int argc, char** argv, OMW::Engine& engine, Files::Configurati
+         return false;
+     }
+     engine.addContentFile("builtin.omwscripts");
++    for (const std::string& script : clientModScripts)
++        engine.addContentFile(script);
+     std::set<std::string> contentDedupe{ "builtin.omwscripts" };
+     for (const auto& contentFile : content)
+     {
+@@ -288,6 +299,14 @@ int runApplication(int argc, char* argv[])
+             return 1;
+ 
+         engine->go();
++
++        if (Misc::ClientMods::restartRequested())
++        {
++            // new client mods were installed: start again so they are loaded
++            engine.reset();
++            Log(Debug::Info) << "Restarting to load the installed client mods";
++            Misc::ClientMods::relaunch(argc, argv);
++        }
+     }
+ 
+     return 0;
+diff --git a/apps/openmw/mwlua/luabindings.cpp b/apps/openmw/mwlua/luabindings.cpp
+index e723d7c9da..369c70ae06 100644
+--- a/apps/openmw/mwlua/luabindings.cpp
++++ b/apps/openmw/mwlua/luabindings.cpp
+@@ -17,6 +17,7 @@
+ #include "localscripts.hpp"
+ #include "markupbindings.hpp"
+ #include "luamanagerimp.hpp"
++#include "modstorebindings.hpp"
+ #include "netbindings.hpp"
+ #include "menuscripts.hpp"
+ #include "nearbybindings.hpp"
+@@ -59,6 +60,7 @@ namespace MWLua
+         initCellBindingsForGlobalScripts(context);
+         return {
+             { "openmw.net", initNetPackage(context, context.mLuaManager->sockets()) },
++            { "openmw.modstore", initModstorePackage(context) },
+             { "openmw.types", initTypesPackage(context) },
+             { "openmw.core", initCorePackage(context) },
+             { "openmw.world", initWorldPackage(context) },
+diff --git a/apps/openmw/mwlua/modstorebindings.cpp b/apps/openmw/mwlua/modstorebindings.cpp
+new file mode 100644
+index 0000000000..c106ce9541
+--- /dev/null
++++ b/apps/openmw/mwlua/modstorebindings.cpp
+@@ -0,0 +1,82 @@
++#include "modstorebindings.hpp"
++
++#include <optional>
++#include <string>
++
++#include <components/debug/debuglog.hpp>
++#include <components/lua/bindfunction.hpp>
++#include <components/lua/luastate.hpp>
++#include <components/lua/readonlytables.hpp>
++#include <components/misc/clientmods.hpp>
++#include <components/misc/sha256.hpp>
++
++#include "../mwbase/environment.hpp"
++#include "../mwbase/statemanager.hpp"
++
++#include "context.hpp"
++
++namespace MWLua
++{
++    namespace
++    {
++        // Everything that is installed as JSON: [{"id":"x","files":[{"p":"a.lua","s":12,"h":"<sha256>"}]}].
++        // (Names are limited to letters, digits and . _ - /, so nothing needs escaping.)
++        std::string manifestJson()
++        {
++            std::string json = "[";
++            bool firstMod = true;
++            for (const Misc::ClientMods::Mod& mod : Misc::ClientMods::installed())
++            {
++                json += firstMod ? "" : ",";
++                firstMod = false;
++                json += "{\"id\":\"" + mod.mId + "\",\"files\":[";
++                bool firstFile = true;
++                for (const Misc::ClientMods::File& file : mod.mFiles)
++                {
++                    json += firstFile ? "" : ",";
++                    firstFile = false;
++                    json += "{\"p\":\"" + file.mPath + "\",\"s\":" + std::to_string(file.mSize) + ",\"h\":\"" + file.mHash
++                        + "\"}";
++                }
++                json += "]}";
++            }
++            return json + "]";
++        }
++    }
++
++    Lua::Table initModstorePackage(const Context& context)
++    {
++        lua_State* state = context.unsafeState();
++        const Lua::PackageBuilder api(state, "modstore");
++
++        // The installed mods and their files, with SHA-256 hashes, as JSON text
++        api.function("manifest", []() { return manifestJson(); });
++        // One installed file, or nil
++        api.function("read", [](std::string_view id, std::string_view path) -> std::optional<std::string> {
++            return Misc::ClientMods::read(id, path);
++        });
++        // Stores a file; fails (returns the reason) unless the name, size and SHA-256 are right. "" when it worked.
++        api.function("write",
++            [](std::string_view id, std::string_view path, std::string_view data, std::string_view hash) {
++                return Misc::ClientMods::write(id, path, data, hash);
++            });
++        // Deletes a file of a mod, or the whole mod when the path is empty. "" when it worked.
++        api.function("remove", [](std::string_view id, std::string_view path) { return Misc::ClientMods::remove(id, path); });
++        api.function("sha256", [](std::string_view data) { return Misc::sha256Hex(data); });
++        api.function("base64Encode", [](std::string_view data) { return Misc::ClientMods::base64Encode(data); });
++        api.function("base64Decode", [](std::string_view text) -> std::optional<std::string> {
++            return Misc::ClientMods::base64Decode(text);
++        });
++        // Quits and starts the game again, so the installed mods are loaded. Returns false (and does nothing) where the game
++        // cannot start itself again.
++        api.function("restart", []() {
++            if (!Misc::ClientMods::canRelaunch())
++                return false;
++            Misc::ClientMods::requestRestart();
++            MWBase::Environment::get().getStateManager()->requestQuit();
++            return true;
++        });
++
++        return api.readOnly();
++    }
++}
+diff --git a/apps/openmw/mwlua/modstorebindings.hpp b/apps/openmw/mwlua/modstorebindings.hpp
+new file mode 100644
+index 0000000000..74c188b4bf
+--- /dev/null
++++ b/apps/openmw/mwlua/modstorebindings.hpp
+@@ -0,0 +1,17 @@
++#ifndef MWLUA_MODSTOREBINDINGS_H
++#define MWLUA_MODSTOREBINDINGS_H
++
++namespace Lua
++{
++    class Table;
++}
++
++namespace MWLua
++{
++    struct Context;
++
++    // openmw.modstore: the client mods folder (see components/misc/clientmods.hpp)
++    Lua::Table initModstorePackage(const Context& context);
++}
++
++#endif // MWLUA_MODSTOREBINDINGS_H
+diff --git a/components/CMakeLists.txt b/components/CMakeLists.txt
+index f5e27190da..7ec6e828c0 100644
+--- a/components/CMakeLists.txt
++++ b/components/CMakeLists.txt
+@@ -318,9 +318,9 @@ add_component_dir (esm4
+ )
+ 
+ add_component_dir (misc
+-    barrier budgetmeasurement color compression constants convert coordinateconverter display endianness float16 frameratelimiter
++    barrier budgetmeasurement clientmods color compression constants convert coordinateconverter display endianness float16 frameratelimiter
+     guarded hotcold math mathutil messageformatparser notnullptr objectpool osgpluginchecker osguservalues progressreporter resourcehelpers
+-    rng strongtypedef thread timeconvert timer tuplehelpers tuplemeta utf8stream weakcache windows
++    rng sha256 strongtypedef thread timeconvert timer tuplehelpers tuplemeta utf8stream weakcache windows
+     )
+ 
+ add_component_dir (misc/strings
+diff --git a/components/misc/clientmods.cpp b/components/misc/clientmods.cpp
+new file mode 100644
+index 0000000000..4a78bab01e
+--- /dev/null
++++ b/components/misc/clientmods.cpp
+@@ -0,0 +1,435 @@
++#include "clientmods.hpp"
++
++#include <algorithm>
++#include <atomic>
++#include <array>
++#include <fstream>
++#include <map>
++#include <mutex>
++#include <set>
++#include <system_error>
++
++
++#include "sha256.hpp"
++
++#ifdef _WIN32
++#include <windows.h>
++#elif defined(__linux__) && !defined(__ANDROID__)
++#include <unistd.h>
++#endif
++
++namespace Misc::ClientMods
++{
++    namespace
++    {
++        namespace fs = std::filesystem;
++
++        fs::path sRoot;
++        std::atomic<bool> sRestart{ false };
++
++        bool nameChar(char c)
++        {
++            return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-'
++                || c == '.';
++        }
++
++        bool allowedExtension(std::string_view path)
++        {
++            static const std::set<std::string, std::less<>> allowed = { "lua", "omwscripts", "yaml", "txt", "tga", "dds",
++                "png", "jpg", "nif", "kf", "wav", "mp3", "ogg" };
++            const std::size_t dot = path.rfind('.');
++            if (dot == std::string_view::npos)
++                return false;
++            std::string ext(path.substr(dot + 1));
++            std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return std::tolower(c); });
++            return allowed.count(ext) > 0;
++        }
++
++        std::optional<std::string> readWhole(const fs::path& path, std::uint64_t limit)
++        {
++            std::error_code ec;
++            const auto size = fs::file_size(path, ec);
++            if (ec || size > limit)
++                return std::nullopt;
++            std::ifstream in(path, std::ios::binary);
++            if (!in)
++                return std::nullopt;
++            std::string data(static_cast<std::size_t>(size), '\0');
++            in.read(data.data(), static_cast<std::streamsize>(size));
++            if (static_cast<std::uint64_t>(in.gcount()) != size)
++                return std::nullopt;
++            return data;
++        }
++
++        struct CachedHash
++        {
++            std::uint64_t mSize;
++            fs::file_time_type mTime;
++            std::string mHash;
++        };
++        std::mutex sCacheMutex;
++        std::map<std::string, CachedHash> sCache;
++
++        std::string hashOf(const fs::path& path, std::uint64_t size)
++        {
++            std::error_code ec;
++            const auto time = fs::last_write_time(path, ec);
++            const std::string key = path.generic_string();
++            {
++                const std::lock_guard lock(sCacheMutex);
++                const auto it = sCache.find(key);
++                if (!ec && it != sCache.end() && it->second.mSize == size && it->second.mTime == time)
++                    return it->second.mHash;
++            }
++            const auto data = readWhole(path, sMaxFileSize);
++            if (!data)
++                return {};
++            std::string hash = sha256Hex(*data);
++            if (!ec)
++            {
++                const std::lock_guard lock(sCacheMutex);
++                sCache[key] = { size, time, hash };
++            }
++            return hash;
++        }
++
++        // The files of one mod folder (only plain files with allowed names; anything else is ignored)
++        std::vector<File> filesOf(const fs::path& dir, bool withHashes)
++        {
++            std::vector<File> files;
++            std::error_code ec;
++            for (fs::recursive_directory_iterator it(dir, fs::directory_options::none, ec), end; !ec && it != end;
++                 it.increment(ec))
++            {
++                if (!it->is_regular_file(ec) || it->is_symlink(ec))
++                    continue;
++                const std::string rel = fs::relative(it->path(), dir, ec).generic_string();
++                if (ec || !validPath(rel))
++                    continue;
++                const std::uint64_t size = it->file_size(ec);
++                if (ec || size > sMaxFileSize)
++                    continue;
++                if (files.size() >= sMaxFilesPerMod)
++                    break;
++                File file;
++                file.mPath = rel;
++                file.mSize = size;
++                if (withHashes)
++                    file.mHash = hashOf(it->path(), size);
++                files.push_back(std::move(file));
++            }
++            std::sort(files.begin(), files.end(), [](const File& a, const File& b) { return a.mPath < b.mPath; });
++            return files;
++        }
++
++        std::vector<std::string> modIds()
++        {
++            std::vector<std::string> ids;
++            if (sRoot.empty())
++                return ids;
++            std::error_code ec;
++            for (fs::directory_iterator it(sRoot, ec), end; !ec && it != end; it.increment(ec))
++            {
++                const std::string id = it->path().filename().string();
++                if (it->is_directory(ec) && !it->is_symlink(ec) && validId(id))
++                    ids.push_back(id);
++            }
++            std::sort(ids.begin(), ids.end());
++            if (ids.size() > sMaxMods)
++                ids.resize(sMaxMods);
++            return ids;
++        }
++
++        std::uint64_t totalSize(const std::vector<File>& files)
++        {
++            std::uint64_t total = 0;
++            for (const File& file : files)
++                total += file.mSize;
++            return total;
++        }
++    }
++
++    void setRoot(const fs::path& root)
++    {
++        sRoot = root;
++    }
++
++    const fs::path& root()
++    {
++        return sRoot;
++    }
++
++    bool validId(std::string_view id)
++    {
++        if (id.empty() || id.size() > 40)
++            return false;
++        for (char c : id)
++            if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-'))
++                return false;
++        return true;
++    }
++
++    bool validPath(std::string_view path)
++    {
++        if (path.empty() || path.size() > 160 || !allowedExtension(path))
++            return false;
++        int parts = 0;
++        std::size_t start = 0;
++        while (start <= path.size())
++        {
++            std::size_t slash = path.find('/', start);
++            if (slash == std::string_view::npos)
++                slash = path.size();
++            const std::string_view part = path.substr(start, slash - start);
++            if (part.empty() || part.front() == '.' || ++parts > 6)
++                return false;
++            for (char c : part)
++                if (!nameChar(c))
++                    return false;
++            start = slash + 1;
++        }
++        return true;
++    }
++
++    std::vector<Mod> installed()
++    {
++        std::vector<Mod> mods;
++        for (const std::string& id : modIds())
++        {
++            Mod mod;
++            mod.mId = id;
++            mod.mFiles = filesOf(sRoot / id, true);
++            if (!mod.mFiles.empty())
++                mods.push_back(std::move(mod));
++        }
++        return mods;
++    }
++
++    std::optional<std::string> read(std::string_view id, std::string_view path)
++    {
++        if (sRoot.empty() || !validId(id) || !validPath(path))
++            return std::nullopt;
++        const fs::path file = sRoot / std::string(id) / std::string(path);
++        std::error_code ec;
++        if (!fs::is_regular_file(file, ec) || fs::is_symlink(file, ec))
++            return std::nullopt;
++        return readWhole(file, sMaxFileSize);
++    }
++
++    std::string write(std::string_view id, std::string_view path, std::string_view data, std::string_view expectedHash)
++    {
++        if (sRoot.empty())
++            return "client mods are not enabled";
++        if (!validId(id))
++            return "bad mod name";
++        if (!validPath(path))
++            return "bad or disallowed file name";
++        if (data.size() > sMaxFileSize)
++            return "file too large";
++        std::string expected(expectedHash);
++        std::transform(expected.begin(), expected.end(), expected.begin(), [](unsigned char c) { return std::tolower(c); });
++        if (sha256Hex(data) != expected)
++            return "hash mismatch";
++
++        const fs::path dir = sRoot / std::string(id);
++        std::error_code ec;
++        if (!fs::exists(dir, ec) && modIds().size() >= sMaxMods)
++            return "too many mods";
++        const fs::path target = dir / std::string(path);
++        // room for it: what the mod holds already, without the file being replaced
++        std::uint64_t others = 0;
++        std::size_t count = 0;
++        for (const File& file : filesOf(dir, false))
++        {
++            ++count;
++            if (file.mPath != path)
++                others += file.mSize;
++        }
++        if (others + data.size() > sMaxModSize || count > sMaxFilesPerMod)
++            return "the mod is too large";
++        if (fs::is_symlink(target, ec))
++            return "refusing to write through a link";
++
++        fs::create_directories(target.parent_path(), ec);
++        if (ec)
++            return "could not create the folder: " + ec.message();
++        // a folder that is not really inside the mods folder (a link somewhere): refuse
++        const fs::path real = fs::weakly_canonical(target.parent_path(), ec);
++        const fs::path rootReal = fs::weakly_canonical(sRoot, ec);
++        if (real.generic_string().rfind(rootReal.generic_string(), 0) != 0)
++            return "outside the mods folder";
++
++        const fs::path temp = target.string() + ".part";
++        {
++            std::ofstream out(temp, std::ios::binary | std::ios::trunc);
++            if (!out)
++                return "could not write the file";
++            out.write(data.data(), static_cast<std::streamsize>(data.size()));
++            if (!out)
++                return "could not write the file";
++        }
++        fs::rename(temp, target, ec);
++        if (ec)
++        {
++            fs::remove(temp, ec);
++            return "could not move the file into place";
++        }
++        return {};
++    }
++
++    std::string remove(std::string_view id, std::string_view path)
++    {
++        if (sRoot.empty() || !validId(id))
++            return "bad mod name";
++        std::error_code ec;
++        if (path.empty())
++        {
++            fs::remove_all(sRoot / std::string(id), ec);
++        }
++        else
++        {
++            if (!validPath(path))
++                return "bad file name";
++            fs::remove(sRoot / std::string(id) / std::string(path), ec);
++        }
++        return ec ? ec.message() : std::string();
++    }
++
++    std::string base64Encode(std::string_view data)
++    {
++        static constexpr char table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
++        std::string out;
++        out.reserve((data.size() + 2) / 3 * 4);
++        std::size_t i = 0;
++        for (; i + 2 < data.size(); i += 3)
++        {
++            const std::uint32_t v = (std::uint8_t(data[i]) << 16) | (std::uint8_t(data[i + 1]) << 8) | std::uint8_t(data[i + 2]);
++            out += table[v >> 18];
++            out += table[(v >> 12) & 63];
++            out += table[(v >> 6) & 63];
++            out += table[v & 63];
++        }
++        if (i + 1 == data.size())
++        {
++            const std::uint32_t v = std::uint8_t(data[i]) << 16;
++            out += table[v >> 18];
++            out += table[(v >> 12) & 63];
++            out += "==";
++        }
++        else if (i + 2 == data.size())
++        {
++            const std::uint32_t v = (std::uint8_t(data[i]) << 16) | (std::uint8_t(data[i + 1]) << 8);
++            out += table[v >> 18];
++            out += table[(v >> 12) & 63];
++            out += table[(v >> 6) & 63];
++            out += '=';
++        }
++        return out;
++    }
++
++    std::optional<std::string> base64Decode(std::string_view text)
++    {
++        if (text.size() % 4 != 0)
++            return std::nullopt;
++        auto value = [](char c) -> int {
++            if (c >= 'A' && c <= 'Z') return c - 'A';
++            if (c >= 'a' && c <= 'z') return c - 'a' + 26;
++            if (c >= '0' && c <= '9') return c - '0' + 52;
++            if (c == '+') return 62;
++            if (c == '/') return 63;
++            return -1;
++        };
++        std::string out;
++        out.reserve(text.size() / 4 * 3);
++        for (std::size_t i = 0; i < text.size(); i += 4)
++        {
++            const bool last = i + 4 == text.size();
++            int v[4];
++            int pad = 0;
++            for (int k = 0; k < 4; ++k)
++            {
++                if (text[i + k] == '=' && last && k >= 2)
++                {
++                    v[k] = 0;
++                    ++pad;
++                }
++                else if ((v[k] = value(text[i + k])) < 0 || pad > 0)
++                    return std::nullopt;
++            }
++            const std::uint32_t n = (v[0] << 18) | (v[1] << 12) | (v[2] << 6) | v[3];
++            out += static_cast<char>(n >> 16);
++            if (pad < 2)
++                out += static_cast<char>((n >> 8) & 0xff);
++            if (pad < 1)
++                out += static_cast<char>(n & 0xff);
++        }
++        return out;
++    }
++
++    void startupEntries(std::vector<fs::path>& dataDirs, std::vector<std::string>& scriptFiles)
++    {
++        for (const std::string& id : modIds())
++        {
++            const fs::path dir = sRoot / id;
++            std::vector<std::string> scripts;
++            std::error_code ec;
++            for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec))
++            {
++                const std::string name = it->path().filename().string();
++                if (it->is_regular_file(ec) && !it->is_symlink(ec) && validPath(name)
++                    && it->path().extension() == ".omwscripts")
++                    scripts.push_back(name);
++            }
++            if (scripts.empty())
++                continue;
++            std::sort(scripts.begin(), scripts.end());
++            dataDirs.push_back(dir);
++            scriptFiles.insert(scriptFiles.end(), scripts.begin(), scripts.end());
++        }
++    }
++
++    void requestRestart()
++    {
++        sRestart = true;
++    }
++
++    bool restartRequested()
++    {
++        return sRestart;
++    }
++
++    bool canRelaunch()
++    {
++#if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__))
++        return true;
++#else
++        return false;
++#endif
++    }
++
++    bool relaunch(int argc, char** argv)
++    {
++#ifdef _WIN32
++        (void)argc;
++        (void)argv;
++        STARTUPINFOW startup = {};
++        startup.cb = sizeof(startup);
++        PROCESS_INFORMATION info = {};
++        std::wstring command = GetCommandLineW();
++        if (!CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &startup, &info))
++            return false;
++        CloseHandle(info.hProcess);
++        CloseHandle(info.hThread);
++        return true;
++#elif defined(__linux__) && !defined(__ANDROID__)
++        std::vector<char*> args(argv, argv + argc);
++        args.push_back(nullptr);
++        execv("/proc/self/exe", args.data()); // (only returns when it failed)
++        return false;
++#else
++        (void)argc;
++        (void)argv;
++        return false;
++#endif
++    }
++}
+diff --git a/components/misc/clientmods.hpp b/components/misc/clientmods.hpp
+new file mode 100644
+index 0000000000..e3b83a04c1
+--- /dev/null
++++ b/components/misc/clientmods.hpp
+@@ -0,0 +1,74 @@
++#ifndef OPENMW_COMPONENTS_MISC_CLIENTMODS_H
++#define OPENMW_COMPONENTS_MISC_CLIENTMODS_H
++
++#include <cstdint>
++#include <filesystem>
++#include <optional>
++#include <string>
++#include <string_view>
++#include <vector>
++
++namespace Misc::ClientMods
++{
++    // Client mods are folders of Lua scripts (and the textures, sounds and translations they use) that a server hands out.
++    // They live in <root>/<id>/..., each folder is added to the game's data directories at startup and its *.omwscripts
++    // files are loaded like the built-in ones. Everything here is checked: names, file types and sizes are limited, and a
++    // file is only written when its SHA-256 matches the one it was announced with.
++    constexpr std::size_t sMaxFileSize = 8 * 1024 * 1024;
++    constexpr std::size_t sMaxModSize = 64 * 1024 * 1024;
++    constexpr std::size_t sMaxFilesPerMod = 500;
++    constexpr std::size_t sMaxMods = 32;
++
++    struct File
++    {
++        std::string mPath; // relative to the mod folder, '/' separated
++        std::uint64_t mSize = 0;
++        std::string mHash; // SHA-256, lowercase hex
++    };
++
++    struct Mod
++    {
++        std::string mId;
++        std::vector<File> mFiles;
++    };
++
++    // The folder everything lives in. Set once at startup; empty means the feature is off.
++    void setRoot(const std::filesystem::path& root);
++    const std::filesystem::path& root();
++
++    // [a-z0-9_-], 1 to 40 characters
++    bool validId(std::string_view id);
++    // A relative path of at most 6 parts made of letters, digits and . _ - (no "..", no hidden files), ending in a file
++    // type a client mod may carry
++    bool validPath(std::string_view path);
++
++    // What is installed (or, for a server, what it hands out): every mod with its files and their hashes.
++    std::vector<Mod> installed();
++
++    // Reads one installed file. Empty if there is no such file.
++    std::optional<std::string> read(std::string_view id, std::string_view path);
++
++    // Writes a file after checking the name, the size limits and that its SHA-256 equals expectedHash. Returns an error
++    // message, or an empty string on success.
++    std::string write(std::string_view id, std::string_view path, std::string_view data, std::string_view expectedHash);
++
++    // Deletes one file of a mod, or the whole mod if path is empty.
++    std::string remove(std::string_view id, std::string_view path);
++
++    // base64 (standard alphabet, padded), for carrying binary files over a line based connection
++    std::string base64Encode(std::string_view data);
++    std::optional<std::string> base64Decode(std::string_view text);
++
++    // The data directories and *.omwscripts files of the installed mods, for the engine to load at startup.
++    void startupEntries(std::vector<std::filesystem::path>& dataDirs, std::vector<std::string>& scriptFiles);
++
++    // Asks the program to start itself again once it has shut down (see relaunch).
++    void requestRestart();
++    bool restartRequested();
++    // Whether relaunch can work on this platform
++    bool canRelaunch();
++    // Starts the program again with the same arguments. Returns false where that is not possible.
++    bool relaunch(int argc, char** argv);
++}
++
++#endif
+diff --git a/components/misc/sha256.cpp b/components/misc/sha256.cpp
+new file mode 100644
+index 0000000000..c4de7f7ff6
+--- /dev/null
++++ b/components/misc/sha256.cpp
+@@ -0,0 +1,99 @@
++#include "sha256.hpp"
++
++#include <array>
++#include <cstdint>
++#include <cstring>
++
++namespace Misc
++{
++    namespace
++    {
++        constexpr std::array<std::uint32_t, 64> sK = {
++            0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98,
++            0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
++            0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8,
++            0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
++            0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819,
++            0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
++            0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
++            0xc67178f2
++        };
++
++        constexpr std::uint32_t rotr(std::uint32_t x, int n)
++        {
++            return (x >> n) | (x << (32 - n));
++        }
++
++        void compress(std::array<std::uint32_t, 8>& h, const unsigned char* block)
++        {
++            std::array<std::uint32_t, 64> w;
++            for (int i = 0; i < 16; ++i)
++                w[i] = (std::uint32_t(block[i * 4]) << 24) | (std::uint32_t(block[i * 4 + 1]) << 16)
++                    | (std::uint32_t(block[i * 4 + 2]) << 8) | std::uint32_t(block[i * 4 + 3]);
++            for (int i = 16; i < 64; ++i)
++            {
++                const std::uint32_t s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >> 3);
++                const std::uint32_t s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >> 10);
++                w[i] = w[i - 16] + s0 + w[i - 7] + s1;
++            }
++            std::uint32_t a = h[0], b = h[1], c = h[2], d = h[3], e = h[4], f = h[5], g = h[6], hh = h[7];
++            for (int i = 0; i < 64; ++i)
++            {
++                const std::uint32_t s1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
++                const std::uint32_t ch = (e & f) ^ (~e & g);
++                const std::uint32_t t1 = hh + s1 + ch + sK[i] + w[i];
++                const std::uint32_t s0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
++                const std::uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
++                const std::uint32_t t2 = s0 + maj;
++                hh = g;
++                g = f;
++                f = e;
++                e = d + t1;
++                d = c;
++                c = b;
++                b = a;
++                a = t1 + t2;
++            }
++            h[0] += a;
++            h[1] += b;
++            h[2] += c;
++            h[3] += d;
++            h[4] += e;
++            h[5] += f;
++            h[6] += g;
++            h[7] += hh;
++        }
++    }
++
++    std::string sha256Hex(std::string_view data)
++    {
++        std::array<std::uint32_t, 8> h = { 0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c,
++            0x1f83d9ab, 0x5be0cd19 };
++        const auto* bytes = reinterpret_cast<const unsigned char*>(data.data());
++        std::size_t full = data.size() / 64;
++        for (std::size_t i = 0; i < full; ++i)
++            compress(h, bytes + i * 64);
++
++        // the rest, the 0x80 marker and the length in bits (one or two more blocks)
++        unsigned char tail[128] = {};
++        const std::size_t rest = data.size() - full * 64;
++        if (rest > 0)
++            std::memcpy(tail, bytes + full * 64, rest);
++        tail[rest] = 0x80;
++        const std::size_t tailSize = rest < 56 ? 64 : 128;
++        const std::uint64_t bits = static_cast<std::uint64_t>(data.size()) * 8;
++        for (int i = 0; i < 8; ++i)
++            tail[tailSize - 1 - i] = static_cast<unsigned char>(bits >> (8 * i));
++        compress(h, tail);
++        if (tailSize == 128)
++            compress(h, tail + 64);
++
++        static constexpr char digits[] = "0123456789abcdef";
++        std::string result;
++        result.reserve(64);
++        for (std::uint32_t word : h)
++            for (int shift = 28; shift >= 0; shift -= 4)
++                result += digits[(word >> shift) & 0xf];
++        return result;
++    }
++}
+diff --git a/components/misc/sha256.hpp b/components/misc/sha256.hpp
+new file mode 100644
+index 0000000000..0396517cd2
+--- /dev/null
++++ b/components/misc/sha256.hpp
+@@ -0,0 +1,13 @@
++#ifndef OPENMW_COMPONENTS_MISC_SHA256_H
++#define OPENMW_COMPONENTS_MISC_SHA256_H
++
++#include <string>
++#include <string_view>
++
++namespace Misc
++{
++    // SHA-256 of the data as 64 lowercase hex digits.
++    std::string sha256Hex(std::string_view data);
++}
++
++#endif
+diff --git a/files/lua_api/openmw/modstore.lua b/files/lua_api/openmw/modstore.lua
+new file mode 100644
+index 0000000000..e9f88318b2
+--- /dev/null
++++ b/files/lua_api/openmw/modstore.lua
+@@ -0,0 +1,63 @@
++---
++-- `openmw.modstore` is available in global scripts. It manages the client mods folder (`<user data>/clientmods/<id>/`):
++-- folders of Lua scripts and their assets that a multiplayer server hands out. At startup every mod folder that holds
++-- an `.omwscripts` file is added to the data directories and its `.omwscripts` files are loaded like the built-in ones, so
++-- a change takes effect after a restart (see @{#modstore.restart}).
++--
++-- Everything is checked: mod names are `[a-z0-9_-]` (at most 40), file paths are relative, at most 6 parts deep, with
++-- letters, digits and `. _ -` and an allowed type (lua, omwscripts, yaml, txt, tga, dds, png, jpg, nif, kf, wav, mp3,
++-- ogg); a file is at most 8 MB, a mod at most 64 MB and 500 files, and at most 32 mods are kept.
++-- @module modstore
++-- @usage local modstore = require('openmw.modstore')
++
++---
++-- The installed mods and their files as JSON text: `[{"id":"x","files":[{"p":"scripts/a.lua","s":12,"h":"<sha256>"}]}]`
++-- (`p` the path, `s` the size in bytes, `h` the SHA-256 as 64 lowercase hex digits). Decode it with `openmw.markup`.
++-- @function [parent=#modstore] manifest
++-- @return #string
++
++---
++-- The contents of an installed file.
++-- @function [parent=#modstore] read
++-- @param #string id
++-- @param #string path
++-- @return #string The data, or nil if there is no such file
++
++---
++-- Stores a file. It is only written if the names and sizes are allowed and the SHA-256 of `data` is `hash`.
++-- @function [parent=#modstore] write
++-- @param #string id
++-- @param #string path
++-- @param #string data
++-- @param #string hash The SHA-256 the file is expected to have
++-- @return #string The reason it failed, or an empty string on success
++
++---
++-- Deletes one file of a mod, or the whole mod if `path` is empty.
++-- @function [parent=#modstore] remove
++-- @param #string id
++-- @param #string path
++-- @return #string The reason it failed, or an empty string on success
++
++---
++-- @function [parent=#modstore] sha256
++-- @param #string data
++-- @return #string The SHA-256 of the data as 64 lowercase hex digits
++
++---
++-- @function [parent=#modstore] base64Encode
++-- @param #string data
++-- @return #string
++
++---
++-- @function [parent=#modstore] base64Decode
++-- @param #string text
++-- @return #string The data, or nil if the text is not valid base64
++
++---
++-- Quits the game and starts it again with the same arguments, so that newly installed mods are loaded. Only possible on
++-- Linux and Windows: elsewhere it does nothing and returns false (ask the player to start the game again).
++-- @function [parent=#modstore] restart
++-- @return #boolean Whether the game is going to restart
++
++return nil
+-- 
+2.55.0
+

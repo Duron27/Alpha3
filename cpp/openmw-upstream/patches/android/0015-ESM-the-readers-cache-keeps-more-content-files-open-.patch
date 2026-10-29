@@ -1,0 +1,66 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Tue, 27 Oct 2026 09:46:54 -0400
+Subject: [PATCH 15/17] ESM: the readers cache keeps more content files open
+ where the process may
+
+With a few hundred content files, 100 open readers made loading a cell close files and open them again (headers read
+again too). A quarter of RLIMIT_NOFILE, 100 to 2048.
+---
+ components/esm3/readerscache.cpp | 17 +++++++++++++++++
+ components/esm3/readerscache.hpp |  6 +++++-
+ 2 files changed, 22 insertions(+), 1 deletion(-)
+
+diff --git a/components/esm3/readerscache.cpp b/components/esm3/readerscache.cpp
+index 34ceff5ffd..c744c30ee7 100644
+--- a/components/esm3/readerscache.cpp
++++ b/components/esm3/readerscache.cpp
+@@ -1,7 +1,12 @@
+ #include "readerscache.hpp"
+ 
++#include <algorithm>
+ #include <stdexcept>
+ 
++#ifndef _WIN32
++#include <sys/resource.h>
++#endif
++
+ namespace ESM
+ {
+     ReadersCache::BusyItem::BusyItem(ReadersCache& owner, std::list<Item>::iterator item) noexcept
+@@ -15,6 +20,18 @@ namespace ESM
+         mOwner.releaseItem(mItem);
+     }
+ 
++    std::size_t ReadersCache::defaultCapacity()
++    {
++        std::size_t capacity = 100;
++#ifndef _WIN32
++        // a quarter of the descriptors the process may have, leaving the rest to everything else
++        rlimit limit{};
++        if (getrlimit(RLIMIT_NOFILE, &limit) == 0 && limit.rlim_cur != RLIM_INFINITY)
++            capacity = std::clamp<std::size_t>(static_cast<std::size_t>(limit.rlim_cur) / 4, 100, 2048);
++#endif
++        return capacity;
++    }
++
+     ReadersCache::ReadersCache(std::size_t capacity)
+         : mCapacity(capacity)
+     {
+diff --git a/components/esm3/readerscache.hpp b/components/esm3/readerscache.hpp
+index 3f6ac01874..a0a2d105b5 100644
+--- a/components/esm3/readerscache.hpp
++++ b/components/esm3/readerscache.hpp
+@@ -52,7 +52,11 @@ namespace ESM
+             std::list<Item>::iterator mItem;
+         };
+ 
+-        explicit ReadersCache(std::size_t capacity = 100);
++        explicit ReadersCache(std::size_t capacity = defaultCapacity());
++
++        /// 100 open files, or more where the process may open more: a load order of several hundred content files
++        /// otherwise closes and opens them again (and reads their headers again) for every cell they all change
++        static std::size_t defaultCapacity();
+ 
+         BusyItem get(std::size_t index);
+ 

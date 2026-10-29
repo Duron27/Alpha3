@@ -1,0 +1,44 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Tue, 27 Oct 2026 09:49:38 -0400
+Subject: [PATCH 17/17] Android: the time step follows the interval Swappy
+ shows the frames at
+
+The main loop measures its own frame, which wobbles around the display interval while Swappy paces the frames, so the
+world moved by uneven steps between frames shown at even ones. The support library returns the paced interval when the
+measured time is near it.
+---
+ apps/openmw/engine.cpp | 13 +++++++++----
+ 1 file changed, 9 insertions(+), 4 deletions(-)
+
+diff --git a/apps/openmw/engine.cpp b/apps/openmw/engine.cpp
+index 3bfdd6864c..e0bc11c523 100644
+--- a/apps/openmw/engine.cpp
++++ b/apps/openmw/engine.cpp
+@@ -524,6 +524,7 @@ void OMW::Engine::setSkipMenu(bool skipMenu, bool newGame)
+ #ifdef ANDROID
+ // Alpha3's support library (C linkage, so the declaration needs no include of the library)
+ extern "C" bool alpha3PrepareRenderer();
++extern "C" double alpha3PacedFrameSeconds(double measured);
+ #endif
+ 
+ void OMW::Engine::createWindow()
+@@ -1086,10 +1087,14 @@ void OMW::Engine::go()
+     const std::chrono::steady_clock::duration maxSimulationInterval(std::chrono::milliseconds(200));
+     while (!mViewer->done() && !mStateManager->hasQuitRequest())
+     {
+-        const double dt = std::chrono::duration_cast<std::chrono::duration<double>>(
+-                              std::min(frameRateLimiter.getLastFrameDuration(), maxSimulationInterval))
+-                              .count()
+-            * timeManager.getSimulationTimeScale();
++        double dt = std::chrono::duration_cast<std::chrono::duration<double>>(
++            std::min(frameRateLimiter.getLastFrameDuration(), maxSimulationInterval))
++                        .count();
++#ifdef ANDROID
++        // the interval Swappy shows the frames at, while it paces them
++        dt = alpha3PacedFrameSeconds(dt);
++#endif
++        dt *= timeManager.getSimulationTimeScale();
+ 
+         mViewer->advance(timeManager.getRenderingSimulationTime());
+ 

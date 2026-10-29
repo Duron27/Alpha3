@@ -1,0 +1,402 @@
+From 5a7a272807f5b271c7f02029ad318b051fc3707a Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Thu, 15 Oct 2026 08:31:52 -0400
+Subject: [PATCH] Client package: official-style layout, bundled runtime,
+ container build on an older glibc baseline
+
+Wrapper scripts next to <name>.x86_64 programs, RPATH $ORIGIN/lib on programs and bundled
+libraries, qt.conf, preflight check and diagnose.sh. multiplayer/container builds the whole
+tree on Ubuntu 24.04 (static OSG/MyGUI/Bullet, own SDL2) so the zips run on other distributions.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ multiplayer/README.md                         |  12 +-
+ multiplayer/container/Dockerfile              |  32 ++++
+ multiplayer/container/build-client-package.sh |  36 ++++
+ multiplayer/package-client.py                 | 174 ++++++++++++++----
+ 4 files changed, 219 insertions(+), 35 deletions(-)
+ create mode 100644 multiplayer/container/Dockerfile
+ create mode 100755 multiplayer/container/build-client-package.sh
+
+diff --git a/multiplayer/README.md b/multiplayer/README.md
+index 37546f9e28..d02193dba1 100644
+--- a/multiplayer/README.md
++++ b/multiplayer/README.md
+@@ -50,8 +50,16 @@ built (the game, launcher, wizard, OpenMW-CS and the tools), their resources wit
+   install.
+ - `...-light.zip`: without the libraries (about 40 MB); its README lists the packages to install.
+ 
+-Linux only for now. The programs need a C library as new as the one that built them, whatever is bundled (the README in the
+-zips gives the version), so they only run on a similarly recent distribution. The script behind it is `multiplayer/package-client.py`
++Linux only for now. A package built straight from your own build tree needs a C library as new as yours, so for something
++you hand to others on different distributions, build it in the container instead:
++
++    multiplayer/container/build-client-package.sh [source-dir] [output-dir]
++
++This builds everything (static OpenSceneGraph/MyGUI/Bullet, own SDL2, as upstream's CI does) on Ubuntu 24.04 in Docker and
++packages it there. The result needs glibc 2.38 or newer (Ubuntu 24.04+, Debian 13+, Fedora 40+, current Arch and so on) and
++carries its own libstdc++, Qt, FFmpeg, OpenAL, SDL2 and the rest. From the system it expects only what any graphical desktop
++has: the GPU driver's OpenGL/EGL, X11 or Wayland, libxkbcommon, D-Bus. Tested on clean Ubuntu 24.04, Debian 13 and Fedora 44.
++Older distributions (Ubuntu 22.04, Debian 12) are not covered. The script behind it is `multiplayer/package-client.py`
+ (`python3 multiplayer/package-client.py --build-dir <build>` does the same by hand). A dedicated server is a separate zip:
+ `--target mpserver-bundle`.
+ 
+diff --git a/multiplayer/container/Dockerfile b/multiplayer/container/Dockerfile
+new file mode 100644
+index 0000000000..bc20abfd99
+--- /dev/null
++++ b/multiplayer/container/Dockerfile
+@@ -0,0 +1,32 @@
++# Build environment for the shareable client package.
++# Ubuntu 24.04 (glibc 2.39) is the baseline: binaries built here run on any
++# Linux distribution with glibc >= 2.39 (Ubuntu 24.04+, Debian 13+, Fedora 40+,
++# Arch, openSUSE Tumbleweed, ...). Dependencies follow upstream CI.
++FROM ubuntu:24.04
++ENV DEBIAN_FRONTEND=noninteractive
++RUN apt-get update && apt-get install -y --no-install-recommends \
++    binutils gcc g++ build-essential cmake ninja-build ccache curl unzip git \
++    pkg-config patchelf python3 ca-certificates file xz-utils \
++    libboost-program-options-dev libboost-system-dev libboost-iostreams-dev \
++    libboost-filesystem-dev \
++    libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev \
++    libsdl2-dev libqt6opengl6-dev qt6-tools-dev qt6-tools-dev-tools \
++    qt6-l10n-tools libqt6svg6 libqt6svg6-dev qt6-qpa-plugins \
++    libopenal-dev libunshield-dev libtinyxml-dev liblz4-dev libpng-dev \
++    libjpeg-dev libicu-dev libyaml-cpp-dev librecast-dev libsqlite3-dev \
++    libcollada-dom-dev libfreetype6-dev libgl-dev libvulkan-dev \
++    libx11-dev libxrandr-dev libxi-dev libxext-dev libxcursor-dev \
++    libwayland-dev wayland-protocols libxkbcommon-dev libasound2-dev libpulse-dev \
++    libdecor-0-dev libsndio-dev libdbus-1-dev libudev-dev libxss-dev libxfixes-dev \
++    libxinerama-dev libxcb1-dev libegl-dev libgbm-dev libdrm-dev libpipewire-0.3-dev \
++    && rm -rf /var/lib/apt/lists/*
++
++# SDL2 of our own: the distribution's links audio/window-system libraries directly
++# (libsndio, libdecor, libXss, ...), so a fresh install without them could not start.
++# Built from source, SDL loads them only when it needs them, as upstream's package does.
++RUN curl -fsSL https://github.com/libsdl-org/SDL/releases/download/release-2.32.8/SDL2-2.32.8.tar.gz | tar xz -C /tmp \
++    && cmake -S /tmp/SDL2-2.32.8 -B /tmp/sdl-build -G Ninja -DCMAKE_BUILD_TYPE=Release \
++       -DCMAKE_INSTALL_PREFIX=/opt/sdl2 -DSDL_STATIC=OFF -DSDL_TEST=OFF \
++    && cmake --build /tmp/sdl-build && cmake --install /tmp/sdl-build && rm -rf /tmp/SDL2-2.32.8 /tmp/sdl-build
++ENV PKG_CONFIG_PATH=/opt/sdl2/lib/pkgconfig SDL2DIR=/opt/sdl2
++WORKDIR /build
+diff --git a/multiplayer/container/build-client-package.sh b/multiplayer/container/build-client-package.sh
+new file mode 100755
+index 0000000000..5dae98e8e5
+--- /dev/null
++++ b/multiplayer/container/build-client-package.sh
+@@ -0,0 +1,36 @@
++#!/bin/bash
++# Build the OpenMW programs inside an Ubuntu 24.04 container and produce the
++# client package zips, so they run on other Linux distributions.
++#
++#   multiplayer/container/build-client-package.sh [SOURCE_DIR] [OUT_DIR]
++#
++# SOURCE_DIR defaults to the repository containing this script.
++# OUT_DIR defaults to ./client-package-out. The build tree is kept in
++# ~/.cache/openmw-mp-container-build so rebuilds are incremental.
++set -euo pipefail
++HERE="$(cd "$(dirname "$0")" && pwd)"
++SRC="$(cd "${1:-$HERE/../..}" && pwd)"
++OUT="$(mkdir -p "${2:-./client-package-out}" && cd "${2:-./client-package-out}" && pwd)"
++CACHE="${OPENMW_MP_BUILD_CACHE:-$HOME/.cache/openmw-mp-container-build}"
++mkdir -p "$CACHE/build" "$CACHE/ccache"
++IMAGE=openmw-mp-client-builder
++
++docker build -t "$IMAGE" "$HERE"
++docker run --rm \
++  -v "$SRC":/src:ro -v "$CACHE/build":/build -v "$CACHE/ccache":/ccache -v "$OUT":/out \
++  -e CCACHE_DIR=/ccache -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
++  "$IMAGE" bash -euxo pipefail -c '
++    cmake -S /src -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release \
++      -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
++      -DOPENMW_USE_SYSTEM_OSG=OFF -DOSG_STATIC=ON -DBUILD_SHARED_LIBS=OFF \
++      -DUSE_SYSTEM_TINYXML=ON -DCMAKE_PREFIX_PATH=/opt/sdl2 -DSDL2_DIR=/opt/sdl2/lib/cmake/SDL2 \
++      -DOPENMW_USE_SYSTEM_MYGUI=OFF -DOPENMW_USE_SYSTEM_BULLET=OFF \
++      -DOPENMW_USE_SYSTEM_SQLITE3=OFF -DOPENMW_USE_SYSTEM_RECASTNAVIGATION=OFF \
++      -DOPENMW_USE_VULKAN=ON -DOPENMW_USE_SYSTEM_GLSLANG=OFF \
++      -DOPENMW_USE_SYSTEM_VULKAN_HEADERS=OFF -DOPENMW_USE_SYSTEM_VMA=OFF \
++      -DOPENMW_BUILTIN_MULTIPLAYER=ON
++    cmake --build /build --target client-package -j"$(nproc)"
++    cp /build/openmw-multiplayer-client-*.zip /out/
++    chown "$HOST_UID:$HOST_GID" /out/*.zip
++  '
++echo "Packages written to $OUT"
+diff --git a/multiplayer/package-client.py b/multiplayer/package-client.py
+index 5a641dabc5..b4d08629fc 100755
+--- a/multiplayer/package-client.py
++++ b/multiplayer/package-client.py
+@@ -18,18 +18,22 @@ import argparse, glob, os, platform, re, shutil, subprocess, sys, tempfile
+ PROGRAMS = ['openmw', 'openmw-launcher', 'openmw-wizard', 'openmw-cs', 'bsatool', 'esmtool', 'niftest',
+             'openmw-iniimporter', 'openmw-essimporter', 'openmw-navmeshtool', 'openmw-bulletobjecttool']
+ QT_PROGRAMS = ['openmw-launcher', 'openmw-wizard', 'openmw-cs']
++SUFFIX = '.' + platform.machine()  # the real programs are <name>.x86_64; a script with the plain name starts each (as upstream's package)
+ # files next to the programs that they read at run time (the first two are needed by every package)
+ ROOT_FILES = ['openmw.cfg', 'defaults.bin', 'defaults-cs.bin', 'gamecontrollerdb.txt']
+ # files in resources/ that exist only because somebody put them in a build folder (experiments), not the product
+ STRAY = ['vfs/shaders/badMB2.omwfx', 'vfs/shaders/bluetest.omwfx']
+-# what any desktop Linux provides itself: the C library, graphics stack, windowing, audio and system services, zlib, glib and
+-# the C++ runtime. Never bundled (two copies of these in one process cause crashes).
++# what any desktop Linux provides itself, and upstream's package also leaves to it: the C library, the graphics stack (OpenGL, EGL,
++# drm; the Vulkan loader is bundled, the programs link it whether or not a machine can use it), X11 / xcb / Wayland and xkbcommon, input and audio services, udev, dbus. Never bundled: they must match the machine.
+ EXCLUDE = re.compile(r'^(ld-linux|libc\.|libm\.|libdl\.|libpthread|librt\.|libresolv|libutil\.|libnsl|libanl|libBrokenLocale|'
+-    r'libthread_db|libGL\.|libGLX|libGLdispatch|libOpenGL|libEGL|libGLESv|libvulkan|libdrm|libgbm|libX|libxcb|libwayland|'
+-    r'libxkbcommon|libasound|libpulse|libpipewire|libsystemd|libudev|libdbus-1|libfontconfig|libfreetype|libselinux|libcap\.|'
+-    r'libaudit|libnvidia|libva|libvdpau|libsndio|libjack|libdecor|libSM\.|libICE\.|libgtk|libgdk|libatk|libcairo|libpango|'
+-    r'libgdk_pixbuf|libglib|libgobject|libgio|libgmodule|libgthread|libffi|libmount|libblkid|libuuid|libpcre2|libz\.|'
+-    r'libsmartcols|libthai|libharfbuzz|libgraphite|libfribidi|libpixman|libepoxy|libstdc|libgcc_s)')
++    r'libthread_db|libGL\.|libGLX|libGLdispatch|libOpenGL|libEGL|libGLESv|libdrm|libgbm|libX11\.|libX11-xcb|libXau|libXdmcp|libXext\.|libxcb\.|libwayland|'
++    r'libxkbcommon\.|libpulse|libpipewire|libsystemd|libudev|libdbus-1|libaudit|libcap\.|libnvidia|'
++    r'libjack|libdecor|libinput|libmtdev|libgtk-|libgdk-|libatk|libsmartcols|libepoxy|libz\.|'
++    r'libstdc|libgcc_s)')
++# ...but the portable package DOES carry the C++ runtime (libstdc++, libgcc_s): the programs and libraries need a very recent one, the
++# system's may be older, and a newer one is safe to use in place of an older one. glib, harfbuzz, freetype, fontconfig, pcre2 and the
++# like are bundled too, as upstream's package does: a desktop without them is common.
++RUNTIME = re.compile(r'^(libstdc\+\+|libgcc_s)')
+ OSG_PLUGINS = ['bmp', 'dae', 'dds', 'freetype', 'jpeg', 'osg', 'png', 'serializers_osg', 'tga']  # CMakeLists.txt USED_OSG_PLUGINS
+ # what the Qt programs (launcher, wizard, OpenMW-CS) need to show a window: the platform back ends, SVG, OpenGL for X11/Wayland
+ QT_PLUGINS = {'platforms': ['libqxcb.so', 'libqwayland-egl.so', 'libqwayland-generic.so', 'libqoffscreen.so'],
+@@ -56,6 +60,17 @@ def library_deps(path):
+     return found
+ 
+ 
++def max_symbol_version(files, prefix):
++    """The newest GLIBC_x.y (or GLIBCXX_x.y.z) any of the files asks for: the system must have at least that."""
++    best = ()
++    for f in files:
++        for token in re.findall(prefix + r'(\d+(?:\.\d+)*)', sh('objdump', '-T', f).stdout):
++            version = tuple(int(x) for x in token.split('.'))
++            if version > best:
++                best = version
++    return '.'.join(str(x) for x in best) if best else None
++
++
+ def copy_tree(src, dst, skip=()):
+     for root, dirs, files in os.walk(src):
+         rel = os.path.relpath(root, src)
+@@ -142,7 +157,7 @@ def main():
+ 
+         print('programs (stripped)')
+         for p in present:
+-            dst = os.path.join(stage, p)
++            dst = os.path.join(stage, p + SUFFIX)
+             r = sh(strip, '--strip-all', '-o', dst, os.path.join(build, p))
+             if r.returncode:  # no strip tool: ship them as they are (much bigger)
+                 print('  could not strip %s (%s), copied as is' % (p, r.stderr.strip()[:60]))
+@@ -164,6 +179,15 @@ def main():
+             open(builtin_mw).read().replace('@BUILTIN_SCRIPTS@', builtin))
+         for f in root_files:
+             shutil.copy2(os.path.join(build, f), os.path.join(stage, f))
++        # what upstream's package carries besides the programs: the license (GPL: it must travel with them), the icon, desktop entries
++        if os.path.isfile(os.path.join(source, 'LICENSE')):
++            shutil.copy2(os.path.join(source, 'LICENSE'), os.path.join(stage, 'LICENSE.txt'))
++        if os.path.isfile(os.path.join(build, 'resources', 'openmw.png')):
++            shutil.copy2(os.path.join(build, 'resources', 'openmw.png'), os.path.join(stage, 'openmw.png'))
++        for d in ('org.openmw.launcher.desktop', 'org.openmw.cs.desktop'):
++            if os.path.isfile(os.path.join(build, d)):
++                os.makedirs(os.path.join(stage, 'desktop files'), exist_ok=True)
++                shutil.copy2(os.path.join(build, d), os.path.join(stage, 'desktop files', d))
+ 
+         # --- libraries
+         libs = {}
+@@ -178,7 +202,7 @@ def main():
+                             if os.path.isfile(os.path.join(osgdir, 'osgdb_%s.so' % n))]
+             if len(plugin_files) != len(OSG_PLUGINS):
+                 print('warning: OpenSceneGraph plugins missing in %s' % osgdir)
+-        else:
++        elif any(n.startswith('libosgDB') for n in libs):
+             print('warning: no OpenSceneGraph plugin folder found: the portable package will not read textures')
+         for f in plugin_files:
+             libs.update(library_deps(f))
+@@ -189,26 +213,83 @@ def main():
+                     if names is None or os.path.basename(f) in names:
+                         qtfiles.append((d, f))
+                         libs.update(library_deps(f))
+-        bundle = {n: r for n, r in libs.items() if not EXCLUDE.match(n)}
++        bundle = {n: r for n, r in libs.items() if not EXCLUDE.match(n) or RUNTIME.match(n)}
++        # libraries that are loaded while running, so that ldd cannot see them: SDL2 can be a thin layer (sdl2-compat, Fedora's) that
++        # opens the real SDL3 itself
++        for n, real in list(bundle.items()):
++            if n.startswith('libSDL2-2.0.so') and b'libSDL3.so.0' in open(real, 'rb').read():
++                sdl3 = os.path.join(os.path.dirname(real), 'libSDL3.so.0')
++                if os.path.exists(sdl3):
++                    print('SDL2 here is sdl2-compat: libSDL3 goes along')
++                    for dn, dreal in library_deps(sdl3).items():
++                        if not EXCLUDE.match(dn) or RUNTIME.match(dn):
++                            bundle.setdefault(dn, dreal)
++                    bundle['libSDL3.so.0'] = os.path.realpath(sdl3)
++
++        # the C library the files need, for the README and the checks the start scripts make
++        program_paths = [os.path.join(build, p) for p in present]
++        glibc = max_symbol_version(program_paths + list(bundle.values()), 'GLIBC_') or \
++            (sh('ldd', '--version').stdout.splitlines() or ['', ''])[0].split()[-1]
++        glibcxx = max_symbol_version(program_paths, 'GLIBCXX_') or '?'
+ 
+         # --- scripts and notes
+         osgname = os.path.basename(osgdir) if osgdir else 'osgPlugins'
+         env = ('export LD_LIBRARY_PATH="$HERE/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"\n'
+                'export OSG_LIBRARY_PATH="$HERE/lib/%s"\n'
+-               'export QT_PLUGIN_PATH="$HERE/lib/qt6/plugins"\n' % osgname)
++               'export QT_PLUGIN_PATH="$HERE/plugins"\n' % osgname)
+         header = '#!/bin/sh\n# %s\nHERE="$(cd "$(dirname "$0")" && pwd)"\ncd "$HERE" || exit 1\n'
+-        scripts = {
+-            'start-game.sh': ('Starts OpenMW (the game). Options are passed on: ./start-game.sh --help', 'openmw'),
+-            'start-launcher.sh': ('Starts the launcher: choose your Morrowind data and settings here first.', 'openmw-launcher'),
+-            'start-cs.sh': ('Starts OpenMW-CS, the construction set.', 'openmw-cs'),
+-            'start-wizard.sh': ('Starts the installation wizard (finds or installs Morrowind).', 'openmw-wizard'),
++        what = {
++            'openmw': 'Starts OpenMW, the game. Options are passed on: ./openmw --help',
++            'openmw-launcher': 'Starts the launcher: choose your Morrowind data and settings here first.',
++            'openmw-cs': 'Starts OpenMW-CS, the construction set.',
++            'openmw-wizard': 'Starts the installation wizard (finds or installs Morrowind).',
+         }
++        # checks that run before a program starts: say what is wrong instead of a bare loader error
++        check = '''
++# Can everything this program needs be found? If not, say what is wrong instead of a bare loader error.
++if [ -z "$OPENMW_SKIP_CHECK" ] && command -v ldd >/dev/null 2>&1; then
++    problems=$(ldd "./$PROGRAM" 2>&1 | grep 'not found' | sed 's/^[[:space:]]*//' | sort -u)
++    if [ -n "$problems" ]; then
++        {
++            echo "$PROGRAM cannot start on this system:"
++            echo "$problems" | sed 's/^/    /'
++            echo
++            if echo "$problems" | grep -q GLIBC; then
++                echo "This system's C library is older than this package needs (glibc @GLIBC@ or newer; this one has $(ldd --version 2>&1 | head -n 1 | sed 's/.* //'))."
++                echo "The programs cannot run on it. See README.txt: they can run in a container with a recent system."
++            else
++                echo "These libraries belong to a normal desktop Linux system (OpenGL/graphics drivers, X11 or Wayland, fontconfig...)."
++                echo "Install them with your package manager and try again."
++            fi
++            echo "./diagnose.sh prints what to send when asking for help. (OPENMW_SKIP_CHECK=1 skips this check.)"
++        } >&2
++        exit 1
++    fi
++fi
++'''.replace('@GLIBC@', glibc)
+         bodies = {}
+-        for name, (what, prog) in scripts.items():
+-            if prog in present:
+-                bodies[name] = lambda portable, what=what, prog=prog: (header % what) + (env if portable else '') + 'exec ./%s "$@"\n' % prog
+-        bodies['run.sh'] = lambda portable: (header % 'Runs any program of this folder: ./run.sh bsatool --help') + (env if portable else '') + \
+-            'program="$1"; shift\nexec "./$program" "$@"\n'
++        for prog in present:
++            bodies[prog] = lambda portable, prog=prog: (header % what.get(prog, 'Runs %s.' % prog)) + \
++                'PROGRAM=%s%s\n' % (prog, SUFFIX) + (env if portable else '') + check + 'exec "./$PROGRAM" "$@"\n'
++        programs_list = ' '.join(p + SUFFIX for p in present)
++        bodies['diagnose.sh'] = lambda portable: (header % 'Prints what is needed to find out why a program does not start. Send the output when asking for help.') + \
++            (env if portable else '') + '''echo "== system"
++( . /etc/os-release 2>/dev/null && echo "$PRETTY_NAME" )
++uname -srm
++echo "glibc: $(ldd --version 2>&1 | head -n 1)"
++echo "this package needs glibc @GLIBC@ or newer@RUNTIME@"
++echo "session: ${XDG_SESSION_TYPE:-?}  DISPLAY=${DISPLAY:-}  WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-}"
++for p in @PROGRAMS@; do
++    [ -x "./$p" ] || continue
++    echo "== $p"
++    ldd "./$p" 2>&1 | grep 'not found' || echo "everything it needs was found"
++done
++echo "== where the main libraries are loaded from"
++LD_DEBUG=libs ./openmw@SUFFIX@ --version 2>&1 | grep -E "calling init: .*(libosg\\.so|libMyGUIEngine|libstdc)" | sed 's/.*calling init: //' | head -n 6
++echo "== graphics"
++(glxinfo -B 2>/dev/null || echo "(glxinfo is not installed)") | head -n 14
++'''.replace('@GLIBC@', glibc).replace('@SUFFIX@', SUFFIX).replace('@PROGRAMS@', programs_list).replace(
++                '@RUNTIME@', '' if portable else ' and libstdc++ with GLIBCXX_%s' % glibcxx)
+ 
+         commit = sh('git', '-C', source, 'rev-parse', '--short', 'HEAD').stdout.strip() or 'unknown'
+         dirty = ' plus uncommitted changes' if sh('git', '-C', source, 'status', '--porcelain', '--untracked-files=no').stdout.strip() else ''
+@@ -223,7 +304,6 @@ def main():
+             r = sh('rpm', '-qf', '--qf', '%{NAME}\\n', path)
+             if r.returncode == 0:
+                 packages.update(r.stdout.split())
+-        glibc = (sh('ldd', '--version').stdout.splitlines() or ['', ''])[0].split()[-1]
+         # where each package comes from: the distribution itself, a Copr project, RPM Fusion (FFmpeg)
+         origin = {'copr': {}, 'rpmfusion': []}
+         for pkg in sorted(packages):
+@@ -250,19 +330,21 @@ What is in this folder
+                         the command-line tools
+   resources/            what they read (scripts, shaders, translations...), including the multiplayer mod
+   openmw.cfg ...        their configuration; do not edit (your own goes in ~/.config/openmw/openmw.cfg)
+-  start-game.sh start-launcher.sh start-cs.sh start-wizard.sh run.sh
+-                        start the programs: ./run.sh <program> [options]
++  *@SUFFIX@            the real programs. Do not run these: run the file of the same name without the suffix, a script that
++                        tells the program where its libraries are (./openmw-launcher, ./openmw ...)
++  diagnose.sh           prints what to send when asking for help
++  LICENSE.txt           the GNU GPL that OpenMW is released under (the source: gitlab.com/duron27/openmw-multiplayer)
+   (programs that were not built are not in the folder)
+ 
+ You need
+   * Morrowind (the game's data files; OpenMW does not include them)
+   * a Linux system with glibc %s or newer (Fedora 44, current Arch or openSUSE Tumbleweed...): the programs were built on
+-    one and will not start on an older system, whatever else is installed
++    one and will not start on an older system, whatever else is installed (on an older one see "If it does not start")
+   * OpenGL drivers (Mesa or the vendor's) and X11 or Wayland
+ """ % glibc
+             if portable:
+-                text += ("  * nothing else: the libraries are in lib/ and the start scripts use them. Start the programs through the\n"
+-                         "    scripts (start-game.sh, run.sh), not directly.\n")
++                text += ("  * nothing else: the libraries are in lib/ (and plugins/). Start the programs by their plain names\n"
++                         "    (./openmw-launcher, ./openmw ...), not the files ending in @SUFFIX@.\n")
+             else:
+                 text += ("  * these libraries from your system (this is the light package: they are not included). OpenMW needs its own\n"
+                          "    patched OpenSceneGraph (github.com/OpenMW/osg): the ordinary OSG will not do.\n")
+@@ -280,16 +362,26 @@ You need
+                          "    The portable package has all of them included.\n")
+             text += """
+ Starting
+-  1. ./start-launcher.sh   pick your Morrowind "Data Files" folder and the game files, press Play.
++  1. ./openmw-launcher     pick your Morrowind "Data Files" folder and the game files, press Play.
+      Without the launcher: put  data="/path/to/Morrowind/Data Files"  and  content=Morrowind.esm  in ~/.config/openmw/openmw.cfg
+-     and run ./start-game.sh  (or ./start-game.sh --data "/path/to/Data Files" --content Morrowind.esm).
++     and run ./openmw  (or ./openmw --data "/path/to/Data Files" --content Morrowind.esm).
+   2. Multiplayer: Multiplayer on the main menu -> Host a game, or Join a server (address, port, password), then start or load
+      a character. The mod is part of this package: do NOT also add it to openmw.cfg (data=...multiplayer/mod and
+      content=mp.omwscripts), it would load twice. A dedicated server is the separate openmw-mp-server zip.
+ 
+ Your own settings, data paths and saves live in ~/.config/openmw and ~/.local/share/openmw, not in this folder.
++
++If it does not start
++  * Start the programs by their plain names (./openmw-launcher, ./openmw ...), not the files ending in @SUFFIX@: the scripts
++    check the system first and name what is missing, and (portable package) tell the programs where lib/ is.
++  * A message about "GLIBC_@GLIBC@ not found" or a library such as libosg.so.162 means the system is older than this package needs.
++    The programs cannot run on it. The way around that is a container with a recent system: with Distrobox
++        distrobox create --name openmw --image fedora:44 && distrobox enter openmw
++    unpack this zip inside it (it shares your files, display and graphics) and start it from there.
++  * ./diagnose.sh prints the system, what each program cannot find and where its libraries load from. Send that output when asking
++    for help.
+ """
+-            return text
++            return text.replace('@GLIBC@', glibc).replace('@SUFFIX@', SUFFIX)
+ 
+         def finish(variant, portable):
+             target = os.path.join(work, 'openmw-multiplayer-client')
+@@ -305,9 +397,25 @@ Your own settings, data paths and saves live in ~/.config/openmw and ~/.local/sh
+                     shutil.copy2(real, os.path.join(lib, n))
+                 for f in plugin_files:
+                     shutil.copy2(f, os.path.join(lib, osgname, os.path.basename(f)))
+-                for d, f in qtfiles:
+-                    os.makedirs(os.path.join(lib, 'qt6', 'plugins', d), exist_ok=True)
+-                    shutil.copy2(f, os.path.join(lib, 'qt6', 'plugins', d, os.path.basename(f)))
++                for d, f in qtfiles:  # Qt looks in <program folder>/plugins by itself
++                    os.makedirs(os.path.join(target, 'plugins', d), exist_ok=True)
++                    shutil.copy2(f, os.path.join(target, 'plugins', d, os.path.basename(f)))
++                # where Qt looks for its plugins: this Qt does not work it out from where it is, so say so (relative to the programs)
++                open(os.path.join(target, 'qt.conf'), 'w').write('[Paths]\nPlugins = plugins\n')
++                # a path to lib/ inside the programs themselves, so that they find it even if started without their script
++                if shutil.which('patchelf'):
++                    for prog in present:
++                        sh('patchelf', '--force-rpath', '--set-rpath', '$ORIGIN/lib', os.path.join(target, prog + SUFFIX))
++                    # the bundled libraries keep the search paths they were built with (a system folder such as
++                    # /usr/lib/<arch>/libproxy); make them look next to themselves first
++                    for n in bundle:
++                        if os.path.isfile(os.path.join(lib, n)) and not os.path.islink(os.path.join(lib, n)):
++                            sh('patchelf', '--force-rpath', '--set-rpath', '$ORIGIN', os.path.join(lib, n))
++                    for d, f in qtfiles:
++                        sh('patchelf', '--force-rpath', '--set-rpath', '$ORIGIN/../../lib',
++                           os.path.join(target, 'plugins', d, os.path.basename(f)))
++                else:
++                    print('note: patchelf not found, the programs rely on their scripts to find lib/')
+             open(os.path.join(target, 'README.txt'), 'w').write(readme(portable))
+             final = os.path.join(out, 'openmw-multiplayer-client-%s-%s.zip' % (system, variant))
+             if os.path.exists(final):
+-- 
+2.55.0
+

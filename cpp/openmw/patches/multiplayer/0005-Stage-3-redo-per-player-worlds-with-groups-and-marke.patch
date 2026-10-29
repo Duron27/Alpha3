@@ -1,0 +1,1285 @@
+From 0a7b179a01118e6a2962762e4c823a5e60e0b2a0 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Wed, 7 Oct 2026 01:54:18 -0400
+Subject: [PATCH] Stage 3 (redo): per-player worlds with groups and marked
+ proxy actors
+
+- drop world-mutating sync (doors/pickups/drops/time); each player keeps their own world
+- relay: group routing, targeted messages, late-join replay, reset/leave on group change
+- proxies.lua: roster of living actors; proxies of group members' actors that are dead/missing locally,
+  named '[Owner's world]', own record without script, damage forwarded to the owner's real actor
+- damage.lua/remote.lua: damage application, health mirroring, kill notice
+- settings group (host/port/group) in Options -> Scripts -> Multiplayer
+- owner_bot.py to test with a single client
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ multiplayer/README.md                    |  23 +-
+ multiplayer/mod/mp.omwscripts            |   2 +
+ multiplayer/mod/scripts/mp/damage.lua    |  14 +
+ multiplayer/mod/scripts/mp/global.lua    | 160 +++++++-----
+ multiplayer/mod/scripts/mp/player.lua    |   9 +
+ multiplayer/mod/scripts/mp/proxies.lua   | 309 +++++++++++++++++++++++
+ multiplayer/mod/scripts/mp/remote.lua    |  56 +++-
+ multiplayer/mod/scripts/mp/worldsync.lua | 186 --------------
+ multiplayer/server/owner_bot.py          |  68 +++++
+ multiplayer/server/relay.py              | 123 ++++-----
+ 10 files changed, 626 insertions(+), 324 deletions(-)
+ create mode 100644 multiplayer/mod/scripts/mp/damage.lua
+ create mode 100644 multiplayer/mod/scripts/mp/player.lua
+ create mode 100644 multiplayer/mod/scripts/mp/proxies.lua
+ delete mode 100644 multiplayer/mod/scripts/mp/worldsync.lua
+ create mode 100644 multiplayer/server/owner_bot.py
+
+diff --git a/multiplayer/README.md b/multiplayer/README.md
+index ad0e567b57..2b3b7cae51 100644
+--- a/multiplayer/README.md
++++ b/multiplayer/README.md
+@@ -8,11 +8,18 @@
+ Run: `multiplayer/run-test.sh [path/to/openmw]`, then load a save. Watch `openmw.log` for `[mp]` lines.
+ Protocol: one JSON object per line, `{"t":"state","name","cell","pos":[x,y,z],"yaw"}`; the server adds `id`.
+ 
+-## Shared world state (stage 3)
+-`mod/scripts/mp/worldsync.lua` syncs, through the relay's replayed change log:
+-- game time (the lowest-id client is "host" and publishes it every 5 s),
+-- non-teleport doors (open/close), picked-up items, and items dropped at runtime.
+-Objects from content files are addressed as `<file>:<index>` (load-order independent); runtime drops as `<senderId>/<localId>`.
+-Changes for objects that are not loaded yet are applied when the object becomes active.
+-Not synced yet: container contents, NPC/creature deaths and combat, quests/globals, weather, locks.
+-Remote-player stand-ins can't be activated (no dialogue/pickpocket).
++## Per-player worlds and groups (stage 3)
++Every player keeps their **own** world; nothing a group member does changes yours.
++Only players in the same *group* (Options -> Scripts -> Multiplayer; default group `lobby`, empty = solo) see each other:
++- Members appear as stand-in NPCs with their look and gear (visible only when you share a cell).
++- If a member has an NPC/creature **alive** that is dead or missing in **your** world, you get a *proxy* copy named
++  `Name [Alice's world]`: its own record, no script, no AI, can't be talked to. You can fight it; the damage is sent to
++  Alice, whose real actor takes it (so she can finish her quest) while your world stays untouched.
++  Proxies mirror the owner's actor position and health. Hits on a proxy never give you a bounty (best effort).
++- Leaving the group (or the member disconnecting) removes their avatar and all their proxies.
++
++Test with one client: `server/owner_bot.py [--hurt <contentfile>:<index>]` pretends to be a member owning a scrib
++that doesn't exist in your world, and applies/prints damage you do to it.
++
++Not done: members' attacks on you, shared fights where both worlds have the actor alive, container contents,
++weather/time, quest sync (by design none), proxies for actors that are alive-but-unloaded in your world.
+diff --git a/multiplayer/mod/mp.omwscripts b/multiplayer/mod/mp.omwscripts
+index 31262948e1..f99df18ebc 100644
+--- a/multiplayer/mod/mp.omwscripts
++++ b/multiplayer/mod/mp.omwscripts
+@@ -1,2 +1,4 @@
+ GLOBAL: scripts/mp/global.lua
++PLAYER: scripts/mp/player.lua
+ CUSTOM: scripts/mp/remote.lua
++CUSTOM: scripts/mp/damage.lua
+diff --git a/multiplayer/mod/scripts/mp/damage.lua b/multiplayer/mod/scripts/mp/damage.lua
+new file mode 100644
+index 0000000000..bd32775b8c
+--- /dev/null
++++ b/multiplayer/mod/scripts/mp/damage.lua
+@@ -0,0 +1,14 @@
++-- Attached on demand to a real NPC/creature in *this* world when a group member
++-- hurts that actor's proxy in their own world. Applies the damage as a fraction of max health.
++local self = require('openmw.self')
++local types = require('openmw.types')
++
++return {
++    eventHandlers = {
++        MpDamage = function(d)
++            local health = types.Actor.stats.dynamic.health(self)
++            local max = health.base + health.modifier
++            health.current = math.max(0, health.current - d.frac * max)
++        end,
++    },
++}
+diff --git a/multiplayer/mod/scripts/mp/global.lua b/multiplayer/mod/scripts/mp/global.lua
+index 87cc5ce6e1..c896b6497a 100644
+--- a/multiplayer/mod/scripts/mp/global.lua
++++ b/multiplayer/mod/scripts/mp/global.lua
+@@ -1,37 +1,85 @@
+--- Multiplayer test client (stage 2): streams the local player's state to a relay
+--- server and represents every remote player as an AI-less NPC with their look and gear.
++-- Multiplayer client. Every player keeps their own world; only players in the same *group*
++-- see each other. Group members appear as stand-in NPCs (see below), and actors that are alive
++-- in a member's world but dead/missing in ours appear as marked proxies (proxies.lua).
+ local net = require('openmw.net')
+ local world = require('openmw.world')
+ local util = require('openmw.util')
+ local types = require('openmw.types')
++local async = require('openmw.async')
++local storage = require('openmw.storage')
+ local markup = require('openmw.markup')
+-local worldsync = require('scripts/mp/worldsync')
++local I = require('openmw.interfaces')
++local proxies = require('scripts/mp/proxies')
+ 
+-local HOST = '127.0.0.1'
+-local PORT = 25565
++local SETTINGS = 'SettingsGlobalMultiplayer'
+ local SEND_INTERVAL = 0.1
+ local EQUIP_INTERVAL = 1
+ local RETRY_INTERVAL = 3
+ local REMOTE_SCRIPT = 'scripts/mp/remote.lua'
+ 
++-- the settings page itself is registered by player.lua (pages can't be registered from global scripts)
++I.Settings.registerGroup {
++    key = SETTINGS, page = 'MultiplayerPage', l10n = 'Multiplayer', name = 'Connection',
++    permanentStorage = true,
++    settings = {
++        { key = 'Enabled', renderer = 'checkbox', name = 'Enabled', default = true },
++        { key = 'Host', renderer = 'textLine', name = 'Server host', default = '127.0.0.1' },
++        { key = 'Port', renderer = 'number', name = 'Server port', default = 25565,
++          argument = { integer = true, min = 1, max = 65535 } },
++        { key = 'Group', renderer = 'textLine', name = 'Group (empty = play solo)', default = 'lobby' },
++    },
++}
++local settings = storage.globalSection(SETTINGS)
++
+ local sendTimer, equipTimer, retry = 0, 0, 0
+ local lastEquipJson
+ local myId
+-local remotes = {} -- id -> { profile, state, equip, obj, equipSent }
++local remotes = {} -- id -> { profile, state, equip, obj, equipSent }  (group members' avatars)
++local avatarIds = {} -- local object id -> true
+ 
+ local function log(...) print('[mp]', ...) end
+-
+ local function player() return world.players[1] end
++local function cellKey(cell) return cell.isExterior and '' or cell.name end
++local function grouped() return net.isConnected() and (settings:get('Group') or '') ~= '' end
+ 
+-worldsync.init({
++proxies.init({
+     send = function(t) net.send(net.encodeJson(t)) end,
+     log = log,
++    player = player,
++    cellKey = cellKey,
+     myId = function() return myId end,
++    active = grouped,
++    isAvatar = function(obj) return avatarIds[obj.id] == true end,
++    ownerName = function(id)
++        local r = remotes[id]
++        return r and r.profile and r.profile.name or ('Player ' .. tostring(id))
++    end,
+ })
+ 
+-local function cellKey(cell) return cell.isExterior and '' or cell.name end
++------------------------------------------------------------------ connection / group
+ 
+------------------------------------------------------------------- outbound
++local function connect()
++    if not settings:get('Enabled') then return end
++    log('connecting to ' .. settings:get('Host') .. ':' .. tostring(settings:get('Port')))
++    net.connect(settings:get('Host'), settings:get('Port'))
++end
++
++local clearRemotes
++local function sendGroup()
++    net.send(net.encodeJson({ t = 'group', name = settings:get('Group') or '' }))
++end
++
++settings:subscribe(async:callback(function(_, key)
++    if key == 'Group' then
++        if net.isConnected() then clearRemotes(); sendGroup() end
++    else
++        clearRemotes()
++        net.disconnect()
++        retry = RETRY_INTERVAL
++    end
++end))
++
++------------------------------------------------------------------ outbound player state
+ 
+ local function sendProfile()
+     local p = player()
+@@ -68,7 +116,7 @@ local function sendState()
+     }))
+ end
+ 
+------------------------------------------------------------------- remote actors
++------------------------------------------------------------------ avatars of group members
+ 
+ local function stateVectors(r)
+     local s = r.state
+@@ -76,6 +124,7 @@ local function stateVectors(r)
+ end
+ 
+ local function placeRemote(r)
++    r.placing = true -- teleport is applied next frame; it also enables the object
+     local pos, rot = stateVectors(r)
+     r.obj:teleport(r.state.cell, pos, { rotation = rot })
+ end
+@@ -92,88 +141,82 @@ local function stockEquipment(r)
+     end
+     r.obj:sendEvent('MpEquip', { slots = slots })
+     r.equipSent = true
+-    log('equipped remote actor with ' .. tostring(next(slots) and 'gear' or 'nothing'))
+ end
+ 
+ local function spawnRemote(r)
+-    local template = types.NPC.record(player())
+     local draft = types.NPC.createRecordDraft({
+-        template = template,
+-        name = r.profile.name,
+-        race = r.profile.race,
+-        class = r.profile.class,
+-        head = r.profile.head,
+-        hair = r.profile.hair,
+-        isMale = r.profile.isMale,
++        template = types.NPC.record(player()),
++        name = r.profile.name, race = r.profile.race, class = r.profile.class,
++        head = r.profile.head, hair = r.profile.hair, isMale = r.profile.isMale,
+         isEssential = true,
+     })
+     local record = world.createRecord(draft)
+     r.obj = world.createObject(record.id, 1)
+-    r.obj:addScript(REMOTE_SCRIPT)
+-    log('spawned actor for ' .. tostring(r.profile.name) .. ' (' .. record.id .. ')')
++    avatarIds[r.obj.id] = true
++    r.obj:addScript(REMOTE_SCRIPT, {})
+     placeRemote(r)
+     r.equipSent = false
++    log('spawned avatar for ' .. tostring(r.profile.name))
+ end
+ 
+ local function removeRemote(id)
+     local r = remotes[id]
+     if not r then return end
+-    if r.obj and r.obj:isValid() then pcall(function() r.obj:remove() end) end
++    if r.obj then
++        avatarIds[r.obj.id] = nil
++        if r.obj:isValid() then pcall(function() r.obj:remove() end) end
++    end
+     remotes[id] = nil
++    proxies.removeOwner(id)
+     log('remote player ' .. tostring(id) .. ' left')
+ end
+ 
+-local function clearRemotes()
++clearRemotes = function()
+     local ids = {}
+     for id in pairs(remotes) do ids[#ids + 1] = id end
+     for _, id in ipairs(ids) do removeRemote(id) end
++    proxies.reset()
+ end
+ 
+--- Keep each remote's actor in sync with what we know: visible only in our own cell.
++-- Avatars are visible only in our own cell.
+ local function updateRemote(r)
+     local p = player()
+     if not (p and r.profile and r.state) then return end
+-    local sameCell = r.state.cell == cellKey(p.cell)
+-    if not sameCell then
+-        if r.obj and r.obj.enabled then r.obj.enabled = false end
+-        return
+-    end
+-    if not r.obj or not r.obj:isValid() then
+-        spawnRemote(r)
++    if r.state.cell ~= cellKey(p.cell) then
++        if r.obj and r.obj:isValid() and r.obj.enabled then r.obj.enabled = false end
+         return
+     end
++    if not r.obj or not r.obj:isValid() then spawnRemote(r) return end
++    if r.obj.enabled then r.placing = false end
+     if not r.obj.enabled then
+-        placeRemote(r)
+-        r.obj.enabled = true
++        if not r.placing then placeRemote(r) end
+         return
+     end
+     if not r.equipSent and r.equip then stockEquipment(r) end
+-    local pos = stateVectors(r)
+-    r.obj:sendEvent('MpTarget', {
+-        pos = pos, yaw = r.state.yaw, stance = r.state.stance,
+-    })
++    r.obj:sendEvent('MpTarget', { pos = stateVectors(r), yaw = r.state.yaw, stance = r.state.stance })
+ end
+ 
+ ------------------------------------------------------------------ messages
+ 
+ local function onMessage(msg)
+-    if msg.t == 'host' then worldsync.setHost(msg.id == myId) return end
+-    if worldsync.onMessage(msg) then return end
+     if msg.t == 'hello' then
+         myId = msg.id
+         log('my id is ' .. tostring(myId))
+         sendProfile()
+         sendEquipment(true)
++        sendGroup()
+         return
+     end
++    if msg.t == 'reset' then clearRemotes() return end
++    if msg.t == 'leave' then removeRemote(msg.id) return end
++    if proxies.onMessage(msg) then return end
+     local id = msg.id
+-    if msg.t == 'leave' then removeRemote(id) return end
+     if not id then return end
+     local r = remotes[id]
+     if not r then
+         r = {}
+         remotes[id] = r
+-        log('remote player ' .. tostring(id) .. ' appeared')
++        log('group member ' .. tostring(id) .. ' appeared')
+     end
+     if msg.t == 'profile' then r.profile = msg
+     elseif msg.t == 'equip' then r.equip = msg.slots; r.equipSent = false
+@@ -184,55 +227,44 @@ end
+ 
+ return {
+     engineHandlers = {
+-        onPlayerAdded = function()
+-            log('connecting to ' .. HOST .. ':' .. PORT)
+-            net.connect(HOST, PORT)
+-        end,
++        onPlayerAdded = function() connect() end,
+         onSave = function()
+-            -- remote actors are saved with the world; remember them so they can be cleaned up on load
++            -- stand-ins are saved with the world; remember them so they can be cleaned up on load
+             local objs = {}
+             for _, r in pairs(remotes) do if r.obj then objs[#objs + 1] = r.obj end end
+             return { objs = objs }
+         end,
+         onLoad = function(saved)
+-            remotes = {}
+-            lastEquipJson = nil
+-            worldsync.reset()
++            remotes, avatarIds, lastEquipJson = {}, {}, nil
++            proxies.reset()
+             for _, obj in ipairs(saved and saved.objs or {}) do
+                 if obj:isValid() then pcall(function() obj:remove() end) end
+             end
+         end,
+         onUpdate = function(dt)
+-            worldsync.onUpdate(dt)
++            proxies.onUpdate(dt)
+             for _, r in pairs(remotes) do updateRemote(r) end
+             if net.isConnected() then
+                 sendTimer = sendTimer + dt
+                 equipTimer = equipTimer + dt
+                 if sendTimer >= SEND_INTERVAL then sendTimer = 0; sendState() end
+                 if equipTimer >= EQUIP_INTERVAL then equipTimer = 0; sendEquipment(false) end
+-            elseif player() then
++            elseif player() and settings:get('Enabled') then
+                 retry = retry + dt
+                 if retry >= RETRY_INTERVAL then
+                     retry = 0
+-                    net.connect(HOST, PORT)
++                    connect()
+                 end
+             end
+         end,
+-        onActivate = function(obj, actor)
+-            -- remote players are stand-ins: no dialogue, pickpocketing, etc.
+-            for _, r in pairs(remotes) do
+-                if r.obj and r.obj == obj then return false end
+-            end
+-            worldsync.onActivate(obj, actor)
++        onActivate = function(obj)
++            -- stand-ins and proxies are not real inhabitants of this world: no dialogue, pickpocketing, etc.
++            if avatarIds[obj.id] or proxies.isProxy(obj) then return false end
+         end,
+-        onDropped = worldsync.onDropped,
+-        onPlaced = worldsync.onDropped,
+-        onObjectActive = worldsync.onObjectActive,
+         onNetConnected = function() log('connected'); retry = 0 end,
+         onNetDisconnected = function(reason)
+             log('disconnected: ' .. tostring(reason))
+             clearRemotes()
+-            worldsync.setHost(false)
+         end,
+         onNetMessage = function(line)
+             local ok, msg = pcall(markup.decodeYaml, line)
+@@ -241,9 +273,11 @@ return {
+     },
+     eventHandlers = {
+         MpSnap = function(d)
++            if proxies.onSnap(d.actor) then return end
+             for _, r in pairs(remotes) do
+                 if r.obj == d.actor and r.state then placeRemote(r) end
+             end
+         end,
++        MpProxyDamage = proxies.onProxyDamage,
+     },
+ }
+diff --git a/multiplayer/mod/scripts/mp/player.lua b/multiplayer/mod/scripts/mp/player.lua
+new file mode 100644
+index 0000000000..3b1f685228
+--- /dev/null
++++ b/multiplayer/mod/scripts/mp/player.lua
+@@ -0,0 +1,9 @@
++-- Registers the Multiplayer settings page (the settings group lives in global.lua).
++local I = require('openmw.interfaces')
++
++I.Settings.registerPage {
++    key = 'MultiplayerPage', l10n = 'Multiplayer', name = 'Multiplayer',
++    description = 'Connect to a relay server and join a group. Group members share presence, nothing else.',
++}
++
++return {}
+diff --git a/multiplayer/mod/scripts/mp/proxies.lua b/multiplayer/mod/scripts/mp/proxies.lua
+new file mode 100644
+index 0000000000..553379e3cb
+--- /dev/null
++++ b/multiplayer/mod/scripts/mp/proxies.lua
+@@ -0,0 +1,309 @@
++-- Per-player worlds: nothing a group member does changes *this* world. Instead, each client
++-- publishes a roster of the living NPCs/creatures around it. When a member has an actor alive
++-- that is dead or missing in our world, we spawn a marked proxy copy ("Name [Alice's world]").
++-- Hits on the proxy are reported to the owner, whose real actor takes the damage (so they can
++-- finish their quest); the proxy has its own record, no script and no AI, so it changes nothing here.
++local core = require('openmw.core')
++local world = require('openmw.world')
++local types = require('openmw.types')
++local util = require('openmw.util')
++
++local M = {}
++
++local ROSTER_INTERVAL = 0.25
++local ROSTER_RANGE = 4000
++local ROSTER_MAX = 60
++local DEAD_REPEATS = 12 -- how many rosters a death notice is repeated
++local REMOTE_SCRIPT = 'scripts/mp/remote.lua'
++local DAMAGE_SCRIPT = 'scripts/mp/damage.lua'
++local SUPPRESS_PROXY_CRIME = true -- hitting a proxy must not give *us* a bounty
++local CRIME_WINDOW = 1.5
++
++local ctx -- { send, log, player, cellKey, myId, ownerName, isAvatar }
++local rosterTimer = 0
++local clock = 0
++local proxies = {} -- key -> { owner, obj, key, last, ownerCell, gone }
++local proxyById = {} -- local object id -> proxy
++local ownerCells = {} -- owner id -> cell key
++local records = {} -- owner..'|'..recordId -> custom record
++local recentDead = {} -- nid -> repeats left (our actors that just died)
++local previousRoster = {} -- nid -> true
++local damageQueue = {} -- { obj, frac, wait }
++local crimeSamples = {} -- { t, level }
++local crimeBase
++local crimeGuard = 0
++
++function M.init(context) ctx = context end
++
++function M.reset()
++    for _, px in pairs(proxies) do
++        if px.obj and px.obj:isValid() then pcall(function() px.obj:remove() end) end
++    end
++    proxies, proxyById, ownerCells, previousRoster, recentDead, damageQueue = {}, {}, {}, {}, {}, {}
++end
++
++function M.isProxy(obj) return proxyById[obj.id] ~= nil end
++
++function M.removeOwner(owner)
++    ownerCells[owner] = nil
++    for key, px in pairs(proxies) do
++        if px.owner == owner then
++            local id = px.obj.id
++            if px.obj:isValid() then pcall(function() px.obj:remove() end) end
++            proxyById[id] = nil
++            proxies[key] = nil
++        end
++    end
++end
++
++-- Stable cross-client id: "<content file>:<index>" (GameObject.id embeds the load order).
++local function contentId(obj)
++    local n = tonumber(obj.id)
++    if not obj.contentFile or not n then return nil end
++    return obj.contentFile .. ':' .. (n % 0x1000000)
++end
++
++local function objectById(id)
++    local file, index = tostring(id):match('^(.+):(%d+)$')
++    if not file then return nil end
++    local ok, obj = pcall(function() return world.getObjectByFormId(core.getFormId(file, tonumber(index))) end)
++    if ok and obj and obj:isValid() then return obj end
++    return nil
++end
++
++local function round(x, step) return math.floor(x / step + 0.5) * step end
++
++------------------------------------------------------------------ outbound
++
++local function healthRatio(a)
++    local ok, r = pcall(function()
++        local h = types.Actor.stats.dynamic.health(a)
++        return h.current / math.max(1, h.base + h.modifier)
++    end)
++    return ok and round(r, 0.01) or 1
++end
++
++local function sendRoster()
++    local p = ctx.player()
++    if not p then return end
++    local list, current = {}, {}
++    for _, a in ipairs(world.activeActors) do
++        if #list >= ROSTER_MAX then break end
++        if a ~= p and (a.type == types.NPC or a.type == types.Creature) and not ctx.isAvatar(a) and not M.isProxy(a) then
++            local nid = contentId(a)
++            if nid and a.enabled and (a.position - p.position):length() < ROSTER_RANGE then
++                if types.Actor.isDead(a) then
++                    if previousRoster[nid] then recentDead[nid] = DEAD_REPEATS end
++                else
++                    current[nid] = true
++                    local pos = a.position
++                    list[#list + 1] = {
++                        n = nid, r = a.recordId, h = healthRatio(a),
++                        p = { round(pos.x, 1), round(pos.y, 1), round(pos.z, 1) },
++                        y = round(a.rotation:getYaw(), 0.01),
++                    }
++                end
++            end
++        end
++    end
++    -- actors that vanished from the roster because they died (not because they walked away)
++    for nid in pairs(previousRoster) do
++        if not current[nid] then
++            local obj = objectById(nid)
++            if obj and types.Actor.isDead(obj) then recentDead[nid] = DEAD_REPEATS end
++        end
++    end
++    previousRoster = current
++    local dead = {}
++    for nid, left in pairs(recentDead) do
++        dead[#dead + 1] = nid
++        if left <= 1 then recentDead[nid] = nil else recentDead[nid] = left - 1 end
++    end
++    ctx.send({ t = 'actors', cell = ctx.cellKey(p.cell), list = list, dead = dead })
++end
++
++------------------------------------------------------------------ proxies
++
++local function needsProxy(nid)
++    local obj = objectById(nid)
++    return not obj or types.Actor.isDead(obj) or not obj.enabled
++end
++
++local function recordFor(owner, recordId)
++    local cacheKey = owner .. '|' .. recordId
++    if records[cacheKey] then return records[cacheKey] end
++    local T = types.NPC
++    local template = T.records[recordId]
++    if not template then
++        T = types.Creature
++        template = T.records[recordId]
++    end
++    if not template then return nil end
++    local fields = {
++        template = template,
++        name = (template.name or recordId) .. ' [' .. ctx.ownerName(owner) .. "'s world]",
++        isEssential = false,
++        isRespawning = false,
++    }
++    -- no script: the proxy must not run the original actor's quest logic in our world
++    fields.mwscript = ''
++    local ok, draft = pcall(T.createRecordDraft, fields)
++    if not ok then
++        fields.mwscript = nil
++        ok, draft = pcall(T.createRecordDraft, fields)
++    end
++    if not ok then ctx.log('cannot create proxy record for ' .. recordId .. ': ' .. tostring(draft)) return nil end
++    records[cacheKey] = world.createRecord(draft)
++    return records[cacheKey]
++end
++
++local function place(px)
++    px.placing = true -- teleport is applied next frame; it also enables the object
++    local e = px.last
++    px.obj:teleport(ctx.cellKey(ctx.player().cell), util.vector3(e.p[1], e.p[2], e.p[3]),
++        { rotation = util.transform.rotateZ(e.y or 0) })
++end
++
++local function spawn(owner, e, key)
++    local rec = recordFor(owner, e.r)
++    if not rec then return nil end
++    local obj = world.createObject(rec.id, 1)
++    obj:addScript(REMOTE_SCRIPT, { proxy = true, key = key })
++    local px = { owner = owner, obj = obj, key = key, last = e }
++    proxies[key] = px
++    proxyById[obj.id] = px
++    place(px)
++    ctx.log('proxy for ' .. e.r .. ' (' .. e.n .. ') from ' .. ctx.ownerName(owner))
++    return px
++end
++
++local function kill(px)
++    if px.gone then return end
++    px.gone = true
++    if px.obj and px.obj:isValid() then px.obj:sendEvent('MpKill') end
++end
++
++local function onRoster(msg)
++    local p = ctx.player()
++    local owner = msg.id
++    if not p or not owner or type(msg.list) ~= 'table' then return end
++    ownerCells[owner] = msg.cell
++    local sameCell = msg.cell == ctx.cellKey(p.cell)
++    for _, e in ipairs(msg.list) do
++        local key = owner .. '|' .. e.n
++        local px = proxies[key]
++        if not px and sameCell and needsProxy(e.n) then px = spawn(owner, e, key) end
++        if px then
++            px.last = e
++            if sameCell and px.obj:isValid() and px.obj.enabled and not px.gone then
++                px.obj:sendEvent('MpTarget', {
++                    pos = util.vector3(e.p[1], e.p[2], e.p[3]), yaw = e.y, hp = e.h,
++                })
++            end
++        end
++    end
++    for _, nid in ipairs(msg.dead or {}) do
++        local px = proxies[owner .. '|' .. nid]
++        if px then kill(px) end
++    end
++end
++
++-- Another member damaged our real actor's proxy in their world.
++local function onDamage(msg)
++    local obj = objectById(msg.nid)
++    if obj and not types.Actor.isDead(obj) then
++        damageQueue[#damageQueue + 1] = { obj = obj, frac = msg.frac, wait = 0 }
++    end
++end
++
++function M.onMessage(msg)
++    if msg.t == 'actors' then onRoster(msg) return true end
++    if msg.t == 'dmg' then
++        if msg.to == ctx.myId() then onDamage(msg) end
++        return true
++    end
++    return false
++end
++
++-- Event from a proxy's local script: we hurt it.
++function M.onProxyDamage(d)
++    local px = proxies[d.key]
++    if not px then return end
++    ctx.send({ t = 'dmg', to = px.owner, nid = px.last.n, frac = d.frac })
++    crimeGuard = CRIME_WINDOW + 0.5
++end
++
++------------------------------------------------------------------ per-frame
++
++local function updateCrime(dt, p)
++    if not SUPPRESS_PROXY_CRIME then return end
++    local ok, level = pcall(types.Player.getCrimeLevel, p)
++    if not ok then return end
++    if crimeGuard > 0 then
++        crimeGuard = crimeGuard - dt
++        if not crimeBase then
++            crimeBase = level
++            for _, s in ipairs(crimeSamples) do crimeBase = math.min(crimeBase, s.level) end
++        end
++        if level > crimeBase then pcall(types.Player.setCrimeLevel, p, crimeBase) end
++    else
++        crimeBase = nil
++        crimeSamples[#crimeSamples + 1] = { t = clock, level = level }
++        while #crimeSamples > 0 and clock - crimeSamples[1].t > CRIME_WINDOW do table.remove(crimeSamples, 1) end
++    end
++end
++
++function M.onUpdate(dt)
++    clock = clock + dt
++    local p = ctx.player()
++    if not p then return end
++    updateCrime(dt, p)
++
++    -- deliver queued damage to our real actors
++    for i = #damageQueue, 1, -1 do
++        local d = damageQueue[i]
++        d.wait = d.wait - dt
++        if not d.obj:isValid() or types.Actor.isDead(d.obj) then
++            table.remove(damageQueue, i)
++        elseif d.wait <= 0 then
++            if not d.obj:hasScript(DAMAGE_SCRIPT) then
++                d.obj:addScript(DAMAGE_SCRIPT)
++                d.wait = 0.2
++            else
++                d.obj:sendEvent('MpDamage', { frac = d.frac })
++                table.remove(damageQueue, i)
++            end
++        end
++    end
++
++    -- proxies are only present while their owner shares our cell
++    local here = ctx.cellKey(p.cell)
++    for _, px in pairs(proxies) do
++        if px.obj:isValid() then
++            local together = ownerCells[px.owner] == here
++            if px.obj.enabled then px.placing = false end
++            if together and not px.obj.enabled and not px.placing then
++                place(px)
++            elseif not together and px.obj.enabled then
++                px.obj.enabled = false
++            end
++        end
++    end
++
++    if ctx.active() then
++        rosterTimer = rosterTimer + dt
++        if rosterTimer >= ROSTER_INTERVAL then
++            rosterTimer = 0
++            sendRoster()
++        end
++    end
++end
++
++-- A proxy fell too far from where its owner's actor is.
++function M.onSnap(actor)
++    local px = proxyById[actor.id]
++    if px and not px.gone then place(px) return true end
++    return false
++end
++
++return M
+diff --git a/multiplayer/mod/scripts/mp/remote.lua b/multiplayer/mod/scripts/mp/remote.lua
+index 34fd4dcce9..fc50d175ae 100644
+--- a/multiplayer/mod/scripts/mp/remote.lua
++++ b/multiplayer/mod/scripts/mp/remote.lua
+@@ -1,10 +1,11 @@
+--- Local script attached to the NPC that stands in for a remote player.
+--- Disables AI and steers the actor toward the last known remote position so it
+--- plays real walk/run animations; the global script teleports it if it gets too far off.
++-- Local script for stand-in actors: remote-player avatars and proxies of group members' NPCs.
++-- Disables AI and steers the actor toward the last known remote position so it plays real
++-- walk/run animations; the global script teleports it if it gets too far off.
++-- Proxies (initData.proxy) additionally mirror health from the owner's world and report
++-- damage done to them locally so the owner's real actor can take it.
+ local self = require('openmw.self')
+ local core = require('openmw.core')
+ local types = require('openmw.types')
+-local util = require('openmw.util')
+ 
+ local Actor = types.Actor
+ 
+@@ -12,13 +13,18 @@ local WALK_START, WALK_STOP = 70, 30 -- distance hysteresis (game units)
+ local RUN_DIST = 250
+ local SNAP_DIST = 700
+ local TURN_RATE = 8 -- rad/s
++local DAMAGE_REPORT_INTERVAL = 0.2
+ 
+-local target -- { pos, yaw, stance }
++local isProxy, key
++local target -- { pos, yaw, stance, sneak, hp }
+ local walking = false
+ local desiredEquip
+ local equipTimer = 0
+ local snapTimer = 0
+ local aiOff = false
++local lastHp
++local pendingDamage = 0
++local damageTimer = 0
+ 
+ local function wrap(a)
+     while a > math.pi do a = a - 2 * math.pi end
+@@ -35,13 +41,44 @@ local function equipMatches()
+     return true
+ end
+ 
++local function healthStat() return Actor.stats.dynamic.health(self) end
++local function maxHealth(h) return math.max(1, h.base + h.modifier) end
++
++local function trackHealth(dt)
++    local h = healthStat()
++    if lastHp == nil then lastHp = h.current end
++    if h.current < lastHp - 0.001 then
++        pendingDamage = pendingDamage + (lastHp - h.current) / maxHealth(h)
++    end
++    lastHp = h.current
++    damageTimer = damageTimer - dt
++    if pendingDamage > 0 and damageTimer <= 0 then
++        damageTimer = DAMAGE_REPORT_INTERVAL
++        core.sendGlobalEvent('MpProxyDamage', { key = key, frac = pendingDamage })
++        pendingDamage = 0
++    end
++    -- the owner's world is authoritative for health: mirror it downward only
++    if target and target.hp and not Actor.isDead(self) then
++        local want = target.hp * maxHealth(h)
++        if want < h.current - 0.5 then
++            h.current = want
++            lastHp = want
++        end
++    end
++end
++
+ return {
+     engineHandlers = {
++        onInit = function(d)
++            if d then isProxy, key = d.proxy, d.key end
++        end,
+         onActive = function() self:enableAI(false); aiOff = true end,
+         onUpdate = function(dt)
+             if not aiOff then self:enableAI(false); aiOff = true end
+             local c = self.controls
+ 
++            if isProxy then trackHealth(dt) end
++
+             if desiredEquip then
+                 equipTimer = equipTimer - dt
+                 if equipTimer <= 0 then
+@@ -50,7 +87,7 @@ return {
+                 end
+             end
+ 
+-            if not target then return end
++            if not target or Actor.isDead(self) then return end
+             snapTimer = snapTimer - dt
+ 
+             local delta = target.pos - self.position
+@@ -77,12 +114,17 @@ return {
+     },
+     eventHandlers = {
+         MpTarget = function(d)
+-            target = { pos = d.pos, yaw = d.yaw, sneak = d.sneak }
++            target = { pos = d.pos, yaw = d.yaw, sneak = d.sneak, hp = d.hp }
+             if d.stance and Actor.getStance(self) ~= d.stance then Actor.setStance(self, d.stance) end
+         end,
+         MpEquip = function(d)
+             desiredEquip = d.slots
+             equipTimer = 0
+         end,
++        MpKill = function()
++            local h = healthStat()
++            lastHp = 0
++            h.current = 0
++        end,
+     },
+ }
+diff --git a/multiplayer/mod/scripts/mp/worldsync.lua b/multiplayer/mod/scripts/mp/worldsync.lua
+deleted file mode 100644
+index 97aec82f53..0000000000
+--- a/multiplayer/mod/scripts/mp/worldsync.lua
++++ /dev/null
+@@ -1,186 +0,0 @@
+--- Shared world state for the multiplayer test mod: game time, doors, picked-up items, dropped items.
+--- The relay server is the source of truth for the log of changes and replays it to late joiners.
+--- Objects are addressed by GameObject.id (identical on every client for content-file objects) or,
+--- for items dropped at runtime, by a canonical id "<senderId>/<senderLocalId>".
+-local core = require('openmw.core')
+-local world = require('openmw.world')
+-local types = require('openmw.types')
+-local util = require('openmw.util')
+-
+-local M = {}
+-
+-local ACTIVATION_CHECK_DELAY = 0.15
+-local TIME_INTERVAL = 5
+-local TIME_TOLERANCE = 0.05 -- game hours
+-
+-local ctx -- { send = function(table), log = function(...), myId = function() }
+-local isHost = false
+-local timeTimer = 0
+-local checks = {} -- { obj, kind, wait }
+-local pending = {} -- object id -> { take = true } | { door = bool }  (waiting for the object to load)
+-local canon = {} -- local object id -> canonical id
+-local byCanon = {} -- canonical id -> local object
+-
+-function M.init(context) ctx = context end
+-
+-function M.reset()
+-    checks, pending, canon, byCanon = {}, {}, {}, {}
+-    timeTimer = 0
+-end
+-
+-function M.setHost(v) isHost = v end
+-
+--- Stable cross-client id for an object defined by a content file: "<file>:<index within file>".
+--- GameObject.id embeds the load-order index of the file, so it can't be shared as is.
+-local function contentId(obj)
+-    local n = tonumber(obj.id)
+-    if not obj.contentFile or not n then return nil end
+-    return obj.contentFile .. ':' .. (n % 0x1000000)
+-end
+-
+-local function netId(obj) return canon[obj.id] or contentId(obj) end
+-
+-local function objectById(id)
+-    local file, index = tostring(id):match('^(.+):(%d+)$')
+-    if not file then return nil end
+-    local ok, obj = pcall(function() return world.getObjectByFormId(core.getFormId(file, tonumber(index))) end)
+-    if ok and obj and obj:isValid() then return obj end
+-    return nil
+-end
+-
+-local function resolve(id)
+-    local obj = byCanon[id]
+-    if obj and obj:isValid() then return obj end
+-    return objectById(id)
+-end
+-
+-local function cellKey(cell) return cell.isExterior and '' or cell.name end
+-
+------------------------------------------------------------------- outbound (local player actions)
+-
+--- Called from the global onActivate handler. Never blocks activation.
+-function M.onActivate(obj, actor)
+-    if actor.type ~= types.Player or not netId(obj) then return end
+-    if obj.type == types.Door then
+-        if not types.Door.isTeleport(obj) then
+-            checks[#checks + 1] = { obj = obj, kind = 'door', wait = ACTIVATION_CHECK_DELAY }
+-        end
+-    elseif types.Item.objectIsInstance(obj) then
+-        checks[#checks + 1] = { obj = obj, kind = 'take', wait = ACTIVATION_CHECK_DELAY, nid = netId(obj) }
+-    end
+-end
+-
+-function M.onDropped(obj, actor, position, rotation)
+-    if actor.type ~= types.Player then return end
+-    local cid = tostring(ctx.myId()) .. '/' .. obj.id
+-    canon[obj.id] = cid
+-    byCanon[cid] = obj
+-    ctx.send({
+-        t = 'drop', cid = cid, rec = obj.recordId, count = obj.count,
+-        cell = cellKey(actor.cell), pos = { position.x, position.y, position.z },
+-        yaw = rotation:getYaw(),
+-    })
+-end
+-
+-local function runChecks(dt)
+-    for i = #checks, 1, -1 do
+-        local c = checks[i]
+-        c.wait = c.wait - dt
+-        if c.wait <= 0 then
+-            table.remove(checks, i)
+-            if c.kind == 'door' then
+-                if c.obj:isValid() then
+-                    local state = types.Door.getDoorState(c.obj)
+-                    if state ~= types.Door.STATE.Idle then
+-                        ctx.send({ t = 'door', oid = netId(c.obj), open = state == types.Door.STATE.Opening })
+-                    end
+-                end
+-            elseif c.kind == 'take' then
+-                if not c.obj:isValid() or c.obj.count == 0 then
+-                    ctx.send({ t = 'take', oid = c.nid })
+-                end
+-            end
+-        end
+-    end
+-end
+-
+------------------------------------------------------------------- inbound
+-
+-local function applyDoor(obj, open)
+-    if (open and types.Door.isClosed(obj)) or (not open and types.Door.isOpen(obj)) then
+-        types.Door.activateDoor(obj, open)
+-    end
+-end
+-
+-local function applyTime(msg)
+-    local ok, g = pcall(function() return world.mwscript.getGlobalVariables() end)
+-    if not ok then return end
+-    pcall(function()
+-        local hourDiff = math.abs((g.gamehour or 0) - msg.hour)
+-        if g.day ~= msg.day or g.month ~= msg.month or g.year ~= msg.year or hourDiff > TIME_TOLERANCE then
+-            g.year, g.month, g.day, g.gamehour = msg.year, msg.month, msg.day, msg.hour
+-        end
+-    end)
+-end
+-
+-local function sendTime()
+-    local ok, g = pcall(function() return world.mwscript.getGlobalVariables() end)
+-    if not ok then return end
+-    ctx.send({ t = 'time', hour = g.gamehour, day = g.day, month = g.month, year = g.year })
+-end
+-
+--- Returns true if the message was a world-state message.
+-function M.onMessage(msg)
+-    if msg.t == 'door' then
+-        local obj = objectById(msg.oid)
+-        if obj then applyDoor(obj, msg.open) else pending[msg.oid] = { door = msg.open } end
+-        return true
+-    elseif msg.t == 'take' then
+-        local obj = resolve(msg.oid)
+-        if obj then
+-            obj:remove()
+-        else
+-            pending[msg.oid] = { take = true }
+-        end
+-        return true
+-    elseif msg.t == 'drop' then
+-        if resolve(msg.cid) then return true end
+-        local ok, obj = pcall(world.createObject, msg.rec, msg.count or 1)
+-        if not ok then ctx.log('cannot create dropped item ' .. tostring(msg.rec)) return true end
+-        canon[obj.id] = msg.cid
+-        byCanon[msg.cid] = obj
+-        obj:teleport(msg.cell or '', util.vector3(msg.pos[1], msg.pos[2], msg.pos[3]),
+-            { rotation = util.transform.rotateZ(msg.yaw or 0) })
+-        return true
+-    elseif msg.t == 'time' then
+-        applyTime(msg)
+-        return true
+-    end
+-    return false
+-end
+-
+--- An object finished loading: apply changes that arrived while it was unloaded.
+-function M.onObjectActive(obj)
+-    local nid = netId(obj)
+-    local p = nid and pending[nid]
+-    if not p then return end
+-    pending[nid] = nil
+-    if p.take then
+-        obj:remove()
+-    elseif p.door ~= nil and obj.type == types.Door then
+-        applyDoor(obj, p.door)
+-    end
+-end
+-
+-function M.onUpdate(dt)
+-    runChecks(dt)
+-    if isHost then
+-        timeTimer = timeTimer + dt
+-        if timeTimer >= TIME_INTERVAL then
+-            timeTimer = 0
+-            sendTime()
+-        end
+-    end
+-end
+-
+-return M
+diff --git a/multiplayer/server/owner_bot.py b/multiplayer/server/owner_bot.py
+new file mode 100644
+index 0000000000..0998bfbb20
+--- /dev/null
++++ b/multiplayer/server/owner_bot.py
+@@ -0,0 +1,68 @@
++#!/usr/bin/env python3
++"""Fake group member for testing proxies with one game client.
++
++Joins GROUP, waits for the game's `state` (to learn its cell and position), then pretends to own
++a living actor (default: a scrib) that does not exist in the game's world, standing 200 units away.
++Prints damage reported against it. Optionally (--hurt NID) sends damage to one of the game's real actors.
++
++usage: owner_bot.py [host] [port] [group] [--rec scrib] [--hurt morrowind.esm:1234]
++"""
++import json
++import math
++import socket
++import sys
++import time
++
++args = [a for a in sys.argv[1:]]
++def opt(name, default=None):
++    if name in args:
++        i = args.index(name); v = args[i + 1]; del args[i:i + 2]; return v
++    return default
++rec = opt("--rec", "scrib")
++hurt = opt("--hurt")
++host = args[0] if len(args) > 0 else "127.0.0.1"
++port = int(args[1]) if len(args) > 1 else 25565
++group = args[2] if len(args) > 2 else "lobby"
++
++s = socket.create_connection((host, port))
++f = s.makefile("rwb", buffering=0)
++def send(m): f.write((json.dumps(m) + "\n").encode())
++
++send({"t": "profile", "name": "Bot", "race": "dark elf", "class": "acrobat",
++      "head": "b_n_dark elf_m_head_01", "hair": "b_n_dark elf_m_hair_01", "isMale": True})
++send({"t": "group", "name": group})
++me = None
++peer = None
++cell, pos = None, None
++hp = 1.0
++t0 = time.time()
++sent_hurt = False
++s.settimeout(0.2)
++buf = b""
++while True:
++    try:
++        d = s.recv(65536)
++        if not d: break
++        buf += d
++    except socket.timeout:
++        pass
++    while b"\n" in buf:
++        line, buf = buf.split(b"\n", 1)
++        m = json.loads(line)
++        if m["t"] == "hello": me = m["id"]
++        elif m["t"] == "state": cell, pos, peer = m["cell"], m["pos"], m["id"]
++        elif m["t"] == "dmg":
++            hp = max(0.0, hp - m["frac"]); print(f"damage {m['frac']:.2f} on {m['nid']} -> hp {hp:.2f}", flush=True)
++    if pos is not None:
++        a = time.time() - t0
++        mine = {"t": "state", "cell": cell, "pos": [pos[0] + 200, pos[1] + 200, pos[2]], "yaw": 0, "stance": 0}
++        send(mine)
++        if hp > 0:
++            lst = [{"n": "morrowind.esm:16777000", "r": rec, "h": hp,
++                    "p": [pos[0] + 200 + 80 * math.cos(a), pos[1] + 200 + 80 * math.sin(a), pos[2]], "y": 0}]
++            send({"t": "actors", "cell": cell, "list": lst, "dead": []})
++        else:
++            send({"t": "actors", "cell": cell, "list": [], "dead": ["morrowind.esm:16777000"]})
++        if hurt and not sent_hurt and a > 6:
++            send({"t": "dmg", "to": peer, "nid": hurt, "frac": 0.3}); sent_hurt = True
++    time.sleep(0.25)
+diff --git a/multiplayer/server/relay.py b/multiplayer/server/relay.py
+index 555dd00341..0b051320ff 100644
+--- a/multiplayer/server/relay.py
++++ b/multiplayer/server/relay.py
+@@ -1,9 +1,14 @@
+ #!/usr/bin/env python3
+-"""Minimal OpenMW multiplayer relay: newline-delimited JSON over TCP.
+-
+-Every line a client sends is stamped with its id and forwarded to all others.
+-With --mirror each client also sees a ghost copy of itself (id -N), for one-client testing.
+-Sends {"t":"hello","id":N} on connect, {"t":"leave","id":N} when a client goes.
++"""OpenMW multiplayer relay: newline-delimited JSON over TCP, with groups.
++
++Every player keeps their own world; the relay only connects players who joined the same group.
++Client -> server:  {"t":"group","name":"<group>"}   join/switch group ("" = solo, nothing is relayed)
++                   any other object: stamped with the sender's "id" and forwarded to the group
++                   (messages with a "to": <id> field go only to that member)
++Server -> client:  {"t":"hello","id":N} on connect, {"t":"leave","id":N} when a member goes,
++                   {"t":"reset"} when you leave/switch groups (drop everything about other members).
++The last profile/equip/state/actors message of each client is replayed to members who join later.
++--mirror: each client also sees a ghost copy of itself (id -N), for one-client testing.
+ """
+ import asyncio
+ import json
+@@ -11,64 +16,57 @@ import sys
+ 
+ MIRROR = "--mirror" in sys.argv
+ sys.argv = [a for a in sys.argv if a != "--mirror"]
+-clients = {}  # id -> StreamWriter
+-world = {"doors": {}, "takes": set(), "drops": {}, "time": None}  # replayed to late joiners
+-last = {}  # id -> {type: last message}, replayed to late joiners
++
++CACHED = ("profile", "equip", "state", "actors")
++clients = {}  # id -> {"w": StreamWriter, "group": str, "last": {type: msg}}
+ next_id = 1
+ 
+ 
+-async def broadcast(msg, exclude=None):
+-    data = (json.dumps(msg, separators=(",", ":")) + "\n").encode()
+-    for cid, w in list(clients.items()):
+-        if cid != exclude:
+-            w.write(data)
++def enc(msg):
++    return (json.dumps(msg, separators=(",", ":")) + "\n").encode()
++
+ 
++def members(group, exclude=None):
++    if not group:
++        return []
++    return [cid for cid, c in clients.items() if c["group"] == group and cid != exclude]
+ 
+-def world_replay():
+-    for oid, open_ in world["doors"].items():
+-        yield {"t": "door", "oid": oid, "open": open_}
+-    for oid in world["takes"]:
+-        yield {"t": "take", "oid": oid}
+-    yield from world["drops"].values()
+-    if world["time"]:
+-        yield world["time"]
+ 
++def send_to(cid, msg):
++    c = clients.get(cid)
++    if c:
++        c["w"].write(enc(msg))
+ 
+-def record_world(msg):
+-    t = msg.get("t")
+-    if t == "door" and "oid" in msg:
+-        world["doors"][msg["oid"]] = bool(msg.get("open"))
+-    elif t == "take" and "oid" in msg:
+-        world["takes"].add(msg["oid"])
+-        world["drops"].pop(msg["oid"], None)
+-    elif t == "drop" and "cid" in msg:
+-        world["drops"][msg["cid"]] = msg
+-    elif t == "time":
+-        world["time"] = msg
+-    else:
+-        return False
+-    return True
+ 
++def to_group(group, msg, exclude=None):
++    for cid in members(group, exclude):
++        send_to(cid, msg)
+ 
+-async def elect_host():
+-    if clients:
+-        await broadcast({"t": "host", "id": min(clients)})
++
++def set_group(cid, name):
++    c = clients[cid]
++    old = c["group"]
++    if name == old:
++        return
++    if old:
++        to_group(old, {"t": "leave", "id": cid}, exclude=cid)
++        send_to(cid, {"t": "reset"})
++    c["group"] = name
++    print(f"~ client {cid} -> group {name!r}", flush=True)
++    if name:
++        for other in members(name, exclude=cid):
++            for m in clients[other]["last"].values():
++                send_to(cid, m)
++        for m in c["last"].values():
++            to_group(name, m, exclude=cid)
+ 
+ 
+ async def handle(reader, writer):
+     global next_id
+     cid, next_id = next_id, next_id + 1
+-    clients[cid] = writer
+-    last[cid] = {}
++    clients[cid] = {"w": writer, "group": "", "last": {}}
+     print(f"+ client {cid} from {writer.get_extra_info('peername')}", flush=True)
+-    writer.write((json.dumps({"t": "hello", "id": cid}) + "\n").encode())
+-    for other, msgs in last.items():
+-        if other != cid:
+-            for m in msgs.values():
+-                writer.write((json.dumps(m, separators=(",", ":")) + "\n").encode())
+-    for m in world_replay():
+-        writer.write((json.dumps(m, separators=(",", ":")) + "\n").encode())
+-    await elect_host()
++    send_to(cid, {"t": "hello", "id": cid})
+     try:
+         async for line in reader:
+             try:
+@@ -77,28 +75,33 @@ async def handle(reader, writer):
+                 continue
+             if not isinstance(msg, dict):
+                 continue
++            t = msg.get("t")
++            if t == "group":
++                set_group(cid, str(msg.get("name", ""))[:64])
++                continue
+             msg["id"] = cid
+-            if record_world(msg):
+-                await broadcast(msg, exclude=cid)
++            group = clients[cid]["group"]
++            if t in CACHED:
++                clients[cid]["last"][t] = msg
++            target = msg.get("to")
++            if target is not None:
++                if target in members(group, exclude=cid):
++                    send_to(target, msg)
+                 continue
+-            if msg.get("t") in ("profile", "equip", "state"):
+-                last[cid][msg["t"]] = msg
+-            await broadcast(msg, exclude=cid)
+-            if MIRROR and msg.get("t") in ("profile", "equip", "state"):
+-                # Echo the sender back as a fake second player standing 300 units east of them.
++            to_group(group, msg, exclude=cid)
++            if MIRROR and group and t in ("profile", "equip", "state"):
+                 ghost = dict(msg, id=-cid)
+-                if msg["t"] == "state" and isinstance(msg.get("pos"), list) and len(msg["pos"]) == 3:
++                if t == "state" and isinstance(msg.get("pos"), list) and len(msg["pos"]) == 3:
+                     ghost["pos"] = [msg["pos"][0] + 300, msg["pos"][1], msg["pos"][2]]
+-                writer.write((json.dumps(ghost, separators=(",", ":")) + "\n").encode())
++                send_to(cid, ghost)
+     except (ConnectionError, asyncio.LimitOverrunError):
+         pass
+     finally:
++        group = clients[cid]["group"]
+         del clients[cid]
+-        del last[cid]
+         writer.close()
+         print(f"- client {cid}", flush=True)
+-        await broadcast({"t": "leave", "id": cid})
+-        await elect_host()
++        to_group(group, {"t": "leave", "id": cid})
+ 
+ 
+ async def main(host, port):
+-- 
+2.55.0
+

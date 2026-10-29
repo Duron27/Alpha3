@@ -1,0 +1,64 @@
+From 3f416946ffc7784f9786cb1aebcac8a0343b3d4c Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Fri, 9 Oct 2026 17:52:11 -0400
+Subject: [PATCH 2/5] Do not build the crash catcher on iOS
+
+Its handlers rely on ptrace and fork, which are unavailable in the iOS sandbox. Also skip the modal
+fatal-error message box there: it blocks forever and hides the log line.
+---
+ components/crashcatcher/crashcatcher.hpp | 8 ++++++--
+ components/debug/debugging.cpp           | 8 ++++++++
+ 2 files changed, 14 insertions(+), 2 deletions(-)
+
+diff --git a/components/crashcatcher/crashcatcher.hpp b/components/crashcatcher/crashcatcher.hpp
+index 60f749e57a..4ff6028007 100644
+--- a/components/crashcatcher/crashcatcher.hpp
++++ b/components/crashcatcher/crashcatcher.hpp
+@@ -3,8 +3,12 @@
+ 
+ #include <filesystem>
+ 
+-#if (defined(__APPLE__) || (defined(__linux) && !defined(ANDROID)) || (defined(__unix) && !defined(ANDROID))           \
+-    || defined(__posix))
++#if defined(__APPLE__)
++#include <TargetConditionals.h>
++#endif
++
++#if (defined(__APPLE__) && !TARGET_OS_IPHONE) || (defined(__linux) && !defined(ANDROID))                              \
++    || (defined(__unix) && !defined(ANDROID)) || defined(__posix)
+ void crashCatcherInstall(int argc, char** argv, const std::filesystem::path& crashLogPath);
+ #else
+ inline void crashCatcherInstall(int /*argc*/, char** /*argv*/, const std::filesystem::path& /*crashLogPath*/) {}
+diff --git a/components/debug/debugging.cpp b/components/debug/debugging.cpp
+index ff0404f0d5..75b107c994 100644
+--- a/components/debug/debugging.cpp
++++ b/components/debug/debugging.cpp
+@@ -16,6 +16,10 @@
+ #pragma warning(pop)
+ #endif
+ 
++#ifdef __APPLE__
++#include <TargetConditionals.h>
++#endif
++
+ #include <components/crashcatcher/crashcatcher.hpp>
+ #include <components/files/conversion.hpp>
+ #include <components/misc/strings/conversion.hpp>
+@@ -482,10 +486,14 @@ namespace Debug
+         }
+         catch (const std::exception& e)
+         {
++#if TARGET_OS_IPHONE
++            // A modal message box blocks forever on iOS and would swallow the log line below.
++#else
+ #if (defined(__APPLE__) || defined(__linux) || defined(__unix) || defined(__posix))
+             if (!isatty(fileno(stdin)))
+ #endif
+                 SDL_ShowSimpleMessageBox(0, (std::string(appName) + ": Fatal error").c_str(), e.what(), nullptr);
++#endif
+ 
+             Log(Debug::Error) << "Fatal error: " << e.what();
+ 
+-- 
+2.55.0
+

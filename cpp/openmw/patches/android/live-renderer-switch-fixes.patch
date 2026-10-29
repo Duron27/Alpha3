@@ -1,0 +1,621 @@
+--- a/apps/openmw/engine.cpp
++++ b/apps/openmw/engine.cpp
+@@ -29,6 +29,9 @@
+ 
+ #include <cerrno>
+ #include <chrono>
++#ifdef ANDROID
++#include <sys/system_properties.h>
++#endif
+ #include <future>
+ #include <system_error>
+ #include <utility>
+@@ -307,6 +310,29 @@
+             mWorld->getRenderingManager()->showHidden();
+ #endif
+ 
++#ifdef ANDROID
++        // Dev probe: adb shell setprop debug.alpha3.renderer "<renderer>:<counter>" (renderer as in settings.cfg, e.g.
++        // "opengl es 3.2 angle") asks for a switch like the Video options do; a new counter asks again.
++        {
++            static auto lastLook = std::chrono::steady_clock::now();
++            static std::string lastRequest;
++            const auto now = std::chrono::steady_clock::now();
++            if (now - lastLook > std::chrono::milliseconds(500))
++            {
++                lastLook = now;
++                char value[PROP_VALUE_MAX] = "";
++                if (__system_property_get("debug.alpha3.renderer", value) > 0 && lastRequest != value)
++                {
++                    lastRequest = value;
++                    const std::string request(value);
++                    const std::string name = request.substr(0, request.rfind(':'));
++                    Log(Debug::Info) << "Renderer probe asks for '" << name << "'";
++                    requestRenderer(Settings::readRendererEntry(name), -1);
++                }
++            }
++        }
++#endif
++
+         if (mRendererSwitches.pending())
+         {
+             MWRender::CaptureManager& capture = mWorld->getRenderingManager()->getCaptureManager();
+@@ -1427,6 +1453,7 @@
+     if (mClockwork != nullptr)
+     {
+         mClockwork->setStats(mProfiler.get(), mResourceStats.get(), &rendering->getCaptureManager().blackBox());
++        rendering->refreshPostProcessing();
+         try
+         {
+             rendering->prepareMaterials(mResDir / "shaders", *mWindowManager->getLoadingScreen());
+@@ -1580,6 +1607,11 @@
+     };
+ 
+     tearDown();
++    // Scene objects the old renderer cached carry its shader programs (a GL dialect, or Vulkan's descriptions of them), which
++    // the other family cannot describe: prepareMaterials then fails on them, and a reload would reuse them. Start the new
++    // one from an empty cache.
++    if (Settings::isOpenGLFamily(oldEntry) != Settings::isOpenGLFamily(target.mEntry))
++        mResourceSystem->clearCache();
+     RendererSwitch active = target;
+     std::string failure;
+     if (!create(target.mEntry, target.mDevice))
+@@ -1636,7 +1668,21 @@
+ #ifdef OPENMW_USE_VULKAN
+     rendering->setClockwork(mClockwork.get());
+     if (mClockwork != nullptr)
++    {
+         mClockwork->setStats(mProfiler.get(), mResourceStats.get(), &rendering->getCaptureManager().blackBox());
++        rendering->refreshPostProcessing();
++        try
++        {
++            rendering->prepareMaterials(mResDir / "shaders", *mWindowManager->getLoadingScreen());
++        }
++        catch (const MWRender::Clockwork::PreparationError& error)
++        {
++            if (!mRendererSwitches.fail(error))
++                throw;
++            switchRenderer();
++            return;
++        }
++    }
+ #endif
+     if (Settings::isOpenGLFamily(active.mEntry))
+         rendering->refreshRenderer();
+--- a/apps/openmw/mwrender/postprocessor.cpp
++++ b/apps/openmw/mwrender/postprocessor.cpp
+@@ -886,6 +886,46 @@
+         Settings::postProcessing().mChain.set(chain);
+     }
+ 
++    void PostProcessor::refreshBackend()
++    {
++        const bool wasUbo = mUBO;
++        osg::GraphicsContext* gc = mViewer->getCamera()->getGraphicsContext();
++        if (gc != nullptr)
++        {
++            osg::GLExtensions* ext = gc->getState()->get<osg::GLExtensions>();
++            if (!ext->glDisablei && ext->glDisableIndexedEXT)
++                ext->glDisablei = ext->glDisableIndexedEXT;
++#ifdef ANDROID
++            ext->glDisablei = nullptr;
++#endif
++            mNormalsSupported = ext->glDisablei != nullptr;
++            mGLSLVersion = static_cast<int>(ext->glslLanguageVersion * 100);
++            mUBO = ext->isUniformBufferObjectSupported && mGLSLVersion >= 330;
++        }
++        else
++        {
++            mGLSLVersion = 460;
++            mUBO = true;
++            mNormalsSupported = true;
++        }
++        if (mUBO != wasUbo)
++        {
++            mStateUpdater = new Fx::StateUpdater(mUBO);
++            setCullCallback(mStateUpdater);
++        }
++
++        // Techniques are rebuilt from their files for the new dialect; the chain is the saved one
++        mTemplates.clear();
++        mQueuedTemplates.clear();
++        mInternalTechniques.clear();
++        auto distortion = loadTechnique("internal_distortion");
++        distortion->setInternal(true);
++        distortion->setLocked(true);
++        mInternalTechniques.push_back(std::move(distortion));
++        loadChain();
++        dirtyTechniques(true);
++    }
++
+     void PostProcessor::toggleMode()
+     {
+         for (auto& technique : mTemplates)
+--- a/apps/openmw/mwrender/postprocessor.hpp
++++ b/apps/openmw/mwrender/postprocessor.hpp
+@@ -191,6 +191,11 @@
+ 
+         void toggleMode();
+ 
++        /// The renderer changed (live switch): what the post-processing took from the first context - GLSL version, UBO and
++        /// normals support - comes from the new one, and every technique is compiled again, since a pass bakes the header
++        /// of the dialect it was compiled for.
++        void refreshBackend();
++
+         std::shared_ptr<Fx::Technique> loadTechnique(VFS::Path::NormalizedView path, bool loadNextFrame = false);
+         std::shared_ptr<Fx::Technique> loadTechnique(std::string_view name, bool loadNextFrame = false);
+ 
+--- a/apps/openmw/mwrender/renderingmanager.cpp
++++ b/apps/openmw/mwrender/renderingmanager.cpp
+@@ -2005,10 +2005,16 @@
+         for (CharacterPreview* preview : mPreviews)
+             preview->refreshRenderer();
+         mStateUpdater->reset();
++        mPostProcessor->refreshBackend();
+         mPostProcessor->resize();
+         mViewer->startThreading();
+     }
+ 
++    void RenderingManager::refreshPostProcessing()
++    {
++        mPostProcessor->refreshBackend();
++    }
++
+     void RenderingManager::releaseContext(osg::State* state)
+     {
+         mRootNode->releaseGLObjects(state);
+--- a/apps/openmw/mwrender/renderingmanager.hpp
++++ b/apps/openmw/mwrender/renderingmanager.hpp
+@@ -243,6 +243,8 @@
+         void detachClockwork(bool restore = true);
+ 
+         void refreshRenderer();
++        /// A Vulkan renderer took over (live switch): the post-processing follows it like it does a GL one.
++        void refreshPostProcessing();
+ 
+         void addPreview(CharacterPreview& preview);
+ 
+--- a/components/sdlutil/sdlgraphicswindow.cpp
++++ b/components/sdlutil/sdlgraphicswindow.cpp
+@@ -43,6 +43,45 @@
+ #ifdef ANDROID
+     namespace
+     {
++        /// ANativeWindow_lock connects the window to the CPU API and nothing in the NDK takes that back, so the window
++        /// stays unusable for EGL and Vulkan (EGL_BAD_ALLOC, VK_ERROR_NATIVE_WINDOW_IN_USE_KHR) after the Zink context
++        /// that locked it is gone. The window's own perform() hook can disconnect it, the way the system's graphics
++        /// stack does (system/window.h). The layout is the stable head of struct ANativeWindow; the magic is checked.
++        void disconnectCpuApi(ANativeWindow* window)
++        {
++            struct NativeWindowHead
++            {
++                int mMagic;
++                int mVersion;
++                void* mReserved[4];
++                void (*mIncRef)(void*);
++                void (*mDecRef)(void*);
++                unsigned mFlags;
++                int mMinSwapInterval;
++                int mMaxSwapInterval;
++                float mXdpi;
++                float mYdpi;
++                intptr_t mOem[4];
++                int (*mSetSwapInterval)(ANativeWindow*, int);
++                int (*mDequeueDeprecated)(ANativeWindow*, void**);
++                int (*mLockDeprecated)(ANativeWindow*, void*);
++                int (*mQueueDeprecated)(ANativeWindow*, void*);
++                int (*mQuery)(const ANativeWindow*, int, int*);
++                int (*mPerform)(ANativeWindow*, int, ...);
++            };
++            constexpr int windowMagic = ('_' << 24) | ('w' << 16) | ('n' << 8) | 'd'; // ANDROID_NATIVE_WINDOW_MAGIC
++            constexpr int apiDisconnect = 14; // NATIVE_WINDOW_API_DISCONNECT
++            constexpr int apiCpu = 2; // NATIVE_WINDOW_API_CPU
++            const auto* head = reinterpret_cast<const NativeWindowHead*>(window);
++            if (head == nullptr || head->mMagic != windowMagic || head->mPerform == nullptr)
++            {
++                Log(Debug::Warning) << "Zink: the native window is not what was expected, its CPU connection stays";
++                return;
++            }
++            const int result = head->mPerform(window, apiDisconnect, apiCpu);
++            Log(Debug::Info) << "Zink: native window disconnected from the CPU API (" << result << ")";
++        }
++
+         constexpr int OSMESA_FORMAT = 0x22;
+         constexpr int OSMESA_RGBA = 0x1908;
+         constexpr int OSMESA_DEPTH_BITS = 0x30;
+@@ -270,6 +309,62 @@
+         close(true);
+     }
+ 
++    namespace
++    {
++        /// OSG asks for a windowing system when a viewer realizes (osgViewer::Viewer::realize passes the display settings
++        /// on) and warns "getWindowingSystemInterface() failed, no interfaces available" when there is none. The windows are
++        /// made here, by SDL, so this interface only answers about the screens through SDL and creates nothing.
++        class SDLWindowingSystemInterface : public osg::GraphicsContext::WindowingSystemInterface
++        {
++        public:
++            SDLWindowingSystemInterface() { setName("SDL"); }
++
++            unsigned int getNumScreens(const osg::GraphicsContext::ScreenIdentifier&) override
++            {
++                return static_cast<unsigned int>(std::max(SDL_GetNumVideoDisplays(), 0));
++            }
++
++            void getScreenSettings(
++                const osg::GraphicsContext::ScreenIdentifier& screen, osg::GraphicsContext::ScreenSettings& settings) override
++            {
++                SDL_DisplayMode mode{};
++                if (SDL_GetCurrentDisplayMode(std::max(screen.screenNum, 0), &mode) == 0)
++                    settings = osg::GraphicsContext::ScreenSettings(mode.w, mode.h, mode.refresh_rate, 32);
++            }
++
++            void enumerateScreenSettings(const osg::GraphicsContext::ScreenIdentifier& screen,
++                osg::GraphicsContext::ScreenSettingsList& list) override
++            {
++                const int display = std::max(screen.screenNum, 0);
++                for (int i = 0; i < SDL_GetNumDisplayModes(display); ++i)
++                {
++                    SDL_DisplayMode mode{};
++                    if (SDL_GetDisplayMode(display, i, &mode) == 0)
++                        list.emplace_back(mode.w, mode.h, mode.refresh_rate, 32);
++                }
++            }
++
++            void setDisplaySettings(osg::DisplaySettings* settings) override { mDisplaySettings = settings; }
++
++            osg::DisplaySettings* getDisplaySettings() const override { return mDisplaySettings.get(); }
++
++            osg::GraphicsContext* createGraphicsContext(osg::GraphicsContext::Traits*) override { return nullptr; }
++
++        private:
++            osg::ref_ptr<osg::DisplaySettings> mDisplaySettings;
++        };
++
++        void registerWindowingSystem()
++        {
++            static const bool registered = [] {
++                osg::GraphicsContext::getWindowingSystemInterfaces()->addWindowingSystemInterface(
++                    new SDLWindowingSystemInterface);
++                return true;
++            }();
++            (void)registered;
++        }
++    }
++
+     GraphicsWindowSDL2::GraphicsWindowSDL2(osg::GraphicsContext::Traits* traits, VSyncMode vsyncMode)
+         : mWindow(nullptr)
+         , mContext(nullptr)
+@@ -278,6 +373,7 @@
+         , mOwnsWindow(false)
+         , mVSyncMode(vsyncMode)
+     {
++        registerWindowingSystem();
+         _traits = traits;
+ 
+         init();
+@@ -1269,6 +1365,10 @@
+         mZinkContext = nullptr;
+         std::free(mZinkBuffer);
+         mZinkBuffer = nullptr;
++        // The window goes back to whoever creates a context on it next
++        if (mZinkNativeWindow != nullptr)
++            disconnectCpuApi(static_cast<ANativeWindow*>(mZinkNativeWindow));
++        mZinkNativeWindow = nullptr;
+ #endif
+         if (mContext)
+             SDL_GL_DeleteContext(mContext);
+--- a/components/shader/shadermanager.cpp
++++ b/components/shader/shadermanager.cpp
+@@ -78,6 +78,117 @@
+         return result;
+     }
+ 
++    /// `#if __VERSION__ >= 450` (alone or leading an &&) is false in every GL dialect (120, 320 es).
++    bool isVulkanOnlyCondition(std::string_view condition)
++    {
++        const auto first = condition.find_first_not_of(" \t");
++        if (first == std::string_view::npos)
++            return false;
++        condition.remove_prefix(first);
++        constexpr std::string_view prefix = "__VERSION__";
++        if (!condition.starts_with(prefix))
++            return false;
++        condition.remove_prefix(prefix.size());
++        const auto operatorAt = condition.find_first_not_of(" \t");
++        if (operatorAt == std::string_view::npos || !condition.substr(operatorAt).starts_with(">="))
++            return false;
++        condition.remove_prefix(operatorAt + 2);
++        const auto numberAt = condition.find_first_not_of(" \t");
++        if (numberAt == std::string_view::npos || !condition.substr(numberAt).starts_with("450"))
++            return false;
++        condition.remove_prefix(numberAt + 3);
++        const auto rest = condition.find_first_not_of(" \t\r");
++        return rest == std::string_view::npos || condition.substr(rest).starts_with("&&")
++            || condition.substr(rest).starts_with("//");
++    }
++
++    /// Removes the blocks only the 450 (Vulkan) dialect compiles, which the GL dialects skip anyway. Mesa's GLSL preprocessor
++    /// mishandles one of these big nested blocks ("Unterminated #if"), and the sources shrink a lot. Dropped lines stay as
++    /// empty ones. A source with an #elif around such a block is left as it is.
++    void dropVulkanOnlyBlocks(std::string& source)
++    {
++        struct Frame
++        {
++            bool mStaticallyFalse = false;
++            bool mParentDropping = false;
++        };
++        std::vector<Frame> stack;
++        std::string result;
++        result.reserve(source.size());
++        bool dropping = false;
++        std::size_t position = 0;
++        while (position < source.size())
++        {
++            std::size_t end = source.find('\n', position);
++            const bool hasNewline = end != std::string::npos;
++            if (!hasNewline)
++                end = source.size();
++            const std::string_view line(source.data() + position, end - position);
++            position = hasNewline ? end + 1 : end;
++
++            std::string_view directive;
++            std::string_view rest;
++            const auto hash = line.find_first_not_of(" \t");
++            if (hash != std::string_view::npos && line[hash] == '#')
++            {
++                std::string_view body = line.substr(hash + 1);
++                const auto word = body.find_first_not_of(" \t");
++                if (word != std::string_view::npos)
++                {
++                    body.remove_prefix(word);
++                    const auto wordEnd = body.find_first_of(" \t(/");
++                    directive = body.substr(0, wordEnd);
++                    rest = wordEnd == std::string_view::npos ? std::string_view() : body.substr(wordEnd);
++                }
++            }
++
++            bool emit = !dropping;
++            if (directive == "if" || directive == "ifdef" || directive == "ifndef")
++            {
++                Frame frame;
++                frame.mParentDropping = dropping;
++                if (!dropping && directive == "if" && isVulkanOnlyCondition(rest))
++                {
++                    frame.mStaticallyFalse = true;
++                    dropping = true;
++                    emit = false;
++                }
++                stack.push_back(frame);
++            }
++            else if (directive == "elif")
++            {
++                if (!stack.empty() && stack.back().mStaticallyFalse)
++                    return;
++            }
++            else if (directive == "else")
++            {
++                if (!stack.empty() && stack.back().mStaticallyFalse)
++                {
++                    dropping = stack.back().mParentDropping;
++                    emit = false;
++                }
++            }
++            else if (directive == "endif")
++            {
++                if (!stack.empty())
++                {
++                    if (stack.back().mStaticallyFalse)
++                    {
++                        dropping = stack.back().mParentDropping;
++                        emit = false;
++                    }
++                    stack.pop_back();
++                }
++            }
++
++            if (emit)
++                result.append(line);
++            if (hasNewline)
++                result.push_back('\n');
++        }
++        source = std::move(result);
++    }
++
+     void appendModule(std::string& source, std::string text, int number)
+     {
+         if (const std::size_t version = text.find("#version"); version != std::string::npos)
+@@ -656,8 +767,28 @@
+             ShaderManager::DefineMap effective = defines;
+             if (version != globals.end() && version->second.ends_with(" es"))
+                 effective["useGPUShader4"] = "0";
+-            return parseDefines(source, effective, globals, templateName)
+-                && parseDirectives(source, links, effective, globals, templateName);
++            if (!parseDefines(source, effective, globals, templateName)
++                || !parseDirectives(source, links, effective, globals, templateName))
++                return false;
++            // The GL dialects (120, 320 es) take no #line directives and none of the blocks only the 450 dialect compiles:
++            // Mesa's GLSL preprocessor loses track of those big nested blocks ("Unterminated #if"), and the sources
++            // shrink a lot. The Vulkan dialect reads the #line directives when it compiles to SPIR-V.
++            if (version != globals.end() && version->second != "450")
++            {
++                std::size_t at = 0;
++                while ((at = source.find("#line ", at)) != std::string::npos)
++                {
++                    if (at != 0 && source[at - 1] != '\n')
++                    {
++                        ++at;
++                        continue;
++                    }
++                    const std::size_t end = source.find('\n', at);
++                    source.erase(at, end == std::string::npos ? std::string::npos : end - at);
++                }
++                dropVulkanOnlyBlocks(source);
++            }
++            return true;
+         }
+     }
+ 
+@@ -793,12 +924,28 @@
+             // Append shader source filename for debugging.
+             static unsigned int counter = 0;
+             shader->setName(std::format("{} {}", counter++, templateName));
++#ifdef ANDROID
++            // Dev probe: adb shell setprop debug.alpha3.shaderdump 2 writes every shader as generated to
++            // /sdcard/Alpha3/shaderdump (1 is the merged ES shaders only)
++            {
++                char dumpProp[PROP_VALUE_MAX] = "";
++                if (__system_property_get("debug.alpha3.shaderdump", dumpProp) > 0 && dumpProp[0] == '2')
++                {
++                    std::string name = shader->getName();
++                    for (char& c : name)
++                        if (c == '/' || c == ' ' || c == '(' || c == ')')
++                            c = '_';
++                    std::ofstream("/sdcard/Alpha3/shaderdump/gen_" + name) << shaderSource;
++                }
++            }
++#endif
+ 
+             getLinkedShaders(shader, linkedShaderNames, defines, built);
+ 
+             const auto inserted = mShaders.insert(std::make_pair(std::make_pair(templateName, defines), shader));
+             shaderIt = inserted.first;
+-            mShaderKeys.emplace(shader.get(), &shaderIt->first);
++            // Keys are raw pointers and a freed shader's address is reused: always overwrite
++            mShaderKeys.insert_or_assign(shader.get(), &shaderIt->first);
+             mHotReloadManager->addShaderFiles(shaderIt->first);
+             if (inserted.second)
+                 mShaderHashes.emplace(hashShaderKey(templateName, defines), shaderIt);
+@@ -1859,13 +2006,17 @@
+         // No GL program links these; twins regenerate what they read.
+         if (mSpirvCache != nullptr)
+         {
++            // A new dialect: the GL ones are expanded without the #line directives and the 450-only blocks, so every
++            // stored source is stale, whatever the template reads.
++            const bool dialectChanged = std::find(changed.begin(), changed.end(), "glslVersion") != changed.end();
+             for (const auto& [key, shader] : mShaders)
+             {
+                 if (shader == nullptr)
+                     continue;
+                 const std::set<std::string, std::less<>>& reads = templateReads(key.first);
+                 // Local defines hide the global ones.
+-                if (std::any_of(changed.begin(), changed.end(),
++                if (dialectChanged
++                    || std::any_of(changed.begin(), changed.end(),
+                         [&](const std::string& name) { return reads.contains(name) && !key.second.contains(name); }))
+                 {
+                     mStaleShaders.insert(shader.get());
+@@ -1914,6 +2065,9 @@
+         if (usesEsDialect())
+         {
+             // The sources changed: merge again, one shader per stage in each program.
++            // The merged shaders go: so do their keys, or a later shader at the same address would inherit one
++            for (const auto& [mergedKey, mergedShader] : mMergedShaders)
++                mShaderKeys.erase(mergedShader.get());
+             mMergedShaders.clear();
+             for (const auto& [pair, program] : mPrograms)
+             {
+@@ -2019,7 +2173,7 @@
+         merged->setName(shader->getName() + " (merged)");
+         // Instanced twins are found through the template key of the shader a program holds.
+         if (const auto keyIt = mShaderKeys.find(shader.get()); keyIt != mShaderKeys.end())
+-            mShaderKeys.emplace(merged.get(), keyIt->second);
++            mShaderKeys.insert_or_assign(merged.get(), keyIt->second);
+ #ifdef ANDROID
+         // Dev probe: adb shell setprop debug.alpha3.shaderdump 1 writes what the driver is given to /sdcard/Alpha3/shaderdump
+         char dumpProp[PROP_VALUE_MAX] = "";
+--- a/apps/openmw/mwrender/clockwork/scene/materialprepare.cpp
++++ b/apps/openmw/mwrender/clockwork/scene/materialprepare.cpp
+@@ -717,7 +717,13 @@
+                     return found->second.second;
+                 auto source = shaders.describeProgram(program);
+                 if (!source)
++                {
++                    std::string names;
++                    for (unsigned int i = 0; i < program.getNumShaders(); ++i)
++                        names += " [" + program.getShader(i)->getName() + "]";
++                    Log(Debug::Error) << "Cannot describe program '" << program.getName() << "' with shaders" << names;
+                     throw Clockwork::PreparationError{};
++                }
+                 const auto [entry, inserted]
+                     = sourceIds.try_emplace({ source->mTemplate, source->mDefines, source->mCapabilities },
+                         static_cast<std::uint32_t>(sources.size()));
+--- a/apps/openmw/mwrender/clockwork/frame/preparation.hpp
++++ b/apps/openmw/mwrender/clockwork/frame/preparation.hpp
+@@ -5,6 +5,7 @@
+ #include <cstdint>
+ #include <cstdlib>
+ #include <exception>
++#include <source_location>
+ #include <stdexcept>
+ #include <string_view>
+ 
+@@ -15,9 +16,12 @@
+     class PreparationError : public std::runtime_error
+     {
+     public:
+-        PreparationError()
++        /// Nothing else names the failure, so the place that raises it goes in the log.
++        explicit PreparationError(std::source_location where = std::source_location::current())
+             : std::runtime_error("Shader preparation failed. Try OpenGL; see openmw.log.")
+         {
++            Log(Debug::Error) << "Preparation failed at " << where.file_name() << ':' << where.line() << " ("
++                              << where.function_name() << ")";
+         }
+     };
+ 
+--- a/apps/openmw/mwrender/clockwork/frame/pipelinetable.cpp
++++ b/apps/openmw/mwrender/clockwork/frame/pipelinetable.cpp
+@@ -43,7 +43,10 @@
+         VkPipeline requiredPipeline(VkPipeline pipeline)
+         {
+             if (pipeline == VK_NULL_HANDLE)
++            {
++                Log(Debug::Error) << "A pipeline the frame needs does not exist";
+                 throw PreparationError{};
++            }
+             return pipeline;
+         }
+ 
+@@ -910,7 +913,10 @@
+         {
+             const std::lock_guard<std::mutex> lock(mMutex);
+             if (pipeline == VK_NULL_HANDLE && mPreparationError == nullptr)
++            {
++                Log(Debug::Error) << "A pipeline built on first use is missing";
+                 mPreparationError = std::make_exception_ptr(PreparationError{});
++            }
+             if (taken.has_value())
+             {
+                 mPending.erase(key);
+@@ -1088,6 +1094,19 @@
+                 catch (...)
+                 {
+                     error = std::current_exception();
++                    // A preparation failure names nothing; say what failed the first time
++                    try
++                    {
++                        std::rethrow_exception(error);
++                    }
++                    catch (const std::exception& exception)
++                    {
++                        Log(Debug::Error) << "Pipeline job failed: " << exception.what();
++                    }
++                    catch (...)
++                    {
++                        Log(Debug::Error) << "Pipeline job failed with an unknown exception";
++                    }
+                 }
+                 lock.lock();
+                 if (mPreparationError == nullptr)
+@@ -1103,7 +1122,10 @@
+             Built built = build(job);
+             lock.lock();
+             if (built.mPipeline == VK_NULL_HANDLE && mPreparationError == nullptr)
++            {
++                Log(Debug::Error) << "A pipeline build returned no pipeline";
+                 mPreparationError = std::make_exception_ptr(PreparationError{});
++            }
+             mStarted[index].reset();
+             ++mProgress.mBuilt;
+             mProgress.mMicroseconds += built.mRecord.mBuildMicroseconds;

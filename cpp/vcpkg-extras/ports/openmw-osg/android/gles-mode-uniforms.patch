@@ -1,0 +1,178 @@
+diff --git a/include/osg/RuntimeHooks b/include/osg/RuntimeHooks
+index 7f29b3f..1bed371 100644
+--- a/include/osg/RuntimeHooks
++++ b/include/osg/RuntimeHooks
+@@ -16,6 +16,7 @@
+ 
+ #include <osg/Image>
+ #include <osg/Program>
++#include <osg/Vec4d>
+ 
+ #include <string>
+ #include <vector>
+@@ -76,6 +77,14 @@ class OSG_EXPORT RuntimeHooks : public Referenced
+           * to keep it. Called on the thread that reads the image. */
+         virtual ref_ptr<Image> imageRead(Image& /*image*/, const std::string& /*extension*/) { return 0; }
+ 
++        /** A ClipPlane has been applied without fixed function: the plane in eye coordinates, for a context that still
++          * has glClipPlane (desktop OpenGL). */
++        virtual void clipPlaneApplied(State& /*state*/, unsigned int /*index*/, const Vec4d& /*eyePlane*/) {}
++
++        /** A program is ready to use, linked from its shaders or loaded as a binary: GL program object handle. Called
++          * before OSG reads its uniforms; the program bound in the context must be left as it was. */
++        virtual void programLinked(const Program& /*program*/, GLuint /*handle*/, State& /*state*/) {}
++
+     protected:
+ 
+         virtual ~RuntimeHooks() {}
+diff --git a/include/osg/State b/include/osg/State
+index 834716f..3ecc564 100644
+--- a/include/osg/State
++++ b/include/osg/State
+@@ -243,6 +243,12 @@ class OSG_EXPORT State : public Referenced
+ 
+         void applyModelViewAndProjectionUniformsIfRequired();
+ 
++        /** Without fixed function the clip planes 0 to MaxUniformClipPlanes-1 reach shaders as the vec4 uniforms
++          * osg_ClipPlane<num> (eye coordinates), applied with the matrix uniforms. A plane whose GL_CLIP_PLANE<num> mode
++          * is off reads (0,0,0,1), which clips nothing. */
++        static const unsigned int MaxUniformClipPlanes = 2;
++        void setClipPlane(unsigned int num, const Vec4& eyePlane);
++
+         osg::Uniform* getModelViewMatrixUniform() { return _modelViewMatrixUniform.get(); }
+         osg::Uniform* getProjectionMatrixUniform() { return _projectionMatrixUniform.get(); }
+         osg::Uniform* getModelViewProjectionMatrixUniform() { return _modelViewProjectionMatrixUniform.get(); }
+@@ -1114,6 +1120,8 @@ class OSG_EXPORT State : public Referenced
+         ref_ptr<Uniform>            _projectionMatrixUniform;
+         ref_ptr<Uniform>            _modelViewProjectionMatrixUniform;
+         ref_ptr<Uniform>            _normalMatrixUniform;
++        ref_ptr<Uniform>            _clipPlaneUniforms[MaxUniformClipPlanes];
++        Vec4                        _clipPlanes[MaxUniformClipPlanes];
+ 
+         Matrix                      _initialInverseViewMatrix;
+ 
+diff --git a/src/osg/ClipPlane.cpp b/src/osg/ClipPlane.cpp
+index 5240ee8..190dc11 100644
+--- a/src/osg/ClipPlane.cpp
++++ b/src/osg/ClipPlane.cpp
+@@ -13,6 +13,8 @@
+ #include <osg/ClipPlane>
+ #include <osg/StateSet>
+ #include <osg/Notify>
++#include <osg/RuntimeHooks>
++#include <osg/State>
+ 
+ using namespace osg;
+ 
+@@ -41,12 +43,17 @@ unsigned int ClipPlane::getClipPlaneNum() const
+     return _clipPlaneNum;
+ }
+ 
+-void ClipPlane::apply(State&) const
++void ClipPlane::apply(State& state) const
+ {
+ #if defined(OSG_GL_FIXED_FUNCTION_AVAILABLE) && !defined(OSG_GLES1_AVAILABLE)
+     glClipPlane((GLenum)(GL_CLIP_PLANE0+_clipPlaneNum),_clipPlane.ptr());
+ #else
+-    //OSG_NOTICE<<"Warning: ClipPlane::apply(State&) - not supported."<<std::endl;
++    // in eye coordinates, as glClipPlane keeps it: shaders read it as the uniform osg_ClipPlane<num>
++    osg::Plane eyePlane(_clipPlane);
++    eyePlane.transformProvidingInverse(osg::Matrix::inverse(state.getModelViewMatrix()));
++    state.setClipPlane(_clipPlaneNum, eyePlane.asVec4());
++    if (RuntimeHooks* hooks = RuntimeHooks::get())
++        hooks->clipPlaneApplied(state, _clipPlaneNum, eyePlane.asVec4());
+ #endif
+ }
+ 
+diff --git a/src/osg/GLExtensions.cpp b/src/osg/GLExtensions.cpp
+index 1fd25df..5ab9aee 100644
+--- a/src/osg/GLExtensions.cpp
++++ b/src/osg/GLExtensions.cpp
+@@ -178,6 +178,12 @@ bool osg::isGLExtensionOrVersionSupported(unsigned int contextID, const char *ex
+                 if (*startOfWord!=0) extensionSet.insert(std::string(startOfWord));
+             }
+ 
++            // OpenGL ES 3 has the 32 bit float depth formats in its core, with no extension to name them: the desktop
++            // extension stands for them, so that code looking for it finds them
++            const char* version = (const char*)glGetString(GL_VERSION);
++            if (version && strncmp(version, "OpenGL ES", 9) == 0 && osg::getGLVersionNumber() >= 3.0f)
++                extensionSet.insert("GL_ARB_depth_buffer_float");
++
+     #if defined(_WIN32) && (defined(OSG_GL1_AVAILABLE) || defined(OSG_GL2_AVAILABLE) || defined(OSG_GL3_AVAILABLE))
+ 
+             // add WGL extensions to the list
+diff --git a/src/osg/Program.cpp b/src/osg/Program.cpp
+index a0e569d..de6b2ba 100644
+--- a/src/osg/Program.cpp
++++ b/src/osg/Program.cpp
+@@ -912,6 +912,8 @@ void Program::PerContextProgram::linkProgram(osg::State& state)
+             }
+         }
+         _binaryKey.clear();
++
++        if (hooks) hooks->programLinked(*_program, _glProgramHandle, state);
+     }
+ 
+     if (_extensions->isUniformBufferObjectSupported)
+diff --git a/src/osg/State.cpp b/src/osg/State.cpp
+index a3b9e33..f93800b 100644
+--- a/src/osg/State.cpp
++++ b/src/osg/State.cpp
+@@ -73,6 +73,8 @@ State::State():
+     _projectionMatrixUniform = new Uniform(Uniform::FLOAT_MAT4,"osg_ProjectionMatrix");
+     _modelViewProjectionMatrixUniform = new Uniform(Uniform::FLOAT_MAT4,"osg_ModelViewProjectionMatrix");
+     _normalMatrixUniform = new Uniform(Uniform::FLOAT_MAT3,"osg_NormalMatrix");
++    for (unsigned int i = 0; i < MaxUniformClipPlanes; ++i)
++        _clipPlaneUniforms[i] = new Uniform(("osg_ClipPlane" + std::to_string(i)).c_str(), Vec4(0.0f, 0.0f, 0.0f, 1.0f));
+ 
+     resetVertexAttributeAlias();
+ 
+@@ -299,18 +301,18 @@ void State::initializeExtensionProcs()
+ 
+     setModeValidity(GL_NORMALIZE,      false); // 0x0BA1
+ 
+-    if (!osg::isGLExtensionSupported(_contextID,"GL_EXT_clip_cull_distance"))
++    if (_glExtensions->isOpenGLES && !osg::isGLExtensionSupported(_contextID,"GL_EXT_clip_cull_distance"))
+     {
+         for (int i = 0; i < 8; i++)
+             setModeValidity(0x3000 + i,    false); // GL_CLIP_PLANE0
+         OSG_NOTICE<<"GL_EXT_clip_cull_distance not supported."<<std::endl;
+     }
+-    if (!osg::isGLExtensionSupported(_contextID,"GL_EXT_depth_clamp"))
++    if (_glExtensions->isOpenGLES && !osg::isGLExtensionSupported(_contextID,"GL_EXT_depth_clamp"))
+     {
+         setModeValidity(0x864F,    false); // GL_DEPTH_CLAMP
+         OSG_NOTICE<<"GL_EXT_DEPTH_CLAMP not supported."<<std::endl;
+     }
+-    if (!osg::isGLExtensionSupported(_contextID,"GL_NV_polygon_mode"))
++    if (_glExtensions->isOpenGLES && !osg::isGLExtensionSupported(_contextID,"GL_NV_polygon_mode"))
+     {
+         setModeValidity(0x2A01,    false); // GL_POLYGON_OFFSET_POINT
+         setModeValidity(0x2A02,    false); // GL_POLYGON_OFFSET_LINE
+@@ -1255,6 +1257,26 @@ void State::applyModelViewAndProjectionUniformsIfRequired()
+     if (_projectionMatrixUniform) _lastAppliedProgramObject->apply(*_projectionMatrixUniform);
+     if (_modelViewProjectionMatrixUniform) _lastAppliedProgramObject->apply(*_modelViewProjectionMatrixUniform);
+     if (_normalMatrixUniform) _lastAppliedProgramObject->apply(*_normalMatrixUniform);
++
++    for (unsigned int i = 0; i < MaxUniformClipPlanes; ++i)
++    {
++        Uniform& uniform = *_clipPlaneUniforms[i];
++        if (_lastAppliedProgramObject->getUniformLocation(uniform.getNameID()) < 0)
++            continue;
++        ModeMap::const_iterator mode = _modeMap.find(0x3000 + i); // GL_CLIP_PLANE0
++        const bool enabled = mode != _modeMap.end() && mode->second.last_applied_value;
++        const Vec4 value = enabled ? _clipPlanes[i] : Vec4(0.0f, 0.0f, 0.0f, 1.0f);
++        Vec4 current;
++        if (!uniform.get(current) || current != value)
++            uniform.set(value);
++        _lastAppliedProgramObject->apply(uniform);
++    }
++}
++
++void State::setClipPlane(unsigned int num, const Vec4& eyePlane)
++{
++    if (num < MaxUniformClipPlanes)
++        _clipPlanes[num] = eyePlane;
+ }
+ 
+ namespace State_Utils

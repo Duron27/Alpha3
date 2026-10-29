@@ -1,0 +1,52 @@
+From: Duron27 <duron27@gmail.com>
+Subject: [PATCH] multiplayer/TODO.md: client-side plan (less C++, features as updatable Luau packs) and parked items
+
+---
+diff --git a/multiplayer/TODO.md b/multiplayer/TODO.md
+new file mode 100644
+index 0000000..e6afef1
+--- /dev/null
++++ b/multiplayer/TODO.md
+@@ -0,0 +1,42 @@
++# Multiplayer TODO
++
++## Client: less C++, features as updatable Luau packs
++Goal: the engine keeps only small generic hooks, every feature is Luau, and a server (or host) can push new or updated
++features to players without a new build. Client side only: the server stays as it is (a C++ host running `relay.lua`).
++
++Today: about 60% of what was written is Luau (the whole mod), 3% is C++ engine hooks (~280 lines), 7% generic sockets, and
++19% is the standalone server program.
++
++1. **Generic main-menu button hook** (`ui.addMainMenuButton{...}`): the mod registers its own button and textures. Removes
++   the last multiplayer-specific C++ in the engine (the hardcoded `"multiplayer"` button in `mwgui/mainmenu.cpp`).
++2. **Split the mod into a core and feature packs.**
++   - Core (small, built in): `netlib`, session/handshake, the pack manager, an extension bus.
++   - Packs: avatars + animation (`remote`), party/chat UI (`player`), `trade`, `shots`, `proxies` (shared fights), ailments,
++     `items`. Each with a manifest: id, version, the core version and engine APIs it needs.
++   - Relay: generic namespaced channels (`ext/<feature>`: to all / to party / to one player) with the usual rate and size
++     limits, so a new feature needs no relay change. Capability negotiation instead of the single protocol number.
++3. **`openmw.modstore` (C++, ~300-400 lines, generic, not multiplayer-specific).** Write validated files (no `..`, file-type
++   allowlist, size caps, sha256 check) under `<user data>/modstore/<id>/<version>/`; add active packs to the VFS and register
++   their `.omwscripts` like `builtin.omwscripts`; expose a reload (`reloadlua` already exists). Needed because scripts load
++   only from the VFS, there is no Lua file-write or download API, and the Luau VM has no `loadstring`.
++4. **Update protocol (Luau).** `hello` lists pack id/version/hash; the client downloads what is missing or old in chunks over
++   the session connection, installs, reloads and resumes. A hosting game can serve packs too. Roll back to the previous
++   version if the new one keeps erroring in its first seconds. Keep the resume token in `openmw.storage` so a reload does not
++   cost the session.
++5. **Trust model** (to decide). Official packs signed with a key whose public half is built into the engine (installed
++   automatically) vs consent-only (a prompt per server and per hash). Either way: a per-pack `require` allowlist (only the
++   core may use sockets), file/size limits, no downgrades.
++
++Risks to check first: a reload in the middle of a session drops script state; avatars carry scripts, so a pack that removes
++one must clean them up first; adding a directory to the VFS and reloading in one go is not tried yet.
++
++## Parked / known gaps
++- Container contents (an allowlist of ordinary loot; never quest items - they would lock other players out).
++- Duplicate NPCs / stand-ins for players who are not in your group.
++- NAT traversal for hosted games: UPnP port mapping and/or a public relay.
++- A normal quit looks like a lost connection (place held for 90 s); needs an engine hook to say "I am leaving".
++- State is broadcast to everyone, so cost grows with the square of the player count (127 players max, ~30 comfortable on a
++  small VPS): skip positions of players in other cells.
++- The server forgets bans and settings on restart; passwords cross the network in plain text.
++- Not yet tried in a real game: shared fights, projectiles and spell effects of others, healing a party member, trading made-up
++  items, reconnecting. Also: the engine with the mod built in (`OPENMW_BUILTIN_MULTIPLAYER`).

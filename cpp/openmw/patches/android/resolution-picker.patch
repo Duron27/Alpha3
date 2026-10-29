@@ -1,0 +1,129 @@
+--- a/apps/openmw/mwgui/settingswindow.cpp
++++ b/apps/openmw/mwgui/settingswindow.cpp
+@@ -396,14 +396,31 @@
+ 
+         // fill resolution list
+         const int screen = Settings::video().mScreen;
+-        int numDisplayModes = SDL_GetNumDisplayModes(screen);
+         std::vector<std::pair<int, int>> resolutions;
++#ifdef ANDROID
++        // SDL lists only the native mode on Android. Offer fractions of it: choosing one resizes the surface in place
++        // (see VideoWrapper::setVideoMode), so this works as a render scale.
++        SDL_DisplayMode nativeMode;
++        if (SDL_GetDesktopDisplayMode(screen, &nativeMode) == 0)
++        {
++            const int nativeW = std::max(nativeMode.w, nativeMode.h);
++            const int nativeH = std::min(nativeMode.w, nativeMode.h);
++            for (const int percent : { 100, 90, 80, 75, 67, 60, 50, 40, 33, 25 })
++            {
++                const int w = (nativeW * percent / 100) / 2 * 2;
++                const int h = (nativeH * percent / 100) / 2 * 2;
++                resolutions.emplace_back(w, h);
++            }
++        }
++#else
++        int numDisplayModes = SDL_GetNumDisplayModes(screen);
+         for (int i = 0; i < numDisplayModes; i++)
+         {
+             SDL_DisplayMode mode;
+             SDL_GetDisplayMode(screen, i, &mode);
+             resolutions.emplace_back(mode.w, mode.h);
+         }
++#endif
+         std::sort(resolutions.begin(), resolutions.end(), sortResolutions);
+         for (std::pair<int, int>& resolution : resolutions)
+         {
+@@ -521,6 +538,12 @@
+         if (index == MyGUI::ITEM_NONE)
+             return;
+ 
++#ifdef ANDROID
++        // Applies at once, and a bad pick is one tap away from being undone.
++        onResolutionAccept();
++        return;
++#endif
++
+         ConfirmationDialog* dialog = MWBase::Environment::get().getWindowManager()->getConfirmationDialog();
+         dialog->askForConfirmation("#{OMWEngine:ConfirmResolution}");
+         dialog->eventOkClicked.clear();
+--- a/components/sdlutil/sdlvideowrapper.cpp
++++ b/components/sdlutil/sdlvideowrapper.cpp
+@@ -12,10 +12,38 @@
+ 
+ #include <SDL_video.h>
+ 
++#ifdef ANDROID
++#include <SDL_system.h>
++#include <jni.h>
++#endif
++
+ namespace SDLUtil
+ {
+     namespace
+     {
++#ifdef ANDROID
++        // The Android surface has a fixed size that the activity can change (SDLActivity.setSurfaceResolution). SDL then
++        // reports an ordinary resize, which the rest of the engine already handles.
++        bool setAndroidSurfaceResolution(int width, int height)
++        {
++            auto* env = static_cast<JNIEnv*>(SDL_AndroidGetJNIEnv());
++            auto activity = static_cast<jobject>(SDL_AndroidGetActivity());
++            if (env == nullptr || activity == nullptr)
++                return false;
++
++            jclass activityClass = env->GetObjectClass(activity);
++            jmethodID method = env->GetMethodID(activityClass, "setSurfaceResolution", "(II)V");
++            const bool found = method != nullptr;
++            if (found)
++                env->CallVoidMethod(activity, method, width, height);
++            else
++                env->ExceptionClear();
++            env->DeleteLocalRef(activityClass);
++            env->DeleteLocalRef(activity);
++            return found;
++        }
++#endif
++
+         void drawableSize(SDL_Window* window, int& width, int& height)
+         {
+ #if SDL_VERSION_ATLEAST(2, 26, 0)
+@@ -91,6 +119,11 @@
+         if (mWindow == nullptr)
+             return;
+ 
++#ifdef ANDROID
++        if (setAndroidSurfaceResolution(width, height))
++            return;
++#endif
++
+         SDL_SetWindowFullscreen(mWindow, 0);
+ 
+         if (SDL_GetWindowFlags(mWindow) & SDL_WINDOW_MAXIMIZED)
+--- a/components/sdlutil/sdlinputwrapper.cpp
++++ b/components/sdlutil/sdlinputwrapper.cpp
+@@ -314,6 +314,25 @@
+                 if (w == 0 && h == 0)
+                     return;
+ 
++#ifdef ANDROID
++                {
++                    // The stored mouse position is in the old window's coordinates (the in-game resolution list resizes
++                    // the surface): scale it so the on-screen cursor stays where the player last touched.
++                    static int lastWidth = 0;
++                    static int lastHeight = 0;
++                    if (lastWidth > 0 && lastHeight > 0 && (lastWidth != w || lastHeight != h)
++                        && SDL_ShowCursor(SDL_QUERY) == SDL_ENABLE)
++                    {
++                        int mouseX = 0;
++                        int mouseY = 0;
++                        SDL_GetMouseState(&mouseX, &mouseY);
++                        SDL_WarpMouseInWindow(mSDLWindow, mouseX * w / lastWidth, mouseY * h / lastHeight);
++                    }
++                    lastWidth = w;
++                    lastHeight = h;
++                }
++#endif
++
+                 // The Vulkan entry has no OSG context.
+                 if (osg::GraphicsContext* const context = mViewer->getCamera()->getGraphicsContext())
+                     context->resized(x, y, w, h);

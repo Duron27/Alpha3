@@ -1,0 +1,268 @@
+From fcc5ba938b15e19390137295d935835177ce6731 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Fri, 9 Oct 2026 08:28:54 -0400
+Subject: [PATCH] Attacks have a wind-up on press and a swing on release, sized
+ by how long the attack was held; per-weapon-group key handling
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ multiplayer/mod/scripts/mp/global.lua | 13 ++--
+ multiplayer/mod/scripts/mp/player.lua | 33 ++++++++--
+ multiplayer/mod/scripts/mp/remote.lua | 92 ++++++++++++++++++---------
+ 3 files changed, 98 insertions(+), 40 deletions(-)
+
+diff --git a/multiplayer/mod/scripts/mp/global.lua b/multiplayer/mod/scripts/mp/global.lua
+index f01c8dd964..9085c48a01 100644
+--- a/multiplayer/mod/scripts/mp/global.lua
++++ b/multiplayer/mod/scripts/mp/global.lua
+@@ -253,6 +253,7 @@ local function sendState()
+         stance = types.Actor.getStance(p),
+         rs = types.Actor.getRunSpeed(p),
+         sneak = myInput.sneak, atk = myInput.atk, seq = myInput.seq, jseq = myInput.jseq,
++        rkind = myInput.rkind, rseq = myInput.rseq, str = myInput.str,
+         reading = myInput.reading, pitch = myInput.pitch,
+     }))
+ end
+@@ -445,12 +446,16 @@ local function updateRemote(r, dt)
+     local jseq = r.state.jseq
+     if jseq and r.lastJSeq and jseq ~= r.lastJSeq then r.obj:sendEvent('MpJump', {}) end
+     r.lastJSeq = jseq or r.lastJSeq
+-    -- play each new attack once (the first state we ever see only sets the baseline)
+-    local seq = r.state.seq
++    -- play each new attack once (the first state we ever see only sets the baseline): wind-up on press,
++    -- the swing on release, with its strength
++    local seq, rseq = r.state.seq, r.state.rseq
+     if seq and r.lastSeq and seq ~= r.lastSeq and r.state.atk then
+-        r.obj:sendEvent('MpAttack', { kind = r.state.atk })
++        r.obj:sendEvent('MpAttack', { phase = 'press', kind = r.state.atk })
+     end
+-    r.lastSeq = seq or r.lastSeq
++    if rseq and r.lastRSeq and rseq ~= r.lastRSeq and r.state.rkind then
++        r.obj:sendEvent('MpAttack', { phase = 'release', kind = r.state.rkind, str = r.state.str or 0 })
++    end
++    r.lastSeq, r.lastRSeq = seq or r.lastSeq, rseq or r.lastRSeq
+ end
+ 
+ ------------------------------------------------------------------ party / ui plumbing
+diff --git a/multiplayer/mod/scripts/mp/player.lua b/multiplayer/mod/scripts/mp/player.lua
+index 36f31e3ac3..0f9221b894 100644
+--- a/multiplayer/mod/scripts/mp/player.lua
++++ b/multiplayer/mod/scripts/mp/player.lua
+@@ -46,19 +46,20 @@ local playerList, myPlayerId = {}, nil
+ local self = require('openmw.self')
+ local types = require('openmw.types')
+ local wasUsing, wasAir, attackSeq, jumpSeq, lastAttack, lastInputSig = false, false, 0, 0, nil, ''
++local releaseSeq, releaseKind, releaseStrength, pressedAt, holding = 0, nil, 0, 0, false
+ local inputData = { sneak = false, reading = false, pitch = 0 }
+ local inputSentAt = -10
+ 
+ -- Sends our animation-relevant input to the global script when it changed (and once a second regardless).
+ local function pushInput(force)
+     inputData.atk, inputData.seq, inputData.jseq = lastAttack, attackSeq, jumpSeq
+-    local sig = table.concat({ tostring(inputData.sneak), tostring(inputData.reading), attackSeq, jumpSeq,
++    local sig = table.concat({ tostring(inputData.sneak), tostring(inputData.reading), attackSeq, releaseSeq, jumpSeq,
+         math.floor(inputData.pitch * 20 + 0.5) }, '|')
+     local t = core.getRealTime()
+     if force or sig ~= lastInputSig or t - inputSentAt > 1 then
+         lastInputSig, inputSentAt = sig, t
+         core.sendGlobalEvent('MpInput', { sneak = inputData.sneak, reading = inputData.reading, pitch = inputData.pitch,
+-            atk = lastAttack, seq = attackSeq, jseq = jumpSeq })
++            atk = lastAttack, seq = attackSeq, jseq = jumpSeq, rkind = releaseKind, rseq = releaseSeq, str = releaseStrength })
+     end
+ end
+ local tab = 'global'
+@@ -465,17 +466,32 @@ return {
+         -- have a menu open, and where we are looking. Attacks and jumps carry a counter so each is shown exactly once.
+         onUpdate = function(dt)
+             local using = I.UI.getMode() == nil and input.isActionPressed(input.ACTION.Use)
++            local function attackKind()
++                local fwd = input.isActionPressed(input.ACTION.MoveForward) or input.isActionPressed(input.ACTION.MoveBackward)
++                local side = input.isActionPressed(input.ACTION.MoveLeft) or input.isActionPressed(input.ACTION.MoveRight)
++                return fwd and 'thrust' or side and 'slash' or 'chop'
++            end
+             if using and not wasUsing then
+                 local stance = types.Actor.getStance(self)
+                 if stance == types.Actor.STANCE.Weapon then
+-                    local fwd = input.isActionPressed(input.ACTION.MoveForward) or input.isActionPressed(input.ACTION.MoveBackward)
+-                    local side = input.isActionPressed(input.ACTION.MoveLeft) or input.isActionPressed(input.ACTION.MoveRight)
++                    -- pressing starts the wind-up; releasing swings, harder the longer it was held
+                     attackSeq = attackSeq + 1
+-                    lastAttack = fwd and 'thrust' or side and 'slash' or 'chop'
++                    lastAttack = attackKind()
++                    pressedAt, holding = core.getRealTime(), true
+                 elseif stance == types.Actor.STANCE.Spell then
+                     attackSeq = attackSeq + 1
+                     lastAttack = 'cast'
+                 end
++            elseif holding and not using and wasUsing then
++                holding = false
++                local speed = 1
++                pcall(function()
++                    local w = types.Actor.getEquipment(self)[types.Actor.EQUIPMENT_SLOT.CarriedRight]
++                    if w then speed = types.Weapon.record(w).speed end
++                end)
++                releaseSeq = releaseSeq + 1
++                releaseKind = attackKind()
++                releaseStrength = math.max(0, math.min(1, (core.getRealTime() - pressedAt) * speed / 0.8))
+             end
+             wasUsing = using
+             local air = not types.Actor.isOnGround(self) and not types.Actor.isSwimming(self)
+@@ -536,7 +552,12 @@ return {
+             state = d
+             if changed then dirty.party = true; dirty.invites = true end
+         end,
+-        MpDebugAttack = function(d) attackSeq = attackSeq + 1; lastAttack = d.kind end, -- test macro
++        MpDebugAttack = function(d) -- test macro: press, then release with strength d.str after d.hold seconds
++            attackSeq = attackSeq + 1; lastAttack = d.kind
++            async:newUnsavableSimulationTimer(d.hold or 0.1, function()
++                releaseSeq = releaseSeq + 1; releaseKind = d.kind; releaseStrength = d.str or 0
++            end)
++        end,
+         MpAvatars = function(d) avatarList = d.list or {} end,
+         MpMarkers = function(d) pcall(ui.setPlayerMarkers, d.list or {}) end,
+         MpPlayers = function(d)
+diff --git a/multiplayer/mod/scripts/mp/remote.lua b/multiplayer/mod/scripts/mp/remote.lua
+index 469b5efdb8..cfc7cc5fe6 100644
+--- a/multiplayer/mod/scripts/mp/remote.lua
++++ b/multiplayer/mod/scripts/mp/remote.lua
+@@ -21,7 +21,7 @@ local DAMAGE_REPORT_INTERVAL = 0.2
+ local playAttack
+ local setReading
+ local ATTACK_TIME = 1.0 -- a swing is cut off after this long, whatever the animation does
+-local attackLeft, attackGroup
++local attackLeft, attackGroup, attackHeld
+ local SWING_SPEED = 1.3
+ local speedTimer
+ local jumpLeft
+@@ -159,8 +159,11 @@ local function attackAnimation(kind)
+ end
+ 
+ local function hasKey(group, key)
+-    local ok, t = pcall(anim.getTextKeyTime, self, group .. ': ' .. key)
+-    return ok and type(t) == 'number' and t >= 0
++    for _, name in ipairs({ group .. ': ' .. key, key }) do
++        local ok, t = pcall(anim.getTextKeyTime, self, name)
++        if ok and type(t) == 'number' and t >= 0 then return true end
++    end
++    return false
+ end
+ 
+ -- first key that exists in this group (an unknown stop key makes the animation run to its very end,
+@@ -170,37 +173,68 @@ local function firstKey(group, keys)
+     return nil
+ end
+ 
+-playAttack = function(kind)
+-    if Actor.isDead(self) or attackGroup then return end -- one swing at a time
+-    local group, from, to = attackAnimation(kind)
+-    if group ~= 'spellcast' and group ~= 'bowandarrow' and group ~= 'crossbow' and group ~= 'throwweapon' then
+-        to = firstKey(group, { kind .. ' small follow stop', kind .. ' medium follow stop', kind .. ' large follow stop',
+-            kind .. ' follow stop', kind .. ' hit', kind .. ' stop' }) or to
++local function keyTime(group, k)
++    for _, name in ipairs({ group .. ': ' .. k, k }) do
++        local okT, t = pcall(anim.getTextKeyTime, self, name)
++        if okT and type(t) == 'number' and t >= 0 then return t end
+     end
++end
++
++local RANGED = { bowandarrow = true, crossbow = true, throwweapon = true }
++
++-- Plays [from, to] of a group on the upper body. hold = keep the last frame until replaced (a charged attack).
++local function playSegment(group, from, to, speed, hold)
+     local ok = pcall(function()
+         if not anim.hasGroup(self, group) then error('no group') end
++        if attackGroup then pcall(anim.cancel, self, attackGroup) end
+         -- Blended on the upper body only, so walking, strafing and jumping carry on underneath. (A queued animation
+         -- takes over the whole actor and left it stuck.)
+         anim.playBlended(self, group, {
+             startKey = from, stopKey = to, priority = anim.PRIORITY.Weapon, blendMask = anim.BLEND_MASK.UpperBody,
+-            autoDisable = true, speed = SWING_SPEED,
++            autoDisable = not hold, speed = speed,
+         })
+     end)
+-    if ok then
+-        -- how long the swing really is: from its start key to its stop key (at the speed we play it)
+-        local function keyTime(k)
+-            for _, name in ipairs({ group .. ': ' .. k, k }) do
+-                local okT, t = pcall(anim.getTextKeyTime, self, name)
+-                if okT and type(t) == 'number' and t >= 0 then return t end
+-            end
++    if not ok then print('[mp-anim] could not play ' .. tostring(group) .. ' ' .. tostring(from)) return false end
++    local t0, t1 = keyTime(group, from), keyTime(group, to)
++    local length = (t0 and t1 and t1 > t0) and (t1 - t0) / speed or 0.6
++    attackGroup = group
++    attackLeft = hold and 5 or math.min(2.5, length + 0.15) -- a held wind-up gives up after 5 s
++    attackHeld = hold
++    print(string.format('[mp-anim] %s %s -> %s (%.2fs)%s', group, from, to, length, hold and ' held' or ''))
++    return true
++end
++
++-- A player pressed attack (wind-up, held until they release) or released it (the swing, harder when charged longer).
++-- Spells have no charge: they are cast on press.
++playAttack = function(d)
++    if Actor.isDead(self) then return end
++    local kind = d.kind
++    local group, from = attackAnimation(kind)
++    if group == 'spellcast' then
++        if d.phase == 'press' then playSegment(group, 'self start', 'self stop', 1, false) end
++        return
++    end
++    if RANGED[group] then
++        if d.phase == 'press' then
++            playSegment(group, 'shoot start', firstKey(group, { 'shoot max attack', 'shoot min attack' }) or 'shoot start', 1, true)
++        else
++            local rel = firstKey(group, { 'shoot release' }) or 'shoot start'
++            playSegment(group, rel, firstKey(group, { 'shoot follow stop' }) or 'shoot follow stop', 1.2, false)
+         end
+-        local t0, t1 = keyTime(from), keyTime(to)
+-        local length = (t0 and t1 and t1 > t0) and (t1 - t0) / SWING_SPEED or nil
+-        print('[mp-anim] key times ' .. tostring(t0) .. ' -> ' .. tostring(t1) .. ' length ' .. tostring(length))
+-        attackGroup, attackLeft = group, math.min(ATTACK_TIME, (length or 0.6) + 0.1)
+-        print('[mp-anim] ' .. group .. ' ' .. from .. ' -> ' .. tostring(to))
++        return
++    end
++    if d.phase == 'press' then
++        -- wind up: raise the weapon and hold it there
++        local top = firstKey(group, { kind .. ' max attack', kind .. ' min attack' })
++        if top then playSegment(group, kind .. ' start', top, 1, true) end
+     else
+-        print('[mp-anim] could not play ' .. tostring(group) .. ' ' .. tostring(kind))
++        local str = d.str or 0
++        local size = str < 0.33 and 'small' or str < 0.66 and 'medium' or 'large'
++        local hit = firstKey(group, { kind .. ' min hit', kind .. ' hit' }) or (kind .. ' start')
++        local stop = firstKey(group, { kind .. ' ' .. size .. ' follow stop', kind .. ' small follow stop',
++            kind .. ' follow stop', kind .. ' stop' }) or (kind .. ' small follow stop')
++        -- a hard swing is a bit faster and carries further
++        playSegment(group, hit, stop, 1.0 + 0.5 * str, false)
+     end
+ end
+ 
+@@ -215,12 +249,10 @@ return {
+             local c = self.controls
+             if attackGroup then
+                 attackLeft = attackLeft - dt
+-                if attackLeft <= 0 or not anim.isPlaying(self, attackGroup) then
+-                    if anim.isPlaying(self, attackGroup) then
+-                        print('[mp-anim] swing cut off after ' .. ATTACK_TIME .. 's')
+-                        pcall(anim.cancel, self, attackGroup)
+-                    end
+-                    attackGroup, attackLeft = nil, nil
++                local playing = anim.isPlaying(self, attackGroup)
++                if attackLeft <= 0 or (not playing and not attackHeld) then
++                    if playing then pcall(anim.cancel, self, attackGroup) end
++                    attackGroup, attackLeft, attackHeld = nil, nil, nil
+                 end
+             end
+ 
+@@ -305,7 +337,7 @@ return {
+             if d.stance and Actor.getStance(self) ~= d.stance then Actor.setStance(self, d.stance) end
+         end,
+         -- Another player attacked or cast: show the animation only. (The avatar has no AI and never deals damage.)
+-        MpAttack = function(d) playAttack(d.kind) end,
++        MpAttack = function(d) playAttack(d) end,
+         MpJump = function() jumpLeft = 0.15 end,
+         MpEquip = function(d)
+             desiredEquip = d.slots
+-- 
+2.55.0
+

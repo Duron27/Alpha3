@@ -1,0 +1,84 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Tue, 27 Oct 2026 09:47:41 -0400
+Subject: [PATCH 16/17] Skinning: no allocation per frame, a branchless
+ weighted sum and no perspective divide per vertex
+
+RigGeometry::cull skins every visible actor each frame on the main thread. The bone matrix list is kept between frames,
+the weighted sum of the bone matrices runs over all 16 elements (the affine column is put back after), and vertices are
+transformed as affine points instead of through Matrixf::preMult, which divides by w for every vertex.
+---
+ components/sceneutil/riggeometry.cpp | 26 ++++++++++++++++++--------
+ components/sceneutil/riggeometry.hpp |  2 ++
+ 2 files changed, 20 insertions(+), 8 deletions(-)
+
+diff --git a/components/sceneutil/riggeometry.cpp b/components/sceneutil/riggeometry.cpp
+index 3b851149bf..0fd333e900 100644
+--- a/components/sceneutil/riggeometry.cpp
++++ b/components/sceneutil/riggeometry.cpp
+@@ -168,7 +168,8 @@ namespace SceneUtil
+         osg::Vec3Array* normalDst = static_cast<osg::Vec3Array*>(geom.getNormalArray());
+         osg::Vec4Array* tangentDst = static_cast<osg::Vec4Array*>(geom.getTexCoordArray(7));
+ 
+-        std::vector<osg::Matrixf> boneMatrices(mNodes.size());
++        std::vector<osg::Matrixf>& boneMatrices = mBoneMatrices;
++        boneMatrices.resize(mNodes.size());
+         std::vector<Bone*>::const_iterator bone = mNodes.begin();
+         std::vector<BoneInfo>::const_iterator boneInfo = mData->mBones.begin();
+         for (osg::Matrixf& boneMat : boneMatrices)
+@@ -185,26 +186,35 @@ namespace SceneUtil
+         else
+             transform = mData->mTransform;
+ 
++        // The bone matrices are affine: the weighted sum is taken over all 16 elements (no branch, so it vectorises) and
++        // the last column is put back, and vertices are transformed without the perspective divide of Matrixf::preMult.
++        osg::Vec3f* const positions = positionDst->asVector().data();
++        const osg::Vec3f* const sourcePositions = positionSrc->asVector().data();
+         for (const auto& [influences, vertices] : mData->mInfluences)
+         {
+-            osg::Matrixf resultMat(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1);
++            osg::Matrixf resultMat(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
++            float* const resultMatPtr = resultMat.ptr();
+ 
+             for (const auto& [index, weight] : influences)
+             {
+                 if (mNodes[index] == nullptr)
+                     continue;
+-                const float* boneMatPtr = boneMatrices[index].ptr();
+-                float* resultMatPtr = resultMat.ptr();
+-                for (int i = 0; i < 16; ++i, ++resultMatPtr, ++boneMatPtr)
+-                    if (i % 4 != 3)
+-                        *resultMatPtr += *boneMatPtr * weight;
++                const float* const boneMatPtr = boneMatrices[index].ptr();
++                for (int i = 0; i < 16; ++i)
++                    resultMatPtr[i] += boneMatPtr[i] * weight;
+             }
++            resultMatPtr[3] = resultMatPtr[7] = resultMatPtr[11] = 0.f;
++            resultMatPtr[15] = 1.f;
+ 
+             resultMat *= transform;
+ 
++            const float* const m = resultMatPtr;
+             for (unsigned short vertex : vertices)
+             {
+-                (*positionDst)[vertex] = resultMat.preMult((*positionSrc)[vertex]);
++                const osg::Vec3f& p = sourcePositions[vertex];
++                positions[vertex].set(m[0] * p.x() + m[4] * p.y() + m[8] * p.z() + m[12],
++                    m[1] * p.x() + m[5] * p.y() + m[9] * p.z() + m[13],
++                    m[2] * p.x() + m[6] * p.y() + m[10] * p.z() + m[14]);
+                 if (normalDst)
+                     (*normalDst)[vertex] = osg::Matrixf::transform3x3((*normalSrc)[vertex], resultMat);
+ 
+diff --git a/components/sceneutil/riggeometry.hpp b/components/sceneutil/riggeometry.hpp
+index 0056d59d1f..b4d98e83dc 100644
+--- a/components/sceneutil/riggeometry.hpp
++++ b/components/sceneutil/riggeometry.hpp
+@@ -104,6 +104,8 @@ namespace SceneUtil
+         };
+         std::shared_ptr<InfluenceData> mData;
+         std::vector<Bone*> mNodes;
++        // Kept between frames so skinning does not allocate
++        std::vector<osg::Matrixf> mBoneMatrices;
+ 
+         unsigned int mLastFrameNumber{ 0 };
+         bool mBoundsFirstFrame{ true };

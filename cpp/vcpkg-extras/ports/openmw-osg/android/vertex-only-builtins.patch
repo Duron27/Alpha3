@@ -1,0 +1,108 @@
+diff --git a/include/osg/State b/include/osg/State
+--- a/include/osg/State
++++ b/include/osg/State
+@@ -290,6 +290,10 @@
+ 
+         bool convertVertexShaderSourceToOsgBuiltIns(std::string& source) const;
+ 
++        /** Alpha3: substitutes only the $OSG_ variables (the first step of the conversion above), for shader stages whose
++         *  gl_ built-ins must not be renamed. */
++        void substituteShaderVariables(std::string& source) const;
++
+ 
+         /** Apply stateset.*/
+         void apply(const StateSet* dstate);
+diff --git a/src/osg/State.cpp b/src/osg/State.cpp
+--- a/src/osg/State.cpp
++++ b/src/osg/State.cpp
+@@ -1352,6 +1352,11 @@
+     }
+ }
+ 
++void State::substituteShaderVariables(std::string& source) const
++{
++    State_Utils::substitudeEnvVars(*this, source);
++}
++
+ bool State::convertVertexShaderSourceToOsgBuiltIns(std::string& source) const
+ {
+     OSG_DEBUG<<"State::convertShaderSourceToOsgBuiltIns()"<<std::endl;
+@@ -1384,12 +1389,45 @@
+         declPos = 0;
+     }
+ 
+-    std::string::size_type extPos = source.rfind( "#extension " );
+-    if ( extPos != std::string::npos )
++    // Alpha3: the declarations must come after every #extension directive, and must survive the preprocessor. OpenMW
++    // wraps "#extension GL_EXT_gpu_shader4" in "#if @useGPUShader4"; the old search for the last "#extension " put the
++    // declarations inside that block, and with the define at 0 they were compiled out (osg_Vertex undeclared). So only
++    // directives outside any conditional count, and one inside a conditional counts as the end of its outermost block.
+     {
+-        // found the string, now find the next linefeed and set the insertion point after it.
+-        declPos = source.find( '\n', extPos );
+-        declPos = declPos != std::string::npos ? declPos+1 : source.length();
++        int depth = 0;
++        bool extensionInBlock = false;
++        std::string::size_type lineStart = declPos;
++        while (lineStart < source.length())
++        {
++            std::string::size_type lineEnd = source.find('\n', lineStart);
++            const std::string::size_type next = lineEnd != std::string::npos ? lineEnd + 1 : source.length();
++            const std::string::size_type first = source.find_first_not_of(" \t", lineStart);
++            if (first != std::string::npos && first < next && source[first] == '#')
++            {
++                const std::string::size_type word = source.find_first_not_of(" \t", first + 1);
++                if (word != std::string::npos && word < next)
++                {
++                    if (source.compare(word, 2, "if") == 0)
++                        ++depth;
++                    else if (source.compare(word, 5, "endif") == 0)
++                    {
++                        if (depth > 0 && --depth == 0 && extensionInBlock)
++                        {
++                            declPos = next;
++                            extensionInBlock = false;
++                        }
++                    }
++                    else if (source.compare(word, 9, "extension") == 0)
++                    {
++                        if (depth == 0)
++                            declPos = next;
++                        else
++                            extensionInBlock = true;
++                    }
++                }
++            }
++            lineStart = next;
++        }
+     }
+     if (_useModelViewAndProjectionUniforms)
+     {
+diff --git a/src/osg/Shader.cpp b/src/osg/Shader.cpp
+--- a/src/osg/Shader.cpp
++++ b/src/osg/Shader.cpp
+@@ -634,10 +634,23 @@
+ #endif
+ 
+     std::string source = _shader->getShaderSource();
+-    // if (_shader->getType()==osg::Shader::VERTEX && (state.getUseVertexAttributeAliasing() || state.getUseModelViewAndProjectionUniforms()))
++    // Alpha3: only vertex shaders get their gl_ built-ins renamed. For other stages the declarations OSG inserts can land
++    // after the first use, and OpenMW's fragment profile declares the matrices it needs itself. Every stage still gets the
++    // $OSG_ variables substituted (osgText's shaders start with one).
++    // Shaders in the 320 es dialect declare their own attributes and uniforms: renaming and declaring on top of that would
++    // clash, or put declarations inside an inactive block.
++    const std::string::size_type versionPos = source.find("#version ");
++    const std::string::size_type versionEnd = source.find('\n', versionPos);
++    const bool declaresItself = versionPos != std::string::npos
++        && source.substr(versionPos, versionEnd - versionPos).find(" es") != std::string::npos;
++    if (_shader->getType()==osg::Shader::VERTEX && !declaresItself)
+     {
+         state.convertVertexShaderSourceToOsgBuiltIns(source);
+     }
++    else
++    {
++        state.substituteShaderVariables(source);
++    }
+ 
+ 
+     GLint compiled = GL_FALSE;

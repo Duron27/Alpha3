@@ -1,0 +1,124 @@
+diff --git a/apps/openmw/engine.cpp b/apps/openmw/engine.cpp
+index 97de582cb7..569a216b4e 100644
+--- a/apps/openmw/engine.cpp
++++ b/apps/openmw/engine.cpp
+@@ -13,7 +13,16 @@
+ #include <osgViewer/ViewerEventHandlers>
+ 
+ #include <SDL.h>
++#if defined(ANDROID) || defined(__ANDROID__)
++#include <SDL_opengles2_gl2ext.h>
++#elif defined(__ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__)
++#include <SDL_opengles2_khrplatform.h>
++#include <SDL_opengles2_gl2platform.h>
++#include <SDL_opengles2_gl2.h>
++#include <SDL_opengles2_gl2ext.h>
++#else
+ #include <SDL_opengl_glext.h>
++#endif
+ #ifdef OPENMW_USE_VULKAN
+ #include <SDL_vulkan.h>
+ #endif
+@@ -205,6 +214,9 @@ namespace
+             facts.mGlVersion = readString(GL_VERSION);
+             facts.mGlShadingLanguage = readString(GL_SHADING_LANGUAGE_VERSION);
+             // GL_CONTEXT_FLAGS needs OpenGL 3.0.
++#ifndef GL_CONTEXT_FLAGS
++#define GL_CONTEXT_FLAGS 0x821E
++#endif
+             if (osg::getGLVersionNumber() >= 3.f)
+                 glGetIntegerv(GL_CONTEXT_FLAGS, &facts.mGlContextFlags);
+         }
+diff --git a/apps/openmw/mwrender/clockwork/frame/postchain.cpp b/apps/openmw/mwrender/clockwork/frame/postchain.cpp
+index 393c53b4fa..e8f91d818e 100644
+--- a/apps/openmw/mwrender/clockwork/frame/postchain.cpp
++++ b/apps/openmw/mwrender/clockwork/frame/postchain.cpp
+@@ -13,7 +13,16 @@
+ #include <stdexcept>
+ #include <utility>
+ 
++#if defined(ANDROID) || defined(__ANDROID__)
++#include <SDL_opengles2_gl2ext.h>
++#elif defined(__ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__)
++#include <SDL_opengles2_khrplatform.h>
++#include <SDL_opengles2_gl2platform.h>
++#include <SDL_opengles2_gl2.h>
++#include <SDL_opengles2_gl2ext.h>
++#else
+ #include <SDL_opengl_glext.h>
++#endif
+ 
+ #include <osg/StateSet>
+ #include <osg/Texture>
+@@ -384,6 +393,9 @@ namespace MWRender::Clockwork
+         for (const osg::ref_ptr<osg::Texture>& texture : technique.getTextures())
+         {
+             const GLenum target = texture->getTextureTarget();
++#ifndef GL_TEXTURE_1D
++#define GL_TEXTURE_1D 0x0DE0
++#endif
+             const VkImageType type = target == GL_TEXTURE_1D
+                 ? VK_IMAGE_TYPE_1D
+                 : (target == GL_TEXTURE_3D ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D);
+diff --git a/apps/openmw/mwrender/postprocessor.cpp b/apps/openmw/mwrender/postprocessor.cpp
+index 102e5ba9e2..eedf09eb0e 100644
+--- a/apps/openmw/mwrender/postprocessor.cpp
++++ b/apps/openmw/mwrender/postprocessor.cpp
+@@ -1,6 +1,15 @@
+ #include "postprocessor.hpp"
+ 
++#if defined(ANDROID) || defined(__ANDROID__)
++#include <SDL_opengles2_gl2ext.h>
++#elif defined(__ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__)
++#include <SDL_opengles2_khrplatform.h>
++#include <SDL_opengles2_gl2platform.h>
++#include <SDL_opengles2_gl2.h>
++#include <SDL_opengles2_gl2ext.h>
++#else
+ #include <SDL_opengl_glext.h>
++#endif
+ #include <algorithm>
+ #include <chrono>
+ #include <thread>
+diff --git a/components/debug/gldebug.cpp b/components/debug/gldebug.cpp
+index b9bebb675d..a15c7e5916 100644
+--- a/components/debug/gldebug.cpp
++++ b/components/debug/gldebug.cpp
+@@ -38,7 +38,16 @@ either expressed or implied, of the FreeBSD Project.
+ #include <components/debug/debuglog.hpp>
+ 
+ // OpenGL constants not provided by OSG:
++#if defined(ANDROID) || defined(__ANDROID__)
++#include <SDL_opengles2_gl2ext.h>
++#elif defined(__ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__)
++#include <SDL_opengles2_khrplatform.h>
++#include <SDL_opengles2_gl2platform.h>
++#include <SDL_opengles2_gl2.h>
++#include <SDL_opengles2_gl2ext.h>
++#else
+ #include <SDL_opengl_glext.h>
++#endif
+ 
+ namespace Debug
+ {
+diff --git a/components/fx/technique.cpp b/components/fx/technique.cpp
+index 215c2de349..79a4caa397 100644
+--- a/components/fx/technique.cpp
++++ b/components/fx/technique.cpp
+@@ -9,7 +9,16 @@
+ #include <osg/Texture2D>
+ #include <osg/Texture3D>
+ 
++#if defined(ANDROID) || defined(__ANDROID__)
++#include <SDL_opengles2_gl2ext.h>
++#elif defined(__ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__)
++#include <SDL_opengles2_khrplatform.h>
++#include <SDL_opengles2_gl2platform.h>
++#include <SDL_opengles2_gl2.h>
++#include <SDL_opengles2_gl2ext.h>
++#else
+ #include <SDL_opengl_glext.h>
++#endif
+ 
+ #include <components/debug/debuglog.hpp>
+ #include <components/files/conversion.hpp>

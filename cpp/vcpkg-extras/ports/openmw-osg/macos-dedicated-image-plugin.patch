@@ -1,0 +1,50 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index b44ef8b..85c29cd 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -799,6 +799,8 @@ IF(NOT ANDROID)
+         ENDIF()
+
+     ELSE()
++        FIND_PACKAGE(JPEG)
++        FIND_PACKAGE(PNG)
+         FIND_PACKAGE(TIFF)
+         FIND_PACKAGE(QuickTime)
+         FIND_PACKAGE(QTKit)
+diff --git a/src/osgDB/Registry.cpp b/src/osgDB/Registry.cpp
+index 14a8d04..83bacf2 100644
+--- a/src/osgDB/Registry.cpp
++++ b/src/osgDB/Registry.cpp
+@@ -308,18 +308,6 @@ Registry::Registry()
+
+     addFileExtensionAlias("js", "V8");
+
+-#if defined(DARWIN_IMAGEIO)
+-    addFileExtensionAlias("jpg",  "imageio");
+-    addFileExtensionAlias("jpe",  "imageio");
+-    addFileExtensionAlias("jpeg", "imageio");
+-    addFileExtensionAlias("tif",  "imageio");
+-    addFileExtensionAlias("tiff", "imageio");
+-    addFileExtensionAlias("gif",  "imageio");
+-    addFileExtensionAlias("png",  "imageio");
+-    addFileExtensionAlias("psd",  "imageio");
+-    addFileExtensionAlias("tga",  "imageio");
+-
+-#endif
+
+ #if defined(USE_QTKIT)
+     addFileExtensionAlias("mov",  "QTKit");
+diff --git a/src/osgPlugins/CMakeLists.txt b/src/osgPlugins/CMakeLists.txt
+index f2ca656..dbeb39c 100644
+--- a/src/osgPlugins/CMakeLists.txt
++++ b/src/osgPlugins/CMakeLists.txt
+@@ -239,8 +239,5 @@ ENDIF()
+ #    ADD_SUBDIRECTORY(OpenAL)
+ # ENDIF()
+
+-IF(APPLE AND NOT ANDROID)
+-    ADD_PLUGIN_DIRECTORY(imageio)
+-ENDIF()
+
+ IF(AV_FOUNDATION_FOUND)
+     ADD_PLUGIN_DIRECTORY(avfoundation)

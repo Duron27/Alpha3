@@ -1,0 +1,112 @@
+From ff0bf907ecadd1cbce377a99a1b453cff4e6fb63 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Fri, 9 Oct 2026 08:38:33 -0400
+Subject: [PATCH] Head tilt direction fixed; upper body tilts with the aim
+ while attacking (animation.setHeadPitch spinePitch)
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ apps/openmw/mwlua/animationbindings.cpp | 7 +++++--
+ apps/openmw/mwrender/animation.cpp      | 5 +++--
+ apps/openmw/mwrender/animation.hpp      | 3 +++
+ files/lua_api/openmw/animation.lua      | 1 +
+ multiplayer/mod/scripts/mp/remote.lua   | 6 +++++-
+ 5 files changed, 17 insertions(+), 5 deletions(-)
+
+diff --git a/apps/openmw/mwlua/animationbindings.cpp b/apps/openmw/mwlua/animationbindings.cpp
+index c0203ef390..0977179301 100644
+--- a/apps/openmw/mwlua/animationbindings.cpp
++++ b/apps/openmw/mwlua/animationbindings.cpp
+@@ -190,8 +190,11 @@ namespace MWLua
+         });
+         // Lets a script aim the actor's head up/down (radians, positive looks down), instead of tracking a target.
+         // Pass nil to restore the default behaviour.
+-        api.function("setHeadPitch", [](SelfObject* object, std::optional<float> pitch) {
+-            getMutableAnimationOrThrow(*object)->setHeadPitchOverride(pitch);
++        // The optional second argument tilts the upper body too (radians, same direction), e.g. while attacking.
++        api.function("setHeadPitch", [](SelfObject* object, std::optional<float> pitch, std::optional<float> spinePitch) {
++            MWRender::Animation* animation = getMutableAnimationOrThrow(*object);
++            animation->setHeadPitchOverride(pitch);
++            animation->setSpinePitch(spinePitch.value_or(0.f));
+         });
+         api.function("cancel", [](SelfObject* object, std::string_view groupname) {
+             return getMutableAnimationOrThrow(*object)->disable(groupname);
+diff --git a/apps/openmw/mwrender/animation.cpp b/apps/openmw/mwrender/animation.cpp
+index 6a40968d61..d56b307ce4 100644
+--- a/apps/openmw/mwrender/animation.cpp
++++ b/apps/openmw/mwrender/animation.cpp
+@@ -1728,11 +1728,12 @@ namespace MWRender
+         if (mSpineController)
+         {
+             float yaw = mUpperBodyYawRadians - yawOffset;
+-            bool enable = std::abs(yaw) > epsilon;
++            bool enable = std::abs(yaw) > epsilon || std::abs(mSpinePitchRadians) > epsilon;
+             mSpineController->setEnabled(enable);
+             if (enable)
+             {
+-                mSpineController->setRotate(osg::Quat(yaw, osg::Vec3f(0, 0, 1)));
++                mSpineController->setRotate(
++                    osg::Quat(mSpinePitchRadians, osg::Vec3f(1, 0, 0)) * osg::Quat(yaw, osg::Vec3f(0, 0, 1)));
+                 yawOffset = mUpperBodyYawRadians;
+             }
+         }
+diff --git a/apps/openmw/mwrender/animation.hpp b/apps/openmw/mwrender/animation.hpp
+index f79aeaf9e9..335fbdca31 100644
+--- a/apps/openmw/mwrender/animation.hpp
++++ b/apps/openmw/mwrender/animation.hpp
+@@ -256,6 +256,7 @@ namespace MWRender
+         float mHeadYawRadians;
+         float mHeadPitchRadians;
+         std::optional<float> mHeadPitchOverride;
++        float mSpinePitchRadians = 0.f;
+         float mUpperBodyYawRadians;
+         float mLegsYawRadians;
+         float mBodyPitchRadians;
+@@ -521,6 +522,8 @@ namespace MWRender
+         // A script can take over the head's up/down angle, replacing head tracking (nullopt gives it back).
+         void setHeadPitchOverride(std::optional<float> pitchRadians) { mHeadPitchOverride = pitchRadians; }
+         std::optional<float> getHeadPitchOverride() const { return mHeadPitchOverride; }
++        // Tilts the upper body up/down (used so a scripted actor's attacks follow where it aims).
++        void setSpinePitch(float pitchRadians) { mSpinePitchRadians = pitchRadians; }
+         virtual float getHeadYaw() const;
+ 
+         virtual void setUpperBodyYawRadians(float v) { mUpperBodyYawRadians = v; }
+diff --git a/files/lua_api/openmw/animation.lua b/files/lua_api/openmw/animation.lua
+index dc00e3454f..6a2bb7fea4 100644
+--- a/files/lua_api/openmw/animation.lua
++++ b/files/lua_api/openmw/animation.lua
+@@ -74,6 +74,7 @@
+ -- @function [parent=#animation] setHeadPitch
+ -- @param openmw.core#GameObject actor
+ -- @param #number pitch Radians; positive looks down. Pass `nil` to go back to the default behaviour.
++-- @param #number spinePitch Optional. Radians to tilt the upper body the same way (default 0).
+ 
+ ---
+ -- Check if the given animation group is currently playing
+diff --git a/multiplayer/mod/scripts/mp/remote.lua b/multiplayer/mod/scripts/mp/remote.lua
+index ac44fa7f4c..875d28fedd 100644
+--- a/multiplayer/mod/scripts/mp/remote.lua
++++ b/multiplayer/mod/scripts/mp/remote.lua
+@@ -26,6 +26,7 @@ local SWING_SPEED = 1.3
+ local speedTimer
+ local jumpLeft
+ local curPitch = 0
++local attackBlend = 0
+ local reading = false
+ local dbgT, dbgPos
+ local isProxy, key
+@@ -273,7 +274,10 @@ return {
+             local wantPitch = math.max(-1.2, math.min(1.2, target.pitch or 0))
+             local step = math.max(-PITCH_RATE * dt, math.min(PITCH_RATE * dt, wantPitch - curPitch))
+             curPitch = curPitch + step
+-            pcall(anim.setHeadPitch, self, curPitch)
++            -- while attacking the whole upper body follows the aim, not just the head
++            attackBlend = attackBlend + math.max(-6 * dt, math.min(6 * dt, (attackGroup and 1 or 0) - attackBlend))
++            local look = -curPitch -- the engine's positive is "down", the camera's is the other way round
++            pcall(anim.setHeadPitch, self, look * (1 - 0.6 * attackBlend), math.max(-0.9, math.min(0.9, look * 0.8 * attackBlend)))
+             snapTimer = snapTimer - dt
+ 
+             local delta = target.pos - self.position
+-- 
+2.55.0
+

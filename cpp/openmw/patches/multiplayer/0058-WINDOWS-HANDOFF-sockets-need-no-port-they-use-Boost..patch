@@ -1,0 +1,33 @@
+From 18399ee8414f085e6485b367dbc1678795aae7ac Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Thu, 15 Oct 2026 09:46:15 -0400
+Subject: [PATCH 58/61] WINDOWS-HANDOFF: sockets need no port, they use
+ Boost.Asio; note the Boost headers setting
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ multiplayer/WINDOWS-HANDOFF.md | 8 +++++---
+ 1 file changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/multiplayer/WINDOWS-HANDOFF.md b/multiplayer/WINDOWS-HANDOFF.md
+index cea7a1021c..7fe18e3e87 100644
+--- a/multiplayer/WINDOWS-HANDOFF.md
++++ b/multiplayer/WINDOWS-HANDOFF.md
+@@ -37,9 +37,11 @@ A Luau-based OpenMW fork ("Clockwork", branch `clockwork-alpha` of the owner's d
+ - Say plainly what was tested and what was not.
+ 
+ ## How Windows differs (known work)
+-1. **Sockets are POSIX-only.** `components/net/sockets.cpp` has no `WSAStartup`, `closesocket`, `ioctlsocket`, `SOCKET` type, or
+-   `WSAGetLastError` handling. It needs a Windows port (and the same for `apps/mpserver/servercore.cpp`, which uses it). Check
+-   `poll` versus `WSAPoll`, non-blocking mode, `EINTR`/`EWOULDBLOCK` mapping, and link `ws2_32`. This is the real code change.
++1. **Sockets need no port.** (Corrected: an earlier version of this note said they were POSIX-only.) `components/net/sockets.cpp`
++   is written on Boost.Asio, which does WSAStartup, closesocket, non-blocking mode and error mapping itself, and `apps/mpserver/CMakeLists.txt`
++   already links `ws2_32` and `mswsock` on Windows. The one Windows problem is that upstream's prebuilt MSVC Boost has no
++   `boost/asio.hpp`: configure with `-DOPENMW_BOOST_HEADERS_DIR=<full Boost 1.90 source>` (see `multiplayer/README.md`, Windows).
++   The Linux build is unaffected (the option is empty there). The code was built on Windows but the sockets were not run against a server.
+ 2. **`multiplayer/package.cmake` returns early on non-UNIX**, and `package-client.py` is Linux-only (ldd, patchelf, `.x86_64` names, wrapper
+    scripts). The Windows zip should be made by a new script (suggest `multiplayer/package-client-windows.py`, PowerShell is fine too)
+    and a Windows branch in `package.cmake` that exposes the same `client-package` target.
+-- 
+2.55.0
+

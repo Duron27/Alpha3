@@ -1,0 +1,39 @@
+From b733a314c226c48307eeb368e9aa698bc648b213 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Fri, 9 Oct 2026 08:35:43 -0400
+Subject: [PATCH] Apply ui.setPlayerMarkers on the main thread (fixes a render
+ crash)
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ apps/openmw/mwlua/uibindings.cpp | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/apps/openmw/mwlua/uibindings.cpp b/apps/openmw/mwlua/uibindings.cpp
+index f57aab631f..6eaf93b544 100644
+--- a/apps/openmw/mwlua/uibindings.cpp
++++ b/apps/openmw/mwlua/uibindings.cpp
+@@ -398,7 +398,7 @@ namespace MWLua
+         api.function("_getDefaultFontSize", []() -> int { return Settings::gui().mFontSize; });
+         // Markers for other players on the map and minimap. Each entry: { cell = '' for the exterior or an
+         // interior cell name, x, y (world position), name }. Replaces the previous list; not saved.
+-        api.function("setPlayerMarkers", [](const Lua::TableView& list) {
++        api.function("setPlayerMarkers", [luaManager = context.mLuaManager](const Lua::TableView& list) {
+             std::vector<ESM::CustomMarker> markers;
+             list.forEach([&](const Lua::ValueView&, const Lua::ValueView& value) {
+                 const Lua::TableView entry = value.asTable();
+@@ -414,7 +414,10 @@ namespace MWLua
+                     marker.mCell = ESM::RefId::stringRefId(cell);
+                 markers.push_back(std::move(marker));
+             });
+-            MWBase::Environment::get().getWindowManager()->setPlayerMarkers(std::move(markers));
++            // GUI widgets may only be touched from the main thread
++            luaManager->addAction([markers = std::move(markers)]() mutable {
++                MWBase::Environment::get().getWindowManager()->setPlayerMarkers(std::move(markers));
++            });
+         });
+         api.function("showMessage",
+             [luaManager = context.mLuaManager](std::string_view message, std::optional<Lua::TableView> options) {
+-- 
+2.55.0
+

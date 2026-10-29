@@ -1,0 +1,106 @@
+From 6c1bfd53928f586ff1ec648b404fdacb7745dca7 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Fri, 9 Oct 2026 08:33:40 -0400
+Subject: [PATCH] animation.setHeadPitch lets scripts aim an actor's head;
+ avatars look where the player looks
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ apps/openmw/mwlua/animationbindings.cpp | 5 +++++
+ apps/openmw/mwmechanics/character.cpp   | 6 ++++++
+ apps/openmw/mwrender/animation.hpp      | 5 +++++
+ files/lua_api/openmw/animation.lua      | 7 +++++++
+ multiplayer/mod/scripts/mp/remote.lua   | 2 +-
+ 5 files changed, 24 insertions(+), 1 deletion(-)
+
+diff --git a/apps/openmw/mwlua/animationbindings.cpp b/apps/openmw/mwlua/animationbindings.cpp
+index 50d46ada9e..c0203ef390 100644
+--- a/apps/openmw/mwlua/animationbindings.cpp
++++ b/apps/openmw/mwlua/animationbindings.cpp
+@@ -188,6 +188,11 @@ namespace MWLua
+         api.function("isLoopingAnimation", [](const LObject& object, std::string_view groupname) {
+             return getConstAnimationOrThrow(object)->isLoopingAnimation(groupname);
+         });
++        // Lets a script aim the actor's head up/down (radians, positive looks down), instead of tracking a target.
++        // Pass nil to restore the default behaviour.
++        api.function("setHeadPitch", [](SelfObject* object, std::optional<float> pitch) {
++            getMutableAnimationOrThrow(*object)->setHeadPitchOverride(pitch);
++        });
+         api.function("cancel", [](SelfObject* object, std::string_view groupname) {
+             return getMutableAnimationOrThrow(*object)->disable(groupname);
+         });
+diff --git a/apps/openmw/mwmechanics/character.cpp b/apps/openmw/mwmechanics/character.cpp
+index ede7c466a7..eb4347bd6f 100644
+--- a/apps/openmw/mwmechanics/character.cpp
++++ b/apps/openmw/mwmechanics/character.cpp
+@@ -3167,6 +3167,12 @@ namespace MWMechanics
+             xAngleRadians = std::asin(direction.z());
+         }
+ 
++        if (const std::optional<float> forced = mAnimation->getHeadPitchOverride())
++        {
++            xAngleRadians = *forced;
++            zAngleRadians = 0.f;
++        }
++
+         const float xLimit = osg::DegreesToRadians(40.f);
+         const float zLimit = osg::DegreesToRadians(30.f);
+         float zLimitOffset = mAnimation->getUpperBodyYawRadians();
+diff --git a/apps/openmw/mwrender/animation.hpp b/apps/openmw/mwrender/animation.hpp
+index 4be7a8d0e7..f79aeaf9e9 100644
+--- a/apps/openmw/mwrender/animation.hpp
++++ b/apps/openmw/mwrender/animation.hpp
+@@ -255,6 +255,7 @@ namespace MWRender
+         osg::ref_ptr<RotateController> mRootController;
+         float mHeadYawRadians;
+         float mHeadPitchRadians;
++        std::optional<float> mHeadPitchOverride;
+         float mUpperBodyYawRadians;
+         float mLegsYawRadians;
+         float mBodyPitchRadians;
+@@ -516,6 +517,10 @@ namespace MWRender
+         virtual void setHeadPitch(float pitchRadians);
+         virtual void setHeadYaw(float yawRadians);
+         virtual float getHeadPitch() const;
++
++        // A script can take over the head's up/down angle, replacing head tracking (nullopt gives it back).
++        void setHeadPitchOverride(std::optional<float> pitchRadians) { mHeadPitchOverride = pitchRadians; }
++        std::optional<float> getHeadPitchOverride() const { return mHeadPitchOverride; }
+         virtual float getHeadYaw() const;
+ 
+         virtual void setUpperBodyYawRadians(float v) { mUpperBodyYawRadians = v; }
+diff --git a/files/lua_api/openmw/animation.lua b/files/lua_api/openmw/animation.lua
+index 05948421f6..dc00e3454f 100644
+--- a/files/lua_api/openmw/animation.lua
++++ b/files/lua_api/openmw/animation.lua
+@@ -68,6 +68,13 @@
+ -- @param #string text key
+ -- @return #number
+ 
++---
++-- Aim the actor's head up or down, replacing the default head tracking. The angle is limited to about 40 degrees.
++-- Can only be used on self.
++-- @function [parent=#animation] setHeadPitch
++-- @param openmw.core#GameObject actor
++-- @param #number pitch Radians; positive looks down. Pass `nil` to go back to the default behaviour.
++
+ ---
+ -- Check if the given animation group is currently playing
+ -- @function [parent=#animation] isPlaying
+diff --git a/multiplayer/mod/scripts/mp/remote.lua b/multiplayer/mod/scripts/mp/remote.lua
+index cfc7cc5fe6..ac44fa7f4c 100644
+--- a/multiplayer/mod/scripts/mp/remote.lua
++++ b/multiplayer/mod/scripts/mp/remote.lua
+@@ -272,8 +272,8 @@ return {
+             -- look where the player looks (the engine turns head and spine with the actor's pitch)
+             local wantPitch = math.max(-1.2, math.min(1.2, target.pitch or 0))
+             local step = math.max(-PITCH_RATE * dt, math.min(PITCH_RATE * dt, wantPitch - curPitch))
+-            c.pitchChange = step
+             curPitch = curPitch + step
++            pcall(anim.setHeadPitch, self, curPitch)
+             snapTimer = snapTimer - dt
+ 
+             local delta = target.pos - self.position
+-- 
+2.55.0
+

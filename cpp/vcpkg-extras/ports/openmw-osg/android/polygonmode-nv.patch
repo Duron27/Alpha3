@@ -1,0 +1,15 @@
+--- a/src/osg/PolygonMode.cpp
++++ b/src/osg/PolygonMode.cpp
+@@ -76,7 +76,11 @@
+ 
+     if (_modeFront==_modeBack)
+     {
+-        glPolygonModeNV(GL_FRONT_AND_BACK,(GLenum)_modeFront);
++        // The NDK GLES headers don't declare GL_NV_polygon_mode, look it up at runtime
++        typedef void (GL_APIENTRY * PolygonModeNVProc)(GLenum, GLenum);
++        static PolygonModeNVProc polygonModeNV = (PolygonModeNVProc)getGLExtensionFuncPtr("glPolygonModeNV");
++        if (polygonModeNV)
++            polygonModeNV(GL_FRONT_AND_BACK,(GLenum)_modeFront);
+     }
+     else
+     {

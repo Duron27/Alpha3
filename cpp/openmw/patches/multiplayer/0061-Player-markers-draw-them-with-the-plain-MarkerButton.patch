@@ -1,0 +1,100 @@
+From 8d61344e9730161daff79d56764deef8a325c0c3 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Thu, 15 Oct 2026 13:57:07 -0400
+Subject: [PATCH 61/61] Player markers: draw them with the plain MarkerButton
+ skin so they show on the world map, local map and minimap
+
+The nested CustomMarkerButton layout did not draw for other players on the world map (the widgets existed and were
+placed correctly, just invisible). Players now use the same MarkerButton skin as the other map markers, in orange for
+the group and green for everyone else; map notes keep their own icon.
+
+player.lua no longer swallows errors from ui.setMapMarkers and logs when the set of players on the map changes.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ apps/openmw/mwgui/mapwindow.cpp       | 11 ++++++-----
+ multiplayer/mod/scripts/mp/player.lua | 18 +++++++++++++++++-
+ 2 files changed, 23 insertions(+), 6 deletions(-)
+
+diff --git a/apps/openmw/mwgui/mapwindow.cpp b/apps/openmw/mwgui/mapwindow.cpp
+index 3ebb0eb5dd..e1430fed62 100644
+--- a/apps/openmw/mwgui/mapwindow.cpp
++++ b/apps/openmw/mwgui/mapwindow.cpp
+@@ -399,8 +399,9 @@ namespace MWGui
+         // A note placed by the player (grey), or another player (orange in our group, green for everybody else).
+         auto addMarker = [this](const ESM::CustomMarker& marker, const PlayerMarker* player) {
+             MarkerUserData markerPos(mLocalMapRender);
+-            MarkerWidget* markerWidget = mLocalMap->createWidget<MarkerWidget>("CustomMarkerButton",
+-                getMarkerCoordinates(marker.mWorldX, marker.mWorldY, markerPos, 16), MyGUI::Align::Default);
++            // (the plain marker skin is what is known to draw; notes keep their own icon)
++            MarkerWidget* markerWidget = mLocalMap->createWidget<MarkerWidget>(player ? "MarkerButton" : "CustomMarkerButton",
++                getMarkerCoordinates(marker.mWorldX, marker.mWorldY, markerPos, player ? 12 : 16), MyGUI::Align::Default);
+             markerWidget->setDepth(Local_MarkerAboveFogLayer);
+             markerWidget->setUserString("ToolTipType", "Layout");
+             markerWidget->setUserString("ToolTipLayout", "TextToolTipOneLine");
+@@ -465,7 +466,7 @@ namespace MWGui
+             if (!player)
+                 continue;
+             widget->setUserData(player->mMarker);
+-            widget->setCoord(getMarkerCoordinates(player->mMarker.mWorldX, player->mMarker.mWorldY, markerPos, 16));
++            widget->setCoord(getMarkerCoordinates(player->mMarker.mWorldX, player->mMarker.mWorldY, markerPos, 12));
+         }
+     }
+ 
+@@ -1344,7 +1345,7 @@ namespace MWGui
+             if (!player.mExterior)
+                 continue;
+             MarkerWidget* widget = mGlobalMap->createWidget<MarkerWidget>(
+-                "CustomMarkerButton", MyGUI::IntCoord(0, 0, 16, 16), MyGUI::Align::Default);
++                "MarkerButton", MyGUI::IntCoord(0, 0, 12, 12), MyGUI::Align::Default);
+             widget->setDepth(Global_MarkerLayer);
+             widget->setUserString("ToolTipType", "Layout");
+             widget->setUserString("ToolTipLayout", "TextToolTipOneLine");
+@@ -1373,7 +1374,7 @@ namespace MWGui
+                 continue;
+             float x, y;
+             worldPosToGlobalMapImageSpace(player->mMarker.mWorldX, player->mMarker.mWorldY, x, y);
+-            widget->setPosition(MyGUI::IntPoint(static_cast<int>(x) - 8, static_cast<int>(y) - 8));
++            widget->setPosition(MyGUI::IntPoint(static_cast<int>(x) - 6, static_cast<int>(y) - 6));
+         }
+     }
+ 
+diff --git a/multiplayer/mod/scripts/mp/player.lua b/multiplayer/mod/scripts/mp/player.lua
+index 3d390673e8..66bf38a023 100644
+--- a/multiplayer/mod/scripts/mp/player.lua
++++ b/multiplayer/mod/scripts/mp/player.lua
+@@ -44,6 +44,7 @@ local COLORS = {
+ 
+ local camera = require('openmw.camera')
+ local nearby = require('openmw.nearby')
++local lastMarkerSig
+ local markers = {} -- avatar object id -> { el, name }
+ local avatarList = {}
+ local ambient = require('openmw.ambient')
+@@ -757,7 +758,22 @@ return {
+             pcall(function() playersSection:set('Address', text) end)
+         end,
+         MpAvatars = function(d) avatarList = d.list or {} end,
+-        MpMarkers = function(d) pcall(ui.setMapMarkers, d.list or {}) end,
++        MpMarkers = function(d)
++            local list = d.list or {}
++            local ok, err = pcall(ui.setMapMarkers, list)
++            if not ok then print('[mp-ui] setMapMarkers failed: ' .. tostring(err))
++            else
++                local sig = {}
++                for _, m in ipairs(list) do
++                    sig[#sig + 1] = string.format('%s@[%s]', tostring(m.name), tostring(m.cell))
++                end
++                sig = #list .. ' ' .. table.concat(sig, '; ')
++                if sig ~= lastMarkerSig then
++                    lastMarkerSig = sig
++                    print('[mp-ui] map markers: ' .. sig)
++                end
++            end
++        end,
+         MpPlayers = function(d)
+             playerList, myPlayerId = d.list, d.me
+             -- shown on the Multiplayer settings page (renderer in menu.lua)
+-- 
+2.55.0
+

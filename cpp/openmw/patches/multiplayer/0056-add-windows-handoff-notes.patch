@@ -1,0 +1,99 @@
+From 541fcf24b9aeded732c8abe04fd8e86d6ac0bd16 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Thu, 15 Oct 2026 08:58:17 -0400
+Subject: [PATCH] Add WINDOWS-HANDOFF.md: context for building the Windows
+ client zip from a Windows VM
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ multiplayer/WINDOWS-HANDOFF.md | 78 ++++++++++++++++++++++++++++++++++
+ 1 file changed, 78 insertions(+)
+ create mode 100644 multiplayer/WINDOWS-HANDOFF.md
+
+diff --git a/multiplayer/WINDOWS-HANDOFF.md b/multiplayer/WINDOWS-HANDOFF.md
+new file mode 100644
+index 0000000000..cea7a1021c
+--- /dev/null
++++ b/multiplayer/WINDOWS-HANDOFF.md
+@@ -0,0 +1,78 @@
++# Handoff: build the Windows client zip
++
++Written for a Claude Code session on a Windows VM that has no memory of the work so far. Read this, then do the task at the end.
++Everything below was done and tested on Linux (Fedora 44 host, Docker containers); nothing here has been built on Windows yet.
++
++## What this project is
++A Luau-based OpenMW fork ("Clockwork", branch `clockwork-alpha` of the owner's dev tree) with **multiplayer**:
++- **The mod** (`multiplayer/mod`, almost all Luau): global/player/menu scripts, listed in `multiplayer/mod/mp.omwscripts`. Built into the
++  engine's `builtin.omwscripts` when CMake option `OPENMW_BUILTIN_MULTIPLAYER` is ON (default ON except Android/iOS), see
++  `files/data/CMakeLists.txt`. `multiplayer/stage.cmake` copies `multiplayer/` into `<build>/multiplayer`.
++- **Engine hooks** (small C++): sockets for Lua (`components/net`, `apps/openmw/mwlua/netbindings.*`, `openmw.net` package), a main
++  menu button, a player map marker, a few animation/UI bindings.
++- **Server** `openmw-mp-server` (`apps/mpserver`): a C++ host running a Luau relay (`multiplayer/server`), JSON lines over TCP, resume
++  tokens, rate limits, up to 128 players. A separate zip: target `mpserver-bundle`. It already has `start-server.bat`.
++- Linux packaging: target `client-package` (`multiplayer/package.cmake`, `multiplayer/package-client.py`) makes
++  `openmw-multiplayer-client-<system>-<cpu>-portable.zip` and `-light.zip`; `multiplayer/container/build-client-package.sh` builds it on
++  Ubuntu 24.04 in Docker so it runs on other distros; `multiplayer/make-appimage.sh` wraps the zip into an AppImage.
++  Read `multiplayer/README.md` for the user-facing description.
++
++## Where the source is
++1. **Published repo:** `gitlab.com:duron27/openmw-multiplayer`, branch `multiplayer`. It has the mod, server, packaging and this file,
++   but **not** the owner's unrelated Clockwork work (frame driver, post chain, settings).
++2. **Full dev tree for the build:** `clockwork-alpha-source.tar.gz` (the owner copies it to you). It is the whole working tree of
++   branch `clockwork-alpha` at commit `25c8330a25` plus about 52 uncommitted changes, without `build/` and `.git`. **Build from this**,
++   because the owner wants those changes in the Windows build. Its `multiplayer/` folder may be a little older than the repo's:
++   after extracting, overlay the repo's `multiplayer/` on it (copy the folder over).
++3. Do **not** commit the unrelated Clockwork changes anywhere, and do not push to the `clockwork-alpha` remote
++   (`OursCodeur/openmw`). Commit only `multiplayer/` work, to the `multiplayer` branch of the repo in (1), and push only when the
++   owner says "push it".
++
++## Rules the owner set
++- Commits are fine when asked; pushing only when told "push it".
++- Do not touch the owner's own OpenMW user config (`%USERPROFILE%\Documents\My Games\OpenMW\openmw.cfg` on Windows).
++- Keep `OPENMW_BUILTIN_MULTIPLAYER` OFF in any build tree the owner uses with his own cfg (it would load the mod twice). It is ON for
++  the shareable package.
++- Do not launch game windows on the owner's desktop without asking.
++- Say plainly what was tested and what was not.
++
++## How Windows differs (known work)
++1. **Sockets are POSIX-only.** `components/net/sockets.cpp` has no `WSAStartup`, `closesocket`, `ioctlsocket`, `SOCKET` type, or
++   `WSAGetLastError` handling. It needs a Windows port (and the same for `apps/mpserver/servercore.cpp`, which uses it). Check
++   `poll` versus `WSAPoll`, non-blocking mode, `EINTR`/`EWOULDBLOCK` mapping, and link `ws2_32`. This is the real code change.
++2. **`multiplayer/package.cmake` returns early on non-UNIX**, and `package-client.py` is Linux-only (ldd, patchelf, `.x86_64` names, wrapper
++   scripts). The Windows zip should be made by a new script (suggest `multiplayer/package-client-windows.py`, PowerShell is fine too)
++   and a Windows branch in `package.cmake` that exposes the same `client-package` target.
++3. **Dependencies:** upstream's way is `CI/before_script.msvc.sh` (run from Git Bash/MSYS) which downloads prebuilt MSVC dependencies
++   and configures CMake; `CI/activate_msvc.sh` and `.gitlab-ci.yml` Windows jobs show the exact flags. Version pins are in
++   `CI/deps_versions.msvc.sh`. Use Visual Studio 2022 (Build Tools is enough) with the C++ workload and CMake. The CMake `FetchContent`
++   items (Luau, optionally Bullet/MyGUI/OSG/Recast/SQLite) need internet.
++4. **Qt:** the launcher, wizard and OpenMW-CS need Qt 6; bundle it with `windeployqt` (run it on each Qt exe, or on the build output).
++5. **Layout of the zip** (mirror upstream's Windows package): all executables together in one folder (`openmw.exe`,
++   `openmw-launcher.exe`, `openmw-wizard.exe`, `openmw-cs.exe`, `bsatool.exe`, `esmtool.exe`, `niftest.exe`, `openmw-iniimporter.exe`,
++   `openmw-essimporter.exe`, `openmw-navmeshtool.exe`, `openmw-bulletobjecttool.exe`), their DLLs, the Qt plugins `windeployqt` adds,
++   `resources/` (with the multiplayer scripts built in: `resources/vfs/builtin.omwscripts` and `resources/vfs-mw/builtin.omwscripts`, which
++   the Linux script rewrites; with `OPENMW_BUILTIN_MULTIPLAYER=ON` the build itself already does this), `openmw.cfg`, `defaults.bin`,
++   `defaults-cs.bin`, `gamecontrollerdb.txt`, `LICENSE.txt` (the GPL text must travel with it), a short README. Use
++   `package-client.py` (stage section) as the reference for what files go where.
++6. **Windows VM tests:** a clean machine has no Visual C++ runtime; include the VC++ redistributable DLLs (or document the installer).
++   Check the zip on a VM without Visual Studio installed. Check `openmw-launcher.exe` starts, `openmw.exe --version` prints, and, if the
++   VM has Morrowind data, that the main menu shows the Multiplayer button.
++7. The Linux `.sh` helpers (`run-two.sh`, `start-server.sh`) have no Windows twin except `start-server.bat`; `run-two` is optional.
++
++## The task
++Make `openmw-multiplayer-client-Windows-x86_64.zip` containing every OpenMW program with the multiplayer mod built in, from the full
++dev tree (source section 2, with the repo's `multiplayer/` overlaid), including the Clockwork changes.
++
++Suggested order:
++1. Extract the source, overlay `multiplayer/`, run the upstream MSVC dependency/configure script with `OPENMW_BUILTIN_MULTIPLAYER=ON`
++   and `BUILD_MP_SERVER=ON`; get a plain build working first (expect the sockets file to fail: port it as in item 1).
++2. Add the Windows packaging (items 2, 4, 5), a `client-package` target for Windows, and the VC++ runtime.
++3. Test on a clean VM (item 6). Optionally also zip `openmw-mp-server.exe` via `mpserver-bundle` (check `apps/mpserver/bundle.cmake`
++   for non-Windows assumptions).
++4. Update `multiplayer/README.md` ("Sharing a build with testers") with the Windows steps, commit to the `multiplayer` branch, and tell
++   the owner what was tested. Push only on "push it".
++
++## Known open items (from `multiplayer/TODO.md`, not part of this task)
++Client-side updatable Luau packs / mod store, container loot edge cases, NAT traversal, clean-quit detection, scaling beyond ~30
++players, and real-game testing of loot, stand-ins, markers, healing, trading and reconnect. See `multiplayer/TODO.md`.
+-- 
+2.55.0
+

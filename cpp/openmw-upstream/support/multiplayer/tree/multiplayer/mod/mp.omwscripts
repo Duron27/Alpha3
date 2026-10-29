@@ -1,0 +1,5 @@
+MENU: scripts/mp/menu.lua
+GLOBAL: scripts/mp/global.lua
+PLAYER: scripts/mp/player.lua
+CUSTOM: scripts/mp/remote.lua
+CUSTOM: scripts/mp/damage.lua

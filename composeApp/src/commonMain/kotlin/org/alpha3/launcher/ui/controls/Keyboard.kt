@@ -1,0 +1,592 @@
+package org.alpha3.launcher.ui.controls
+
+import org.alpha3.launcher.engine.Engine
+import org.alpha3.launcher.resources.close
+import org.alpha3.launcher.resources.darkmode
+import org.alpha3.launcher.resources.gold
+import org.alpha3.launcher.resources.keyboard_settings
+import org.alpha3.launcher.resources.lightmode
+import org.alpha3.launcher.resources.select_theme
+import org.alpha3.launcher.resources.Res
+import org.alpha3.launcher.engine.KeyCodes
+import org.alpha3.launcher.utils.PlatformContext
+import androidx.compose.animation.core.*
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.input.pointer.pointerInput
+import coil3.compose.LocalPlatformContext
+import org.jetbrains.compose.resources.stringResource
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import org.alpha3.launcher.engine.Engine.nativeCommitText
+import org.alpha3.launcher.engine.Engine.onNativeKeyDown
+import org.alpha3.launcher.engine.Engine.onNativeKeyUp
+import org.alpha3.launcher.utils.GameFilesPreferences
+import org.alpha3.launcher.utils.TranslateText
+import org.alpha3.launcher.engine.Engine.sendKeyEvent
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.launch
+import org.alpha3.launcher.ui.view.vibrateHelper
+import kotlinx.coroutines.flow.map
+import kotlin.math.roundToInt
+import kotlin.random.Random
+
+object UIKeyboard {
+    var showVKB by mutableStateOf(false)
+    var isShiftPressed by mutableStateOf(false)
+    var isCapsLock by mutableStateOf(false)
+}
+
+fun cycleBackLight(context: PlatformContext, scope: CoroutineScope, currentBacklight: Float) {
+    val nextBacklight = when (currentBacklight) {
+        1f -> 0.75f
+        0.75f -> 0.50f
+        0.50f -> 0.25f
+        0.25f -> 1f
+        else -> 1f // fallback for unexpected values
+    }
+    scope.launch {
+        GameFilesPreferences.setPreference(GameFilesPreferences.KEYBOARD_BACKLIGHT, nextBacklight)
+    }
+}
+
+fun cycleColorTheme(context: PlatformContext, scope: CoroutineScope, currentTheme: String) {
+    val nextTheme = when (currentTheme) {
+        "darkMode" -> "lightMode"
+        "lightMode" -> "RGB"
+        "RGB" -> "gold"
+        "gold" -> "darkMode"
+        else -> "darkMode" // fallback
+    }
+    scope.launch {
+        GameFilesPreferences.setPreference(GameFilesPreferences.KEYBOARD_THEME, nextTheme)
+    }
+}
+
+@Composable
+fun VirtualKeyboard() {
+    val context = LocalPlatformContext.current
+    val scope = rememberCoroutineScope()
+    
+    val themeMode by GameFilesPreferences.getPreference(GameFilesPreferences.KEYBOARD_THEME, "lightMode").collectAsState(initial = "lightMode")
+    val backLight by GameFilesPreferences.getPreference(GameFilesPreferences.KEYBOARD_BACKLIGHT, 1f).collectAsState(initial = 1f)
+    
+    var functionKEYS by remember { mutableStateOf(false) }
+    var numROWS by remember { mutableIntStateOf(if (functionKEYS) 6 else 5) }
+    var offsetX by remember { mutableFloatStateOf(0f) }
+    var offsetY by remember { mutableFloatStateOf(0f) }
+    var showSettingsDialog by remember { mutableStateOf(false) }
+    
+    val storedWidth by GameFilesPreferences.getNullablePreference(GameFilesPreferences.KEYBOARD_WIDTH).collectAsState(initial = null)
+    val storedHeight by GameFilesPreferences.getNullablePreference(GameFilesPreferences.KEYBOARD_HEIGHT).collectAsState(initial = null)
+    
+    var boxHeight by remember(storedHeight, numROWS) { 
+        mutableFloatStateOf(storedHeight ?: (numROWS * 40f)) 
+    }
+    var boxWidth by remember(storedWidth, boxHeight) { 
+        mutableFloatStateOf(storedWidth ?: (boxHeight * 3.5f)) 
+    }
+    var expanded by remember { mutableStateOf(false) }
+
+    Column(
+        modifier = Modifier
+            .offset { IntOffset(offsetX.roundToInt(), offsetY.roundToInt()) }
+            .then(
+                Modifier.pointerInput(Unit) {
+                    detectDragGestures(
+                        onDragStart = { },
+                        onDrag = { _, dragAmount ->
+                            offsetX += dragAmount.x
+                            offsetY += dragAmount.y
+                        },
+                        onDragEnd = { }
+                    )
+                }
+            )
+    ) {
+        // Efficient RGB Transition
+        val colors = listOf(Color.Red, Color.Green, Color.Blue)
+        val infiniteTransition = rememberInfiniteTransition(label = "RGB")
+        val colorFraction by infiniteTransition.animateFloat(
+            initialValue = 0f,
+            targetValue = colors.size.toFloat(),
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 3000, easing = LinearEasing),
+                repeatMode = RepeatMode.Restart
+            ),
+            label = "fraction"
+        )
+
+        fun getRGBColor(offset: Float): Color {
+            val total = colorFraction + offset
+            val idx = total.toInt() % colors.size
+            val nextIdx = (idx + 1) % colors.size
+            val lerpFraction = total % 1f
+            return lerp(colors[idx], colors[nextIdx], lerpFraction)
+        }
+
+        // Function to create rows of boxes with sizes
+        @Composable
+        fun createRow(
+            charsNormal: List<String>,
+            sizes: List<Modifier>,
+            modifier: Modifier = Modifier
+        ) {
+            val context = LocalPlatformContext.current
+            val translationChecked by GameFilesPreferences.getPreference(GameFilesPreferences.TRANSLATION_ENABLED_KEY, false).collectAsState(initial = false)
+            val isVibrationOnFlow = remember { GameFilesPreferences.getPreference(GameFilesPreferences.VIBRATION_STATE_KEY, "true").map { it.toBoolean() } }
+            val isVibrationOn by isVibrationOnFlow.collectAsState(initial = true)
+
+            Box(
+                modifier = modifier
+                    .width((boxHeight.dp / numROWS) * 17.5f)
+            ) {
+                Row {
+                    charsNormal.zip(sizes).forEach { (char, sizeModifier) ->
+                        val keyCode = Engine.keyCodeForChar(char)
+                        var isPressed by remember { mutableStateOf(false) }
+                        val keyOffset = remember { Random.nextFloat() * 0.5f }
+
+                        Box(
+                            modifier = sizeModifier
+                                .drawBehind {
+                                    val baseColor = when (themeMode) {
+                                        "darkMode" -> Color.Black
+                                        "lightMode" -> Color.White
+                                        "RGB" -> getRGBColor(keyOffset)
+                                        "gold" -> Color(202, 165, 96)
+                                        else -> Color.LightGray
+                                    }
+                                    drawRect(color = Color.Black.copy(alpha = 0.25f))
+                                    drawRect(
+                                        color = baseColor.copy(alpha = backLight),
+                                        style = Stroke(width = 2.dp.toPx())
+                                    )
+                                }
+                                .pointerInput(char) {
+                                    awaitPointerEventScope {
+                                        while (true) {
+                                            val event = awaitPointerEvent()
+                                            val down = event.changes.firstOrNull()?.pressed == true
+
+                                            if (down && !isPressed) {
+                                                isPressed = true
+                                                if (isVibrationOn) {
+                                                    vibrateHelper(context, 50, 50)
+                                                }
+                                                when (char) {
+                                                    "ALPHA" -> cycleBackLight(context, scope, backLight)
+                                                    "␣" -> sendKeyEvent(KeyCodes.KEYCODE_SPACE)
+                                                    "`" -> sendKeyEvent(KeyCodes.KEYCODE_GRAVE)
+                                                    "TAB" -> {
+                                                        sendKeyEvent(KeyCodes.KEYCODE_TAB)
+                                                        onNativeKeyDown(KeyCodes.KEYCODE_TAB)
+                                                    }
+
+                                                    "⌫" -> sendKeyEvent(KeyCodes.KEYCODE_DEL)
+                                                    "⏎" -> sendKeyEvent(KeyCodes.KEYCODE_ENTER)
+                                                    "↑" -> sendKeyEvent(KeyCodes.KEYCODE_DPAD_UP)
+                                                    "↓" -> sendKeyEvent(KeyCodes.KEYCODE_DPAD_DOWN)
+                                                    "→" -> sendKeyEvent(KeyCodes.KEYCODE_DPAD_RIGHT)
+                                                    "←" -> sendKeyEvent(KeyCodes.KEYCODE_DPAD_LEFT)
+                                                    "ESC" -> sendKeyEvent(KeyCodes.KEYCODE_ESCAPE)
+                                                    "F1" -> sendKeyEvent(KeyCodes.KEYCODE_F1)
+                                                    "F2" -> sendKeyEvent(KeyCodes.KEYCODE_F2)
+                                                    "F3" -> sendKeyEvent(KeyCodes.KEYCODE_F3)
+                                                    "F4" -> sendKeyEvent(KeyCodes.KEYCODE_F4)
+                                                    "F5" -> sendKeyEvent(KeyCodes.KEYCODE_F5)
+                                                    "F6" -> sendKeyEvent(KeyCodes.KEYCODE_F6)
+                                                    "F7" -> sendKeyEvent(KeyCodes.KEYCODE_F7)
+                                                    "F8" -> sendKeyEvent(KeyCodes.KEYCODE_F8)
+                                                    "F9" -> sendKeyEvent(KeyCodes.KEYCODE_F9)
+                                                    "F10" -> sendKeyEvent(KeyCodes.KEYCODE_F10)
+                                                    "F11" -> sendKeyEvent(KeyCodes.KEYCODE_F11)
+                                                    "F12" -> sendKeyEvent(KeyCodes.KEYCODE_F12)
+                                                    "CAPS" -> {
+                                                        UIKeyboard.isCapsLock =
+                                                            !UIKeyboard.isCapsLock
+                                                        UIKeyboard.isShiftPressed =
+                                                            UIKeyboard.isCapsLock
+                                                    }
+
+                                                    "Fn" -> functionKEYS = !functionKEYS
+                                                    "⚙" -> cycleColorTheme(context, scope, themeMode) //showSettingsDialog = true
+
+                                                    else -> keyCode?.let {
+                                                        onNativeKeyDown(it)
+                                                        nativeCommitText(char, 0)
+                                                    }
+                                                }
+                                            } else if (!down && isPressed) {
+                                                isPressed = false
+                                                keyCode?.let {
+                                                    onNativeKeyUp(it)
+                                                    when (char) {
+                                                        "TAB" -> {
+                                                            onNativeKeyUp(KeyCodes.KEYCODE_TAB)
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                .then(
+                                    if (char == "SCALE") {
+                                        Modifier.pointerInput(Unit) {
+                                            detectDragGestures(
+                                                onDragStart = { },
+                                                onDrag = { change, dragAmount ->
+                                                    change.consume()
+                                                    boxWidth += dragAmount.x
+                                                    boxHeight += dragAmount.y
+                                                },
+                                                onDragEnd = { 
+                                                    scope.launch {
+                                                        GameFilesPreferences.setPreference(GameFilesPreferences.KEYBOARD_WIDTH, boxWidth)
+                                                        GameFilesPreferences.setPreference(GameFilesPreferences.KEYBOARD_HEIGHT, boxHeight)
+                                                    }
+                                                }
+                                            )
+                                        }
+                                    } else {
+                                        Modifier
+                                    }
+                                )
+                        ) {
+                            var translatedText by remember { mutableStateOf("") }
+
+                            if (translationChecked) {
+                                TranslateText(
+                                    inputText = char,
+                                    onTranslationResult = { result ->
+                                        translatedText =
+                                            result // Update the state with the translated text
+                                    }
+                                )
+
+                            }
+                            Text(
+                                text = if (translationChecked) translatedText else char,
+                                color = when (themeMode) {
+                                    "darkMode" -> Color.Black
+                                    "lightMode" -> Color.White
+                                    "RGB" -> getRGBColor(keyOffset)
+                                    "gold" -> Color(202, 165, 96)
+                                    else -> Color.LightGray
+                                }.copy(alpha = if (backLight == 1f) 1f else backLight),
+                                fontSize = 16.sp,  // Set the text size
+                                fontWeight = FontWeight.Bold,  // Set the text style to bold
+                                modifier = Modifier.align(Alignment.Center)  // Center the text in the box
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        val fnKEYS =  listOf("ESC", " ", "F1", "F2", "F3", "F4", " ", "F5", "F6", "F7", "F8", " ", "F9", "F10", "F11", "F12")
+        val fnKEYSSizes = listOf(
+            Modifier
+                .padding(all = 2.dp)
+                .height(boxHeight.dp / numROWS)
+                .width((boxHeight.dp / numROWS) * 1.5f)
+        ) + listOf(
+            Modifier
+                .padding(all = 2.dp)
+                .height(boxHeight.dp / numROWS)
+                .alpha(0.0f)
+                .weight(1f)
+        ) + List(4) {
+            Modifier
+                .padding(all = 2.dp)
+                .size(boxHeight.dp / numROWS)
+        } + listOf(
+            Modifier
+                .padding(all = 2.dp)
+                .height(boxHeight.dp / numROWS)
+                .width((boxHeight.dp / numROWS) / 2)
+                .alpha(0.0f)
+        ) + List(4) {
+            Modifier
+                .padding(all = 2.dp)
+                .size(boxHeight.dp / numROWS)
+        } + listOf(
+            Modifier
+                .padding(all = 2.dp)
+                .height(boxHeight.dp / numROWS)
+                .width((boxHeight.dp / numROWS) / 2)
+                .alpha(0.0f)
+        ) + List(4) {
+            Modifier
+                .padding(all = 2.dp)
+                .size(boxHeight.dp / numROWS)
+        }
+
+        if (functionKEYS){
+            createRow(
+                charsNormal = fnKEYS,
+                sizes = fnKEYSSizes
+            )
+        }
+
+        val topRowNormal = when {
+            UIKeyboard.isShiftPressed -> listOf("~", "!", "@", "#", "$", "%", "^", "&", "*", "(", ")", "_", "+", "⌫")
+            else -> listOf("`", "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "=", "⌫")
+        }
+        val topRowSizes = List(13) {
+            Modifier
+                .padding(all = 2.dp)
+                .size(boxHeight.dp / numROWS)
+        } + listOf(
+            Modifier
+                .padding(all = 2.dp)
+                .height(boxHeight.dp / numROWS)
+                .weight(1f)
+        )
+        createRow(
+            charsNormal = topRowNormal,
+            sizes = topRowSizes
+        )
+
+        val secondRowNormal = when {
+            UIKeyboard.isShiftPressed -> listOf("TAB", "Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P", "{", "}", "|")
+            else -> listOf("TAB", "q", "w", "e", "r", "t", "y", "u", "i", "o", "p", "[", "]", "\\")
+        }
+        val secondRowSizes = listOf(
+            // Tab Key
+            Modifier
+                .padding(all = 2.dp)
+                .height(boxHeight.dp / numROWS)
+                .width((boxHeight.dp / numROWS) * 1.125f),
+        ) + List(12) {
+            Modifier
+                .padding(all = 2.dp)
+                .size(boxHeight.dp / numROWS)
+        } + listOf(
+            Modifier
+                .padding(all = 2.dp)
+                .height(boxHeight.dp / numROWS)
+                .weight(1f)
+        )
+        createRow(
+            charsNormal = secondRowNormal,
+            sizes = secondRowSizes
+        )
+
+        val thirdRowNormal = when {
+            UIKeyboard.isShiftPressed -> listOf("CAPS", "A", "S", "D", "F", "G", "H", "J", "K", "L", ":", "\"", "⏎")
+            else -> listOf("CAPS", "a", "s", "d", "f", "g", "h", "j", "k", "l", ";", "'", "⏎")
+        }
+        val thirdRowSizes = listOf(
+            Modifier
+                .padding(all = 2.dp)
+                .height(boxHeight.dp / numROWS)
+                .width((boxHeight.dp / numROWS) * 1.5f)
+        ) + List(11) {
+            Modifier
+                .padding(all = 2.dp)
+                .size(boxHeight.dp / numROWS)
+        } + listOf(
+            Modifier
+                .padding(all = 2.dp)
+                .height(boxHeight.dp / numROWS)
+                .weight(1f)
+        )
+        createRow(
+            charsNormal = thirdRowNormal,
+            sizes = thirdRowSizes
+        )
+
+        val fourthRowNormal = when {
+            UIKeyboard.isShiftPressed -> listOf("ALPHA", "Z", "X", "C", "V", "B", "N", "M", "<", ">", "?", "", "↑", "")
+            else -> listOf("ALPHA", "z", "x", "c", "v", "b", "n", "m", ",", ".", "/", "", "↑", "")
+        }
+
+        val fourthRowSizes = listOf(
+            Modifier
+                .padding(all = 2.dp)
+                .height(boxHeight.dp / numROWS)
+                .width((boxHeight.dp / numROWS) * 2f)
+        ) + List(10) {
+            Modifier
+                .padding(all = 2.dp)
+                .size(boxHeight.dp / numROWS)
+        } + listOf(
+            Modifier
+                .padding(all = 2.dp)
+                .alpha(0.0f)
+                .weight(1f)
+        ) + listOf(
+            Modifier
+                .padding(all = 2.dp)
+                .size(boxHeight.dp / numROWS)
+        ) + listOf(
+            Modifier
+                .padding(all = 2.dp)
+                .alpha(0.0f)
+                .size(boxHeight.dp / numROWS)
+        )
+        createRow(
+            charsNormal = fourthRowNormal,
+            sizes = fourthRowSizes
+        )
+
+        val fifthRowChars = listOf("⚙", "Fn", "␣", "SCALE", "←", "↓", "→")
+        val fifthRowSizes = listOf(
+            Modifier
+                .padding(all = 2.dp)
+                .height(boxHeight.dp / numROWS)
+                .width((boxHeight.dp / numROWS) * 2f),
+            // Spacer
+            Modifier
+                .padding(all = 2.dp)
+                .height(boxHeight.dp / numROWS)
+                //.alpha(0.0f)
+                .width((boxHeight.dp / numROWS) * 2f),
+            // Space bar
+            Modifier
+                .padding(all = 2.dp)
+                .height(boxHeight.dp / numROWS)
+                .width((boxHeight.dp / numROWS) * 7.5f),
+            // Spacer
+            Modifier
+                .padding(all = 2.dp)
+                .height(boxHeight.dp / numROWS)
+                //.alpha(0.0f)
+                .weight(1f)
+        ) + List(3) {
+            Modifier
+                .padding(all = 2.dp)
+                .size(boxHeight.dp / numROWS)
+        }
+
+        createRow(
+            charsNormal = fifthRowChars,
+            sizes = fifthRowSizes
+        )
+
+        // Settings Dialog
+        if (showSettingsDialog) {
+            Dialog(onDismissRequest = { showSettingsDialog = false }) {
+                Surface(
+                    modifier = Modifier
+                        .size(300.dp),
+                    shape = RoundedCornerShape(8.dp),
+                    color = Color(0xFF2C2C2E)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            stringResource(Res.string.keyboard_settings),
+                            style = MaterialTheme.typography.headlineSmall,
+                            color = Color.White)
+
+                        Spacer(Modifier.height(24.dp))
+                        Button(
+                            onClick = { expanded = true },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color(0xFF3A3A3C),
+                                contentColor = Color.White
+                            )
+                        ) {
+                            Text(stringResource(Res.string.select_theme))
+                        }
+                        Spacer(Modifier.weight(1f))
+
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+
+                            DropdownMenu(
+                                expanded = expanded,
+                                onDismissRequest = { expanded = false },
+                                modifier = Modifier
+                                    .border(1.dp, Color.Black)
+                                    .background(Color.Black)
+                            ) {
+                                DropdownMenuItem(
+                                    text = { Text(stringResource(Res.string.lightmode), color = Color.White) },
+                                    onClick = {
+                                        scope.launch { GameFilesPreferences.setPreference(GameFilesPreferences.KEYBOARD_THEME, "lightMode") }
+                                        expanded = false
+                                    })
+                                DropdownMenuItem(
+                                    text = { Text(stringResource(Res.string.darkmode), color = Color.White) },
+                                    onClick = {
+                                        scope.launch { GameFilesPreferences.setPreference(GameFilesPreferences.KEYBOARD_THEME, "darkMode") }
+                                        expanded = false
+                                    })
+                                DropdownMenuItem(
+                                    text = { Text("RGB", color = Color.White) },
+                                    onClick = {
+                                        scope.launch { GameFilesPreferences.setPreference(GameFilesPreferences.KEYBOARD_THEME, "RGB") }
+                                        expanded = false
+                                    })
+                                DropdownMenuItem(
+                                    text = { Text(stringResource(Res.string.gold), color = Color.White) },
+                                    onClick = {
+                                        scope.launch { GameFilesPreferences.setPreference(GameFilesPreferences.KEYBOARD_THEME, "gold") }
+                                        expanded = false
+                                    })
+                            }
+                        }
+
+                        Spacer(Modifier.weight(1f))
+
+                        Button(
+                            onClick = { showSettingsDialog = false },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color.Blue,
+                                contentColor = Color.White
+                            )
+                        ) {
+                            Text(stringResource(Res.string.close))
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

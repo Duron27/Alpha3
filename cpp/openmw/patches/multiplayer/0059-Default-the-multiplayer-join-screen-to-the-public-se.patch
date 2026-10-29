@@ -1,0 +1,35 @@
+From e75db80b9837e1f2f4c96ea60d43c9b218882824 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Thu, 15 Oct 2026 11:35:17 -0400
+Subject: [PATCH 59/61] Default the multiplayer join screen to the public
+ server
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ multiplayer/mod/scripts/mp/menu.lua | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/multiplayer/mod/scripts/mp/menu.lua b/multiplayer/mod/scripts/mp/menu.lua
+index e63fc0adf3..891678236d 100644
+--- a/multiplayer/mod/scripts/mp/menu.lua
++++ b/multiplayer/mod/scripts/mp/menu.lua
+@@ -16,6 +16,7 @@ local section = storage.playerSection('MpConnect')
+ -- 'Active' means: the game being loaded was started from this screen. Never carry it over from an earlier run.
+ section:set('Active', false)
+ 
++local DEFAULT_HOST = '192.53.121.201' -- the public server; used until the player joins another one
+ local W, H = 640, 590
+ local TEXT_SIZE = 18
+ local C = {
+@@ -236,7 +237,7 @@ end
+ 
+ local function open()
+     mode = section:get('Mode') or mode
+-    hostBuf = hostBuf or section:get('Host') or '127.0.0.1'
++    hostBuf = hostBuf or section:get('Host') or DEFAULT_HOST
+     portBuf = portBuf or tostring(section:get('Port') or 25565)
+     passBuf = passBuf or section:get('Password') or ''
+     view, message = 'main', nil
+-- 
+2.55.0
+

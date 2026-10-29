@@ -1,0 +1,45 @@
+--- a/apps/openmw/engine.cpp
++++ b/apps/openmw/engine.cpp
+@@ -764,8 +764,27 @@
+         if (Settings::isOpenGLFamily(entry.mEntry))
+         {
+             glEntry = entry.mEntry;
++#ifdef ANDROID
++            // No Vulkan entry started (a device below Vulkan 1.2, or a driver that refuses it): the phone's own OpenGL ES
++            // driver takes over, not Zink, which presents through a CPU copy.
++            if (glEntry == Settings::RendererEntry::OpenGL && !Settings::isOpenGLFamily(mRendererRequest.mEntry))
++                glEntry = Settings::RendererEntry::OpenGLES32;
++#endif
+             break;
+         }
++#ifdef ANDROID
++        // Dev probe: adb shell setprop debug.alpha3.novulkan 1 makes every Vulkan entry fail, like a device without Vulkan
++        {
++            char noVulkan[PROP_VALUE_MAX] = "";
++            if (__system_property_get("debug.alpha3.novulkan", noVulkan) > 0 && noVulkan[0] == '1')
++            {
++                runtime.mRendererReason
++                    = std::string(Settings::rendererLabel(entry.mEntry)) + " is switched off by debug.alpha3.novulkan";
++                Log(Debug::Warning) << runtime.mRendererReason;
++                continue;
++            }
++        }
++#endif
+         if (!hidden && Settings::skipRenderer(previous, entry.mEntry))
+         {
+             runtime.mRendererReason
+--- a/apps/openmw/rendererswitch.cpp
++++ b/apps/openmw/rendererswitch.cpp
+@@ -17,7 +17,12 @@
+             case Entry::Vulkan13:
+                 return RendererSwitch{ Entry::Vulkan12, current.mDevice };
+             case Entry::Vulkan12:
++#ifdef ANDROID
++                // The phone's own OpenGL ES driver, not Zink (a CPU copy)
++                return RendererSwitch{ Entry::OpenGLES32, -1 };
++#else
+                 return RendererSwitch{ Entry::OpenGL, -1 };
++#endif
+             case Entry::OpenGL:
+             case Entry::OpenGLES32:
+             case Entry::OpenGLES32Angle:

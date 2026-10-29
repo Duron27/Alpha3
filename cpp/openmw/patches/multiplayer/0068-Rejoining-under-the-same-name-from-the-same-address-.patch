@@ -1,0 +1,41 @@
+From 70de8d21e632024205d637430fd298be687dd31c Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Thu, 15 Oct 2026 14:58:26 -0400
+Subject: [PATCH] Rejoining under the same name from the same address takes
+ back a held place
+
+A player whose connection was lost keeps their place for the grace period, but the resume token only lives in memory, so
+after restarting the game they joined as a new player and the old one stood there until the hold ran out. A join with no
+token whose name and address match a held place now resumes it.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ multiplayer/mod/scripts/mp/relay.lua | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/multiplayer/mod/scripts/mp/relay.lua b/multiplayer/mod/scripts/mp/relay.lua
+index 6a6d3b1934..2c0a046b31 100644
+--- a/multiplayer/mod/scripts/mp/relay.lua
++++ b/multiplayer/mod/scripts/mp/relay.lua
+@@ -497,6 +497,18 @@ local function handleJoin(id, msg)
+     if options.password ~= '' and msg.password ~= options.password then return refuse(id, 'password') end
+     if bans[tostring(msg.name or ''):lower()] then return refuse(id, 'banned') end
+     local old = findByToken(msg.token)
++    -- No token (the game was restarted), but the same name from the same address as a player whose place is being held:
++    -- that is them coming back, not a second player. Without this the old one stands there until the hold runs out.
++    if not old and c.ip then
++        local want = tostring(msg.name or ''):lower()
++        for oid, oc in pairs(clients) do
++            if oc.awayUntil and oc.authed and not oc.virtual and oid ~= hostId and oc.ip == c.ip
++                and tostring(oc.name or ''):lower() == want then
++                old = oid
++                break
++            end
++        end
++    end
+     if old then return resume(id, old, msg) end
+     local name = uniqueName(msg.name, id)
+     if playerCount() >= options.maxPlayers then return refuse(id, 'full') end
+-- 
+2.55.0
+

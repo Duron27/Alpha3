@@ -1,0 +1,796 @@
+From 9f3d46e272d4c61a334eb36a7610703d25088386 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Thu, 15 Oct 2026 15:26:53 -0400
+Subject: [PATCH 71/71] Client mods kept on the server: the relay lists them
+ with hashes, clients ask, download what differs, verify, and restart
+
+- relay.lua: on joining, a "mods" message with every mod and file (size, SHA-256); "modget" answers with base64 chunks of
+  a file (read once and cached while it downloads, rate limited, names checked by the engine)
+- clientmods.lua (client): compares the list with what is installed, per file. Same hash: nothing. Different hash: updated.
+  Missing locally: new. Only local: deleted, and a mod the server dropped is removed. Asks the player only if something
+  differs, downloads only those files, the engine writes each one only if its SHA-256 matches, then deletes what is gone
+- player.lua: the confirmation window (counts of new, updated and removed files, download size; install and restart, or
+  decline and leave) and the restart question; global.lua wires it in
+- openmw-mp-server: openmw.modstore for its folder (--client-mods, default multiplayer/clientmods or next to the program)
+- README: how a server hands out its client mods; TODO: the pack manager plan is replaced by this
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ apps/mpserver/CMakeLists.txt              |   2 +
+ apps/mpserver/main.cpp                    |  10 ++
+ apps/mpserver/servercore.cpp              |  51 ++++++
+ apps/mpserver/servercore.hpp              |   1 +
+ apps/openmw/mwlua/modstorebindings.cpp    |  29 +---
+ components/misc/clientmods.cpp            |  22 +++
+ components/misc/clientmods.hpp            |   3 +
+ multiplayer/README.md                     |  22 +++
+ multiplayer/TODO.md                       |  35 ++---
+ multiplayer/mod/scripts/mp/clientmods.lua | 182 ++++++++++++++++++++++
+ multiplayer/mod/scripts/mp/global.lua     |  23 +++
+ multiplayer/mod/scripts/mp/player.lua     |  74 +++++++++
+ multiplayer/mod/scripts/mp/relay.lua      |  45 +++++-
+ 13 files changed, 445 insertions(+), 54 deletions(-)
+ create mode 100644 multiplayer/mod/scripts/mp/clientmods.lua
+
+diff --git a/apps/mpserver/CMakeLists.txt b/apps/mpserver/CMakeLists.txt
+index 814a808bce..e1e7cac245 100644
+--- a/apps/mpserver/CMakeLists.txt
++++ b/apps/mpserver/CMakeLists.txt
+@@ -10,6 +10,8 @@ option(BUILD_MP_SERVER_GUI "Give openmw-mp-server a window (needs Qt Widgets)" O
+ add_library(mpserver-core STATIC
+     servercore.cpp
+     ${CMAKE_SOURCE_DIR}/components/net/sockets.cpp
++    ${CMAKE_SOURCE_DIR}/components/misc/clientmods.cpp
++    ${CMAKE_SOURCE_DIR}/components/misc/sha256.cpp
+ )
+ target_include_directories(mpserver-core PRIVATE ${CMAKE_SOURCE_DIR})
+ target_link_libraries(mpserver-core PUBLIC Luau.VM Luau.Compiler Boost::headers Threads::Threads)
+diff --git a/apps/mpserver/main.cpp b/apps/mpserver/main.cpp
+index 450cd59cb6..6c2338f9bf 100644
+--- a/apps/mpserver/main.cpp
++++ b/apps/mpserver/main.cpp
+@@ -77,6 +77,8 @@ namespace
+             "  --mod <dir>              the mod's directory (the one containing scripts/mp); by default it is looked for\n"
+             "                           next to the program and in the source tree above it\n"
+             "  --script <file>          the server script; default <mod>/../server/server.lua\n"
++            "  --client-mods <dir>      the client mods handed out to players (<dir>/<id>/..., each with an <id>.omwscripts);\n"
++            "                           default <mod>/../clientmods, or clientmods next to the program\n"
+             "  --port <n>               TCP port to listen on (default 25565)\n"
+             "  --password <text>        password to join (or set MP_PASSWORD)\n"
+             "  --admin-password <text>  password for /login (or set MP_ADMIN_PASSWORD)\n"
+@@ -133,6 +135,7 @@ namespace
+                 return false;
+             if (a == "--mod") o.mMod = v;
+             else if (a == "--script") o.mScript = v;
++            else if (a == "--client-mods") o.mClientMods = v;
+             else if (a == "--port") o.mPort = std::atoi(v);
+             else if (a == "--password") o.mPassword = v;
+             else if (a == "--admin-password") o.mAdminPassword = v;
+@@ -270,6 +273,13 @@ int main(int argc, char** argv)
+                 options.mMod.string().c_str());
+             return 1;
+         }
++        if (options.mClientMods.empty())
++        {
++            std::error_code mec;
++            const std::filesystem::path inSource = (options.mMod / ".." / "clientmods").lexically_normal();
++            options.mClientMods = std::filesystem::is_directory(inSource, mec) ? inSource : exeDir / "clientmods";
++        }
++        std::printf("[server] client mods are handed out from %s\n", options.mClientMods.string().c_str());
+         if (options.mScript.empty())
+             options.mScript = options.mMod / ".." / "server" / "server.lua";
+         std::error_code ec;
+diff --git a/apps/mpserver/servercore.cpp b/apps/mpserver/servercore.cpp
+index 7bec73e980..5b08012744 100644
+--- a/apps/mpserver/servercore.cpp
++++ b/apps/mpserver/servercore.cpp
+@@ -1,6 +1,8 @@
+ // The server without a user interface: embeds the Luau VM and the engine's own sockets (components/net), supplies the
+ // three engine modules the relay uses (openmw.net sockets, openmw.core a clock, openmw.markup a JSON decoder) and
+ // runs multiplayer/server/server.lua, which runs the relay of the mod unchanged.
++#include <components/misc/clientmods.hpp>
++#include <components/misc/sha256.hpp>
+ #include "servercore.hpp"
+ 
+ // engine modules the relay uses: openmw.net (sockets), openmw.core (a clock) and openmw.markup (a JSON decoder).
+@@ -386,6 +388,44 @@ namespace
+         return 1;
+     }
+ 
++    int modstoreManifest(lua_State* l)
++    {
++        const std::string json = Misc::ClientMods::manifestJson();
++        lua_pushlstring(l, json.data(), json.size());
++        return 1;
++    }
++
++    int modstoreRead(lua_State* l)
++    {
++        std::size_t idLen = 0, pathLen = 0;
++        const char* id = luaL_checklstring(l, 1, &idLen);
++        const char* path = luaL_checklstring(l, 2, &pathLen);
++        const auto data = Misc::ClientMods::read(std::string_view(id, idLen), std::string_view(path, pathLen));
++        if (!data)
++            lua_pushnil(l);
++        else
++            lua_pushlstring(l, data->data(), data->size());
++        return 1;
++    }
++
++    int modstoreSha256(lua_State* l)
++    {
++        std::size_t len = 0;
++        const char* data = luaL_checklstring(l, 1, &len);
++        const std::string hex = Misc::sha256Hex(std::string_view(data, len));
++        lua_pushlstring(l, hex.data(), hex.size());
++        return 1;
++    }
++
++    int modstoreBase64(lua_State* l)
++    {
++        std::size_t len = 0;
++        const char* data = luaL_checklstring(l, 1, &len);
++        const std::string text = Misc::ClientMods::base64Encode(std::string_view(data, len));
++        lua_pushlstring(l, text.data(), text.size());
++        return 1;
++    }
++
+     void registerFunction(lua_State* l, const char* name, lua_CFunction f)
+     {
+         lua_pushcfunction(l, f, name);
+@@ -411,6 +451,16 @@ namespace
+             registerFunction(l, "getRealTime", coreGetRealTime);
+             return true;
+         }
++        if (name == "openmw.modstore")
++        {
++            // The client mods this server hands out (a folder of <id>/... with their hashes), read-only
++            lua_createtable(l, 0, 4);
++            registerFunction(l, "manifest", modstoreManifest);
++            registerFunction(l, "read", modstoreRead);
++            registerFunction(l, "sha256", modstoreSha256);
++            registerFunction(l, "base64Encode", modstoreBase64);
++            return true;
++        }
+         if (name == "openmw.markup")
+         {
+             lua_createtable(l, 0, 2);
+@@ -609,6 +659,7 @@ namespace MpServer
+     {
+         mImpl->mOptions = options;
+         mImpl->mHost.mModDir = options.mMod;
++        Misc::ClientMods::setRoot(options.mClientMods);
+         gHost = &mImpl->mHost;
+     }
+ 
+diff --git a/apps/mpserver/servercore.hpp b/apps/mpserver/servercore.hpp
+index 357b42c96f..e91d6ce71b 100644
+--- a/apps/mpserver/servercore.hpp
++++ b/apps/mpserver/servercore.hpp
+@@ -14,6 +14,7 @@ namespace MpServer
+     {
+         std::filesystem::path mMod; // the directory holding scripts/mp
+         std::filesystem::path mScript; // server.lua
++        std::filesystem::path mClientMods; // the client mods handed out to players: <dir>/<id>/...
+         int mPort = 25565;
+         std::string mPassword, mAdminPassword, mMotd, mWeather = "cycle";
+         int mMaxPlayers = 64;
+diff --git a/apps/openmw/mwlua/modstorebindings.cpp b/apps/openmw/mwlua/modstorebindings.cpp
+index c106ce9541..1909514bfc 100644
+--- a/apps/openmw/mwlua/modstorebindings.cpp
++++ b/apps/openmw/mwlua/modstorebindings.cpp
+@@ -17,40 +17,13 @@
+ 
+ namespace MWLua
+ {
+-    namespace
+-    {
+-        // Everything that is installed as JSON: [{"id":"x","files":[{"p":"a.lua","s":12,"h":"<sha256>"}]}].
+-        // (Names are limited to letters, digits and . _ - /, so nothing needs escaping.)
+-        std::string manifestJson()
+-        {
+-            std::string json = "[";
+-            bool firstMod = true;
+-            for (const Misc::ClientMods::Mod& mod : Misc::ClientMods::installed())
+-            {
+-                json += firstMod ? "" : ",";
+-                firstMod = false;
+-                json += "{\"id\":\"" + mod.mId + "\",\"files\":[";
+-                bool firstFile = true;
+-                for (const Misc::ClientMods::File& file : mod.mFiles)
+-                {
+-                    json += firstFile ? "" : ",";
+-                    firstFile = false;
+-                    json += "{\"p\":\"" + file.mPath + "\",\"s\":" + std::to_string(file.mSize) + ",\"h\":\"" + file.mHash
+-                        + "\"}";
+-                }
+-                json += "]}";
+-            }
+-            return json + "]";
+-        }
+-    }
+-
+     Lua::Table initModstorePackage(const Context& context)
+     {
+         lua_State* state = context.unsafeState();
+         const Lua::PackageBuilder api(state, "modstore");
+ 
+         // The installed mods and their files, with SHA-256 hashes, as JSON text
+-        api.function("manifest", []() { return manifestJson(); });
++        api.function("manifest", []() { return Misc::ClientMods::manifestJson(); });
+         // One installed file, or nil
+         api.function("read", [](std::string_view id, std::string_view path) -> std::optional<std::string> {
+             return Misc::ClientMods::read(id, path);
+diff --git a/components/misc/clientmods.cpp b/components/misc/clientmods.cpp
+index 4a78bab01e..80ef96b608 100644
+--- a/components/misc/clientmods.cpp
++++ b/components/misc/clientmods.cpp
+@@ -205,6 +205,28 @@ namespace Misc::ClientMods
+         return mods;
+     }
+ 
++    std::string manifestJson()
++    {
++        // (names are limited to letters, digits and . _ - /, so nothing needs escaping)
++        std::string json = "[";
++        bool firstMod = true;
++        for (const Mod& mod : installed())
++        {
++            json += firstMod ? "" : ",";
++            firstMod = false;
++            json += "{\"id\":\"" + mod.mId + "\",\"files\":[";
++            bool firstFile = true;
++            for (const File& file : mod.mFiles)
++            {
++                json += firstFile ? "" : ",";
++                firstFile = false;
++                json += "{\"p\":\"" + file.mPath + "\",\"s\":" + std::to_string(file.mSize) + ",\"h\":\"" + file.mHash + "\"}";
++            }
++            json += "]}";
++        }
++        return json + "]";
++    }
++
+     std::optional<std::string> read(std::string_view id, std::string_view path)
+     {
+         if (sRoot.empty() || !validId(id) || !validPath(path))
+diff --git a/components/misc/clientmods.hpp b/components/misc/clientmods.hpp
+index e3b83a04c1..4728dc9b2c 100644
+--- a/components/misc/clientmods.hpp
++++ b/components/misc/clientmods.hpp
+@@ -45,6 +45,9 @@ namespace Misc::ClientMods
+     // What is installed (or, for a server, what it hands out): every mod with its files and their hashes.
+     std::vector<Mod> installed();
+ 
++    // installed() as JSON text: [{"id":"x","files":[{"p":"scripts/a.lua","s":12,"h":"<sha256>"}]}]
++    std::string manifestJson();
++
+     // Reads one installed file. Empty if there is no such file.
+     std::optional<std::string> read(std::string_view id, std::string_view path);
+ 
+diff --git a/multiplayer/README.md b/multiplayer/README.md
+index 62b2d83085..09fd6bdbda 100644
+--- a/multiplayer/README.md
++++ b/multiplayer/README.md
+@@ -144,6 +144,28 @@ loads `relay.lua` unchanged, so a server behaves exactly like a hosted game (res
+   wrote to whom), parties, trades, admin logins and commands, weather changes, and once a minute how many messages a player
+   had thrown away for flooding or being malformed. Type `help` for the commands.
+ 
++## Client mods kept on the server
++A server (or a game that hosts) can hand out its own client Lua mods, so every player runs the same scripts without
++installing anything by hand.
++
++- **On the server:** put the mods in a folder, one subfolder per mod: `clientmods/<name>/...`, with a `<name>.omwscripts` file
++  at the top of each (the same file you would list as `content=` in `openmw.cfg`), its scripts under `scripts/`, and any
++  textures, sounds or translations it uses. `<name>` is lowercase letters, digits, `_` and `-`. The standalone server uses
++  `multiplayer/clientmods` or `clientmods` next to the program, or the folder given with `--client-mods <dir>`. A hosted game
++  hands out the `clientmods` folder of its own user data directory.
++- **When a player joins:** the server sends the list of its mods with a SHA-256 hash for every file. The game compares it
++  with what is installed (in `<user data>/clientmods`). **If nothing differs, nothing is asked.** Only differences count: a
++  file whose hash is different (updated), a file the player does not have (new) and a file the player has but the server no
++  longer has (deleted); a whole mod that the server dropped is removed too.
++- **The question:** the player sees which mods change and how many files are new, updated and removed, with the download
++  size, and chooses to install and restart or to decline (declining leaves the server).
++- **The install:** only the files that differ are downloaded, over the session connection. The engine writes a file only if
++  its SHA-256 is the announced one and its name and size are allowed (types: lua, omwscripts, yaml, txt, tga, dds, png,
++  jpg, nif, kf, wav, mp3, ogg; at most 8 MB a file, 64 MB and 500 files a mod, 32 mods). Then the game restarts (Linux and
++  Windows; elsewhere the player starts it again) and the new scripts load at startup. The player joins again.
++
++A player trusts the server's owner with this: the scripts run in their game like any mod. They are only ever asked first.
++
+ ## Playing together
+ Every player keeps their **own** world; nothing a group member does changes yours, except the shared things below.
+ - **Presence:** everyone appears as a stand-in NPC (look and gear) when you share a cell, with an arrow and name that
+diff --git a/multiplayer/TODO.md b/multiplayer/TODO.md
+index 2668d17b42..5b4f81ae64 100644
+--- a/multiplayer/TODO.md
++++ b/multiplayer/TODO.md
+@@ -1,32 +1,17 @@
+ # Multiplayer TODO
+ 
+-## Client: less C++, features as updatable Luau packs
+-Goal: the engine keeps only small generic hooks, every feature is Luau, and a server (or host) can push new or updated
+-features to players without a new build. Client side only: the server stays as it is (a C++ host running `relay.lua`).
++## Client Lua mods kept on the server
++The client Lua mods live in a folder next to the server (`clientmods/<id>/...`, each with an `<id>.omwscripts` file). When a
++client joins, the server tells it which mods and files (with SHA-256 hashes) it hands out; the client compares them with
++what it has installed in its own `clientmods` folder, and if they differ it asks the player (a confirmation popup),
++downloads what is missing or changed over the session connection, checks every file against its hash, removes what the
++server no longer has, and restarts the game so the new scripts are loaded. No pack manager, no signing.
+ 
+-Today: about 60% of what was written is Luau (the whole mod), 3% is C++ engine hooks (~280 lines), 7% generic sockets, and
+-19% is the standalone server program.
++Engine side (generic, small): `openmw.modstore` (list/read/write/remove with hash, size and file-type checks, restart),
++the `clientmods` folders added to the data directories and their `*.omwscripts` loaded at startup, a relaunch after
++shutdown (Linux and Windows; elsewhere the player starts the game again).
+ 
+-2. **Split the mod into a core and feature packs.**
+-   - Core (small, built in): `netlib`, session/handshake, the pack manager, an extension bus.
+-   - Packs: avatars + animation (`remote`), party/chat UI (`player`), `trade`, `shots`, `proxies` (shared fights), ailments,
+-     `items`. Each with a manifest: id, version, the core version and engine APIs it needs.
+-   - Relay: generic namespaced channels (`ext/<feature>`: to all / to party / to one player) with the usual rate and size
+-     limits, so a new feature needs no relay change. Capability negotiation instead of the single protocol number.
+-3. **`openmw.modstore` (C++, ~300-400 lines, generic, not multiplayer-specific).** Write validated files (no `..`, file-type
+-   allowlist, size caps, sha256 check) under `<user data>/modstore/<id>/<version>/`; add active packs to the VFS and register
+-   their `.omwscripts` like `builtin.omwscripts`; expose a reload (`reloadlua` already exists). Needed because scripts load
+-   only from the VFS, there is no Lua file-write or download API, and the Luau VM has no `loadstring`.
+-4. **Update protocol (Luau).** `hello` lists pack id/version/hash; the client downloads what is missing or old in chunks over
+-   the session connection, installs, reloads and resumes. A hosting game can serve packs too. Roll back to the previous
+-   version if the new one keeps erroring in its first seconds. Keep the resume token in `openmw.storage` so a reload does not
+-   cost the session.
+-5. **Trust model** (to decide). Official packs signed with a key whose public half is built into the engine (installed
+-   automatically) vs consent-only (a prompt per server and per hash). Either way: a per-pack `require` allowlist (only the
+-   core may use sockets), file/size limits, no downgrades.
+-
+-Risks to check first: a reload in the middle of a session drops script state; avatars carry scripts, so a pack that removes
+-one must clean them up first; adding a directory to the VFS and reloading in one go is not tried yet.
++To decide: what a player who declines gets (now: they cannot join that server), a way to mark a server's mods as optional.
+ 
+ ## Parked / known gaps
+ - Loot sharing and stand-ins for other worlds are in but only tested with faked engine objects: try them in a real game
+diff --git a/multiplayer/mod/scripts/mp/clientmods.lua b/multiplayer/mod/scripts/mp/clientmods.lua
+new file mode 100644
+index 0000000000..916c6c364a
+--- /dev/null
++++ b/multiplayer/mod/scripts/mp/clientmods.lua
+@@ -0,0 +1,182 @@
++-- Client mods kept on the server. A server (or a game hosting) hands out a folder of Lua mods; the relay tells every client
++-- which mods and files it has, with their SHA-256. This module compares that with what is installed here, asks the
++-- player, downloads what is missing or changed over the session connection, checks every file against its hash (the
++-- engine refuses a file whose hash is wrong), removes what the server no longer has and offers to restart the game,
++-- which loads the new scripts at startup.
++local markup = require('openmw.markup')
++local ok, modstore = pcall(require, 'openmw.modstore')
++if not ok then modstore = nil end
++
++local M = {}
++
++local ctx -- { send(table), toUi(event, data), notice(text), declined(), now() }
++local state -- nil | 'asking' | 'downloading' | 'done'
++local need, drop -- files to fetch { mod, p, s, h }; things to delete { mod, p (nil: the whole mod) }
++local index, cur, lastChunk, installed
++
++local MAX_FILES, MAX_BYTES = 2000, 256 * 1024 * 1024
++
++function M.init(c) ctx = c end
++function M.available() return modstore ~= nil end
++function M.busy() return state ~= nil end
++
++local function isHash(h) return type(h) == 'string' and #h == 64 and h:match('^%x+$') ~= nil end
++
++-- What the server hands out, as { mod id = { path = { s, h } } }, or nil if the list is not what it should be
++local function parseServer(list)
++    if type(list) ~= 'table' then return nil end
++    local mods, files = {}, 0
++    for _, mod in ipairs(list) do
++        if type(mod) ~= 'table' or type(mod.id) ~= 'string' or type(mod.files) ~= 'table' then return nil end
++        local entry = {}
++        for _, f in ipairs(mod.files) do
++            files = files + 1
++            if files > MAX_FILES or type(f) ~= 'table' or type(f.p) ~= 'string' or type(f.s) ~= 'number' or not isHash(f.h) then
++                return nil
++            end
++            entry[f.p] = { s = f.s, h = f.h:lower() }
++        end
++        mods[mod.id] = entry
++    end
++    return mods
++end
++
++local function parseLocal()
++    local mods = {}
++    local okJson, list = pcall(function() return markup.decodeYaml(modstore.manifest()) end)
++    if not okJson or type(list) ~= 'table' then return mods end
++    for _, mod in ipairs(list) do
++        local entry = {}
++        for _, f in ipairs(mod.files or {}) do entry[f.p] = { s = f.s, h = f.h } end
++        mods[mod.id] = entry
++    end
++    return mods
++end
++
++local function sortedKeys(t)
++    local keys = {}
++    for k in pairs(t) do keys[#keys + 1] = k end
++    table.sort(keys)
++    return keys
++end
++
++local function fail(reason)
++    if ctx then ctx.notice('Could not install the server\'s mods: ' .. tostring(reason)) end
++    state, need, drop, cur = nil, nil, nil, nil
++    if ctx then ctx.toUi('MpModsDone', { ok = false, reason = tostring(reason) }) end
++end
++
++-- The server's list arrived (after joining).
++function M.onServerMods(list)
++    if not modstore or not ctx or state == 'asking' or state == 'downloading' then return end
++    state = nil
++    local theirs = parseServer(list)
++    if not theirs then return end
++    local mine = parseLocal()
++    need, drop = {}, {}
++    local bytes, added, updated, deleted = 0, 0, 0, 0
++    for _, id in ipairs(sortedKeys(theirs)) do
++        for _, p in ipairs(sortedKeys(theirs[id])) do
++            local want = theirs[id][p]
++            local have = mine[id] and mine[id][p]
++            -- only what differs: a file with the same hash is left alone
++            if not have or have.h ~= want.h then
++                need[#need + 1] = { mod = id, p = p, s = want.s, h = want.h }
++                bytes = bytes + want.s
++                if have then updated = updated + 1 else added = added + 1 end
++            end
++        end
++        for _, p in ipairs(sortedKeys(mine[id] or {})) do
++            if not theirs[id][p] then drop[#drop + 1] = { mod = id, p = p } deleted = deleted + 1 end
++        end
++    end
++    for _, id in ipairs(sortedKeys(mine)) do
++        if not theirs[id] then
++            drop[#drop + 1] = { mod = id }
++            for _ in pairs(mine[id]) do deleted = deleted + 1 end
++        end
++    end
++    if #need == 0 and #drop == 0 then need, drop = nil, nil return end
++    if bytes > MAX_BYTES then need, drop = nil, nil ctx.notice('The server\'s mods are too large to install.') return end
++    -- the mods that change, for the question
++    local names, seen = {}, {}
++    for _, f in ipairs(need) do if not seen[f.mod] then seen[f.mod] = true names[#names + 1] = f.mod end end
++    for _, d in ipairs(drop) do if not seen[d.mod] then seen[d.mod] = true names[#names + 1] = d.mod end end
++    table.sort(names)
++    state = 'asking'
++    ctx.toUi('MpModPrompt', { mods = names, added = added, updated = updated, deleted = deleted, bytes = bytes })
++end
++
++local function requestNext()
++    index = index + 1
++    cur = need[index]
++    if not cur then
++        -- everything is here and checked: delete what the server no longer has
++        for _, d in ipairs(drop) do
++            local err = modstore.remove(d.mod, d.p or '')
++            if err ~= '' then return fail('could not remove ' .. d.mod .. (d.p and ('/' .. d.p) or '') .. ': ' .. err) end
++        end
++        local count = #need
++        state, need, drop, cur = 'done', nil, nil, nil
++        ctx.toUi('MpModsDone', { ok = true, files = count })
++        return
++    end
++    cur.parts, cur.got = {}, 0
++    lastChunk = ctx.now()
++    ctx.send({ t = 'modget', mod = cur.mod, p = cur.p, off = 0 })
++end
++
++-- The player's answer to the question.
++function M.answer(accept)
++    if state ~= 'asking' then return end
++    if not accept then
++        state, need, drop = nil, nil, nil
++        ctx.declined()
++        return
++    end
++    state, index = 'downloading', 0
++    ctx.notice('Downloading the server\'s mods...')
++    requestNext()
++end
++
++function M.onChunk(msg)
++    if state ~= 'downloading' or not cur then return end
++    if msg.mod ~= cur.mod or msg.p ~= cur.p then return end
++    if msg.missing then return fail('the server no longer has ' .. cur.p) end
++    if msg.off ~= cur.got or type(msg.d) ~= 'string' or type(msg.n) ~= 'number' or msg.n ~= cur.s then
++        return fail('the server sent ' .. cur.p .. ' wrong')
++    end
++    local piece = modstore.base64Decode(msg.d)
++    if not piece then return fail('the server sent ' .. cur.p .. ' wrong') end
++    cur.parts[#cur.parts + 1] = piece
++    cur.got = cur.got + #piece
++    lastChunk = ctx.now()
++    if cur.got > cur.s then return fail(cur.p .. ' is larger than announced') end
++    if cur.got < cur.s and #piece > 0 then
++        return ctx.send({ t = 'modget', mod = cur.mod, p = cur.p, off = cur.got })
++    end
++    if cur.got ~= cur.s then return fail(cur.p .. ' ended early') end
++    -- the engine writes it only if the SHA-256 is the announced one
++    local err = modstore.write(cur.mod, cur.p, table.concat(cur.parts), cur.h)
++    if err ~= '' then return fail(cur.mod .. '/' .. cur.p .. ': ' .. err) end
++    requestNext()
++end
++
++function M.update()
++    if state == 'downloading' and ctx.now() - lastChunk > 20 then fail('the server stopped answering') end
++end
++
++-- The player asked to restart (after the install).
++function M.restart()
++    if state ~= 'done' then return end
++    if not modstore.restart() then
++        ctx.notice('The mods are installed. Start the game again to load them.')
++    end
++end
++
++-- Connection gone: forget a half done download (what was written stays: files are only ever written whole and checked)
++function M.reset()
++    if state == 'asking' or state == 'downloading' then state, need, drop, cur = nil, nil, nil, nil end
++end
++
++return M
+diff --git a/multiplayer/mod/scripts/mp/global.lua b/multiplayer/mod/scripts/mp/global.lua
+index 60e8559dd8..75e156f3eb 100644
+--- a/multiplayer/mod/scripts/mp/global.lua
++++ b/multiplayer/mod/scripts/mp/global.lua
+@@ -16,6 +16,7 @@ local shots = require('scripts/mp/shots')
+ local loot = require('scripts/mp/loot')
+ local items = require('scripts/mp/items')
+ local relay = require('scripts/mp/relay')
++local clientmods = require('scripts/mp/clientmods')
+ local bot = require('scripts/mp/bot')
+ 
+ local SETTINGS = 'SettingsGlobalMultiplayer'
+@@ -189,6 +190,22 @@ settings:subscribe(async:callback(function(_, key)
+     retry = RETRY_INTERVAL
+ end))
+ 
++------------------------------------------------------------------ client mods kept on the server (clientmods.lua)
++
++clientmods.init({
++    send = function(t) net.send(net.encodeJson(t)) end,
++    toUi = toUi,
++    notice = notice,
++    now = core.getRealTime,
++    declined = function()
++        -- without the server's mods the game would not match the others': leave
++        refusedBy = 'mods'
++        notice('You need the server\'s mods to play here. Join again to be asked once more.')
++        net.disconnect()
++        clearRemotes()
++    end,
++})
++
+ ------------------------------------------------------------------ time and weather (the host is the clock)
+ 
+ local function releaseClock()
+@@ -838,6 +855,8 @@ local function onMessage(msg)
+         clearRemotes()
+         return
+     end
++    if t == 'mods' then clientmods.onServerMods(msg.list) return end
++    if t == 'modchunk' then clientmods.onChunk(msg) return end
+     if t == 'notice' then notice(tostring(msg.text or '')) return end
+     if t == 'ping' then net.send(net.encodeJson({ t = 'pong', n = msg.n })) return end
+     if t == 'players' then
+@@ -996,6 +1015,7 @@ net.callbacks = {
+     onConnected = function() log('connected'); retry = 0; lastServerMessage = core.getRealTime(); pushUi() end,
+     onDisconnected = function(reason)
+         log('disconnected: ' .. tostring(reason))
++        clientmods.reset()
+         clearRemotes()
+         notice('Disconnected from the server.')
+         pushUi()
+@@ -1043,6 +1063,7 @@ return {
+             lastReal = realNow
+             clock = clock + dt
+             relay.update(dt)
++            clientmods.update()
+             net.update(dt)
+             if botWanted and hosting() and relay.isRunning() and net.isConnected() then
+                 if not bot.isRunning() then
+@@ -1261,6 +1282,8 @@ return {
+             toUi('MpTradeResult', { ok = true })
+         end,
+         MpCmd = function(d)
++            if d.cmd == 'modsAnswer' then clientmods.answer(d.accept and true or false) return end
++            if d.cmd == 'modsRestart' then clientmods.restart() return end
+             if d.cmd == 'accept' and not d.id then d.id = resolveInviter(d.name) end
+             if (d.cmd == 'accept' or d.cmd == 'decline') and not d.id then
+                 notice('No pending invite' .. (d.name and (' from ' .. d.name) or '') .. '.')
+diff --git a/multiplayer/mod/scripts/mp/player.lua b/multiplayer/mod/scripts/mp/player.lua
+index ead1f9da26..fb89946b70 100644
+--- a/multiplayer/mod/scripts/mp/player.lua
++++ b/multiplayer/mod/scripts/mp/player.lua
+@@ -550,6 +550,78 @@ local function openMenu(d)
+     }
+ end
+ 
++------------------------------------------------------------------ the server's client mods (see clientmods.lua)
++
++local modEl
++
++local function closeModWindow()
++    modEl = destroy(modEl)
++    I.UI.setMode()
++end
++
++-- A small window in the middle of the screen: some lines of text and a few choices. The game is paused while it is open.
++local function openModWindow(lines, options)
++    if modEl then modEl = destroy(modEl) end
++    local content = {}
++    for i, line in ipairs(lines) do
++        content[#content + 1] = text { position = V2(14, 10 + (i - 1) * 22), text = line, textColor = COLORS.system, textSize = 16 }
++    end
++    local top = 10 + #lines * 22 + 12
++    for i, o in ipairs(options) do
++        content[#content + 1] = text {
++            position = V2(28, top + (i - 1) * 28), text = '> ' .. o.label, textColor = COLORS.tab_on, textSize = 17,
++            events = { mouseClick = async:callback(function() closeModWindow() o.fn() end) },
++        }
++    end
++    local w, h = 560, top + #options * 28 + 14
++    local scr = screen()
++    I.UI.setPauseOnMode('Interface', true)
++    I.UI.setMode('Interface', { windows = {} })
++    modEl = ui.create {
++        layer = 'Windows', type = ui.TYPE.Widget,
++        props = { position = V2(scr.x / 2 - w / 2, scr.y / 2 - h / 2), size = V2(w, h) },
++        content = ui.content({ background(0.9), table.unpack(content) }),
++    }
++end
++
++local function sizeText(bytes)
++    if bytes >= 1048576 then return string.format('%.1f MB', bytes / 1048576) end
++    return string.format('%d KB', math.max(1, math.floor(bytes / 1024 + 0.5)))
++end
++
++local function listText(names, limit)
++    local shown = {}
++    for i = 1, math.min(#names, limit) do shown[i] = names[i] end
++    return table.concat(shown, ', ') .. (#names > limit and (' and ' .. (#names - limit) .. ' more') or '')
++end
++
++local function countText(n, what) return n .. ' ' .. what .. (n == 1 and ' file' or ' files') end
++
++local function askMods(d)
++    local lines = { 'This server\'s client mods are not the ones you have: ' .. listText(d.mods, 4) }
++    local changes = {}
++    if d.added > 0 then changes[#changes + 1] = countText(d.added, 'new') end
++    if d.updated > 0 then changes[#changes + 1] = countText(d.updated, 'updated') end
++    if d.deleted > 0 then changes[#changes + 1] = countText(d.deleted, 'removed') end
++    lines[#lines + 1] = table.concat(changes, ', ') .. (d.bytes > 0 and ('  (download: ' .. sizeText(d.bytes) .. ')') or '')
++    lines[#lines + 1] = 'Every file is checked against the server\'s hash. The game restarts afterwards, and you join again.'
++    openModWindow(lines, {
++        { label = 'Install and restart', fn = function() core.sendGlobalEvent('MpCmd', { cmd = 'modsAnswer', accept = true }) end },
++        { label = 'Decline (leave the server)', fn = function() core.sendGlobalEvent('MpCmd', { cmd = 'modsAnswer', accept = false }) end },
++    })
++end
++
++local function modsDone(d)
++    if not d.ok then
++        openModWindow({ 'The mods could not be installed.', tostring(d.reason or '') }, { { label = 'OK', fn = function() end } })
++        return
++    end
++    openModWindow({ 'The server\'s mods are installed (' .. (d.files or 0) .. ' files).', 'The game has to restart to load them.' }, {
++        { label = 'Restart now', fn = function() core.sendGlobalEvent('MpCmd', { cmd = 'modsRestart' }) end },
++        { label = 'Later', fn = function() end },
++    })
++end
++
+ ------------------------------------------------------------------ shots (see shots.lua)
+ 
+ local SHOT_MAX_RANGE = 6000
+@@ -769,6 +841,8 @@ return {
+             pcall(function() playersSection:set('Address', text) end)
+         end,
+         MpAvatars = function(d) avatarList = d.list or {} end,
++        MpModPrompt = function(d) askMods(d) end,
++        MpModsDone = function(d) modsDone(d) end,
+         MpMarkers = function(d)
+             local list = d.list or {}
+             local ok, err = pcall(ui.setMapMarkers, list)
+diff --git a/multiplayer/mod/scripts/mp/relay.lua b/multiplayer/mod/scripts/mp/relay.lua
+index 2c0a046b31..0293c886f8 100644
+--- a/multiplayer/mod/scripts/mp/relay.lua
++++ b/multiplayer/mod/scripts/mp/relay.lua
+@@ -5,6 +5,8 @@
+ local net = require('scripts/mp/netlib')
+ local markup = require('openmw.markup')
+ local core = require('openmw.core')
++local okModstore, modstore = pcall(require, 'openmw.modstore') -- the client mods this host or server hands out (absent in older engines)
++if not okModstore then modstore = nil end
+ 
+ local MAX_PARTY = 3
+ local MAX_PLAYERS = 128 -- the most a server takes, whatever it is told (a hosting game counts as one of them)
+@@ -44,7 +46,7 @@ local GRACE = 90 -- seconds a player that lost their connection keeps their name
+ local TRADE_REQUEST_TTL = 60
+ -- messages per second and player, by type; more is dropped (the general limit above still applies)
+ local RATE = { pubactors = 2, state = 30, vitals = 5, actors = 8, equip = 3, profile = 3, shot = 8, aid = 4, dmg = 30, world = 4, loot = 10,
+-    trade = 30 }
++    trade = 30, modget = 100 }
+ 
+ local M = {}
+ M.PROTO = PROTO
+@@ -295,6 +297,7 @@ local VALID = {
+     trade_inv = function(m) return isCountMap(m.items, 2000) and (m.gens == nil or (type(m.gens) == 'table')) end,
+     trade_deal = function(m) return isNum(m.rev) and isCountMap(m.a, 200) and isCountMap(m.b, 200) end,
+     trade_ok = function(m) return isNum(m.rev) end,
++    modget = function(m) return isStr(m.mod, 40) and isStr(m.p, 160) and (m.off == nil or isNum(m.off)) end,
+ }
+ 
+ local function withinRate(c, t)
+@@ -386,9 +389,21 @@ function M.onClientConnected(id)
+ end
+ 
+ -- A client that passed the join check gets the current world: everyone's look and position, time and weather.
++-- The client mods this host or server hands out, with their hashes (see clientmods in the engine): the client compares them
++-- with what it has installed and asks the player before downloading anything.
++local function sendMods(id)
++    local c = clients[id]
++    if not modstore or not c or c.virtual or id == hostId then return end
++    local ok, json = pcall(modstore.manifest)
++    if ok and type(json) == 'string' and #json < 400000 then
++        sendRaw(id, '{"t":"mods","list":' .. json .. '}')
++    end
++end
++
+ local function admit(id)
+     local c = clients[id]
+     c.authed = true
++    sendMods(id)
+     if dedicated then
+         if worldJson then sendRaw(id, worldJson) end
+     else
+@@ -710,6 +725,33 @@ function M.onClientMessage(sock, line)
+     process(id, msg)
+ end
+ 
++local MOD_CHUNK = 24000 -- bytes of a file per message (a little over 32000 characters once it is base64)
++local modCache = {} -- 'id/path' -> { data, t }: a file being downloaded is read once, not for every chunk
++local function modData(modId, path)
++    local key = modId .. '/' .. path
++    local entry = modCache[key]
++    if entry and clock - entry.t < 30 then entry.t = clock return entry.data end
++    local data = modstore.read(modId, path)
++    if not data then return nil end
++    local n, oldest = 0, nil
++    for k, e in pairs(modCache) do
++        n = n + 1
++        if clock - e.t >= 30 then modCache[k] = nil elseif not oldest or e.t < modCache[oldest].t then oldest = k end
++    end
++    if n >= 6 and oldest and modCache[oldest] then modCache[oldest] = nil end
++    modCache[key] = { data = data, t = clock }
++    return data
++end
++
++local function handleModGet(id, msg)
++    if not modstore then return end
++    local data = modData(msg.mod, msg.p)
++    if not data then return sendTo(id, { t = 'modchunk', mod = msg.mod, p = msg.p, missing = true }) end
++    local off = math.max(0, math.floor(msg.off or 0))
++    sendTo(id, { t = 'modchunk', mod = msg.mod, p = msg.p, off = off, n = #data,
++        d = modstore.base64Encode(data:sub(off + 1, off + MOD_CHUNK)) })
++end
++
+ process = function(id, msg)
+     local c = clients[id]
+     if not c or c.refused then return end
+@@ -749,6 +791,7 @@ process = function(id, msg)
+     if not withinRate(c, t) then c.rateDropped = (c.rateDropped or 0) + 1 return end
+     local valid = VALID[t]
+     if valid and not valid(msg) then c.invalidDropped = (c.invalidDropped or 0) + 1 return end
++    if t == 'modget' then return handleModGet(id, msg) end
+     if t == 'world' then -- time and weather: only the clock (the host, or the elected player of a server) sets them
+         if id == clockId() then
+             c.last.world = enc(msg)
+-- 
+2.55.0
+
