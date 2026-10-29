@@ -56,6 +56,12 @@ buildingJob:
   - sdkmanager "platform-tools"
   - sdkmanager "build-tools;${ANDROID_BUILD_TOOLS}"
 
+  # Release signing: both are GitLab CI/CD "File" variables. storeFile in the properties is relative to the properties file,
+  # so they have to sit side by side in the repo root (androidApp/build.gradle.kts looks there).
+  - test -f "$KEYSTORE_FILE" && test -f "$KEYSTORE_PROPERTIES" || { echo "KEYSTORE_FILE / KEYSTORE_PROPERTIES variables missing (are they protected and is this tag protected?)"; exit 1; }
+  - cp "$KEYSTORE_FILE" ./alpha3-keystore.jks
+  - cp "$KEYSTORE_PROPERTIES" ./release-keystore.properties
+
   # Not necessary, just in case someone changed the flag:
   - chmod +x ./gradlew
 
@@ -64,7 +70,8 @@ buildingJob:
     # native library named by build id, the same id the crash reports print:
     #   androidApp/src/main/assets/symbols/<build id>.syms        function names (the app bundles these for its crash viewer)
     #   androidApp/native-symbols/.build-id/ab/cdef....debug      full debug info (source lines), for llvm-addr2line / lldb
-    - ./gradlew assembleRelease -Dorg.gradle.java.home=/usr/lib/jvm/temurin-21-jdk/ &> ./gradle.log
+    # tee shows the output in the job log and writes gradle.log; pipefail keeps gradle's exit code instead of tee's
+    - set -o pipefail; ./gradlew assembleRelease -Dorg.gradle.java.home=/usr/lib/jvm/temurin-21-jdk/ 2>&1 | tee ./gradle.log
     - cp androidApp/build/outputs/apk/release/*.apk openmw-android-alpha3-$CI_COMMIT_TAG.apk
     # Keep the symbols next to the apk: without them a crash report from this release cannot be read down to source lines.
     - test "$(find androidApp/native-symbols/.build-id -name '*.debug' | wc -l)" -gt 0 || { echo "No debug symbols were produced"; exit 1; }
