@@ -53,3 +53,4 @@ androidApp/native-symbols/
 
 # Signing keys
 *.jks
+.secure_files/

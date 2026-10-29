@@ -56,11 +56,12 @@ buildingJob:
   - sdkmanager "platform-tools"
   - sdkmanager "build-tools;${ANDROID_BUILD_TOOLS}"
 
-  # Release signing: both are GitLab CI/CD "File" variables. storeFile in the properties is relative to the properties file,
-  # so they have to sit side by side in the repo root (androidApp/build.gradle.kts looks there).
-  - test -f "$KEYSTORE_FILE" && test -f "$KEYSTORE_PROPERTIES" || { echo "KEYSTORE_FILE / KEYSTORE_PROPERTIES variables missing (are they protected and is this tag protected?)"; exit 1; }
-  - cp "$KEYSTORE_FILE" ./alpha3-keystore.jks
-  - cp "$KEYSTORE_PROPERTIES" ./release-keystore.properties
+  # Release signing: alpha3-keystore.jks and release-keystore.properties are in Settings > CI/CD > Secure files. They download
+  # to .secure_files/ under their own names. storeFile in the properties is relative to the properties file, so they have to
+  # sit side by side in the repo root (androidApp/build.gradle.kts looks there).
+  - curl --silent --show-error --fail "https://gitlab.com/gitlab-org/incubation-engineering/mobile-devops/download-secure-files/-/raw/main/installation/install" | bash
+  - test -f .secure_files/alpha3-keystore.jks && test -f .secure_files/release-keystore.properties || { echo "Secure files alpha3-keystore.jks / release-keystore.properties not downloaded:"; ls -la .secure_files; exit 1; }
+  - cp .secure_files/alpha3-keystore.jks .secure_files/release-keystore.properties .
 
   # Not necessary, just in case someone changed the flag:
   - chmod +x ./gradlew
