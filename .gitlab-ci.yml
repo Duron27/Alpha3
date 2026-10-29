@@ -59,7 +59,7 @@ buildingJob:
   # Release signing: alpha3-keystore.jks and release-keystore.properties are in Settings > CI/CD > Secure files. They download
   # to .secure_files/ under their own names. storeFile in the properties is relative to the properties file, so they have to
   # sit side by side in the repo root (androidApp/build.gradle.kts looks there).
-  - curl --silent --show-error --fail "https://gitlab.com/gitlab-org/incubation-engineering/mobile-devops/download-secure-files/-/raw/main/installation/install" | bash
+  - curl --silent --show-error --fail "  - curl --silent --show-error --fail "https://gitlab.com/gitlab-org/incubation-engineering/mobile-devops/download-secure-files/-/raw/main/installer" | bash
   - test -f .secure_files/alpha3-keystore.jks && test -f .secure_files/release-keystore.properties || { echo "Secure files alpha3-keystore.jks / release-keystore.properties not downloaded:"; ls -la .secure_files; exit 1; }
   - cp .secure_files/alpha3-keystore.jks .secure_files/release-keystore.properties .
 
