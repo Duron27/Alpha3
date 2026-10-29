@@ -60,12 +60,12 @@ buildingJob:
   - chmod +x ./gradlew
 
   script:
-    # assembleDebug also runs generateNativeSymbolsDebug (androidApp/build.gradle.kts), which writes the debug symbols of every
+    # assembleRelease also runs generateNativeSymbolsRelease (androidApp/build.gradle.kts), which writes the debug symbols of every
     # native library named by build id, the same id the crash reports print:
     #   androidApp/src/main/assets/symbols/<build id>.syms        function names (the app bundles these for its crash viewer)
     #   androidApp/native-symbols/.build-id/ab/cdef....debug      full debug info (source lines), for llvm-addr2line / lldb
-    - ./gradlew assembleDebug -Dorg.gradle.java.home=/usr/lib/jvm/temurin-21-jdk/ &> ./gradle.log
-    - cp androidApp/build/outputs/apk/debug/*.apk openmw-android-alpha3-$CI_COMMIT_TAG.apk
+    - ./gradlew assembleRelease -Dorg.gradle.java.home=/usr/lib/jvm/temurin-21-jdk/ &> ./gradle.log
+    - cp androidApp/build/outputs/apk/release/*.apk openmw-android-alpha3-$CI_COMMIT_TAG.apk
     # Keep the symbols next to the apk: without them a crash report from this release cannot be read down to source lines.
     - test "$(find androidApp/native-symbols/.build-id -name '*.debug' | wc -l)" -gt 0 || { echo "No debug symbols were produced"; exit 1; }
     - test "$(ls androidApp/src/main/assets/symbols/*.syms | wc -l)" -gt 0 || { echo "No symbol tables were produced"; exit 1; }
