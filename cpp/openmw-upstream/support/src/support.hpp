@@ -87,6 +87,15 @@ namespace Alpha3
     // ---- distantmeshes.cpp: true while the distant meshes read a texture for the CPU; the image hooks leave it as it is
     bool imageHooksBypassed();
 
+    // ---- texturestreaming.cpp ([Textures] streaming): a large mipmapped image read as its smaller levels only, given to
+    // prepare (null from it: as it is); the full image follows, through prepare on a background thread, once the small one
+    // is uploaded, and is swapped in on the draw thread after a frame. Null: the image is not streamed.
+    osg::ref_ptr<osg::Image> textureStreamingRead(
+        osg::Image& image, osg::ref_ptr<osg::Image> (*prepare)(osg::Image&));
+    void textureStreamingTextureLoading(const osg::Image& image);
+    void textureStreamingFrame(); // on the draw thread, after the frame is drawn
+    void textureStreamingStop(); // before the context closes
+
     // ---- allocator.cpp: [General] allocator, once the settings are loaded
     void applyAllocatorSetting();
 }

@@ -130,6 +130,36 @@ namespace Alpha3
             Log(Debug::Info) << "GL debug output on (OSG_GL_ERROR_CHECKING=" << value << ")";
         }
 
+        // A DXT image as the GPU can sample it: null when it can as it is (or nothing can be done, and the engine decides)
+        osg::ref_ptr<osg::Image> prepareDxtForGpu(osg::Image& image)
+        {
+            const osg::GLExtensions* gl = osg::GLExtensions::Get(0, false);
+            if (gl == nullptr || gl->isTextureCompressionS3TCSupported)
+                return nullptr;
+
+            // ASTC textures need a GPU that can sample ASTC; ETC2 is part of OpenGL ES 3
+            if (textureConversionUsesEtc2() || gl->isTextureCompressionASTCSupported)
+            {
+                if (osg::ref_ptr<osg::Image> converted = transcodeDxt(image, image.getFileName()))
+                    return converted;
+            }
+            else
+            {
+                static std::once_flag logged;
+                std::call_once(logged,
+                    [] { Log(Debug::Info) << "Texture conversion is off: this GPU does not support ASTC textures"; });
+            }
+
+            // decompressed on the CPU, block-wise with all mip levels
+            static const bool decompress = std::getenv("OPENMW_DECOMPRESS_TEXTURES") != nullptr;
+            if (decompress)
+            {
+                if (osg::ref_ptr<osg::Image> decoded = decodeS3tc(image))
+                    return decoded;
+            }
+            return nullptr;
+        }
+
         class Hooks : public osg::RuntimeHooks
         {
         public:
@@ -183,7 +213,12 @@ namespace Alpha3
                 }
             }
 
-            void swapBuffers(osg::GraphicsContext& gc) override { Alpha3::swapBuffers(gc); }
+            void swapBuffers(osg::GraphicsContext& gc) override
+            {
+                // the frame is drawn: no texture of this context is being uploaded
+                textureStreamingFrame();
+                Alpha3::swapBuffers(gc);
+            }
 
             void clipPlaneApplied(osg::State&, unsigned int index, const osg::Vec4d& eyePlane) override
             {
@@ -249,9 +284,14 @@ namespace Alpha3
             void textureImageLoading(const osg::Image& image, osg::State&) override
             {
                 texturePreloadTextureLoading(image);
+                textureStreamingTextureLoading(image);
             }
 
-            void contextClosing(osg::GraphicsContext&) override { texturePreloadStop(); }
+            void contextClosing(osg::GraphicsContext&) override
+            {
+                textureStreamingStop();
+                texturePreloadStop();
+            }
 
             // the engine's main thread, between its update and the frame's rendering
             void renderingTraversals() override { omw_frame_update(); }
@@ -303,31 +343,13 @@ namespace Alpha3
                 if (!isDxt(format))
                     return nullptr;
                 // the GPU is known once there is a context; images read before that are left to the engine
-                const osg::GLExtensions* gl = osg::GLExtensions::Get(0, false);
-                if (gl == nullptr || gl->isTextureCompressionS3TCSupported)
+                if (osg::GLExtensions::Get(0, false) == nullptr)
                     return nullptr;
 
-                // ASTC textures need a GPU that can sample ASTC; ETC2 is part of OpenGL ES 3
-                if (textureConversionUsesEtc2() || gl->isTextureCompressionASTCSupported)
-                {
-                    if (osg::ref_ptr<osg::Image> converted = transcodeDxt(image, image.getFileName()))
-                        return converted;
-                }
-                else
-                {
-                    static std::once_flag logged;
-                    std::call_once(logged,
-                        [] { Log(Debug::Info) << "Texture conversion is off: this GPU does not support ASTC textures"; });
-                }
-
-                // decompressed on the CPU, block-wise with all mip levels
-                static const bool decompress = std::getenv("OPENMW_DECOMPRESS_TEXTURES") != nullptr;
-                if (decompress)
-                {
-                    if (osg::ref_ptr<osg::Image> decoded = decodeS3tc(image))
-                        return decoded;
-                }
-                return nullptr;
+                // the small mip levels now, the rest once the texture is drawn
+                if (osg::ref_ptr<osg::Image> streamed = textureStreamingRead(image, prepareDxtForGpu))
+                    return streamed;
+                return prepareDxtForGpu(image);
             }
 
         private:

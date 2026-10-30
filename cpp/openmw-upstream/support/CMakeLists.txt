@@ -76,6 +76,7 @@ set(ALPHA3_SUPPORT_SOURCES
     src/shaders.cpp
     src/textureconversion.cpp
     src/texturepreload.cpp
+    src/texturestreaming.cpp
 )
 if (ANDROID)
     list(APPEND ALPHA3_SUPPORT_SOURCES src/framegen.cpp src/framepacing.cpp src/zink.cpp)

@@ -44,6 +44,15 @@ OpenMW builds every paging chunk in game: it collects the references, loads the 
 - Load the small mip levels of a texture first, then the full size only when the object gets close or covers enough of the screen.
 - Unload high mips for things far away to stay inside a memory budget, which matters most on phones with little RAM.
 - Builds on the `[Textures]` conversion cache: converted textures already store their mips, so loading part of a file should be cheap.
+- **Status: first version done, no OpenMW or OSG patch.** See `cpp/openmw-upstream/support/src/texturestreaming.cpp`, off by default (`[Textures] streaming`).
+  1. A mipmapped DDS larger than `streaming start size` (256) is read as its smaller levels only. With texture conversion on, only those levels are converted while the cell loads.
+  2. The first time that small texture is uploaded, the full image is prepared on a background thread.
+  3. After a later frame, on the draw thread, the full data replaces the small image's data in place, up to `streaming swaps per frame` per frame. OSG sees the change and remakes the texture at full size. Every texture sharing that image changes with it.
+- **Tested:** on a desktop GL context, a texture remade at the new size from the same image. In a host test, 210 textures from Morrowind.bsa (start size lowered to 64) read small first (1.1 MB instead of 11 MB), then byte-identical to the full image after the swap, with and without a conversion step. Vanilla textures are 256 px or smaller, so at the default this only affects high-res texture packs.
+- **Next:**
+  - **Memory budget:** drop textures not drawn for a while back to their small levels, which needs a "drawn this frame" signal (a hook in `Texture::apply`, or the cull visitor).
+  - **Upgrade by distance or screen size** instead of on first upload: today a texture compiled ahead for a cell becomes full size even if it is only seen far away.
+  - **Device check:** load times of a cell with a 2K texture pack, with and without streaming.
 
 ## 4. Occlusion culling
 
