@@ -5,7 +5,12 @@
 // is prepared on a background thread, and after a later frame its data replaces the small image's: OSG sees the image
 // change and remakes the texture at full size (osg::Texture2D::textureObjectValid). A few are swapped per frame, so the
 // uploads are spread out instead of stalling one frame. A texture uploaded that the scene camera never draws (the sky,
-// the GUI) is made full size a few seconds after its upload.
+// the GUI) is made full size a few seconds after its upload, and its name is remembered so it is not streamed again.
+//
+// Images shown in full on the screen must never start blurry, so these are read at full size:
+// * whatever the engine's main thread reads: the GUI, splash screens, and what a cell needs right away;
+// * images the texture preload reads (it names them) that are not textures of the world (outside textures/, or menu
+//   pictures), or that an earlier session found the scene camera never draws.
 //
 // The image object is the one the engine's image manager keeps and every texture of that file shares, so nothing in the
 // engine needs to know: the textures that use it change with it.
@@ -17,6 +22,8 @@
 #include <condition_variable>
 #include <cstring>
 #include <deque>
+#include <fstream>
+#include <unordered_set>
 #include <limits>
 #include <mutex>
 #include <thread>
@@ -48,6 +55,68 @@ namespace Alpha3
                 std::clamp(settingInt("Textures", "streaming start size", 256), 16, 4096),
                 std::clamp(settingInt("Textures", "streaming swaps per frame", 8), 1, 1000) };
             return settings;
+        }
+
+        std::atomic<std::thread::id> sMainThread{};
+        thread_local const std::string* tlPath = nullptr;
+
+        bool onMainThread()
+        {
+            return std::this_thread::get_id() == sMainThread.load(std::memory_order_relaxed);
+        }
+
+        // Images not to stream, by name: shown in full on the screen
+        class FullQualityImages
+        {
+        public:
+            bool contains(const std::string& name)
+            {
+                if (!name.starts_with("textures/"))
+                    return true; // splash/, bookart/, icons/, ...
+                for (std::string_view prefix : { "textures/menu", "textures/levelup", "textures/tx_menubook",
+                         "textures/scroll", "textures/compass", "textures/target" })
+                    if (name.starts_with(prefix))
+                        return true;
+                std::lock_guard lock(mMutex);
+                load();
+                return mNames.count(name) != 0;
+            }
+
+            void add(const std::string& name)
+            {
+                if (name.empty())
+                    return;
+                std::lock_guard lock(mMutex);
+                load();
+                if (!mNames.insert(name).second)
+                    return;
+                std::ofstream(file(), std::ios::app) << name << '\n';
+            }
+
+        private:
+            static std::filesystem::path file() { return cacheDirectory() / "texture-streaming-full.list"; }
+
+            void load()
+            {
+                if (mLoaded)
+                    return;
+                mLoaded = true;
+                std::ifstream in(file());
+                std::string line;
+                while (std::getline(in, line))
+                    if (!line.empty())
+                        mNames.insert(line);
+            }
+
+            std::mutex mMutex;
+            bool mLoaded = false;
+            std::unordered_set<std::string> mNames;
+        };
+
+        FullQualityImages& fullQualityImages()
+        {
+            static FullQualityImages instance;
+            return instance;
         }
 
         // The image's mip levels from the first one no larger than maxSize, as an image of their own (same format);
@@ -105,6 +174,8 @@ namespace Alpha3
 
             osg::ref_ptr<osg::Image> read(osg::Image& image, Prepare prepare)
             {
+                if (onMainThread() || (tlPath != nullptr && fullQualityImages().contains(*tlPath)))
+                    return nullptr;
                 osg::ref_ptr<osg::Image> small = withoutTopLevels(image, streamingSettings().mStartSize);
                 if (!small)
                     return nullptr;
@@ -167,8 +238,15 @@ namespace Alpha3
                     {
                         std::vector<const osg::Image*> unseen;
                         for (const auto& [image, pending] : mPending)
-                            if (pending.mUploaded && !pending.mSeen && mFrames - pending.mUploadFrame > sUnseenFrames)
-                                unseen.push_back(image);
+                        {
+                            if (!pending.mUploaded || pending.mSeen || mFrames - pending.mUploadFrame <= sUnseenFrames)
+                                continue;
+                            unseen.push_back(image);
+                            // shown some other way than in the world: read at full size from now on
+                            osg::ref_ptr<osg::Image> alive;
+                            if (pending.mSmall.lock(alive))
+                                fullQualityImages().add(alive->getFileName());
+                        }
                         for (const osg::Image* image : unseen)
                             upgrade(image);
                     }
@@ -344,6 +422,16 @@ namespace Alpha3
     {
         if (streamingSettings().mEnabled)
             streaming().textureLoading(image);
+    }
+
+    void noteMainThread()
+    {
+        sMainThread.store(std::this_thread::get_id(), std::memory_order_relaxed);
+    }
+
+    void setStreamingPath(const std::string* path)
+    {
+        tlPath = path;
     }
 
     void textureStreamingDrawableAdded(osg::NodeVisitor& cullVisitor, osg::Drawable& drawable, const osg::Matrix& modelView)

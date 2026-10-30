@@ -27,6 +27,7 @@
 #include <meshoptimizer.h>
 
 #include <algorithm>
+#include <chrono>
 #include <array>
 #include <atomic>
 #include <cmath>
@@ -551,7 +552,8 @@ namespace Alpha3
         }
 
         // Uncompressed RGBA DDS with its mip levels (alpha weighted box filter)
-        // One mip level as DXT5 (etcpak takes BGRA, in rows padded to blocks of 4)
+        // One mip level as DXT5 (etcpak's DXT encoders take RGBA as stored, unlike its ETC ones, which take BGRA; in rows
+        // padded to blocks of 4)
         void compressBc3(const std::vector<unsigned char>& rgba, int width, int height, std::string& out)
         {
             const int pw = (width + 3) & ~3, ph = (height + 3) & ~3;
@@ -561,8 +563,7 @@ namespace Alpha3
                 {
                     const unsigned char* in
                         = &rgba[(static_cast<std::size_t>(std::min(y, height - 1)) * width + std::min(x, width - 1)) * 4];
-                    const unsigned char bgra[4] = { in[2], in[1], in[0], in[3] };
-                    std::memcpy(&padded[static_cast<std::size_t>(y) * pw + x], bgra, 4);
+                    std::memcpy(&padded[static_cast<std::size_t>(y) * pw + x], in, 4);
                 }
             const std::size_t blocks = static_cast<std::size_t>(pw / 4) * (ph / 4);
             std::vector<std::uint64_t> compressed(blocks * 2);
@@ -1421,7 +1422,7 @@ namespace Alpha3
         std::uint64_t settingsHash(Kind kind, const Settings& settings, int level)
         {
             if (kind == Kind::Card)
-                return 1 + (static_cast<std::uint64_t>(settings.mCardSize) << 8) + (2ull << 40); // 2: DXT5, power of two
+                return 1 + (static_cast<std::uint64_t>(settings.mCardSize) << 8) + (3ull << 40); // 3: DXT5 (red and blue right), power of two
             // level 0 has the hash it had before there were levels, so cached meshes stay valid
             const float levelError = settings.simplifyError(level);
             std::uint32_t error;
@@ -1431,11 +1432,22 @@ namespace Alpha3
         }
 
         // A mesh that was not made, by its name and time: looked up without reading it
-        BlobKey failureKey(std::string_view path, const VFS::File& file, std::uint64_t settings)
+        BlobKey failureKey(std::string_view path, std::uint64_t time, std::uint64_t settings)
         {
-            const auto time = static_cast<std::uint64_t>(file.getLastModified().time_since_epoch().count());
             return BlobKey{ fnv1a(path, 0xcbf29ce484222325ull) ^ time, fnv1a(path, 0x84222325cbf29ce4ull) ^ settings
                     ^ 0xfa11ed0000000000ull };
+        }
+
+        std::uint64_t modified(const VFS::File& file)
+        {
+            return static_cast<std::uint64_t>(file.getLastModified().time_since_epoch().count());
+        }
+
+        // By its name alone: the listing reads the time (a stat, slow on Android's shared storage) only of the few
+        // meshes that have this
+        BlobKey failedOnceKey(std::string_view path, std::uint64_t settings)
+        {
+            return failureKey(path, 0x0ce0ce0ce0ce0ce0ull, settings);
         }
 
         class DistantMesh
@@ -1498,7 +1510,9 @@ namespace Alpha3
                         mNif.clear();
                         // a card's texture name is listed whatever happens; nothing reads it
                         mDds = mKind == Kind::Card ? writeDds(std::vector<unsigned char>(4, 0), 1, 1) : std::string();
-                        cache.store(failureKey(mSourcePath.value(), *mSource, settings), std::string(), std::string());
+                        cache.store(failureKey(mSourcePath.value(), modified(*mSource), settings), std::string(),
+                            std::string());
+                        cache.store(failedOnceKey(mSourcePath.value(), settings), std::string(), std::string());
                         ++sNotMade;
                         return;
                     }
@@ -1586,6 +1600,7 @@ namespace Alpha3
                 mSettings = readSettings();
                 if (!mSettings.mCards && !mSettings.mSimplify)
                     return;
+                const auto start = std::chrono::steady_clock::now();
 
                 constexpr std::string_view meshes = "meshes/", nif = ".nif";
                 struct Found
@@ -1639,12 +1654,14 @@ namespace Alpha3
                         if (out.contains(distantName(level)))
                             continue; // a mod's own
                         // not made before: listing it would only have the engine keep the mesh twice
-                        if (Cache::get().contains(
-                                failureKey(name, *f.mFile, settingsHash(f.mKind, mSettings, level))))
+                        const std::uint64_t settings = settingsHash(f.mKind, mSettings, level);
+                        if (Cache::get().contains(failedOnceKey(name, settings))
+                            && Cache::get().contains(failureKey(name, modified(*f.mFile), settings)))
                         {
-                            if (level == 0)
-                                ++skipped;
-                            continue;
+                            if (level > 0)
+                                continue;
+                            ++skipped;
+                            break; // none of a mesh that could not be read at all
                         }
                         auto mesh = std::make_shared<DistantMesh>(
                             mVfs, f.mKind, mSettings, level, f.mFile, f.mPath, texturePath);
@@ -1667,7 +1684,11 @@ namespace Alpha3
                     Log(Debug::Info) << "Distant meshes: " << cards << " drawn as cards, " << simplified
                                      << " simplified past the active grid (" << levels << " farther levels), " << skipped
                                      << " left as they are (cache " << (cacheDirectory() / "impostors").string()
-                                     << ")";
+                                     << "), listed in "
+                                     << std::chrono::duration<double, std::milli>(
+                                            std::chrono::steady_clock::now() - start)
+                                            .count()
+                                     << " ms";
             }
 
             bool contains(VFS::Path::NormalizedView file) const override { return mFiles.find(file) != mFiles.end(); }

@@ -4,6 +4,8 @@
 // image manager recognises KTX data and hands it to OSG's KTX reader. The engine only has to ask for the archive.
 #include <alpha3/upstream.hpp>
 
+#include "support.hpp"
+
 #include <cstring>
 #include <filesystem>
 #include <map>
@@ -182,6 +184,7 @@ namespace Alpha3
 
     void addKtxTextures(VFS::Manager& vfs)
     {
+        noteMainThread(); // the engine sets up its VFS on its main thread
         vfs.addArchive(std::make_unique<KtxArchive>());
         addDistantMeshes(vfs);
     }
