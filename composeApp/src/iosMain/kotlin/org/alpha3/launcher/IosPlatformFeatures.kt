@@ -49,6 +49,8 @@ class IosPlatformFeatures : PlatformFeatures() {
         "angle" to "ANGLE (OpenGL ES 3.0 on Metal)",
     )
 
+    override val systemLogName get() = "Console log"
+
     override val modDownloaderHost get() = org.alpha3.launcher.mods.downloader.IosModDownloaderHost
 
     override val texturePrepass: org.alpha3.launcher.utils.TexturePrepassRunner get() = IosTexturePrepass

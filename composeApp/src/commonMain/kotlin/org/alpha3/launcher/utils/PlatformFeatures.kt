@@ -84,6 +84,9 @@ open class PlatformFeatures {
      */
     open val glRenderers: Map<String, String> get() = emptyMap()
 
+    /** What the platform calls the system log the overlay and settings show; null where that is logcat (Android). */
+    open val systemLogName: String? get() = null
+
     /** Launches the native kram binary for texture conversion; null where it is unavailable. */
     open val kramRunner: org.alpha3.launcher.tools.KramTool.Runner? get() = null
 

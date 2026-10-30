@@ -660,7 +660,11 @@ fun SystemSettingsSection() {
             SettingRow(title = stringResource(Res.string.display_battery_info), subtitle = stringResource(Res.string.create_a_window_showing_battery_info)) {
                 Switch(checked = UIStateManager.isBatteryStatusEnabled, onCheckedChange = { UIStateManager.isBatteryStatusEnabled = it })
             }
-            SettingRow(title = stringResource(Res.string.logcat), subtitle = stringResource(Res.string.create_a_window_showing_logcat_info)) {
+            SettingRow(
+                title = Platform.features.systemLogName ?: stringResource(Res.string.logcat),
+                subtitle = Platform.features.systemLogName?.let { "Create a window showing the ${it.lowercase()}." }
+                    ?: stringResource(Res.string.create_a_window_showing_logcat_info)
+            ) {
                 Switch(checked = UIStateManager.isLoggingEnabled, onCheckedChange = { UIStateManager.isLoggingEnabled = it })
             }
             SettingRow(title = stringResource(Res.string.custom_log_output), subtitle = stringResource(Res.string.create_a_window_showing_custom_log_output)) {
@@ -729,8 +733,11 @@ fun DevInsert() {
     var selectedInitialDirectory by remember { mutableStateOf<File?>(null) }
 
     Column {
-        SettingRow(title = stringResource(Res.string.enable_logcat), subtitle = stringResource(Res.string.enable_launcher_logcat)) {
-            Switch(checked = UIStateManager.isLogcatEnabled, onCheckedChange = { UIStateManager.isLogcatEnabled = it })
+        // Saves Android's logcat when the game starts; iOS has no such buffer to save
+        if (Platform.features.systemLogName == null) {
+            SettingRow(title = stringResource(Res.string.enable_logcat), subtitle = stringResource(Res.string.enable_launcher_logcat)) {
+                Switch(checked = UIStateManager.isLogcatEnabled, onCheckedChange = { UIStateManager.isLogcatEnabled = it })
+            }
         }
         LogcatLevelSelector()
         SettingRow(title = "Show / Hide system bars") {
@@ -910,7 +917,7 @@ fun InGameSettings() {
         SettingRow(title = stringResource(Res.string.display_battery_info)) {
             Switch(checked = UIStateManager.isBatteryStatusEnabled, onCheckedChange = { UIStateManager.isBatteryStatusEnabled = it })
         }
-        SettingRow(title = stringResource(Res.string.logcat)) {
+        SettingRow(title = Platform.features.systemLogName ?: stringResource(Res.string.logcat)) {
             Switch(checked = UIStateManager.isLoggingEnabled, onCheckedChange = { UIStateManager.isLoggingEnabled = it })
         }
         SettingRow(title = stringResource(Res.string.custom_log_output)) {
@@ -967,8 +974,8 @@ fun LogcatLevelSelector() {
     val currentLevel = UIStateManager.logcatLevel
 
     SettingRow(
-        title = "Logcat Filter Level",
-        subtitle = "Select minimum priority level for logcat messages"
+        title = "${Platform.features.systemLogName ?: "Logcat"} Filter Level",
+        subtitle = "Select minimum priority level for ${Platform.features.systemLogName?.lowercase() ?: "logcat"} messages"
     ) {
         Box {
             TextButton(onClick = { expanded = true }) {
