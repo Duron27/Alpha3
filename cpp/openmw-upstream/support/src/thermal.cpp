@@ -1,7 +1,7 @@
 // [General] thermal mode: how close the phone is to throttling, for the parts that can do their work more slowly while it
 // heats up. Throttled, Android clamps every core and the GPU at once, so everything is slower than if a little had been
-// given up before. auto (the default) follows Android's forecast (AThermal_getThermalHeadroom, Android 11+: 1 is where
-// it starts to clamp); full never backs off.
+// given up before. full (the default) never backs off; auto follows Android's forecast (AThermal_getThermalHeadroom,
+// Android 11+: 1 is where it starts to clamp).
 //
 // Warm (forecast 0.85 or more): background texture conversion on half its threads, Zink one display period more per
 // frame. Hot (0.95 or more): conversion on one thread, frames held to two display periods at least (Swappy, or the swap
@@ -84,11 +84,11 @@ namespace Alpha3
             }
 
             const bool mAuto = [] {
-                std::string mode = setting("General", "thermal mode", "auto");
+                std::string mode = setting("General", "thermal mode", "full");
                 for (char& c : mode)
                     c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-                Log(Debug::Info) << "Thermal mode: " << (mode == "full" ? "full" : "auto");
-                return mode != "full";
+                Log(Debug::Info) << "Thermal mode: " << (mode == "auto" ? "auto" : "full");
+                return mode == "auto";
             }();
             std::atomic<int64_t> mNextCheck{ 0 };
             std::atomic<int> mPressure{ 0 };

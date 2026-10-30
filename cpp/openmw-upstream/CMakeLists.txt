@@ -249,7 +249,8 @@ set(OPENMW_UPSTREAM_COMMON
 )
 if(ALPHA3_IS_ANDROID)
     list(APPEND OPENMW_UPSTREAM_COMMON
-        # libopenmw-navmeshtool.so: the app's navmesh baking loads it and calls its SDL_main
+        # apps/navmeshtool's work, which support/ links into the engine for the app's navmesh baking (its own library is
+        # not built)
         -DBUILD_NAVMESHTOOL=1
         # GL comes from glad (built by the vcpkg step in the top-level CMakeLists), which loads the system GLES driver or
         # Zink's OSMesa at runtime, instead of linking libGLESv3 directly
@@ -270,8 +271,9 @@ else()
         string(APPEND OPENMW_UPSTREAM_IOS_LINK_FLAGS " -framework ${fw}")
     endforeach()
     list(APPEND OPENMW_UPSTREAM_COMMON
-        # no navmesh tool process on iOS: the engine builds the navmesh while it plays
-        -DBUILD_NAVMESHTOOL=0
+        # apps/navmeshtool's work, which support/ links into the engine (alpha3_navmesh_run, called before the engine
+        # starts: iOS has no other process); its own executable is not built
+        -DBUILD_NAVMESHTOOL=1
         -DOPENGL_gl_LIBRARY=${prefix}/lib/libglad.a
         -DBUILD_MYGUI_PLUGIN=0
         # cmake/CheckLuaCustomAllocator.cmake runs a test program, which an iOS build cannot (OpenMW skips it on Android).
@@ -289,7 +291,7 @@ if(ALPHA3_IS_ANDROID)
         COMMAND ${CMAKE_COMMAND} -E remove_directory ${assets_upstream_dir}/resources
         COMMAND ${CMAKE_COMMAND} -E copy_directory resources ${assets_upstream_dir}/resources
         COMMAND ${CMAKE_COMMAND} -E copy defaults.bin gamecontrollerdb.txt ${assets_upstream_dir}/openmw/
-        COMMAND ${CMAKE_COMMAND} -E copy libopenmw_upstream.so libopenmw-navmeshtool.so libalpha3_texconv.so ${jni_libs_dir}/
+        COMMAND ${CMAKE_COMMAND} -E copy libopenmw_upstream.so libalpha3_texconv.so ${jni_libs_dir}/
         COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/settings.fallback.cfg ${assets_upstream_dir}/openmw/
         # upstream's own global config: it carries the fallback= values (FontColor_*, ...) that stock OpenMW reads from
         # openmw.cfg and aborts without; the fork's copy has none. Paths in it are fixed up at install time in the app.

@@ -122,11 +122,25 @@ if (ANDROID)
         src/cachebuild.cpp
         src/hooks.cpp
         src/logcat.cpp
+        src/navmeshbuild.cpp
     )
 else()
-    add_library(alpha3_support_init OBJECT src/hooks.cpp)
+    add_library(alpha3_support_init OBJECT src/hooks.cpp src/navmeshbuild.cpp)
 endif()
 target_include_directories(alpha3_support_init PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+# apps/navmeshtool's headers, for src/navmeshbuild.cpp
+target_include_directories(alpha3_support_init PRIVATE ${CMAKE_SOURCE_DIR})
+
+# The navmesh tool's work (apps/navmeshtool without its main) is linked into the engine, where the app's navmesh baking
+# runs it (src/navmeshbuild.cpp: a process of its own on Android, before the engine on iOS); the phones do not build the
+# tool's own library. Its targets are made after this directory, so they are linked at the end of the configure.
+function(alpha3_link_navmeshtool)
+    target_link_libraries(alpha3_support_init openmw-navmeshtool-lib)
+    if (ANDROID OR IOS)
+        set_target_properties(openmw-navmeshtool PROPERTIES EXCLUDE_FROM_ALL TRUE)
+    endif()
+endfunction()
+cmake_language(DEFER DIRECTORY ${CMAKE_SOURCE_DIR} CALL alpha3_link_navmeshtool)
 target_compile_options(alpha3_support_init PRIVATE -fPIC)
 target_link_libraries(alpha3_support_init alpha3_support components)
 
@@ -165,16 +179,6 @@ target_link_libraries(openmw alpha3_support_init alpha3_support alpha3_mimalloc)
 # cannot take a pointer from our operator new
 target_link_options(openmw PRIVATE -static-libstdc++ -Wl,--exclude-libs,libc++_static.a -Wl,--exclude-libs,libc++abi.a)
 
-# The navmesh tool library (loaded by the app's navmesh baking) logs to logcat too, and needs liblog and zlib. Its target
-# is made after this directory, so it is linked at the end of the configure.
-add_library(alpha3_logcat OBJECT src/logcat.cpp)
-target_compile_options(alpha3_logcat PRIVATE -fPIC)
-function(alpha3_link_navmeshtool)
-    if (TARGET openmw-navmeshtool-lib)
-        target_link_libraries(openmw-navmeshtool-lib alpha3_logcat log z)
-    endif()
-endfunction()
-cmake_language(DEFER DIRECTORY ${CMAKE_SOURCE_DIR} CALL alpha3_link_navmeshtool)
 
 # Multiplayer, when the outer build turns it on (its files are copied into the tree then, see multiplayer/CMakeLists.txt)
 if (ALPHA3_MULTIPLAYER)

@@ -71,6 +71,8 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.withContext
 import org.alpha3.launcher.paths.OpenMWPaths
 import org.alpha3.launcher.paths.OpenMWPaths.SETTINGS_FILE
@@ -304,7 +306,8 @@ fun BarOptions (context: PlatformContext) {
                     }
                 },
                 onClick = {
-                    scope.launch {
+                    // not the menu's scope: the menu leaves the screen (and its scope is cancelled) once useNavmesh is set
+                    CoroutineScope(SupervisorJob() + Dispatchers.Main).launch {
                     UIStateManager.useNavmesh = true
                     // Delete the navmesh file if it exists
                     val navmeshFile = File("${OpenMWPaths.USER_DATA}/navmesh.db")

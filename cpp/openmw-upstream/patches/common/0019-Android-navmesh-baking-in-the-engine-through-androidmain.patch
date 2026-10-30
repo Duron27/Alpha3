@@ -1,0 +1,101 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Fri, 30 Oct 2026 14:30:00 -0400
+Subject: [PATCH 19/19] Android: navmesh baking in the engine, through androidmain
+
+The launcher's navmesh baking runs apps/navmeshtool's work inside the engine (Alpha3::buildNavMesh, in the support
+library) instead of loading libopenmw-navmeshtool.so; its JNI entry is here with the engine's others. The generator
+tells how many tiles are done, so the launcher's progress comes from the call instead of from the log.
+---
+ apps/navmeshtool/navmesh.cpp |  7 +++++++
+ apps/navmeshtool/navmesh.hpp |  4 ++++
+ apps/openmw/androidmain.cpp  | 28 ++++++++++++++++++++++++++++
+ 3 files changed, 39 insertions(+)
+
+diff --git a/apps/navmeshtool/navmesh.cpp b/apps/navmeshtool/navmesh.cpp
+--- a/apps/navmeshtool/navmesh.cpp
++++ b/apps/navmeshtool/navmesh.cpp
+@@ -427,6 +427,8 @@
+ 
+         Status getStatus() const { return mStatus.load(); }
+ 
++        std::pair<std::size_t, std::size_t> getProgress() const { return { mProvided.load(), mExpected.load() }; }
++
+         void expect(ESM::RefId worldspace, std::size_t tiles, std::shared_ptr<RecastMeshProvider> provider)
+         {
+             {
+@@ -576,6 +578,11 @@
+     {
+     }
+ 
++    std::pair<std::size_t, std::size_t> NavMeshTilesGenerator::getProgress() const
++    {
++        return mConsumer->getProgress();
++    }
++
+     Status NavMeshTilesGenerator::addWorldspace(WorldspaceData&& data)
+     {
+         mConsumer->waitTilesInFlight(maxTilesInFlight);
+diff --git a/apps/navmeshtool/navmesh.hpp b/apps/navmeshtool/navmesh.hpp
+--- a/apps/navmeshtool/navmesh.hpp
++++ b/apps/navmeshtool/navmesh.hpp
+@@ -3,6 +3,7 @@
+ 
+ #include <cstddef>
+ #include <memory>
++#include <utility>
+ 
+ namespace DetourNavigator
+ {
+@@ -61,6 +62,9 @@
+ 
+         GenerateTilesResult finish();
+ 
++        // Tiles done, and queued: those of the worldspaces added so far
++        std::pair<std::size_t, std::size_t> getProgress() const;
++
+     private:
+         const DetourNavigator::AgentBounds& mAgentBounds;
+         const DetourNavigator::Settings& mSettings;
+diff --git a/apps/openmw/androidmain.cpp b/apps/openmw/androidmain.cpp
+--- a/apps/openmw/androidmain.cpp
++++ b/apps/openmw/androidmain.cpp
+@@ -34,6 +34,7 @@
+ #include <cstdint>
+ #include <mutex>
+ #include <string>
++#include <vector>
+ 
+ #include <osg/Camera>
+ #include <osg/GraphicsContext>
+@@ -580,3 +581,30 @@
+ {
+   omw_surface_recreated();
+ }
++
++// NavMeshService.runNative(arguments, listener): navmesh.db for the mod list (Alpha3::buildNavMesh, in the support
++// library), in the service's own process. The arguments are the engine's (--resources, the profile's --config ...);
++// listener.onProgress(phase, worldspacesDone, worldspaces, tilesDone, tiles) a few times a second.
++extern "C" JNIEXPORT jint JNICALL Java_org_openmw_utils_NavMeshService_runNative(
++    JNIEnv* env, jclass, jobjectArray arguments, jobject listener)
++{
++  std::vector<std::string> values{ "openmw-navmeshtool" };
++  for (jsize i = 0, n = env->GetArrayLength(arguments); i < n; ++i)
++  {
++    auto value = static_cast<jstring>(env->GetObjectArrayElement(arguments, i));
++    const char* chars = env->GetStringUTFChars(value, nullptr);
++    values.emplace_back(chars);
++    env->ReleaseStringUTFChars(value, chars);
++    env->DeleteLocalRef(value);
++  }
++  std::vector<const char*> argv;
++  for (const std::string& value : values)
++    argv.push_back(value.c_str());
++  jmethodID onProgress = env->GetMethodID(env->GetObjectClass(listener), "onProgress", "(IIIII)V");
++  return Alpha3::buildNavMesh(static_cast<int>(argv.size()), argv.data(), [&](const Alpha3::NavMeshProgress& p) {
++    env->CallVoidMethod(listener, onProgress, jint(p.phase), jint(p.worldspacesDone), jint(p.worldspaces),
++        jint(p.tilesDone), jint(p.tiles));
++    if (env->ExceptionCheck())
++      env->ExceptionClear();
++  });
++}

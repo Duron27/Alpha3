@@ -710,13 +710,9 @@ fun hideSystemBars(activity: Activity) {
     }
 }
 
-@OptIn(InternalCoroutinesApi::class)
 fun runNavMesh(context: Context) {
     try {
-        val intent = Intent(context, org.openmw.utils.NavMeshService::class.java).apply {
-            putExtra("configPath", OpenMWPaths.ACTIVE_CONFIG)
-        }
-        context.startService(intent)
+        org.openmw.utils.NavMeshService.start(context)
         Log.d("EngineActivity", "NavMesh Service started")
     } catch (e: Exception) {
         Log.e("EngineActivity", "Failed to start NavMesh Service", e)

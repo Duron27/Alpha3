@@ -4,6 +4,8 @@
 // What the Android build of stock OpenMW calls in Alpha3's support library (cpp/openmw-upstream/support). Most of the
 // library works through OSG's RuntimeHooks and needs no call; these are the few places the engine has to ask.
 
+#include <cstddef>
+#include <functional>
 #include <memory>
 #include <string_view>
 
@@ -147,6 +149,22 @@ namespace Alpha3
         int mStencilBits = 8;
         int mSamples = 0;
     };
+
+    // Where buildNavMesh is. phase 0: reading the content files; 1: worldspaces being gathered and their tiles made
+    // (tilesDone of tiles: those of the worldspaces gathered so far); 2: the tiles left after the last worldspace;
+    // 3: compacting the database.
+    struct NavMeshProgress
+    {
+        int phase;
+        std::size_t worldspacesDone, worldspaces, tilesDone, tiles;
+    };
+
+    // navmesh.db for the mod list, as openmw-navmeshtool makes it and with its options (src/navmeshbuild.cpp); argv[0] is
+    // the program name. progress is called on the calling thread a few times a second, and once at the end. 0: done,
+    // 1: cancelled, 2: out of space, 3: failed (see navmeshtool.log). Android calls it in a process of its own
+    // (androidmain.cpp); also exported as alpha3_navmesh_run for iOS.
+    int buildNavMesh(
+        int argc, const char* const* argv, const std::function<void(const NavMeshProgress&)>& progress = {});
 }
 
 #endif

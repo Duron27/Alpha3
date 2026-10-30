@@ -1,6 +1,8 @@
 package org.alpha3.launcher.ui.view
 
 import org.alpha3.launcher.utils.SystemInfo
+import org.alpha3.launcher.utils.NavMeshStatus
+import org.alpha3.launcher.utils.MToast
 import org.alpha3.launcher.utils.formatDecimals
 import org.alpha3.launcher.utils.Log
 import kotlinx.coroutines.IO
@@ -393,6 +395,8 @@ fun ProgressWithNavmesh(onComplete: () -> Unit) {
     val logLines by logLinesFlow.collectAsState()
     var detailedLogs by remember { mutableStateOf(false) }
     var cpuUsage by remember { mutableIntStateOf(0) }
+    // the stock engine's run reports itself; the others are followed through navmeshtool.log
+    val engineProgress by NavMeshStatus.progress.collectAsState()
 
     Row(
         modifier = Modifier
@@ -420,6 +424,7 @@ fun ProgressWithNavmesh(onComplete: () -> Unit) {
                         text = "Building Navmesh... ${(progress * 100).toInt()}%",
                         color = Color.White
                     )
+                    engineProgress?.let { Text(text = it.description, color = Color.White) }
                     Spacer(modifier = Modifier.height(8.dp))
 
                     Text(
@@ -465,6 +470,8 @@ fun ProgressWithNavmesh(onComplete: () -> Unit) {
     LaunchedEffect(Unit) {
         //Log.d("ProgressWithNavmesh", "LaunchedEffect triggered")
         launch(Dispatchers.IO) {
+            var navmeshSeen = false
+            var navmeshGone = 0
             while (navmeshStatus.value != "Done") {
                 val file = File("${OpenMWPaths.USER_DATA}/navmesh.db")
                 if (file.exists()) {
@@ -474,16 +481,22 @@ fun ProgressWithNavmesh(onComplete: () -> Unit) {
                 // Update memory info
                 memoryInfoFlow.value = getMemoryInfo(context)
 
-                // Read navmeshtool.log and parse progress (since Env is process-local)
+                val reported = NavMeshStatus.progress.value
+                if (reported != null) {
+                    progressFlow.value = reported.fraction
+                    if (reported.result != null) navmeshStatus.value = "Done"
+                }
+
+                // Read navmeshtool.log: the lines for the details switch, and the progress of the runs that only log
                 val logFile = File("${OpenMWPaths.ACTIVE_CONFIG}/navmeshtool.log")
                 if (logFile.exists()) {
                     val lines = try { logFile.readLines() } catch (_: Exception) { emptyList() }
                     logLinesFlow.value = lines
 
-                    // 1. Check for success message to end loop
-                    if (lines.any { it.contains("runNavMeshTool sucess") }) {
+                    if (reported == null && lines.any { it.contains("runNavMeshTool sucess") }) {
+                        // 1. Check for success message to end loop
                         navmeshStatus.value = "Done"
-                    } else {
+                    } else if (reported == null) {
                         // 2. Parse percentage from the latest generation log line
                         lines.findLast { it.contains("navmesh tiles are generated") }?.let { line ->
                             val regex = """\(([\d.]+)%\)""".toRegex()
@@ -496,6 +509,12 @@ fun ProgressWithNavmesh(onComplete: () -> Unit) {
                 }
 
                 val navmeshPid = SystemInfo.services.navmeshProcessId()
+                // a process gone for a second without a result has crashed: the result is never sent
+                if (navmeshPid != null) navmeshSeen = true
+                navmeshGone = if (navmeshSeen && navmeshPid == null) navmeshGone + 1 else 0
+                NavMeshStatus.progress.value?.let {
+                    if (it.result == null && navmeshGone >= 4) NavMeshStatus.progress.value = it.copy(result = 3)
+                }
 
                 // Update CPU usage using the correct PID
                 val usage = getCpuProcessUsage(navmeshPid)
@@ -503,9 +522,16 @@ fun ProgressWithNavmesh(onComplete: () -> Unit) {
                     cpuUsage = usage
                 }
 
-                delay(1000.milliseconds)
+                delay(if (reported != null) 250.milliseconds else 1000.milliseconds)
             }
             progressFlow.value = 1f
+            NavMeshStatus.progress.value?.let { reported ->
+                if (reported.result != 0) MToast("Navmesh: ${reported.description}", true)
+                // the launcher is back once the result has been seen for a moment
+                delay(1500.milliseconds)
+                NavMeshStatus.progress.value = null
+                UIStateManager.useNavmesh = false
+            }
 
         }
     }

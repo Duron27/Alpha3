@@ -44,7 +44,7 @@ Everything still open, in rough order. The sections below have the details.
 
 ## Thermal mode
 
-- `[General] thermal mode = auto` (default) follows Android's thermal headroom forecast (Android 11+, checked every 2 s). Warm (0.85 or more): background texture conversion on half its threads, and Zink one display period more per frame. Hot (0.95 or more): conversion on one thread, frames held to two display periods at least (Swappy's minimum interval, or the swap interval of plain swaps), occlusion culling without its helper threads. Each level is left 0.1 below where it starts. `full` never backs off.
+- `[General] thermal mode = full` (default) never backs off. `auto` follows Android's thermal headroom forecast (Android 11+, checked every 2 s). Warm (0.85 or more): background texture conversion on half its threads, and Zink one display period more per frame. Hot (0.95 or more): conversion on one thread, frames held to two display periods at least (Swappy's minimum interval, or the swap interval of plain swaps), occlusion culling without its helper threads. Each level is left 0.1 below where it starts.
 - On the Note 10+ while charging after a long test run, the forecast was 1.22 (skin 48.9 °C), so it started hot.
 
 ## 1. Distant objects as sprites (impostors)

@@ -51,14 +51,11 @@ namespace
     }
 
     // 0: done, 1: cancelled, 2: distant meshes are off in settings.cfg, 3: failed (see the log)
-    int run(const std::vector<std::string>& arguments, const std::function<void(const Alpha3::DistantMeshProgress&)>& progress)
+    int run(int argc, const char* const* argv, const std::function<void(const Alpha3::DistantMeshProgress&)>& progress)
     {
-        std::vector<const char*> argv{ "alpha3-cache" };
-        for (const std::string& argument : arguments)
-            argv.push_back(argument.c_str());
         const bpo::options_description options = makeOptions();
         bpo::variables_map variables;
-        bpo::store(bpo::command_line_parser(static_cast<int>(argv.size()), argv.data())
+        bpo::store(bpo::command_line_parser(argc, argv)
                        .options(options)
                        .allow_unregistered()
                        .run(),
@@ -91,6 +88,23 @@ namespace
         Log(Debug::Info) << "Alpha3 cache: distant meshes done";
         return 0;
     }
+
+    // for wrapped, which wrapApplication calls on this thread
+    const std::function<void(const Alpha3::DistantMeshProgress&)>* sProgress = nullptr;
+
+    // Exceptions are caught here: wrapApplication would show them in a message box, which this process has no window for
+    int wrapped(int argc, char* argv[])
+    {
+        try
+        {
+            return run(argc, argv, *sProgress);
+        }
+        catch (const std::exception& e)
+        {
+            Log(Debug::Error) << "Alpha3 cache: " << e.what();
+            return 3;
+        }
+    }
 }
 
 // CacheBuildService.runNative(arguments, listener): the engine's arguments (--resources, the profile's --config ...);
@@ -99,7 +113,7 @@ extern "C" JNIEXPORT jint JNICALL Java_org_openmw_utils_CacheBuildService_runNat
     JNIEnv* env, jclass, jobjectArray arguments, jobject listener)
 {
     sCancel = false;
-    std::vector<std::string> args;
+    std::vector<std::string> args{ "alpha3-cache" };
     for (jsize i = 0, n = env->GetArrayLength(arguments); i < n; ++i)
     {
         auto value = static_cast<jstring>(env->GetObjectArrayElement(arguments, i));
@@ -108,21 +122,19 @@ extern "C" JNIEXPORT jint JNICALL Java_org_openmw_utils_CacheBuildService_runNat
         env->ReleaseStringUTFChars(value, chars);
         env->DeleteLocalRef(value);
     }
+    std::vector<char*> argv;
+    for (std::string& arg : args)
+        argv.push_back(arg.data());
     jclass listenerClass = env->GetObjectClass(listener);
     jmethodID onProgress = env->GetMethodID(listenerClass, "onProgress", "(IIII)V");
-    try
-    {
-        return run(args, [&](const Alpha3::DistantMeshProgress& p) {
-            env->CallVoidMethod(listener, onProgress, jint(p.done), jint(p.total), jint(p.made), jint(p.notMade));
-            if (env->ExceptionCheck())
-                env->ExceptionClear();
-        });
-    }
-    catch (const std::exception& e)
-    {
-        Log(Debug::Error) << "Alpha3 cache: " << e.what();
-        return 3;
-    }
+    const std::function<void(const Alpha3::DistantMeshProgress&)> progress = [&](const Alpha3::DistantMeshProgress& p) {
+        env->CallVoidMethod(listener, onProgress, jint(p.done), jint(p.total), jint(p.made), jint(p.notMade));
+        if (env->ExceptionCheck())
+            env->ExceptionClear();
+    };
+    sProgress = &progress;
+    // setupLogging writes through the streams wrapApplication sets up
+    return Debug::wrapApplication(&wrapped, static_cast<int>(argv.size()), argv.data(), "Alpha3Cache");
 }
 
 extern "C" JNIEXPORT void JNICALL Java_org_openmw_utils_CacheBuildService_cancelNative(JNIEnv*, jclass)
