@@ -5,14 +5,49 @@
 
 #include <alpha3/upstream.hpp>
 
+#include <algorithm>
+#include <chrono>
 #include <functional>
+#include <mutex>
 
 #include <osg/GraphicsContext>
+
+namespace
+{
+    // The last frame intervals, for the launcher's performance overlay (Android: framepacing.cpp and androidmain.cpp)
+    constexpr size_t sFrameHistory = 240;
+    std::mutex sFrameMutex;
+    float sFrameTimes[sFrameHistory];
+    size_t sFrameCount = 0;
+
+    void recordFrame()
+    {
+        using Clock = std::chrono::steady_clock;
+        static Clock::time_point last = Clock::now();
+        const Clock::time_point now = Clock::now();
+        const float milliseconds = std::chrono::duration<float, std::milli>(now - last).count();
+        last = now;
+        std::lock_guard<std::mutex> lock(sFrameMutex);
+        sFrameTimes[sFrameCount++ % sFrameHistory] = milliseconds;
+    }
+}
+
+// Copies up to [capacity] of the last frame intervals in milliseconds, oldest first; returns how many. The launcher looks
+// it up with dlsym while the overlay's performance hub is on.
+extern "C" __attribute__((visibility("default"))) int alpha3_frame_times(float* out, int capacity)
+{
+    std::lock_guard<std::mutex> lock(sFrameMutex);
+    const size_t count = std::min({ sFrameCount, sFrameHistory, static_cast<size_t>(std::max(capacity, 0)) });
+    for (size_t i = 0; i < count; ++i)
+        out[i] = sFrameTimes[(sFrameCount - count + i) % sFrameHistory];
+    return static_cast<int>(count);
+}
 
 namespace Alpha3
 {
     void swapBuffers(osg::GraphicsContext& gc)
     {
+        recordFrame();
         gc.swapBuffersImplementation();
     }
 

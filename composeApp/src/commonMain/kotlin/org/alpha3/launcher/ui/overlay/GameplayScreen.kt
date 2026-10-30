@@ -77,7 +77,6 @@ fun GameplayScreen(
     context: PlatformContext,
     forwardTouches: Boolean = false,
     landscapeOnly: Boolean = false,
-    showLogToggle: Boolean = false,
     /** Runs before the saved control layout is loaded (e.g. to install the default layout on first run). */
     prepare: suspend () -> Unit = {},
     onKeyEvent: (Int) -> Unit = { keyCode ->
@@ -202,7 +201,6 @@ fun GameplayScreen(
 
         ScrollWheelIndicator(context = context, containerWidth = containerWidth, containerHeight = containerHeight)
 
-        if (showLogToggle) EngineLogPanel()
     }
 }
 
@@ -283,60 +281,3 @@ private fun TouchToMouse(density: Float) {
 }
 
 private const val MOVE = 2
-
-/** Small terminal toggle (top start) that shows the engine log, replacing the old SwiftUI log overlay. */
-@Composable
-private fun EngineLogPanel() {
-    var open by remember { mutableStateOf(false) }
-    Box(Modifier.fillMaxSize().padding(8.dp)) {
-        Text(
-            if (open) "Hide log" else "Log",
-            color = Color.White,
-            fontSize = 11.sp,
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .background(Color.Black.copy(alpha = 0.4f), RoundedCornerShape(12.dp))
-                .pointerInput(Unit) {
-                    awaitPointerEventScope {
-                        while (true) {
-                            val e = awaitPointerEvent()
-                            if (e.changes.any { it.pressed && !it.previousPressed }) {
-                                open = !open
-                                e.changes.forEach { it.consume() }
-                            }
-                        }
-                    }
-                }
-                .padding(horizontal = 12.dp, vertical = 4.dp)
-        )
-        if (open) {
-            val state = rememberLazyListState()
-            val logs = PlayBridge.logs
-            LaunchedEffect(logs.size) { if (logs.isNotEmpty()) state.scrollToItem(logs.size - 1) }
-            Column(
-                Modifier.align(Alignment.Center).widthIn(max = 600.dp).heightIn(max = 300.dp).fillMaxWidth()
-                    .background(Color.Black.copy(alpha = 0.9f), RoundedCornerShape(12.dp))
-                    .pointerInput(Unit) { awaitPointerEventScope { while (true) awaitPointerEvent().changes.forEach { it.consume() } } }
-                    .padding(8.dp)
-            ) {
-                Row(Modifier.fillMaxWidth()) {
-                    Text("Engine Logs", color = Color.White, fontSize = 13.sp, modifier = Modifier.weight(1f))
-                    Text(
-                        "Clear", color = Color.Red, fontSize = 13.sp,
-                        modifier = Modifier.pointerInput(Unit) {
-                            awaitPointerEventScope {
-                                while (true) {
-                                    val e = awaitPointerEvent()
-                                    if (e.changes.any { it.pressed && !it.previousPressed }) PlayBridge.clearLogs()
-                                }
-                            }
-                        }
-                    )
-                }
-                LazyColumn(state = state) {
-                    items(logs.toList()) { line -> Text(line, color = Color.Green, fontSize = 10.sp) }
-                }
-            }
-        }
-    }
-}
