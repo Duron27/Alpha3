@@ -36,6 +36,10 @@ namespace Alpha3
     bool usesZink();
     bool usesGles();
 
+    // ---- angle.cpp (iOS): OSG_USE_ANGLE, and ANGLE's eglGetProcAddress (null when ANGLE is not loaded)
+    bool usesAngle();
+    void* angleProcAddress(const char* name);
+
     // ---- shaders.cpp
     bool translateShaderSource(const osg::Shader& shader, std::string& source);
     osg::ref_ptr<osg::Shader> mergeShaderStage(const std::vector<const osg::Shader*>& shaders);

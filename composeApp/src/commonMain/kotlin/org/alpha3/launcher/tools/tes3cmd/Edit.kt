@@ -274,7 +274,7 @@ fun Tes3Cmd.recoverPlugin(plugin: String, mod: ModOptions = ModOptions()) {
             // tes3cmd reads one chunk; with no record type in it, the scan "finds" the end of the chunk.
             val n = minOf(scanChunk, data.size - pos)
             if (n <= 0) break@read
-            val chunk = String(CharArray(n) { (data[pos + it].toInt() and 0xff).toChar() })
+            val chunk = CharArray(n) { (data[pos + it].toInt() and 0xff).toChar() }.concatToString()
             val m = typeRe.find(chunk)
             val newOffset = pos + (m?.range?.first ?: n)
             out("Scan found ${m?.value ?: ""} at: $newOffset\n")

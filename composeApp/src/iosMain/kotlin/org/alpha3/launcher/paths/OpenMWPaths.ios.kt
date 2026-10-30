@@ -5,6 +5,10 @@ package org.alpha3.launcher.paths
 import org.alpha3.launcher.io.File
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.memScoped
+import kotlinx.coroutines.runBlocking
+import androidx.datastore.preferences.core.edit
+import org.alpha3.launcher.utils.GameFilesPreferences
+import org.alpha3.launcher.utils.dataStore
 import platform.Foundation.*
 
 private fun documentsDir(): String =
@@ -148,26 +152,32 @@ actual object OpenMWPaths {
      * to the user's. The user `openmw.cfg` is created holding only a comment; it gets the game's paths and plugins once a
      * Morrowind folder is selected. Existing files are the user's and stay.
      */
-    private fun setupConfigs() {
+    private fun setupConfigs(engineChanged: Boolean) {
         val fm = NSFileManager.defaultManager
         // The global config's data-local points at OpenMW/Override; the engine warns when it is missing
         // ("No such dir"). Android creates the same folders on its first launch.
         listOf("OpenMW/Override", "OpenMW/Mods").forEach { ensureDir("$USER_FILE_STORAGE/$it") }
         val assets = "${NSBundle.mainBundle.resourcePath}/OpenMWAssets"
-        for ((name, target) in listOf(
-            "settings.cfg" to SETTINGS_FILE,
-            "defaults.bin" to DEFAULTS_BIN,
-            "gamecontrollerdb.txt" to "$GLOBAL_CONFIG/gamecontrollerdb.txt",
+        // settings.cfg is the user's; the other two belong to the engine and follow the bundled build.
+        for ((name, target, engineOwned) in listOf(
+            Triple("settings.cfg", SETTINGS_FILE, false),
+            Triple("defaults.bin", DEFAULTS_BIN, true),
+            Triple("gamecontrollerdb.txt", "$GLOBAL_CONFIG/gamecontrollerdb.txt", true),
         )) {
-            if (!fm.fileExistsAtPath(target) && fm.fileExistsAtPath("$assets/$name")) {
+            if (!fm.fileExistsAtPath("$assets/$name")) continue
+            if (engineOwned && engineChanged) fm.removeItemAtPath(target, null)
+            if (!fm.fileExistsAtPath(target)) {
                 if (!fm.copyItemAtPath("$assets/$name", target, null)) println("Failed to copy $name")
             }
         }
-        if (!fm.fileExistsAtPath(OPENMW_CFG) && fm.fileExistsAtPath("$assets/openmw.cfg")) {
+        if ((engineChanged || !fm.fileExistsAtPath(OPENMW_CFG)) && fm.fileExistsAtPath("$assets/openmw.cfg")) {
+            // The settings page's charset is the only line the launcher edits in the global config; keep it.
+            val encoding = if (fm.fileExistsAtPath(OPENMW_CFG)) File(OPENMW_CFG).readLines().find { it.startsWith("encoding=") } else null
             // The template points at its own folder; the copied resources live in the container instead.
-            val text = File("$assets/openmw.cfg").readText()
+            var text = File("$assets/openmw.cfg").readText()
                 .replace("\nresources=resources", "\nresources=$USER_RESOURCES")
                 .replace("\ndata=resources/vfs-mw", "\ndata=$USER_RESOURCES/vfs-mw")
+            if (encoding != null) text = text.lines().filterNot { it.startsWith("encoding=") }.joinToString("\n") + "\n$encoding\n"
             File(OPENMW_CFG).writeText(text)
         }
         // Like Android's first launch: the mod list reads the user config before any game is selected.
@@ -177,8 +187,46 @@ actual object OpenMWPaths {
         }
     }
 
+    /**
+     * Identifies the bundled engine: the app version and build plus the engine binary's timestamp, so a new
+     * TestFlight build and a new local build both count as a change.
+     */
+    private fun bundleStamp(): String {
+        val info = NSBundle.mainBundle.infoDictionary
+        val engine = "${NSBundle.mainBundle.privateFrameworksPath}/libopenmw.framework/libopenmw"
+        val modified = (NSFileManager.defaultManager.attributesOfItemAtPath(engine, null)?.get(NSFileModificationDate) as? NSDate)?.timeIntervalSince1970
+        return "${info?.get("CFBundleShortVersionString")}-${info?.get("CFBundleVersion")}-$modified"
+    }
+
+    /**
+     * iOS moves the app to a new data container (a new UUID in its path) when the app is reinstalled or updated,
+     * so absolute paths saved earlier point nowhere. Point them at the current container.
+     */
+    private fun migrateContainerPaths() {
+        val oldContainer = Regex("/Data/Application/[0-9A-Fa-f-]{36}(?=/)")
+        val home = NSHomeDirectory()
+        val current = oldContainer.find("$home/")?.value ?: return
+        fun fix(text: String) = oldContainer.replace(text, current)
+        for (cfg in listOf(USER_OPENMW_CFG, OPENMW_CFG)) {
+            if (!NSFileManager.defaultManager.fileExistsAtPath(cfg)) continue
+            val text = File(cfg).readText()
+            val fixed = fix(text)
+            if (fixed != text) { File(cfg).writeText(fixed); println("Moved $cfg to the current app container") }
+        }
+        runBlocking {
+            dataStore.edit { prefs ->
+                val saved = prefs[GameFilesPreferences.GAME_FILES_URI_KEY] ?: return@edit
+                val fixed = fix(saved)
+                if (fixed != saved) prefs[GameFilesPreferences.GAME_FILES_URI_KEY] = fixed
+            }
+        }
+    }
+
     actual fun setupResources() {
-        setupConfigs()
+        val stamp = bundleStamp()
+        val engineChanged = File(VERSION_STAMP).let { !it.exists() || it.readText() != stamp }
+        setupConfigs(engineChanged)
+        migrateContainerPaths()
         val fm = NSFileManager.defaultManager
         val bundlePath = "${NSBundle.mainBundle.resourcePath}/OpenMWAssets/resources"
         val destPath = USER_RESOURCES
@@ -189,7 +237,7 @@ actual object OpenMWPaths {
         }
 
         val shadersDest = "$destPath/shaders"
-        if (!fm.fileExistsAtPath(shadersDest)) {
+        if (engineChanged || !fm.fileExistsAtPath(shadersDest)) {
             println("Copying resources from bundle to $destPath...")
             
             // If destPath exists, remove it so we can copy the whole folder
@@ -206,6 +254,7 @@ actual object OpenMWPaths {
         } else {
             println("Resources already present in $destPath")
         }
+        File(VERSION_STAMP).writeText(stamp)
     }
 }
 

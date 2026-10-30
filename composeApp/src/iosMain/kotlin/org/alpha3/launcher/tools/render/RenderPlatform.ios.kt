@@ -16,7 +16,7 @@ internal actual fun decodeEncodedImage(bytes: ByteArray): Bitmap? = try {
     val info = ImageInfo(image.width, image.height, ColorType.BGRA_8888, ColorAlphaType.UNPREMUL)
     val bmp = org.jetbrains.skia.Bitmap()
     bmp.allocPixels(info)
-    val pixels = if (image.readPixels(bmp)) bmp.readPixels(info, image.width * 4L) else null
+    val pixels = if (image.readPixels(bmp)) bmp.readPixels(info, image.width * 4) else null
     pixels?.let { px ->
         // BGRA bytes in memory are 0xAARRGGBB little-endian ints
         Bitmap(image.width, image.height, IntArray(image.width * image.height) { i ->

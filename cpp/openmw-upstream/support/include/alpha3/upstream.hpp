@@ -96,6 +96,46 @@ namespace Alpha3
         int mHeight = 0;
         int mStencilBits = 8;
     };
+
+    // iOS: the window always fills the screen at its size in points, and [Video] resolution is the scale it is rendered at.
+    // nativeScreenScale: the screen's pixels per point. renderScale: drawable pixels per point now (1 until set).
+    float nativeScreenScale();
+    float renderScale();
+    // Renders the window at about width x height pixels (the width decides, the window keeps its shape): sets the scale of
+    // SDL's view, the graphics context takes the new size on its draw thread, then the engine gets a size change event.
+    void setRenderResolution(SDL_Window* window, osg::GraphicsContext* context, int width, int height);
+
+    // iOS, OSG_USE_ANGLE: OpenGL ES 3.0 through ANGLE on Metal (the app's libGLESv2_angle.framework, opened at runtime)
+    // for a window that has no SDL context: ANGLE's EGL draws into a CAMetalLayer view SDL puts in the window.
+    class AngleContext
+    {
+    public:
+        // Null if ANGLE cannot start (the reason is logged). samples: MSAA of the window, 0 for none
+        static std::unique_ptr<AngleContext> create(SDL_Window* window, int samples);
+        ~AngleContext();
+
+        // What the context was made with, for the traits of the graphics context
+        int depthBits() const { return mDepthBits; }
+        int stencilBits() const { return mStencilBits; }
+        int samples() const { return mSamples; }
+
+        bool makeCurrent();
+        bool release();
+        void present();
+        void setSwapInterval(int interval);
+
+    private:
+        AngleContext() = default;
+
+        SDL_Window* mWindow = nullptr;
+        void* mView = nullptr;
+        void* mDisplay = nullptr;
+        void* mSurface = nullptr;
+        void* mContext = nullptr;
+        int mDepthBits = 24;
+        int mStencilBits = 8;
+        int mSamples = 0;
+    };
 }
 
 #endif

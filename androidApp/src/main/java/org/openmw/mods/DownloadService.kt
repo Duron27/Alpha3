@@ -1,4 +1,4 @@
-package org.openmw.modDownloader
+package org.openmw.mods
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -24,6 +24,14 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import org.openmw.R
+import org.alpha3.launcher.mods.downloader.ModListManager
+import org.alpha3.launcher.mods.downloader.NexusInfo
+import org.alpha3.launcher.mods.downloader.StatusInfo
+import org.alpha3.launcher.mods.downloader.finishedFileCount
+import org.alpha3.launcher.mods.downloader.notificationProgress
+import org.alpha3.launcher.mods.downloader.sizeText
+import org.alpha3.launcher.mods.downloader.speedText
+import org.alpha3.launcher.paths.OpenMWPathsAndroid
 
 /**
  * Keeps the mod downloader alive while it works: a foreground service (so a phone call, turning the screen off or
@@ -155,7 +163,7 @@ class DownloadService : Service() {
          */
         fun sync(running: Boolean) {
             if (!running) return
-            val context = ModListManager.applicationContextOrNull ?: return
+            val context = OpenMWPathsAndroid.appContext
             try {
                 ContextCompat.startForegroundService(context, Intent(context, DownloadService::class.java))
             } catch (e: Exception) {

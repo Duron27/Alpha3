@@ -20,7 +20,7 @@ internal fun subText(s: Sub): String {
     }
     val body = if (d.isNotEmpty() && d.last() == 0.toByte()) d.copyOf(d.size - 1) else d
     val printable = body.isNotEmpty() && body.all { (it.toInt() and 0xff) >= 0x20 && it.toInt() != 0x7f }
-    if (printable && (d.last() == 0.toByte() || body.size > 3)) return quote(String(CharArray(body.size) { (body[it].toInt() and 0xff).toChar() }))
+    if (printable && (d.last() == 0.toByte() || body.size > 3)) return quote(CharArray(body.size) { (body[it].toInt() and 0xff).toChar() }.concatToString())
     return "[hex:" + d.joinToString("") { (it.toInt() and 0xff).toString(16).padStart(2, '0') } + "]"
 }
 

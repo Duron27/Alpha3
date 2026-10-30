@@ -133,7 +133,7 @@ namespace Alpha3
         // The Adreno compiler refuses a shader that calls a function defined in another shader object ("Call to
         // undefined function") and one without main(), which is how OpenMW's library shaders are written. Desktop GL
         // (Zink) links them as they are.
-        if (glslTarget() != GlslTarget::Gles32)
+        if (glslTarget() != GlslTarget::Gles)
             return nullptr;
 
         // the shader with main() first: the program has the engine's shaders before the libraries they link

@@ -1,59 +1,34 @@
-package org.openmw.modDownloader
+package org.alpha3.launcher.mods.downloader
 
-import android.annotation.SuppressLint
-import android.util.Log
+import io.ktor.client.request.header
+import io.ktor.client.request.prepareGet
+import io.ktor.client.statement.bodyAsChannel
+import io.ktor.http.contentLength
+import io.ktor.http.contentType
+import io.ktor.utils.io.readAvailable
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.IO
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
-import okhttp3.Request
-import okio.Buffer
+import okio.IOException
 import okio.buffer
-import okio.sink
-import org.alpha3.launcher.paths.OpenMWPaths
-import org.openmw.modDownloader.ModListManager.allowExtract
-import org.openmw.modDownloader.ModListManager.applicationContext
-import org.openmw.modDownloader.ModListManager.modList
-import org.openmw.modDownloader.NexusInfo.extractionProgressMap
-import java.io.File
-import java.io.IOException
-import java.text.SimpleDateFormat
-import java.util.Date
-import kotlin.coroutines.coroutineContext
-
-enum class ModStatus {
-    DOWNLOADING,
-    EXTRACTING,
-    COMPLETED,
-    IDLE
-}
+import okio.use
+import org.alpha3.launcher.io.File
+import org.alpha3.launcher.mods.downloader.ModListManager.allowExtract
+import org.alpha3.launcher.mods.downloader.ModListManager.modList
+import org.alpha3.launcher.utils.Log
+import org.alpha3.launcher.utils.currentTimeMillis
 
 /** Progress rows are per file: a mod with several archives in the list would otherwise share one row and hide each other. */
 fun progressKey(mod: ModDesc, info: DownloadInfo): String =
-    if (mod.downloadInfo.count { it.sourceLists.contains(ModListManager.modList) } > 1) "${mod.slug}|${info.fileName}" else mod.slug
+    if (mod.downloadInfo.count { it.sourceLists.contains(modList) } > 1) "${mod.slug}|${info.fileName}" else mod.slug
 
-fun getModStatus(modId: String): ModStatus {
-    val progress = NexusInfo.downloadProgressMap[modId] ?: ""
-    val extractionStatus = extractionProgressMap[modId] ?: "Waiting..."
-
-    return when {
-        !progress.contains("Downloaded") -> ModStatus.DOWNLOADING
-        !extractionStatus.contains("Extracted") && !extractionStatus.contains("Waiting") -> ModStatus.EXTRACTING
-        progress.contains("Downloaded") && extractionStatus.contains("Extracted") -> ModStatus.COMPLETED
-        else -> ModStatus.IDLE
-    }
-}
-
-@SuppressLint("SimpleDateFormat")
 fun appendToDownloadLog(message: String) {
     try {
-        val logFile = File("${OpenMWPaths.USER_FILE_STORAGE}/OpenMW/Download_$modList.log")
-        val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(Date())
-        val logEntry = "[$timestamp] $message\n"
-
-        logFile.parentFile?.mkdirs()
-        logFile.appendText(logEntry)
+        File("$modStorage/Download_$modList.log").appendText("[${logTimestamp()}] $message\n")
     } catch (e: Exception) {
         Log.e("DownloadLog", "Failed to write to log file: ${e.message}")
     }
@@ -72,7 +47,7 @@ private class HttpStatusException(val code: Int, message: String) : IOException(
 suspend fun downloadModFile(mod: ModDesc, info: DownloadInfo) {
     withContext(Dispatchers.IO) {
         val key = progressKey(mod, info)
-        val cacheDir = File("${OpenMWPaths.USER_FILE_STORAGE}/OpenMW/CACHE")
+        val cacheDir = File(modCache)
         val outputFile = File(cacheDir, "${info.fileName}")
         val partFile = File(cacheDir, "${info.fileName}.part")
         var failure: String? = null
@@ -83,7 +58,7 @@ suspend fun downloadModFile(mod: ModDesc, info: DownloadInfo) {
             // Premium links only live a few hours and a long run asks for them all up front, so ask again for any
             // that have run out (or are about to) just before using them.
             val expires = downloadUrl?.let { extractExpiresValue(it) }
-            if (expires != null && expires < System.currentTimeMillis() / 1000 + 300) {
+            if (expires != null && expires < currentTimeMillis() / 1000 + 300) {
                 downloadUrl = refreshedLink(mod, info) ?: downloadUrl
             }
             var refreshed = false
@@ -94,7 +69,7 @@ suspend fun downloadModFile(mod: ModDesc, info: DownloadInfo) {
             while (true) {
                 attempt++
                 try {
-                    downloadOnce(mod, info, downloadUrl!!, partFile, key)
+                    downloadOnce(mod, downloadUrl!!, partFile, key)
                     if (outputFile.exists()) outputFile.delete()
                     if (!partFile.renameTo(outputFile)) throw IOException("Could not move ${partFile.name} into place")
                     failure = null
@@ -114,7 +89,7 @@ suspend fun downloadModFile(mod: ModDesc, info: DownloadInfo) {
                         }
                     }
                     val retryable = e !is HttpStatusException || e.code >= 500 || e.code == 408 || e.code == 429
-                    failure = e.message ?: e.javaClass.simpleName
+                    failure = e.message ?: e::class.simpleName
                     if (!retryable || attempt >= MAX_DOWNLOAD_ATTEMPTS) break
                     NexusInfo.downloadProgressMap[key] = "Retrying ${mod.name} (attempt ${attempt + 1} of $MAX_DOWNLOAD_ATTEMPTS)"
                     NexusInfo.downloadSpeedMap.remove(key)
@@ -124,7 +99,7 @@ suspend fun downloadModFile(mod: ModDesc, info: DownloadInfo) {
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            failure = e.message ?: e.javaClass.simpleName
+            failure = e.message ?: e::class.simpleName
         }
 
         if (failure != null) {
@@ -156,7 +131,7 @@ suspend fun downloadModFile(mod: ModDesc, info: DownloadInfo) {
 private suspend fun refreshedLink(mod: ModDesc, info: DownloadInfo): String? {
     if (info.nexusFileId.isNullOrEmpty() || info.directDownload?.contains("nexus", ignoreCase = true) != true) return null
     return try {
-        getDirectDownload(applicationContext, mod, info).directDownload
+        getDirectDownload(mod, info).directDownload
             ?.also { appendToDownloadLog("Refreshed link: ${info.fileName}") }
     } catch (e: CancellationException) {
         throw e
@@ -165,38 +140,35 @@ private suspend fun refreshedLink(mod: ModDesc, info: DownloadInfo): String? {
     }
 }
 
-private suspend fun downloadOnce(mod: ModDesc, info: DownloadInfo, url: String, partFile: File, key: String) {
+private suspend fun downloadOnce(mod: ModDesc, url: String, partFile: File, key: String) {
     var offset = if (partFile.exists()) partFile.length() else 0L
-    val request = Request.Builder()
-        .url(url)
-        .header("User-Agent", "Alpha3/2.71")
-        .apply { if (offset > 0) header("Range", "bytes=$offset-") }
-        .build()
-
-    ModListManager.client.newCall(request).execute().use { response ->
+    ModHttp.client.prepareGet(url) {
+        header("User-Agent", "Alpha3/2.71")
+        if (offset > 0) header("Range", "bytes=$offset-")
+    }.execute { response ->
+        val code = response.status.value
         var append = false
         when {
-            response.code == 206 -> append = true
+            code == 206 -> append = true
             // The part file already holds the whole file.
-            response.code == 416 && offset > 0 -> return
-            !response.isSuccessful -> throw HttpStatusException(response.code, "HTTP error: ${response.code} - ${response.message}")
+            code == 416 && offset > 0 -> return@execute
+            code !in 200..299 -> throw HttpStatusException(code, "HTTP error: $code - ${response.status.description}")
             // The server ignored the Range header: start again from the beginning.
             else -> offset = 0
         }
 
-        val body = response.body
         // A link that leads to a web page instead of a file would otherwise be cached and fail to unpack
-        if (body.contentType()?.subtype.equals("html", ignoreCase = true)) {
+        if (response.contentType()?.contentSubtype.equals("html", ignoreCase = true)) {
             throw HttpStatusException(415, "The link leads to a web page, not a file")
         }
-        val remaining = body.contentLength()
+        val remaining = response.contentLength() ?: -1L
         val total = if (remaining > 0) offset + remaining else -1L
         var done = offset
-        val startTime = System.currentTimeMillis()
+        val startTime = currentTimeMillis()
         val startOffset = offset
         var lastUpdate = 0L
-        val source = body.source()
-        val chunk = Buffer()
+        val channel = response.bodyAsChannel()
+        val chunk = ByteArray(64 * 1024)
 
         partFile.sink(append = append).buffer().use { sink ->
             while (true) {
@@ -207,12 +179,13 @@ private suspend fun downloadOnce(mod: ModDesc, info: DownloadInfo, url: String, 
                     delay(300)
                 }
                 if (ModListManager.cancelled) throw CancellationException("cancelled")
-                coroutineContext.ensureActive()
-                val read = source.read(chunk, 64 * 1024L)
-                if (read == -1L) break
-                sink.write(chunk, read)
+                currentCoroutineContext().ensureActive()
+                val read = channel.readAvailable(chunk, 0, chunk.size)
+                if (read == -1) break
+                if (read == 0) continue
+                sink.write(chunk, 0, read)
                 done += read
-                val now = System.currentTimeMillis()
+                val now = currentTimeMillis()
                 if (now - lastUpdate >= PROGRESS_INTERVAL_MS) {
                     lastUpdate = now
                     val seconds = (now - startTime) / 1000.0
@@ -228,26 +201,18 @@ private suspend fun downloadOnce(mod: ModDesc, info: DownloadInfo, url: String, 
     }
 }
 
-
 suspend fun calculateAndUpdateSizeOnDisk(mod: ModDesc, info: DownloadInfo) {
     withContext(Dispatchers.IO) {
         try {
-            val destination = File(
-                "${OpenMWPaths.USER_FILE_STORAGE}/OpenMW/CACHE",
-                "${info.fileName}"
-            )
-
+            val destination = File(modCache, "${info.fileName}")
             if (destination.exists()) {
+                // Stored as raw bytes, not as a formatted string
                 val totalExtractedSize = getTotalExtractedSize(destination)
-
-                // Store as raw bytes instead of formatted string
-                val updatedInfo = info.copy(extractedSizeBytes = totalExtractedSize)
-
-                // Update the database
-                updateDownloadInfoInDatabase(mod.modId, updatedInfo)
-
+                updateDownloadInfoInDatabase(mod.modId, info.copy(extractedSizeBytes = totalExtractedSize))
                 Log.d("SizeCalculation", "Updated sizeOnDisk for ${mod.slug}: ${formatSize(totalExtractedSize / 1024)}")
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.e("SizeCalculation", "Failed to calculate size for ${mod.slug}: ${e.message}")
         }
@@ -258,12 +223,14 @@ suspend fun calculateAndUpdateSizeOnDisk(mod: ModDesc, info: DownloadInfo) {
 suspend fun renameDownloadInfoFile(modId: String, oldFileName: String?, newFileName: String) {
     withContext(Dispatchers.IO) {
         try {
-            val modDao = ModDatabase.getDatabase(applicationContext).modDao()
+            val modDao = ModDatabase.getDatabase().modDao()
             val currentMod = modDao.getModById(modId) ?: return@withContext
             val updatedInfo = currentMod.downloadInfo.map { info ->
                 if (info.fileName == oldFileName) info.copy(fileName = newFileName) else info
             }
             modDao.updateMod(currentMod.copy(downloadInfo = updatedInfo))
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.e("DatabaseUpdate", "Failed to rename download file for mod $modId: ${e.message}", e)
         }
@@ -273,30 +240,26 @@ suspend fun renameDownloadInfoFile(modId: String, oldFileName: String?, newFileN
 suspend fun updateDownloadInfoInDatabase(modId: String, updatedInfo: DownloadInfo) {
     withContext(Dispatchers.IO) {
         try {
-            val modDao = ModDatabase.getDatabase(applicationContext).modDao()
-
-            // Get the current mod from database
+            val modDao = ModDatabase.getDatabase().modDao()
             val currentMod = modDao.getModById(modId)
             if (currentMod == null) {
                 Log.e("DatabaseUpdate", "Mod with ID $modId not found in database")
                 return@withContext
             }
-
-            // Update the download info
             val updatedDownloadInfo = currentMod.downloadInfo.map { info ->
                 if (info.fileName == updatedInfo.fileName) updatedInfo else info
             }
-
-            // Create updated mod object
-            val updatedMod = currentMod.copy(downloadInfo = updatedDownloadInfo)
-
-            // Update in database
-            modDao.updateMod(updatedMod)
-
+            modDao.updateMod(currentMod.copy(downloadInfo = updatedDownloadInfo))
             Log.d("DatabaseUpdate", "Successfully updated sizeOnDisk for mod $modId")
-
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.e("DatabaseUpdate", "Failed to update sizeOnDisk in database for mod $modId: ${e.message}", e)
         }
     }
+}
+
+fun formatSize(kb: Long): String = when {
+    kb >= 1024 -> "${kb / 1024} MB"
+    else -> "$kb KB"
 }

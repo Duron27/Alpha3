@@ -43,8 +43,8 @@ open class PlatformFeatures {
     /** Reopens the launcher screen (used after leaving the in-game controls editor). */
     open fun restartLauncher() {}
 
-    /** True while the mod downloader is busy; read from composition, so back it with Compose state. */
-    open val isProcessingMods: Boolean get() = false
+    /** True while the mod downloader is busy; read from composition (Compose state). */
+    val isProcessingMods: Boolean get() = org.alpha3.launcher.mods.downloader.StatusInfo.processing
 
     // Asset / config management
     open fun prepareResources() {}
@@ -56,7 +56,10 @@ open class PlatformFeatures {
     open fun runNavMesh() {}
 
     // Which tool tabs of the mod screen the platform provides; the others are not shown at all
-    open val supportsModDownloader: Boolean get() = false
+    val supportsModDownloader: Boolean get() = modDownloaderHost != null
+
+    /** The browser, background work and links the mod downloader needs; null where there is no mod downloader. */
+    open val modDownloaderHost: org.alpha3.launcher.mods.downloader.ModDownloaderHost? get() = null
     val supportsModTools: Boolean get() = toolFs != null && toolPlatform != null
     open val supportsTerminal: Boolean get() = false
     val supportsKram: Boolean get() = kramRunner != null
@@ -64,7 +67,7 @@ open class PlatformFeatures {
     // Tool screens that are only available where the platform provides them
     @Composable open fun Terminal() {}
     @Composable open fun UqmDownloads() {}
-    @Composable open fun ModDownloader() {}
+    @Composable fun ModDownloader() { if (supportsModDownloader) org.alpha3.launcher.mods.downloader.ModDownloaderScreen() }
     /** Storage and host description for the Kotlin OpenMW tools (clean, leveled lists, groundcover, light fixes); null where unavailable. */
     open val toolFs: org.alpha3.launcher.tools.openmw.ToolFs? get() = null
     open val toolPlatform: org.alpha3.launcher.tools.openmw.ToolPlatform? get() = null
@@ -74,6 +77,12 @@ open class PlatformFeatures {
 
     /** Installs and lists downloadable GPU drivers; null where custom drivers are not supported. */
     open val gpuDrivers: GpuDriverManager? get() = null
+
+    /**
+     * Where there are no custom GPU drivers: the stock engine's renderers to choose from, as the
+     * [GameFilesPreferences.GL_RENDERER_KEY] value and its name, the default first. Empty: no choice.
+     */
+    open val glRenderers: Map<String, String> get() = emptyMap()
 
     /** Launches the native kram binary for texture conversion; null where it is unavailable. */
     open val kramRunner: org.alpha3.launcher.tools.KramTool.Runner? get() = null

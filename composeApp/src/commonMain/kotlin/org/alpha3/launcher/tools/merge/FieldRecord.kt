@@ -251,7 +251,7 @@ internal class FieldRecord(
     }
 
     private fun identity(spec: SeqSpec, e: Elem): String =
-        if (spec.byName) trimmedNameExact(e.subs[0].data) else String(CharArray(e.bytes.size) { (e.bytes[it].toInt() and 0xff).toChar() })
+        if (spec.byName) trimmedNameExact(e.subs[0].data) else CharArray(e.bytes.size) { (e.bytes[it].toInt() and 0xff).toChar() }.concatToString()
 
     /** The subrecords of this record, without NAME. */
     fun toSubs(): List<Sub> {
@@ -307,7 +307,7 @@ internal fun readSubs(body: ByteArray): List<Sub> {
 internal fun trimmedNameExact(b: ByteArray): String {
     var end = b.size
     for (i in b.indices) if (b[i].toInt() == 0) { end = i; break }
-    return String(CharArray(end) { (b[it].toInt() and 0xff).toChar() })
+    return CharArray(end) { (b[it].toInt() and 0xff).toChar() }.concatToString()
 }
 
 internal fun trimmedName(b: ByteArray): String {

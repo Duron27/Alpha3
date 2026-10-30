@@ -137,7 +137,13 @@ namespace Alpha3
             {
                 std::call_once(mFirstContext, [] {
                     // OSG is built against glad's OpenGL ES header; the Zink context loads them from OSMesa itself
-                    if (!usesZink() && !gladLoadGLES2(reinterpret_cast<GLADloadfunc>(SDL_GL_GetProcAddress)))
+                    GLADloadfunc load = reinterpret_cast<GLADloadfunc>(SDL_GL_GetProcAddress);
+#ifndef __ANDROID__
+                    // iOS with ANGLE: SDL has no OpenGL context, the functions are ANGLE's
+                    if (usesAngle())
+                        load = reinterpret_cast<GLADloadfunc>(angleProcAddress);
+#endif
+                    if (!usesZink() && !gladLoadGLES2(load))
                         Log(Debug::Error) << "Failed to initialize GLAD";
                     enableDebugOutput();
                     // the settings are loaded by the time there is a window
@@ -162,15 +168,17 @@ namespace Alpha3
                 // the shaders are converted for it, so the context reports the desktop version that matches: 4.6 when
                 // the compute shaders convert and the driver has the work group size (16x16) and storage blocks they
                 // need (3 per stage for the lighting, 5 for its culling), else 3.3. OSG has read its features already.
-                if (extensions.isOpenGLES && extensions.glVersion >= 3.2f)
+                // OpenGL ES 3.0 (iOS) has uniform blocks but no compute shaders or storage blocks: 3.3.
+                if (extensions.isOpenGLES && extensions.glVersion >= 3.0f)
                 {
+                    const float glesVersion = extensions.glVersion;
                     const bool compute = computeShadersAvailable() && extensions.maxComputeWorkGroupInvocations >= 256
                         && extensions.maxVertexShaderStorageBlocks >= 3 && extensions.maxFragmentShaderStorageBlocks >= 3
                         && extensions.maxComputeShaderStorageBlocks >= 5;
                     extensions.glslLanguageVersion = compute ? 4.6f : 3.3f;
                     if (compute)
                         extensions.glVersion = 4.6f;
-                    Log(Debug::Info) << "OpenGL ES 3.2 reported to the engine as GLSL "
+                    Log(Debug::Info) << "OpenGL ES " << glesVersion << " reported to the engine as GLSL "
                                      << extensions.glslLanguageVersion << (compute ? "" : " (no compute shaders)");
                 }
             }

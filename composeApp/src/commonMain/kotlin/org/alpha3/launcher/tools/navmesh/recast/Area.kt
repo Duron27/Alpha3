@@ -11,7 +11,7 @@ internal fun rcErodeWalkableArea(erosionRadius: Int, chf: CompactHeightfield): B
     val cellIndex = chf.cellIndex
     val cellCount = chf.cellCount
     val dist = IntArray(n)
-    java.util.Arrays.fill(dist, 255)
+    dist.fill(255)
 
     for (s in 0 until n) {
         if (areas[s] == RC_NULL_AREA) { dist[s] = 0; continue }

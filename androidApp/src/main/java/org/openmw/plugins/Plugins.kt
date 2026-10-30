@@ -7,11 +7,8 @@ import android.net.Uri
 import android.util.Log
 import android.view.View
 import dalvik.system.DexClassLoader
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 import org.alpha3.launcher.paths.OpenMWPaths
-import org.openmw.modDownloader.NxmDownloads
+import org.alpha3.launcher.mods.downloader.NxmDownloads
 import java.io.File
 import java.util.Properties
 import java.util.concurrent.ConcurrentHashMap
@@ -156,7 +153,7 @@ object Plugins {
         }
 
         override fun deliverNxm(uri: Uri) {
-            CoroutineScope(Dispatchers.Main).launch { NxmDownloads.handle(context, uri) }
+            NxmDownloads.handle(uri.toString())
         }
 
         override fun openScreen(factory: PluginScreenFactory): PluginScreen {

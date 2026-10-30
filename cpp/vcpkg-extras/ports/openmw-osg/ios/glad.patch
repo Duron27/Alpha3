@@ -1,0 +1,28 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index d2f7b6f5a..dc1ccb73f 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -582,8 +582,10 @@ ELSEIF(OSG_GLES2_AVAILABLE)
+     ENDIF()
+ ELSEIF(OSG_GLES3_AVAILABLE)
+     IF (APPLE AND NOT ANDROID)
++        # iOS: glad's OpenGL ES 3.2 header, as on Android. Its function pointers are loaded from OpenGLES.framework at
++        # runtime, so what the driver has (OpenGL ES 3.0 and its extensions) is used and the rest stays null.
+         SET(OPENGL_HEADER1 "#include \"TargetConditionals.h\"" CACHE STRING "#include<> line for OpenGL Header")
+-        SET(OPENGL_HEADER2 "#include <OpenGLES/ES3/gl.h>" CACHE STRING "#include<> line for additional OpenGL Headers if required")
++        SET(OPENGL_HEADER2 "#include <glad/gles2.h>" CACHE STRING "#include<> line for additional OpenGL Headers if required")
+     ELSE()
+         #SET(OPENGL_HEADER1 "#include <GLES3/gl3.h>" CACHE STRING "#include<> line for OpenGL Header")
+         SET(OPENGL_HEADER1 "#include <glad/gles2.h>" CACHE STRING "#include<> line for OpenGL Header")
+@@ -1102,8 +1104,9 @@ IF(APPLE AND NOT ANDROID)
+ 
+     IF(OSG_BUILD_PLATFORM_IPHONE)
+ 
+-        # set osg window system to iOS
+-        SET(OSG_WINDOWING_SYSTEM "IOS" CACHE STRING "Windowing system type for graphics window creation, options only IOS." FORCE)
++        # No OSG window: the host app makes the window and context with SDL (GraphicsWindowIOS includes the OpenGLES headers,
++        # which cannot be mixed with glad's)
++        SET(OSG_WINDOWING_SYSTEM "None" CACHE STRING "Windowing system type for graphics window creation; options: None." FORCE)
+ 
+         # set osg default image plugin
+         SET(OSG_DEFAULT_IMAGE_PLUGIN_FOR_OSX "imageio" CACHE STRING "Forced imageio default image plugin for iOS" FORCE)

@@ -4,7 +4,49 @@ set(OSG_VER 3.6.5)
 
 set(PATCHES "")
 
-if(VCPKG_TARGET_IS_OSX OR VCPKG_TARGET_IS_IOS)
+# OpenGL ES through glad, and Alpha3's runtime hooks for the support library of the upstream engine
+# (cpp/openmw-upstream/support): what the rendering of stock OpenMW on OpenGL ES rests on. Shared by Android and iOS; the
+# patches live in android/ because that is where they started. The hooks are no-ops unless the support library installs
+# them, so the fork, which links the same OSG on Android, is unaffected.
+set(ALPHA3_GLES_PATCHES
+    "android/0001-Replace-Atomic-impl-with-std-atomic.patch"
+    "android/0002-BufferObject-make-numClients-atomic.patch"
+    "android/0004-IncrementalCompileOperation-wrap-some-stuff-in-atomi.patch"
+    "android/dae_collada.patch"
+    # glad's OpenGL ES 3.2 header instead of the system's (the vcpkg prefix gets glad from cpp/GLAD first)
+    "android/glad.patch"
+    "android/vertex-only-builtins.patch"
+    "android/features.patch"
+    "android/textures.patch"
+    "android/msaa.patch"
+    "android/polygonmode-nv.patch"
+    "android/0005-CullSettings-make-inheritanceMask-atomic-to-silence-.patch"
+    "android/silence-clipplane-warning.patch"
+    "android/silence-alphafunc-warning.patch"
+    # OpenGL ES 3.0 (Apple) has no glEnablei; the terrain sets it on every pass, so OSG warned on every draw
+    "android/silence-enablei-warning.patch"
+    "android/uniform-lookup-by-id.patch"
+    "android/runtime-hooks.patch"
+    "android/gles-texture-formats.patch"
+    "android/gles-fixed-function-shims.patch"
+    "android/gles-mode-uniforms.patch"
+    "android/frame-and-texture-hooks.patch"
+    "android/vao-custom-drawing.patch"
+    # the model view projection and normal matrices are only worked out for programs that read them
+    "android/lazy-matrix-uniforms.patch"
+)
+
+if(VCPKG_TARGET_IS_IOS)
+    list(
+      APPEND PATCHES
+      "macos-dedicated-image-plugin.patch"
+      ${ALPHA3_GLES_PATCHES}
+      # glad on iOS too (OpenGLES.framework loaded at runtime), and no OSG window: SDL makes it
+      "ios/glad.patch"
+      # with OSG_USE_ANGLE the GL functions come from the app's libGLESv2_angle.framework (ANGLE on Metal)
+      "ios/angle.patch"
+    )
+elseif(VCPKG_TARGET_IS_OSX)
     list(
       APPEND PATCHES
       "macos-dedicated-image-plugin.patch"
@@ -13,31 +55,8 @@ elseif(VCPKG_TARGET_IS_ANDROID)
     list(
       APPEND PATCHES
       "android/fix-freetype-include-dirs.patch"
-      "android/0001-Replace-Atomic-impl-with-std-atomic.patch"
-      "android/0002-BufferObject-make-numClients-atomic.patch"
-      "android/0004-IncrementalCompileOperation-wrap-some-stuff-in-atomi.patch"
       "android/force-add-plugins.patch"
-      "android/dae_collada.patch"
-      "android/glad.patch"
-      "android/vertex-only-builtins.patch"
-      "android/features.patch"
-      "android/textures.patch"
-      "android/msaa.patch"
-      "android/polygonmode-nv.patch"
-      "android/0005-CullSettings-make-inheritanceMask-atomic-to-silence-.patch"
-      "android/silence-clipplane-warning.patch"
-      "android/silence-alphafunc-warning.patch"
-      "android/uniform-lookup-by-id.patch"
-      # Alpha3: hooks for the support library of the upstream engine (cpp/openmw-upstream/support), no-ops unless it
-      # installs them, and the OpenGL ES fixes they switch on
-      "android/runtime-hooks.patch"
-      "android/gles-texture-formats.patch"
-      "android/gles-fixed-function-shims.patch"
-      "android/gles-mode-uniforms.patch"
-      "android/frame-and-texture-hooks.patch"
-      "android/vao-custom-drawing.patch"
-      # the model view projection and normal matrices are only worked out for programs that read them
-      "android/lazy-matrix-uniforms.patch"
+      ${ALPHA3_GLES_PATCHES}
     )
 endif()
 
@@ -90,7 +109,7 @@ elseif(VCPKG_TARGET_IS_IOS)
     -D_OPENTHREADS_ATOMIC_USE_BSD_ATOMIC=0
     -DOPENGL_PROFILE=GLES3
     -DOSG_BUILD_PLATFORM_IPHONE=ON
-    -DOSG_WINDOWING_SYSTEM=IOS
+    -DOSG_WINDOWING_SYSTEM=None
     -DDYNAMIC_OPENTHREADS=OFF
     -DDYNAMIC_OPENSCENEGRAPH=OFF
     -DBUILD_OSG_PLUGIN_OSG=ON

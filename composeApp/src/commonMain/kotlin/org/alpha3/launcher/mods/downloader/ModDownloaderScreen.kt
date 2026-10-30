@@ -1,6 +1,6 @@
-package org.openmw.modDownloader
+package org.alpha3.launcher.mods.downloader
 
-import android.util.Log
+import org.alpha3.launcher.utils.Log
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.expandIn
@@ -77,9 +77,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Color.Companion.White
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.keepScreenOn
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.res.stringResource
+import org.jetbrains.compose.resources.painterResource
+import org.jetbrains.compose.resources.stringResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -88,25 +87,30 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.datastore.preferences.core.edit
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.IO
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import org.alpha3.launcher.paths.OpenMWPaths
 import org.alpha3.launcher.paths.Profiles
-import org.openmw.R
-import org.openmw.modDownloader.ModListManager.allowExtract
-import org.openmw.modDownloader.ModListManager.apiKey
-import org.openmw.modDownloader.ModListManager.availableLists
-import org.openmw.modDownloader.ModListManager.brokenMods
-import org.openmw.modDownloader.ModListManager.modList
-import org.openmw.modDownloader.ModListManager.onlySync
-import org.openmw.modDownloader.ModListManager.remainingMods
-import org.openmw.modDownloader.ModListManager.selectedThreadCount
-import org.openmw.modDownloader.ModListManager.validate
-import org.openmw.modDownloader.NexusInfo.extractionProgressMap
-import org.openmw.modDownloader.NexusInfo.extractionProgressPercentMap
-import org.openmw.modDownloader.NexusInfo.isNexusExpanded
-import org.openmw.modDownloader.SevenZip.isInitialized
+import org.alpha3.launcher.resources.Res
+import org.alpha3.launcher.resources.approval_delegation_24dp_e8eaed_fill0_wght400_grad0_opsz24
+import org.alpha3.launcher.resources.loading
+import org.alpha3.launcher.resources.nexus_api_key
+import org.alpha3.launcher.resources.remove_api_key
+import org.alpha3.launcher.resources.save
+import org.alpha3.launcher.mods.downloader.ModListManager.allowExtract
+import org.alpha3.launcher.mods.downloader.ModListManager.apiKey
+import org.alpha3.launcher.mods.downloader.ModListManager.availableLists
+import org.alpha3.launcher.mods.downloader.ModListManager.brokenMods
+import org.alpha3.launcher.mods.downloader.ModListManager.modList
+import org.alpha3.launcher.mods.downloader.ModListManager.onlySync
+import org.alpha3.launcher.mods.downloader.ModListManager.remainingMods
+import org.alpha3.launcher.mods.downloader.ModListManager.selectedThreadCount
+import org.alpha3.launcher.mods.downloader.ModListManager.validate
+import org.alpha3.launcher.mods.downloader.NexusInfo.extractionProgressMap
+import org.alpha3.launcher.mods.downloader.NexusInfo.extractionProgressPercentMap
+import org.alpha3.launcher.mods.downloader.NexusInfo.isNexusExpanded
 import org.alpha3.launcher.ui.controls.UIStateManager.customColor
 import org.alpha3.launcher.ui.controls.UIStateManager.gold
 import org.alpha3.launcher.ui.view.ProgressDialog
@@ -117,21 +121,21 @@ import org.alpha3.launcher.utils.GameFilesPreferences.IS_NEXUS_PREMIUM
 import org.alpha3.launcher.utils.GameFilesPreferences.NEXUS_API_KEY
 import org.alpha3.launcher.utils.GameFilesPreferences
 import org.alpha3.launcher.utils.dataStore
-import org.openmw.utils.stringRes
-import java.io.File
+import org.alpha3.launcher.utils.stringRes
+import org.alpha3.launcher.io.File
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.math.roundToInt
 
 object StatusInfo {
     private var running by mutableStateOf(false)
 
-    /** True while a mod list is being downloaded and installed; keeps the app alive in the background through [DownloadService]. */
+    /** True while a mod list is being downloaded and installed; the host keeps the app working meanwhile ([ModDownloaderHost.setRunning]). */
     var processing: Boolean
         get() = running
         set(value) {
             if (running == value) return
             running = value
-            DownloadService.sync(value)
+            host?.setRunning(value)
         }
     var showProcessCompleteDialog by mutableStateOf(false)
     var activeMods by mutableIntStateOf(0)
@@ -142,7 +146,6 @@ object StatusInfo {
 
 @Composable
 fun OnboardingScreen() {
-    val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
     Box(
@@ -163,7 +166,7 @@ fun OnboardingScreen() {
                 onValueChange = {
                     apiKey = it
                 },
-                label = { Text(stringResource(R.string.nexus_api_key)) },
+                label = { Text(stringResource(Res.string.nexus_api_key)) },
                 modifier = Modifier
                     .height(100.dp)
                     .fillMaxWidth()
@@ -172,7 +175,7 @@ fun OnboardingScreen() {
             Row {
                 TextButton(
                     onClick = {
-                        NxmDownloads.openSignIn(context)
+                        NxmDownloads.openSignIn()
                     },
                     colors = ButtonDefaults.buttonColors(
                         containerColor = gold,
@@ -187,7 +190,7 @@ fun OnboardingScreen() {
                     onClick = {
                         scope.launch(Dispatchers.Default) {
                             try {
-                                validate(context)
+                                validate()
                             } catch (e: Exception) {
                                 Log.e("VALIDATE_ERROR", "Validation failed: ${e.message}")
                                 addCustomLog("VALIDATE_ERROR: Validation failed: ${e.message}", textSize = 10, textColor = Color.Cyan)
@@ -211,9 +214,8 @@ fun OnboardingScreen() {
 }
 
 @Composable
-fun SSOHome() {
-    val context = LocalContext.current
-    val modDao = ModDatabase.getDatabase(context).modDao()
+fun ModDownloaderScreen() {
+    val modDao = ModDatabase.getDatabase().modDao()
     var settings by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     var showInitiatingDialog by rememberSaveable { mutableStateOf(false) }
@@ -231,7 +233,6 @@ fun SSOHome() {
     }
     val logMessages = remember { mutableStateListOf<String>() }
     val isPremium by GameFilesPreferences.getNullablePreference(IS_NEXUS_PREMIUM).collectAsState(initial = null)
-    var showLogs by remember { mutableStateOf(false) }
     val isValidated by remember {
         derivedStateOf { isPremium != null }
     }
@@ -301,11 +302,11 @@ fun SSOHome() {
     LaunchedEffect(Unit) {
         launch(Dispatchers.Default) {
             // The lists land in the database, which the screens observe; the returned list isn't needed
-            ModListManager.downloadAndParseModList(context)
+            ModListManager.downloadAndParseModList()
 
             val potiFile = File("${OpenMWPaths.USER_FILE_STORAGE}/OpenMW/POTI.modlist")
             if (potiFile.exists()) {
-                val count = importPotiModlistStructured(context, potiFile.path)
+                val count = importPotiModlistStructured(potiFile.path)
                 Log.d("MAIN", "Imported $count POTI mods")
                 addCustomLog("SSOHome: Imported $count POTI mods", textSize = 10, textColor = Color.Cyan)
 
@@ -335,17 +336,13 @@ fun SSOHome() {
         println("isValidated Changed: $isValidated")
     }
 
-    isInitialized()
 
     if (showInitiatingDialog) {
         ProgressDialog(
-            text = stringRes(R.string.loading)
+            text = stringRes(Res.string.loading)
         )
     }
 
-    if (showLogs) {
-        LogViewerDialog(onDismiss = { showLogs = false })
-    }
 
     if (StatusInfo.showProcessCompleteDialog) {
         val result = StatusInfo.installResult
@@ -579,7 +576,7 @@ fun SSOHome() {
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Image(
-                                painter = painterResource(id = R.drawable.approval_delegation_24dp_e8eaed_fill0_wght400_grad0_opsz24),
+                                painter = painterResource(Res.drawable.approval_delegation_24dp_e8eaed_fill0_wght400_grad0_opsz24),
                                 contentDescription = "Checkmark",
                                 colorFilter = ColorFilter.tint(Color.Green),
                                 modifier = Modifier
@@ -603,14 +600,14 @@ fun SSOHome() {
                                     contentColor = White   // Text color
                                 )
                             ) {
-                                Text(stringResource(R.string.remove_api_key), color = gold)
+                                Text(stringResource(Res.string.remove_api_key), color = gold)
                             }
                         }
                     } else {
                         OutlinedTextField(
                             value = apiKey,
                             onValueChange = { apiKey = it },
-                            label = { Text(stringResource(R.string.nexus_api_key)) },
+                            label = { Text(stringResource(Res.string.nexus_api_key)) },
                             modifier = Modifier
                                 .height(100.dp)
                         )
@@ -622,7 +619,7 @@ fun SSOHome() {
                                     dataStore.edit { preferences ->
                                         preferences[NEXUS_API_KEY] = apiKey
                                     }
-                                    validate(context)
+                                    validate()
                                 }
                             },
                             colors = ButtonDefaults.buttonColors(
@@ -630,7 +627,7 @@ fun SSOHome() {
                                 contentColor = White   // Text color
                             )
                         ) {
-                            Text(stringResource(R.string.save), color = gold)
+                            Text(stringResource(Res.string.save), color = gold)
                         }
                     }
                 }
@@ -683,7 +680,7 @@ fun SSOHome() {
                                 isNexusExpanded = true
                                 StatusInfo.processing = true
                                 ModListManager.runJob = scope.launch(Dispatchers.Default) {
-                                    processModList(context, isPremium!!).collect { processedMods ->
+                                    processModList(isPremium!!).collect { processedMods ->
                                         // Optional: Log or handle processed mods
                                         Log.d(
                                             "RateLimitDisplay",
@@ -696,7 +693,7 @@ fun SSOHome() {
                                         val jsonString =
                                             fetchJsonFromUrl("https://modding-openmw.com/api/cfg-generator/$modList")
                                         val config = parseOpenMWConfig(jsonString)
-                                        val formattedConfig = formatOpenMWConfig(context, config)
+                                        val formattedConfig = formatOpenMWConfig(config)
                                         val savedFile = saveConfigToFile(
                                             "$modList.cfg",
                                             formattedConfig
@@ -870,9 +867,8 @@ fun getAllAvailableLists(modDao: ModDao): List<String> {
 
 @Composable
 fun RateLimitDisplay() {
-    val context = LocalContext.current
     val availableSpace = getAvailableStorageSpace()
-    val modDao = remember { ModDatabase.getDatabase(context).modDao() }
+    val modDao = remember { ModDatabase.getDatabase().modDao() }
     var totalMods by remember { mutableIntStateOf(0) }
     val isPremium by GameFilesPreferences.getNullablePreference(IS_NEXUS_PREMIUM).collectAsState(initial = null)
 

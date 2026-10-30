@@ -1,0 +1,59 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Fri, 9 Oct 2026 17:52:11 -0400
+Subject: [PATCH 4/7] Use point resolution and skip USE_GRAPHICSWINDOW on iOS
+
+A native-scale HiDPI drawable does not match the window-unit viewport math, and OSG has no static graphics window to register for SDL there.
+---
+ apps/openmw/engine.cpp                  | 8 ++++++++
+ components/sdlutil/sdlcursormanager.cpp | 6 +++++-
+ 2 files changed, 13 insertions(+), 1 deletion(-)
+
+diff --git a/apps/openmw/engine.cpp b/apps/openmw/engine.cpp
+index e0bc11c523..396dbbedbc 100644
+--- a/apps/openmw/engine.cpp
++++ b/apps/openmw/engine.cpp
+@@ -1,5 +1,9 @@
+ #include "engine.hpp"
+ 
++#ifdef __APPLE__
++#include <TargetConditionals.h>
++#endif
++
+ #include <cerrno>
+ #include <chrono>
+ #include <future>
+@@ -551,6 +555,10 @@ void OMW::Engine::createWindow()
+         flags |= SDL_WINDOW_FULLSCREEN;
+     else if (windowMode == Settings::WindowMode::WindowedFullscreen)
+         flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
++#if TARGET_OS_IPHONE
++    // A native-scale drawable would not match the window-unit viewport math used by the engine.
++    flags &= ~SDL_WINDOW_ALLOW_HIGHDPI;
++#endif
+ 
+ #ifdef ANDROID
+     {
+diff --git a/components/sdlutil/sdlcursormanager.cpp b/components/sdlutil/sdlcursormanager.cpp
+index a582103ebc..af947d76d2 100644
+--- a/components/sdlutil/sdlcursormanager.cpp
++++ b/components/sdlutil/sdlcursormanager.cpp
+@@ -1,5 +1,9 @@
+ #include "sdlcursormanager.hpp"
+ 
++#ifdef __APPLE__
++#include <TargetConditionals.h>
++#endif
++
+ #include <memory>
+ #include <stdexcept>
+ #include <string>
+@@ -20,7 +24,7 @@
+ 
+ #include "imagetosurface.hpp"
+ 
+-#if defined(OSG_LIBRARY_STATIC) && (!defined(ANDROID) || OSG_VERSION_GREATER_THAN(3, 6, 5))
++#if defined(OSG_LIBRARY_STATIC) && !TARGET_OS_IPHONE && (!defined(ANDROID) || OSG_VERSION_GREATER_THAN(3, 6, 5))
+ // Sets the default windowing system interface according to the OS.
+ // Necessary for OpenSceneGraph to do some things, like decompression.
+ USE_GRAPHICSWINDOW()

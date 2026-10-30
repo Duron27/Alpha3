@@ -43,6 +43,7 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.DelicateCoroutinesApi
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.map
 import org.alpha3.launcher.engine.Engine
 import org.alpha3.launcher.engine.MouseActions
@@ -94,6 +95,9 @@ fun GameplayScreen(
         if (!ready) return@Box
 
         LaunchedEffect(size) {
+            // A host that rotates into landscape (iOS) reports several sizes while the rotation animates, and each
+            // control remembers the position of its first load: wait until the size settles (a newer size cancels this).
+            if (landscapeOnly) delay(300)
             UIStateManager.containerGlobalWidth.floatValue = containerWidth
             UIStateManager.containerGlobalHeight.floatValue = containerHeight
             // Engine coordinates are in points.

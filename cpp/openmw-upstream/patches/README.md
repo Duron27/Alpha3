@@ -1,8 +1,10 @@
-# Android patches for stock OpenMW
+# Patches for stock OpenMW (Android and iOS)
 
-`android/*.patch` is a `git format-patch` series on top of the commit pinned as `OPENMW_UPSTREAM_COMMIT` in
-`../CMakeLists.txt`. It is applied in order by `cmake/apply_patch.cmake` (`git apply`, skipped when already applied).
-Nothing here is shared with the fork's patches in `cpp/openmw`.
+`common/*.patch` is a `git format-patch` series on top of the commit pinned as `OPENMW_UPSTREAM_COMMIT` in
+`../CMakeLists.txt`, applied on every platform. It started as the Android series: what only Android needs is inside
+`#ifdef ANDROID` / `if (ANDROID)`, so it builds unchanged for iOS. `ios/*.patch` is a second series on top of it, applied
+on iOS only. Both are applied in order by `cmake/apply_patch.cmake` (`git apply`, skipped when already applied), and the
+multiplayer patch after them. Nothing here is shared with the fork's patches in `cpp/openmw`.
 
 The series is kept small on purpose, because OpenMW changes every day and every hunk can stop applying. What does not
 have to be in OpenMW's files lives elsewhere:
@@ -35,10 +37,15 @@ have to be in OpenMW's files lives elsewhere:
 
     git clone https://gitlab.com/OpenMW/openmw.git && cd openmw
     git checkout <old pinned commit>
-    git am /path/to/alpha3_aio/cpp/openmw-upstream/patches/android/*.patch
+    git am /path/to/alpha3_aio/cpp/openmw-upstream/patches/common/*.patch
+    git tag alpha3-common
+    git am /path/to/alpha3_aio/cpp/openmw-upstream/patches/ios/*.patch
     git rebase <new commit>            # fix conflicts
-    rm /path/to/.../patches/android/*.patch
-    git format-patch --no-signature --zero-commit <new commit> -o /path/to/.../patches/android
+    rm /path/to/.../patches/common/*.patch /path/to/.../patches/ios/*.patch
+    git format-patch --no-signature --zero-commit <new commit>..alpha3-common -o /path/to/.../patches/common
+    git format-patch --no-signature --zero-commit alpha3-common -o /path/to/.../patches/ios
+
+(after the rebase, move the tag to the rebased last common commit before the second format-patch)
 
 Then set `OPENMW_UPSTREAM_COMMIT` to the new commit, and check that the multiplayer patch (`multiplayer/*.patch`, applied
 after these, with `../support/multiplayer/tree` copied in first) still applies; rebase it the same way. The support library is compiled against OpenMW's `Settings::Manager`, `Log` and
@@ -68,6 +75,21 @@ offline with glslangValidator; it needs glslang and g++ on the host.
 15. The ESM readers cache keeps up to a quarter of RLIMIT_NOFILE content files open (100 to 2048), not 100
 16. Skinning (`RigGeometry::cull`): no allocation per frame, a branchless weighted sum, no perspective divide per vertex
 17. The time step follows the interval Swappy shows the frames at (`alpha3PacedFrameSeconds`, `../support/src/framepacing.cpp`)
+
+`ios/`, from the fork's iOS patches (`cpp/openmw/patches/ios/upstream`), rebased onto the common series:
+
+1. OpenMW is a shared library on iOS (`libopenmw.dylib`, wrapped into `libopenmw.framework` for the app, which calls its
+   `main`), with UIKit instead of Cocoa and no macOS bundling
+2. No crash catcher on iOS (ptrace and fork are not allowed), and no modal fatal error box
+3. `OPENMW_LOCAL_CONFIG_DIR` points the engine at the app's global config
+4. Point resolution (no HiDPI drawable) and no `USE_GRAPHICSWINDOW` (OSG has no window system on iOS; SDL makes the window)
+5. Render stages return to the context's default framebuffer object (iOS has no framebuffer 0)
+6. No `-noall_load` when linking for iOS
+7. An OpenGL ES 3.0 context (Apple's OpenGL ES stops at 3.0), OpenGLES.framework linked, and the support library built
+   into the engine as on Android. Its iOS half translates the shaders to `#version 300 es` (`OPENMW_GLES_VERSION=30`,
+   set by `OpenMWLauncher.swift`) and reports the context to the engine as GLSL 3.3 without compute shaders;
+   `../support/src/ios.cpp` stands in for Swappy, frame generation, Zink and mimalloc. OSG is built with the same GLES
+   patches as on Android plus `vcpkg-extras/ports/openmw-osg/ios/glad.patch`.
 
 ## Where the earlier patches went
 

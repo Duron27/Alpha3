@@ -35,8 +35,7 @@ import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import org.openmw.modDownloader.ModDatabase
-import org.openmw.modDownloader.ModListManager
+import org.alpha3.launcher.mods.downloader.ModDatabase
 import org.alpha3.launcher.ui.controls.UIStateManager
 import org.alpha3.launcher.ui.navigation.RootNav
 import org.alpha3.launcher.ui.theme.OpenMWTheme
@@ -50,7 +49,7 @@ import org.alpha3.launcher.paths.Profiles
 import org.openmw.utils.ConfigFileObserver
 import org.alpha3.launcher.utils.GameFilesPreferences
 import org.alpha3.launcher.utils.MyAlertDialog
-import org.openmw.modDownloader.NxmDownloads
+import org.alpha3.launcher.mods.downloader.NxmDownloads
 import org.openmw.utils.UpstreamEngine
 import org.openmw.utils.UserManageAssets
 
@@ -87,8 +86,7 @@ class MainActivity : ComponentActivity() {
         CaptureCrash.initialize(this)
         Thread.setDefaultUncaughtExceptionHandler(CaptureCrash())
 
-        ModListManager.init(this)
-        ModDatabase.getDatabase(this)
+        ModDatabase.getDatabase()
 
         handleNxmIntent(intent)
         checkPermissionsAndProceed()
@@ -114,7 +112,7 @@ class MainActivity : ComponentActivity() {
         val data = intent?.data ?: return
         if (data.scheme != "nxm") return
         intent.data = null
-        lifecycleScope.launch { NxmDownloads.handle(applicationContext, data) }
+        NxmDownloads.handle(data.toString())
     }
 
     private fun checkPermissionsAndProceed() {

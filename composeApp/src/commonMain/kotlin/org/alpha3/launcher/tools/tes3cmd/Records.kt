@@ -56,7 +56,7 @@ internal fun zstr(b: ByteArray?): String {
     if (b == null) return ""
     var end = b.indexOf(0)
     if (end < 0) end = b.size
-    return String(CharArray(end) { (b[it].toInt() and 0xff).toChar() })
+    return CharArray(end) { (b[it].toInt() and 0xff).toChar() }.concatToString()
 }
 
 internal fun zstrFixed(b: ByteArray, n: Int): String = zstr(b.copyOf(minOf(n, b.size)))

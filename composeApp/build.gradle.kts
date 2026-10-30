@@ -8,6 +8,8 @@ plugins {
     alias(libs.plugins.compose.multiplatform)
     alias(libs.plugins.compose.compiler)
     alias(libs.plugins.kotlin.serialization)
+    // Room's code generator for the mod downloader's database (version from the root build)
+    id("com.google.devtools.ksp")
 }
 
 // Provide defaults for Xcode properties to avoid "no value available" errors
@@ -50,6 +52,11 @@ kotlin {
             baseName = "ComposeApp"
             isStatic = true
         }
+        // The system libarchive (7z, rar, zip) unpacks downloaded mods. The SDK has the library but not its headers,
+        // so the .def declares the few functions used; the app links -larchive (see iosApp's OTHER_LDFLAGS).
+        iosTarget.compilations.getByName("main").cinterops.create("libarchive") {
+            defFile(project.file("src/nativeInterop/cinterop/libarchive.def"))
+        }
     }
 
     sourceSets {
@@ -59,9 +66,12 @@ kotlin {
             implementation(libs.androidx.documentfile)
             implementation(libs.relinker)
             implementation(libs.coil3.gif)
+            implementation(libs.ktor.client.okhttp)
+            implementation(libs.x.zip.jbinding.xandroid)
         }
         iosMain.dependencies {
             implementation(libs.ktor.client.darwin)
+            implementation(libs.androidx.sqlite.bundled)
         }
         commonMain.dependencies {
             implementation(libs.core)
@@ -93,11 +103,16 @@ kotlin {
             implementation(libs.coil3.network.ktor)
             implementation(libs.okio)
             implementation(libs.androidx.datastore.preferences)
+            implementation(libs.androidx.room.runtime)
         }
         commonTest.dependencies {
             implementation(libs.kotlin.test)
         }
     }
+}
+
+dependencies {
+    listOf("kspAndroid", "kspIosArm64", "kspIosSimulatorArm64").forEach { add(it, libs.androidx.room.compiler) }
 }
 
 compose.resources {

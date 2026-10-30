@@ -10,6 +10,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlin.concurrent.atomics.AtomicReference
+import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import org.alpha3.launcher.io.File
 import org.alpha3.launcher.paths.OpenMWPaths
 import org.alpha3.launcher.tools.coverify.CoverifyConfig
@@ -89,13 +91,23 @@ class ModToolsRunner(private val fs: ToolFs, private val platform: ToolPlatform)
     private val cfg get() = OpenMWPaths.USER_OPENMW_CFG
     private val outputDir get() = OpenMWPaths.USER_GENERATED
 
-    private val logLock = Any()
+    // Tools log from worker threads; append through a CAS loop so lines are never lost (synchronized is JVM-only).
+    @OptIn(ExperimentalAtomicApi::class)
+    private val logLines = AtomicReference(emptyList<String>())
+
+    @OptIn(ExperimentalAtomicApi::class)
     private fun log(msg: String) {
         val lines = msg.lines().filter { it.isNotBlank() }
-        if (lines.isNotEmpty()) synchronized(logLock) { log = (log + lines).takeLast(2000) }
+        if (lines.isEmpty()) return
+        while (true) {
+            val cur = logLines.load()
+            val next = (cur + lines).takeLast(2000)
+            if (logLines.compareAndSet(cur, next)) { log = next; return }
+        }
     }
 
-    fun clearLog() { synchronized(logLock) { log = emptyList() } }
+    @OptIn(ExperimentalAtomicApi::class)
+    fun clearLog() { logLines.store(emptyList()); log = emptyList() }
 
     fun start(tools: List<ModTool>) {
         if (running || tools.isEmpty()) return

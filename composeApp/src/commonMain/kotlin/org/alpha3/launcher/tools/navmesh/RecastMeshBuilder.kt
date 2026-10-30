@@ -2,6 +2,7 @@
 // Port of OpenMW's components/detournavigator/recastmeshbuilder.cpp.
 package org.alpha3.launcher.tools.navmesh
 
+import kotlin.jvm.JvmField
 import kotlin.math.floor
 
 internal class RecastMeshTriangle(@JvmField val areaType: Int, @JvmField val v: FloatArray)

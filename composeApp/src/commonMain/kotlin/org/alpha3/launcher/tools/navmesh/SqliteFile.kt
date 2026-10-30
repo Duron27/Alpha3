@@ -3,6 +3,8 @@
 // freshly vacuumed database looks (4096 byte pages, UTF-8, rollback journal mode), so OpenMW can open the result.
 package org.alpha3.launcher.tools.navmesh
 
+import kotlin.jvm.JvmField
+
 internal const val PAGE = 4096
 internal const val MAX_LOCAL_TABLE = PAGE - 35
 internal const val MAX_LOCAL_INDEX = ((PAGE - 12) * 64 / 255) - 23
@@ -378,7 +380,7 @@ private fun readVarint(b: ByteArray, o: Int): VarintResult {
 private class DbReader(val db: ByteArray) {
     val pageSize: Int
     init {
-        if (db.size < 100 || String(CharArray(15) { db[it].toInt().toChar() }) != "SQLite format 3") throw NavMeshException("not an SQLite database")
+        if (db.size < 100 || CharArray(15) { db[it].toInt().toChar() }.concatToString() != "SQLite format 3") throw NavMeshException("not an SQLite database")
         val ps = be16(db, 16)
         pageSize = if (ps == 1) 65536 else ps
         if (db.size % pageSize != 0) throw NavMeshException("truncated SQLite database")

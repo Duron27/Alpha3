@@ -1,41 +1,27 @@
-package org.openmw.modDownloader
+package org.alpha3.launcher.mods.downloader
 
-import android.content.Context
-import android.util.Log
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import org.json.JSONObject
+import androidx.compose.ui.graphics.Color
 import kotlinx.coroutines.flow.first
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import org.alpha3.launcher.io.File
 import org.alpha3.launcher.paths.OpenMWPaths
 import org.alpha3.launcher.paths.Profiles
-import org.alpha3.launcher.tools.openmw.AndroidToolFs
-import org.alpha3.launcher.tools.openmw.androidToolPlatform
 import org.alpha3.launcher.tools.openmw.disableMissingConfigEntries
-import org.alpha3.launcher.utils.GameFilesPreferences
-import androidx.compose.ui.graphics.Color
 import org.alpha3.launcher.ui.view.addCustomLog
-import java.io.File
-import java.io.FileOutputStream
+import org.alpha3.launcher.utils.GameFilesPreferences
+import org.alpha3.launcher.utils.Log
+import org.alpha3.launcher.utils.Platform
 
 fun saveConfigToFile(fileName: String, content: String): File {
-    val file = File("${OpenMWPaths.USER_FILE_STORAGE}/OpenMW/", fileName)
-    FileOutputStream(file).use { output ->
-        output.write(content.toByteArray())
-    }
+    val file = File("$modStorage/", fileName)
+    file.writeText(content)
     return file
 }
 
-fun fetchJsonFromUrl(url: String): String {
-    val client = OkHttpClient()
-    val request = Request.Builder().url(url).build()
-    client.newCall(request).execute().use { response ->
-        if (response.isSuccessful) {
-            return response.body.string()
-        } else {
-            throw Exception("Failed to fetch JSON: ${response.code}")
-        }
-    }
-}
+suspend fun fetchJsonFromUrl(url: String): String = ModHttp.getText(url, userAgent = null)
 
 data class OpenMWConfig(
     val fallbackValues: String,
@@ -45,66 +31,45 @@ data class OpenMWConfig(
     val groundcoverFiles: String
 )
 
+/** The site's cfg generator answer, with its Windows paths moved to this device's mod folder. */
 fun parseOpenMWConfig(jsonString: String): OpenMWConfig {
-    val jsonObject = JSONObject(jsonString)
-    val openmwCfg = jsonObject.getJSONObject("openmw_cfg")
+    val openmwCfg = Json.parseToJsonElement(jsonString).jsonObject["openmw_cfg"] as? JsonObject
+        ?: throw IllegalArgumentException("No openmw_cfg in the cfg generator's answer")
 
-    // Helper function to transform paths
-    fun transformPath(path: String): String {
-        return path
-            .replace("C:\\games\\OpenMWMods\\", "${OpenMWPaths.USER_FILE_STORAGE}/OpenMW/Mods/")
-            .replace("\\", "/")
-    }
+    fun transformPath(path: String): String = path
+        .replace("C:\\games\\OpenMWMods\\", "$modStorage/Mods/")
+        .replace("\\", "/")
 
-    val fallbackValues = transformPath(openmwCfg.getString("fallback values"))
-    val dataPaths = openmwCfg.getString("data paths")
-        .split("\n")
-        .filter { it.isNotBlank() }
-        .map { transformPath(it) }
-    val fallbackArchives = openmwCfg.getString("fallback archives")
-        .split("\n")
-        .filter { it.isNotBlank() }
-        .map { transformPath(it) }
-    val contentFiles = openmwCfg.getString("content files")
-        .split("\n")
-        .filter { it.isNotBlank() }
-        .map { transformPath(it) }
-    val groundcoverFiles = transformPath(openmwCfg.getString("groundcover files"))
+    fun string(name: String): String = openmwCfg[name]?.jsonPrimitive?.content
+        ?: throw IllegalArgumentException("No \"$name\" in the cfg generator's answer")
+
+    fun lines(name: String) = string(name).split("\n").filter { it.isNotBlank() }.map { transformPath(it) }
 
     return OpenMWConfig(
-        fallbackValues = fallbackValues,
-        dataPaths = dataPaths,
-        fallbackArchives = fallbackArchives,
-        contentFiles = contentFiles,
-        groundcoverFiles = groundcoverFiles
+        fallbackValues = transformPath(string("fallback values")),
+        dataPaths = lines("data paths"),
+        fallbackArchives = lines("fallback archives"),
+        contentFiles = lines("content files"),
+        groundcoverFiles = transformPath(string("groundcover files"))
     )
 }
 
-suspend fun formatOpenMWConfig(context: Context, config: OpenMWConfig): String {
+suspend fun formatOpenMWConfig(config: OpenMWConfig): String {
     val gameFilesUri = GameFilesPreferences.getNullablePreference(GameFilesPreferences.GAME_FILES_URI_KEY).first()
     val builder = StringBuilder()
 
-    // Fallback Values
     builder.append(config.fallbackValues).append("\n\n")
 
-    // Data Paths
     builder.append("## Data Paths\n")
     builder.append("data=$gameFilesUri/Data Files\n")
-    config.dataPaths.forEach { path ->
-        builder.append("$path\n")
-    }
+    config.dataPaths.forEach { builder.append("$it\n") }
     builder.append("\n")
 
-    // BSAs
     builder.append("## BSAS\n")
-    config.fallbackArchives.forEach { archive ->
-        builder.append("$archive\n")
-    }
+    config.fallbackArchives.forEach { builder.append("$it\n") }
     builder.append("\n")
 
-    // Plugins
     builder.append("## Plugins\n")
-
     config.contentFiles
         .filter {
             it !in listOf(
@@ -115,15 +80,7 @@ suspend fun formatOpenMWConfig(context: Context, config: OpenMWConfig): String {
                 "content=deleted_groundcover.omwaddon"
             )
         }
-        .forEach { content ->
-            val contentLine = if (content.startsWith("content=")) {
-                content
-            } else {
-                "content=$content"
-            }
-
-            builder.append("$contentLine\n")
-        }
+        .forEach { content -> builder.append(if (content.startsWith("content=")) content else "content=$content").append("\n") }
 
     return builder.toString()
 }
@@ -133,10 +90,12 @@ suspend fun formatOpenMWConfig(context: Context, config: OpenMWConfig): String {
  * plugins or archives that do not exist (a failed download, a tool that did not run), so the game still starts.
  */
 fun disableMissingConfigEntries(vararg paths: String?) {
+    val fs = Platform.features.toolFs ?: return
+    val platform = Platform.features.toolPlatform ?: return
     for (path in paths.filterNotNull().distinct()) {
         try {
             if (!File(path).isFile) continue
-            val check = disableMissingConfigEntries(AndroidToolFs, androidToolPlatform(), path) { Log.d("ConfigCheck", it) }
+            val check = disableMissingConfigEntries(fs, platform, path) { Log.d("ConfigCheck", it) }
             if (check.disabled.isNotEmpty()) {
                 addCustomLog("Disabled ${check.disabled.size} openmw.cfg entries with missing files in ${File(path).name}", textSize = 10, textColor = Color.Yellow)
             }
@@ -145,7 +104,6 @@ fun disableMissingConfigEntries(vararg paths: String?) {
         }
     }
 }
-
 
 /** What [installModListProfile] did, for the "mod list installed" popup. */
 class ProfileInstall(
@@ -178,14 +136,18 @@ fun installModListProfile(modList: String, generatedCfg: String?): ProfileInstal
         val settings = File(folder, "settings.cfg")
         if (!settings.exists()) File(OpenMWPaths.BASE_CONFIG, "settings.cfg").takeIf { it.isFile }?.copyTo(settings)
         val settingsCopied = !hadSettings && settings.exists()
-        val source = File(generatedCfg ?: "${OpenMWPaths.USER_FILE_STORAGE}/OpenMW/$modList.cfg")
+        val source = File(generatedCfg ?: "$modStorage/$modList.cfg")
         if (!source.isFile) {
             return ProfileInstall(modList, name, folder, settingsCopied, false, 0, "The config for $modList was not downloaded, so the profile's openmw.cfg is still a copy of the default one.")
         }
         val target = File(folder, "openmw.cfg")
         source.copyTo(target, overwrite = true)
-        val check = disableMissingConfigEntries(AndroidToolFs, androidToolPlatform(), target.absolutePath) { Log.d("ConfigCheck", it) }
-        ProfileInstall(modList, name, folder, settingsCopied, true, check.disabled.size, null)
+        val fs = Platform.features.toolFs
+        val platform = Platform.features.toolPlatform
+        val disabled = if (fs != null && platform != null) {
+            disableMissingConfigEntries(fs, platform, target.absolutePath) { Log.d("ConfigCheck", it) }.disabled.size
+        } else 0
+        ProfileInstall(modList, name, folder, settingsCopied, true, disabled, null)
     } catch (e: Exception) {
         Log.e("ProfileInstall", "Could not install the profile for $modList", e)
         ProfileInstall(modList, name, folder, false, false, 0, "Could not set up the profile: ${e.message}")

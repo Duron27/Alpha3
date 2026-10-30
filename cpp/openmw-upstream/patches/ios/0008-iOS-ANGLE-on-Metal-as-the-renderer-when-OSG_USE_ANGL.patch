@@ -1,0 +1,177 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Thu, 29 Oct 2026 23:59:00 -0400
+Subject: [PATCH 8/8] iOS: ANGLE on Metal as the renderer when OSG_USE_ANGLE is
+ set
+
+The window is made a Metal one and Alpha3's support library makes the context: ANGLE's EGL (libGLESv2_angle.framework, opened at runtime) on the CAMetalLayer view SDL puts in the window. Making it current, presenting and the swap interval go to that context instead of SDL's, as the Zink context does on Android.
+---
+diff --git a/apps/openmw/engine.cpp b/apps/openmw/engine.cpp
+--- a/apps/openmw/engine.cpp
++++ b/apps/openmw/engine.cpp
+@@ -558,6 +558,9 @@
+ #if TARGET_OS_IPHONE
+     // A native-scale drawable would not match the window-unit viewport math used by the engine.
+     flags &= ~SDL_WINDOW_ALLOW_HIGHDPI;
++    // ANGLE on Metal (Alpha3's support library): the window gets a CAMetalLayer for ANGLE's EGL, no SDL OpenGL context
++    if (getenv("OSG_USE_ANGLE") != nullptr)
++        flags = (flags & ~SDL_WINDOW_OPENGL) | SDL_WINDOW_METAL;
+ #endif
+ 
+ #ifdef ANDROID
+diff --git a/components/sdlutil/sdlgraphicswindow.cpp b/components/sdlutil/sdlgraphicswindow.cpp
+--- a/components/sdlutil/sdlgraphicswindow.cpp
++++ b/components/sdlutil/sdlgraphicswindow.cpp
+@@ -2,7 +2,7 @@
+ 
+ #include <SDL_video.h>
+ 
+-#ifdef ANDROID
++#if defined(ANDROID) || TARGET_OS_IPHONE
+ #include <alpha3/upstream.hpp>
+ #endif
+ 
+@@ -119,7 +119,29 @@
+             _traits->doubleBuffer = true;
+             _traits->sampleBuffers = 0;
+             _traits->samples = 0;
++            mValid = true;
++            getEventQueue()->syncWindowRectangleWithGraphicsContext();
++            return;
++        }
++#endif
++#if TARGET_OS_IPHONE
++        if (getenv("OSG_USE_ANGLE") != nullptr)
++        {
++            mAngle = Alpha3::AngleContext::create(mWindow, _traits->samples);
++            if (!mAngle)
++                return;
++            _traits->red = _traits->green = _traits->blue = 8;
++            _traits->alpha = 0;
++            _traits->depth = mAngle->depthBits();
++            _traits->stencil = mAngle->stencilBits();
++            _traits->doubleBuffer = true;
++            _traits->sampleBuffers = mAngle->samples() > 0 ? 1 : 0;
++            _traits->samples = mAngle->samples();
+             mValid = true;
++            // ANGLE's window surface is the default framebuffer, FBO 0
++            mAngle->makeCurrent();
++            setSwapInterval(mVSyncMode);
++            mAngle->release();
+             getEventQueue()->syncWindowRectangleWithGraphicsContext();
+             return;
+         }
+@@ -259,6 +281,10 @@
+         if (mZink)
+             return mZink->makeCurrent();
+ #endif
++#if TARGET_OS_IPHONE
++        if (mAngle)
++            return mAngle->makeCurrent();
++#endif
+         return SDL_GL_MakeCurrent(mWindow, mContext) == 0;
+     }
+ 
+@@ -274,6 +300,10 @@
+         if (mZink)
+             return Alpha3::ZinkContext::release();
+ #endif
++#if TARGET_OS_IPHONE
++        if (mAngle)
++            return mAngle->release();
++#endif
+         return SDL_GL_MakeCurrent(nullptr, nullptr) == 0;
+     }
+ 
+@@ -282,6 +312,9 @@
+ #ifdef ANDROID
+         mZink.reset();
+ #endif
++#if TARGET_OS_IPHONE
++        mAngle.reset();
++#endif
+         if (mContext)
+             SDL_GL_DeleteContext(mContext);
+         mContext = nullptr;
+@@ -303,6 +336,10 @@
+         if (mZink)
+             return mZink->present();
+ #endif
++#if TARGET_OS_IPHONE
++        if (mAngle)
++            return mAngle->present();
++#endif
+         SDL_GL_SwapWindow(mWindow);
+     }
+ 
+@@ -318,6 +355,11 @@
+         if (mZink)
+             return;
+ #endif
++#if TARGET_OS_IPHONE
++        // the context is current on the draw thread, where OSG calls this
++        if (mAngle)
++            return setSwapInterval(mode);
++#endif
+         SDL_Window* oldWin = SDL_GL_GetCurrentWindow();
+         SDL_GLContext oldCtx = SDL_GL_GetCurrentContext();
+ 
+@@ -332,6 +374,15 @@
+     {
+         mVSyncMode = mode;
+ 
++#if TARGET_OS_IPHONE
++        if (mAngle)
++        {
++            // eglSwapInterval has no adaptive mode
++            mAngle->setSwapInterval(mode == VSyncMode::Disabled ? 0 : 1);
++            return;
++        }
++#endif
++
+         if (mode == VSyncMode::Adaptive)
+         {
+             if (SDL_GL_SetSwapInterval(-1) == -1)
+diff --git a/components/sdlutil/sdlgraphicswindow.hpp b/components/sdlutil/sdlgraphicswindow.hpp
+--- a/components/sdlutil/sdlgraphicswindow.hpp
++++ b/components/sdlutil/sdlgraphicswindow.hpp
+@@ -3,7 +3,11 @@
+ 
+ #include <SDL_video.h>
+ 
+-#ifdef ANDROID
++#ifdef __APPLE__
++#include <TargetConditionals.h>
++#endif
++
++#if defined(ANDROID) || TARGET_OS_IPHONE
+ #include <memory>
+ #endif
+ 
+@@ -17,6 +21,12 @@
+     class ZinkContext;
+ }
+ #endif
++#if TARGET_OS_IPHONE
++namespace Alpha3
++{
++    class AngleContext;
++}
++#endif
+ 
+ namespace SDLUtil
+ {
+@@ -29,6 +39,10 @@
+         // renderer = opengl: desktop GL through Mesa Zink instead of an SDL/EGL context (Alpha3's support library)
+         std::unique_ptr<Alpha3::ZinkContext> mZink;
+ #endif
++#if TARGET_OS_IPHONE
++        // OSG_USE_ANGLE: OpenGL ES through ANGLE on Metal instead of an SDL context (Alpha3's support library)
++        std::unique_ptr<Alpha3::AngleContext> mAngle;
++#endif
+ 
+         bool mValid;
+         bool mRealized;
+-- 
+2.50.1
+

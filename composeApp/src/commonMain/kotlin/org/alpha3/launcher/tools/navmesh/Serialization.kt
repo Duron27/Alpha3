@@ -2,6 +2,7 @@
 // Port of the binary formats in OpenMW's components/detournavigator/serialization.cpp (little endian).
 package org.alpha3.launcher.tools.navmesh
 
+import kotlin.jvm.JvmField
 import org.alpha3.launcher.tools.navmesh.recast.PolyMesh
 import org.alpha3.launcher.tools.navmesh.recast.PolyMeshDetail
 

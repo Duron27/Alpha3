@@ -33,5 +33,11 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         window.rootViewController = LauncherRootViewController(content: launcher)
         window.makeKeyAndVisible()
         self.window = window
+#if DEBUG
+        // `xcrun simctl launch <device> org.alpha3.launcher.Alpha3 -autoplay` starts the game without tapping Play
+        if ProcessInfo.processInfo.arguments.contains("-autoplay") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { startEngine() }
+        }
+#endif
     }
 }

@@ -1,0 +1,56 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Thu, 29 Oct 2026 22:27:11 -0400
+Subject: [PATCH 7/7] iOS: OpenGL ES 3.0 context and Alpha3's support library
+ in the engine
+
+The window asks SDL for an OpenGL ES 3 context (OPENMW_GLES_VERSION still picks another), the engine links OpenGLES.framework, whose functions glad loads at runtime, and the support library (shader translation, program binary cache, texture conversion) is built into it as on Android.
+---
+ apps/openmw/CMakeLists.txt               | 6 +++++-
+ components/sdlutil/sdlgraphicswindow.cpp | 7 ++++++-
+ 2 files changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/apps/openmw/CMakeLists.txt b/apps/openmw/CMakeLists.txt
+index 21a86a9097..7af03c191e 100644
+--- a/apps/openmw/CMakeLists.txt
++++ b/apps/openmw/CMakeLists.txt
+@@ -163,6 +163,8 @@ if(BUILD_OPENMW)
+     if (ANDROID)
+         # Ships next to the fork's libopenmw.so in the same APK
+         set_target_properties(openmw PROPERTIES OUTPUT_NAME openmw_upstream)
++    endif()
++    if (ANDROID OR IOS)
+         # Alpha3's support library (OSG RuntimeHooks: shader translation, caches, frame pacing, ...), see its CMakeLists.txt
+         if (ALPHA3_SUPPORT_DIR)
+             add_subdirectory(${ALPHA3_SUPPORT_DIR} ${CMAKE_BINARY_DIR}/alpha3-support)
+@@ -256,8 +258,10 @@ if(IOS AND BUILD_OPENMW)
+     find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
+     find_library(COREGRAPHICS_FRAMEWORK CoreGraphics REQUIRED)
+     find_library(QUARTZCORE_FRAMEWORK QuartzCore REQUIRED)
++    # OSG calls OpenGL ES through glad, which looks the functions up in OpenGLES.framework at runtime
++    find_library(OPENGLES_FRAMEWORK OpenGLES REQUIRED)
+     target_link_libraries(openmw ${UIKIT_FRAMEWORK} ${FOUNDATION_FRAMEWORK} ${COREGRAPHICS_FRAMEWORK}
+-                                 ${QUARTZCORE_FRAMEWORK})
++                                 ${QUARTZCORE_FRAMEWORK} ${OPENGLES_FRAMEWORK})
+ 
+     if (FFmpeg_FOUND)
+         target_link_options(openmw PRIVATE "LINKER:SHELL:-framework CoreVideo"
+diff --git a/components/sdlutil/sdlgraphicswindow.cpp b/components/sdlutil/sdlgraphicswindow.cpp
+index 142380e67a..06460f2f7e 100644
+--- a/components/sdlutil/sdlgraphicswindow.cpp
++++ b/components/sdlutil/sdlgraphicswindow.cpp
+@@ -130,8 +130,13 @@ namespace SDLUtil
+         SDL_Window* oldWin = SDL_GL_GetCurrentWindow();
+         SDL_GLContext oldCtx = SDL_GL_GetCurrentContext();
+ 
+-#if defined(ANDROID) || defined(OPENMW_GL4ES_MANUAL_INIT)
++#if defined(ANDROID) || defined(OPENMW_GL4ES_MANUAL_INIT) || TARGET_OS_IPHONE
++#if TARGET_OS_IPHONE
++        // iOS has OpenGL ES 3.0 and nothing newer
++        int major = 3;
++#else
+         int major = 2;
++#endif
+         int minor = 0;
+ 
+         if (const char* const version_env = getenv("OPENMW_GLES_VERSION"))

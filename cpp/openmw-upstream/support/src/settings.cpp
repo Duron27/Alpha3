@@ -8,7 +8,9 @@
 #include <SDL_hints.h>
 
 #include <components/debug/debuglog.hpp>
+#ifdef __ANDROID__
 #include <components/files/androidpath.hpp>
+#endif
 #include <components/settings/settings.hpp>
 
 namespace Alpha3
@@ -63,7 +65,13 @@ namespace Alpha3
 
     std::filesystem::path cacheDirectory()
     {
+#ifdef __ANDROID__
         return Files::AndroidPath("openmw").getCachePath();
+#else
+        // iOS: the app container's Library/Caches (HOME is the container)
+        const char* home = std::getenv("HOME");
+        return std::filesystem::path(home ? home : ".") / "Library" / "Caches" / "openmw";
+#endif
     }
 
     bool usesZink()

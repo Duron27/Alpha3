@@ -486,6 +486,33 @@ fun GraphicsSettingsSection() {
             TexturePrepassRow()
         }
 
+        // The renderers of a platform without custom GPU drivers (iOS: Apple's OpenGL ES or ANGLE on Metal)
+        val glRenderers = Platform.features.glRenderers
+        if (Platform.features.gpuDrivers == null && glRenderers.isNotEmpty()) {
+            val default = glRenderers.keys.first()
+            val glRenderer by GameFilesPreferences.getPreference(GameFilesPreferences.GL_RENDERER_KEY, default).collectAsState(initial = default)
+            var rendererExpanded by remember { mutableStateOf(false) }
+            SettingRow(
+                title = "Renderer",
+                subtitle = glRenderers[glRenderer] ?: glRenderers.getValue(default)
+            ) {
+                Box(modifier = Modifier.clickable { rendererExpanded = true }) {
+                    Text("Change", modifier = Modifier.padding(8.dp), color = White)
+                    DropdownMenu(expanded = rendererExpanded, onDismissRequest = { rendererExpanded = false }) {
+                        glRenderers.forEach { (option, name) ->
+                            DropdownMenuItem(
+                                text = { Text(name, color = White) },
+                                onClick = {
+                                    scope.launch { GameFilesPreferences.setPreference(GameFilesPreferences.GL_RENDERER_KEY, option) }
+                                    rendererExpanded = false
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
         // Frame pacing (Swappy) only exists on Android's OpenGL ES renderer
         if (Platform.features.gpuDrivers != null) {
             SettingRow(

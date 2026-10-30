@@ -1,0 +1,33 @@
+--- a/src/osg/Capability.cpp
++++ b/src/osg/Capability.cpp
+@@ -46,7 +46,14 @@
+     }
+     else
+     {
+-        OSG_WARN<<"Warning: Enablei::apply(..) failed, Enablei is not support by OpenGL driver."<<std::endl;
++        // OpenGL ES 3.0 (Apple's) has no indexed enables. OpenMW only uses them for the normals render target, which it
++        // turns off without them, but sets them on every terrain pass: warn once instead of every draw.
++        static bool warned = false;
++        if (!warned)
++        {
++            warned = true;
++            OSG_WARN<<"Warning: Enablei/Disablei::apply(..) failed, glEnablei/glDisablei are not supported by the OpenGL driver."<<std::endl;
++        }
+     }
+ }
+ 
+@@ -60,6 +67,13 @@
+     }
+     else
+     {
+-        OSG_WARN<<"Warning: Enablei::apply(..) failed, Enablei is not support by OpenGL driver."<<std::endl;
++        // OpenGL ES 3.0 (Apple's) has no indexed enables. OpenMW only uses them for the normals render target, which it
++        // turns off without them, but sets them on every terrain pass: warn once instead of every draw.
++        static bool warned = false;
++        if (!warned)
++        {
++            warned = true;
++            OSG_WARN<<"Warning: Enablei/Disablei::apply(..) failed, glEnablei/glDisablei are not supported by the OpenGL driver."<<std::endl;
++        }
+     }
+ }

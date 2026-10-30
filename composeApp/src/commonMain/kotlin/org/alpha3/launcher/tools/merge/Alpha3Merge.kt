@@ -157,7 +157,7 @@ fun runAlpha3Merge(o: Alpha3MergeOptions, nowMillis: () -> Long = { 0L }): Alpha
     val merged = mergeRecords(loaded, order.filter { it in loaded }, o.log)
         .sortedWith(compareBy({ it.value.recordTag }, { it.value.recordId.lowercase() }))
     o.log("Merged in ${(nowMillis() - mergeStart) / 1000} s: " +
-        merged.groupingBy { it.value.recordTag }.eachCount().toSortedMap().entries.joinToString(", ") { "${it.value} ${it.key}" })
+        merged.groupingBy { it.value.recordTag }.eachCount().entries.sortedBy { it.key }.joinToString(", ") { "${it.value} ${it.key}" })
 
     val outPath = joinPath(o.outputDirectory, o.outputName)
     var added = emptyList<String>()
@@ -179,9 +179,9 @@ fun runAlpha3Merge(o: Alpha3MergeOptions, nowMillis: () -> Long = { 0L }): Alpha
         }
     }
     o.log("Done: ${merged.size} merged records")
-    o.log("Shared records by type: " + wanted.groupingBy { it.substringBefore("::") }.eachCount().toSortedMap().entries.joinToString(", ") { "${it.value} ${it.key}" })
+    o.log("Shared records by type: " + wanted.groupingBy { it.substringBefore("::") }.eachCount().entries.sortedBy { it.key }.joinToString(", ") { "${it.value} ${it.key}" })
     o.log("Loaded records by type: " + loaded.values.flatMap { p -> p.records.values.filterNotNull().map { it.recordTag } }
-        .groupingBy { it }.eachCount().toSortedMap().entries.joinToString(", ") { "${it.value} ${it.key}" })
+        .groupingBy { it }.eachCount().entries.sortedBy { it.key }.joinToString(", ") { "${it.value} ${it.key}" })
     return Alpha3MergeResult(
         cfgPath, outPath, order.size,
         merged.map { MergedRecordInfo(it.value.recordTag, it.value.recordId, it.sources) },

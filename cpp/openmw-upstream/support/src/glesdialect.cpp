@@ -97,7 +97,7 @@ namespace Alpha3
         // Rewrites the identifiers of one source. Comments and number literals are copied untouched.
         std::string rewriteIdentifiers(const std::string& source, GlslStage stage, GlslTarget target, Needs& needs)
         {
-            const bool gles = target == GlslTarget::Gles32;
+            const bool gles = target == GlslTarget::Gles;
             const bool vertex = stage == GlslStage::Vertex;
             std::string out;
             out.reserve(source.size() + source.size() / 16);
@@ -508,7 +508,7 @@ namespace Alpha3
 
         std::string buildDeclarations(const Needs& needs, GlslStage stage, GlslTarget target)
         {
-            const bool gles = target == GlslTarget::Gles32;
+            const bool gles = target == GlslTarget::Gles;
             std::string out;
             if (gles)
                 out += "precision highp float; precision highp int; precision highp sampler2D; precision highp sampler3D;"
@@ -552,9 +552,23 @@ namespace Alpha3
         }
     }
 
+    unsigned int glesVersion()
+    {
+        static const unsigned int version = [] {
+            const char* env = std::getenv("OPENMW_GLES_VERSION");
+            const std::string_view value = env ? env : "";
+            if (value == "30" || value == "3.0")
+                return 300u;
+            if (value == "31" || value == "3.1")
+                return 310u;
+            return 320u;
+        }();
+        return version;
+    }
+
     GlslTarget glslTarget()
     {
-        static const GlslTarget target = std::getenv("OSG_USE_ZINK") != nullptr ? GlslTarget::DesktopCompat : GlslTarget::Gles32;
+        static const GlslTarget target = std::getenv("OSG_USE_ZINK") != nullptr ? GlslTarget::DesktopCompat : GlslTarget::Gles;
         return target;
     }
 
@@ -642,23 +656,23 @@ namespace Alpha3
 
         Needs needs;
         const bool clipDistances
-            = target == GlslTarget::Gles32 && stage == GlslStage::Vertex && sClipDistancesAvailable;
+            = target == GlslTarget::Gles && stage == GlslStage::Vertex && sClipDistancesAvailable;
         std::string translated
             = rewriteIdentifiers(clipDistances ? replaceClipVertex(source, needs) : source, stage, target, needs);
-        if (target == GlslTarget::Gles32)
+        if (target == GlslTarget::Gles)
             translated = stripDesktopExtensions(stripUniformInitializers(translated));
-        if (target == GlslTarget::Gles32 && stage == GlslStage::Vertex && depthClamp)
+        if (target == GlslTarget::Gles && stage == GlslStage::Vertex && depthClamp)
             translated = wrapMainForDepthClamp(translated);
-        if (target == GlslTarget::Gles32)
+        if (target == GlslTarget::Gles)
             translated = replaceEmptyMacros(translated);
 
         // the version line sits at the same offset: the rewrite does not touch "#version 120" (no identifier of ours in it)
         const std::size_t newVersionEnd = translated.find('\n', versionPos);
-        if (target == GlslTarget::Gles32)
-            translated.replace(versionPos, newVersionEnd - versionPos, "#version 320 es");
+        if (target == GlslTarget::Gles)
+            translated.replace(versionPos, newVersionEnd - versionPos, "#version " + std::to_string(glesVersion()) + " es");
 
         std::string declarations = buildDeclarations(needs, stage, target);
-        if (target == GlslTarget::Gles32 && stage == GlslStage::Vertex
+        if (target == GlslTarget::Gles && stage == GlslStage::Vertex
             && (needs.clipPlanes || translated.find("gl_ClipDistance") != std::string::npos))
             declarations.insert(0, "#extension GL_EXT_clip_cull_distance : enable\n");
         if (!declarations.empty())
@@ -675,16 +689,19 @@ namespace Alpha3
         // The compute shaders are written for desktop GLSL and are not translated as text
         std::string translated
             = stage == GlslStage::Compute ? source : translateGlslText(source, stage, target, depthClamp);
-        if (target == GlslTarget::Gles32)
+        if (target == GlslTarget::Gles)
             translated = pruneUnusedStorageBlocks(translated);
         // Regardless of what the text translation did or skipped, the default sends the result through glslang and SPIRV-Cross
-        if (target == GlslTarget::Gles32 && spirvConversionEnabled())
-            return convertGlslToGles(translated, stage);
+        if (target == GlslTarget::Gles && spirvConversionEnabled())
+            return convertGlslToGles(translated, stage, glesVersion());
         return translated;
     }
 
     bool computeShadersAvailable()
     {
-        return glslTarget() != GlslTarget::Gles32 || spirvConversionEnabled();
+        // OpenGL ES 3.0 has no compute shaders at all
+        if (glslTarget() == GlslTarget::Gles && glesVersion() < 310)
+            return false;
+        return glslTarget() != GlslTarget::Gles || spirvConversionEnabled();
     }
 }

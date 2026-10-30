@@ -1,4 +1,4 @@
-package org.openmw.modDownloader
+package org.alpha3.launcher.mods.downloader
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -25,13 +25,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Color.Companion.White
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import org.alpha3.launcher.ui.controls.UIStateManager.gold
-import org.openmw.modDownloader.ModListManager.allowExtract
+import org.alpha3.launcher.utils.formatDecimals
+import org.alpha3.launcher.mods.downloader.ModListManager.allowExtract
 
 private enum class FileState { WAITING, DOWNLOADING, EXTRACTING, DONE, FAILED }
 
@@ -92,14 +92,14 @@ private fun fileRows(): List<FileRow> {
 }
 
 /** Files that are done or failed, counted from what is on screen, so the number always agrees with the rows. */
-internal fun finishedFileCount(): Int = fileRows().count { it.state == FileState.DONE || it.state == FileState.FAILED }
+fun finishedFileCount(): Int = fileRows().count { it.state == FileState.DONE || it.state == FileState.FAILED }
 
 /** What the notification shows: a line per file being downloaded, how many are unpacking, and the bytes received so far. */
-internal class NotificationProgress(val downloading: List<String>, val unpacking: Int, val receivedBytes: Long)
+class NotificationProgress(val downloading: List<String>, val unpacking: Int, val receivedBytes: Long)
 
 private const val NAME_CHARS = 24
 
-internal fun notificationProgress(): NotificationProgress {
+fun notificationProgress(): NotificationProgress {
     val rows = fileRows()
     val downloading = rows.filter { it.state == FileState.DOWNLOADING }.sortedByDescending { it.percent }.map { row ->
         // Progress first and the name cut short: a notification line is one line, and what does not fit is dropped
@@ -115,10 +115,10 @@ internal fun notificationProgress(): NotificationProgress {
     )
 }
 
-internal fun sizeText(bytes: Long): String = when {
-    bytes >= 1L shl 30 -> "%.2f GB".format(bytes / (1024.0 * 1024 * 1024))
-    bytes >= 1L shl 20 -> "%.0f MB".format(bytes / (1024.0 * 1024))
-    else -> "%d KB".format(bytes / 1024)
+fun sizeText(bytes: Long): String = when {
+    bytes >= 1L shl 30 -> "${formatDecimals(bytes / (1024.0 * 1024 * 1024), 2)} GB"
+    bytes >= 1L shl 20 -> "${formatDecimals(bytes / (1024.0 * 1024), 0)} MB"
+    else -> "${bytes / 1024} KB"
 }
 
 private fun etaText(bytesLeft: Long, speedKb: Int): String? {
@@ -131,7 +131,7 @@ private fun etaText(bytesLeft: Long, speedKb: Int): String? {
     }
 }
 
-internal fun speedText(kb: Int) = if (kb >= 1024) "%.1f MB/s".format(kb / 1024.0) else "$kb KB/s"
+fun speedText(kb: Int) = if (kb >= 1024) "${formatDecimals(kb / 1024.0, 1)} MB/s" else "$kb KB/s"
 
 /**
  * What the downloader is doing right now, in plain words: overall progress, the files that are downloading or being
@@ -139,7 +139,6 @@ internal fun speedText(kb: Int) = if (kb >= 1024) "%.1f MB/s".format(kb / 1024.0
  */
 @Composable
 fun DownloadActivity() {
-    val context = LocalContext.current
     val processing = StatusInfo.processing
     val rows = fileRows()
     if (rows.isEmpty() && !processing) return
@@ -217,7 +216,7 @@ fun DownloadActivity() {
                 Text(if (ModListManager.paused) "Resume downloads" else "Pause downloads", color = gold)
             }
             if (inBrowser != null) {
-                TextButton(onClick = { NxmDownloads.skipCurrent(context) }) { Text("Skip this file", color = gold) }
+                TextButton(onClick = { NxmDownloads.skipCurrent() }) { Text("Skip this file", color = gold) }
             }
         }
     } else {

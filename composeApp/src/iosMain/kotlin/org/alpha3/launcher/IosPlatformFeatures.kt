@@ -44,6 +44,13 @@ class IosPlatformFeatures : PlatformFeatures() {
 
     override fun showSoftKeyboard() = SystemKeyboard.toggle()
 
+    override val glRenderers = linkedMapOf(
+        "gles" to "OpenGL ES 3.0 (Apple)",
+        "angle" to "ANGLE (OpenGL ES 3.0 on Metal)",
+    )
+
+    override val modDownloaderHost get() = org.alpha3.launcher.mods.downloader.IosModDownloaderHost
+
     override val toolFs get() = IosToolFs
     override val toolPlatform get() = iosToolPlatform()
 

@@ -29,7 +29,7 @@ private fun calculateDistanceField(chf: CompactHeightfield, src: IntArray): Int 
     val cellIndex = chf.cellIndex
     val cellCount = chf.cellCount
     val cells = chf.width * chf.height
-    java.util.Arrays.fill(src, 0, n, 0xffff)
+    src.fill(0xffff, 0, n)
 
     for (i in 0 until n) {
         val area = areas[i]

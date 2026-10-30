@@ -107,7 +107,7 @@
         </service>
 
         <service
-            android:name=".modDownloader.DownloadService"
+            android:name=".mods.DownloadService"
             android:foregroundServiceType="dataSync"
             android:exported="false" />
 

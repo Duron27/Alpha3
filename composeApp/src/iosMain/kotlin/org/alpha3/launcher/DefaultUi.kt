@@ -30,7 +30,12 @@ fun installDefaultUi() {
     // Also repairs layouts installed by an earlier run.
     if (!config.exists()) return
     val text = config.readText()
-    if (AndroidUiPrefix in text) config.writeText(text.replace(AndroidUiPrefix, "file://$dir/"))
+    var fixed = text.replace(AndroidUiPrefix, "file://$dir/")
+    // Icons are saved as absolute paths, and iOS moves the app to a new data container (a new UUID in the path) on a
+    // reinstall or update: point them at the current one, or every custom icon goes blank.
+    AppContainer.find("$dir/")?.value?.let { current -> fixed = AppContainer.replace(fixed, current) }
+    if (fixed != text) config.writeText(fixed)
 }
 
 private const val AndroidUiPrefix = "file:///storage/emulated/0/Alpha3/OpenMW/ui/"
+private val AppContainer = Regex("/Data/Application/[0-9A-Fa-f-]{36}(?=/)")

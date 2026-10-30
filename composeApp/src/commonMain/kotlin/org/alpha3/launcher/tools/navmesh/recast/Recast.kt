@@ -79,7 +79,7 @@ internal class CompactHeightfield(
     val areas = IntArray(spanCount)
 
     /** Neighbouring span in each of the four directions (span * 4 + dir), or -1 where there is no connection. */
-    val nbr = IntArray(spanCount * 4).also { java.util.Arrays.fill(it, -1) }
+    val nbr = IntArray(spanCount * 4).also { it.fill(-1) }
 
     fun getCon(span: Int, direction: Int): Int = (con[span] ushr (direction * 6)) and 0x3f
 

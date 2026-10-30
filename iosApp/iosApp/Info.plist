@@ -16,6 +16,8 @@
 		<key>NSAllowsArbitraryLoads</key>
 		<true/>
 	</dict>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Multiplayer connects to games hosted on your local network, and lets players on it join yours.</string>
 	<key>UIFileSharingEnabled</key>
 	<true/>
 </dict>

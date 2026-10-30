@@ -1,17 +1,8 @@
 @file:Suppress("DEPRECATION")
 
-package org.openmw.modDownloader
+package org.alpha3.launcher.mods.downloader
 
-import android.app.DownloadManager
-import android.content.Context
-import android.content.Intent
-import android.net.Uri
-import android.text.Html
-import android.text.method.LinkMovementMethod
-import android.util.Log
-import android.util.TypedValue
-import android.widget.TextView
-import android.widget.Toast
+import org.alpha3.launcher.utils.Log
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -35,7 +26,6 @@ import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.PagerState
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.text.ClickableText
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
@@ -69,415 +59,33 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Color.Companion.White
-import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
-import androidx.room.ColumnInfo
-import androidx.room.Dao
-import androidx.room.Database
-import androidx.room.Delete
-import androidx.room.Entity
-import androidx.room.Insert
-import androidx.room.OnConflictStrategy
-import androidx.room.PrimaryKey
-import androidx.room.Query
-import androidx.room.Room
-import androidx.room.RoomDatabase
-import androidx.room.Transaction
-import org.alpha3.launcher.tools.ModAction
-import androidx.room.TypeConverter
-import androidx.room.TypeConverters
-import androidx.room.Update
-import coil.compose.AsyncImage
+import coil3.compose.AsyncImage
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.IO
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.DeserializationStrategy
-import kotlinx.serialization.SerialName
-import kotlinx.serialization.Serializable
-import kotlinx.serialization.SerializationException
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonContentPolymorphicSerializer
-import kotlinx.serialization.json.JsonElement
-import kotlinx.serialization.json.jsonObject
 import org.alpha3.launcher.paths.OpenMWPaths
-import org.openmw.modDownloader.ModListManager.modList
-import org.openmw.modDownloader.NexusInfo.downloadProgressMap
-import org.openmw.modDownloader.StatusInfo.activeMods
-import org.openmw.modDownloader.ZipUtils.nativeGetArchiveFileList
+import org.alpha3.launcher.mods.downloader.ModListManager.modList
+import org.alpha3.launcher.mods.downloader.NexusInfo.downloadProgressMap
+import org.alpha3.launcher.mods.downloader.StatusInfo.activeMods
+import org.alpha3.launcher.mods.downloader.ZipUtils.nativeGetArchiveFileList
+import org.alpha3.launcher.utils.currentTimeMillis
 import org.alpha3.launcher.ui.controls.UIStateManager.customColor
 import org.alpha3.launcher.utils.GameFilesPreferences
-import java.io.File
-import java.time.Instant
-import androidx.core.net.toUri
+import org.alpha3.launcher.io.File
 import org.alpha3.launcher.ui.controls.UIStateManager.gold
-
-@Dao
-interface ModDao {
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertMod(mod: ModDesc)
-
-    @Query("SELECT COUNT(*) FROM mods")
-    suspend fun getModCount(): Int
-
-    @Update
-    suspend fun updateMods(mods: List<ModDesc>)
-
-    @Update
-    suspend fun updateMod(mod: ModDesc)
-
-    @Delete
-    suspend fun deleteMod(mod: ModDesc)
-
-    @Query("SELECT * FROM mods WHERE slug = :slug")
-    fun getModBySlugFlow(slug: String): Flow<ModDesc?>
-
-    @Query("SELECT * FROM mods WHERE slug LIKE :slug")
-    fun getModsBySlugFlowFilter(slug: String): Flow<List<ModDesc>>
-
-    // The file name is somewhere in the download_info JSON, so let SQL narrow it down first and only
-    // decode the few rows that mention it (LIKE can over-match, which the exact check below fixes).
-    @Query("SELECT * FROM mods WHERE downloadInfo LIKE '%' || :fileName || '%'")
-    suspend fun getModsMentioningFileName(fileName: String): List<ModDesc>
-
-    suspend fun getModByFileName(fileName: String): ModDesc? {
-        return getModsMentioningFileName(fileName).find { mod ->
-            mod.downloadInfo.any { it.fileName == fileName || it.versions.any { v -> v.fileName == fileName } }
-        }
-    }
-
-    @Query("SELECT * FROM mods WHERE slug = :slug")
-    fun getModBySlug(slug: String): Flow<ModDesc?>
-
-    @Query("SELECT * FROM mods ORDER BY name COLLATE NOCASE ASC")
-    fun getAllModsFlow(): Flow<List<ModDesc>>
-
-    @Query("SELECT * FROM mods WHERE category = :category ORDER BY name COLLATE NOCASE ASC")
-    suspend fun getModsByCategory(category: String): List<ModDesc>
-
-    @Query("SELECT * FROM mods ORDER BY name COLLATE NOCASE ASC")
-    suspend fun getAllMods(): List<ModDesc>
-
-    @Query("DELETE FROM mods")
-    suspend fun clearAllMods()
-
-    @Transaction
-    suspend fun replaceAllMods(mods: List<ModDesc>) {
-        clearAllMods()
-        insertAll(mods)
-    }
-
-    @Query("SELECT * FROM mods WHERE slug IN (:slugs)")
-    suspend fun getModsBySlugs(slugs: List<String>): List<ModDesc>
-
-    @Transaction
-    suspend fun insertOrAppendMods(mods: List<ModDesc>, currentList: String, context: Context) {
-        // SQLite allows only 999 variables per statement on many Android versions, so look the slugs up in chunks.
-        // (UI state like StatusInfo.processing belongs to the caller; setting it here flipped it off mid-sync
-        // and left it on after the early return below.)
-        val existingMods = mods.map { it.slug }.chunked(500)
-            .flatMap { getModsBySlugs(it) }
-            .associateBy { it.slug }
-
-        //FileLogger.logDebug(context, "DuplicateDebug", "Processing ${mods.size} mods for list: $currentList")
-
-        val alreadyProcessed = mods.all { mod ->
-            existingMods[mod.slug]?.onLists?.contains(currentList) == true
-        }
-
-        if (alreadyProcessed) {
-            //FileLogger.logDebug(context, "DuplicateDebug", "List $currentList already processed - skipping")
-            return
-        }
-
-        // Log the incoming mods with their sourceLists
-        /*
-        mods.forEach { mod ->
-            FileLogger.logDebug(context, "DuplicateDebug",
-                "Incoming mod: ${mod.slug} with sources: ${mod.downloadInfo.flatMap { it.sourceLists }.distinct()}")
-        }
-
-         */
-
-        val mergedMods = mods.map { newMod ->
-            val existing = existingMods[newMod.slug]
-            if (existing != null) {
-                //FileLogger.logDebug(context, "DuplicateDebug",
-                    //"Merging existing mod: ${newMod.slug} - existing sources: ${existing.onLists}")
-                val mergedDownloadInfo = mergeDownloadInfo(existing.downloadInfo, newMod.downloadInfo, currentList, context)
-                newMod.copy(
-                    onLists = (existing.onLists + newMod.onLists).distinct(),
-                    downloadInfo = mergedDownloadInfo
-                )
-            } else {
-                //FileLogger.logDebug(context, "DuplicateDebug", "New mod: ${newMod.slug}")
-                newMod
-            }
-        }
-
-        insertOrReplace(mergedMods)
-        //FileLogger.logDebug(context, "DuplicateDebug", "Completed insertOrAppendMods for list: $currentList")
-
-        // FLUSH ALL LOGS TO FILE AT THE END
-        //FileLogger.flushLogsToFile(context)
-    }
-
-    private fun mergeDownloadInfo(
-        existing: List<DownloadInfo>,
-        new: List<DownloadInfo>,
-        currentList: String,
-        context: Context
-    ): List<DownloadInfo> {
-        //FileLogger.logDebug(context, "MergeDebug", "Merging download info - existing: ${existing.size}, new: ${new.size}")
-
-        // More comprehensive key function - include ALL identifying fields
-        fun key(info: DownloadInfo) =
-            "${info.fileName.orEmpty()}|${info.nexusFileId.orEmpty()}|${info.directDownload.orEmpty()}|${info.extractTo.orEmpty()}"
-
-        val mergedMap = existing.associateBy { key(it) }.toMutableMap()
-
-        // Log existing entries
-        /*
-        existing.forEachIndexed { index, info ->
-            FileLogger.logDebug(context, "MergeDebug", "Existing[$index]: key=${key(info)}, fileName=${info.fileName}, sources=${info.sourceLists}")
-        }
-
-         */
-
-        for (newInfo in new) {
-            val k = key(newInfo)
-            val existingInfo = mergedMap[k]
-
-            if (existingInfo == null) {
-                // Brand new variant - add currentList to sources
-                //FileLogger.logDebug(context, "MergeDebug", "New entry: key=$k, fileName=${newInfo.fileName}")
-                val sources = if (newInfo.sourceLists.isEmpty()) {
-                    listOf(currentList)
-                } else {
-                    (newInfo.sourceLists + currentList).distinct()
-                }
-                mergedMap[k] = newInfo.copy(sourceLists = sources)
-            } else {
-                //FileLogger.logDebug(context, "MergeDebug", "Duplicate found - key: $k")
-                //FileLogger.logDebug(context, "MergeDebug", "  Existing: ${existingInfo.fileName} | ${existingInfo.nexusFileId} | sources=${existingInfo.sourceLists}")
-                //FileLogger.logDebug(context, "MergeDebug", "  New: ${newInfo.fileName} | ${newInfo.nexusFileId} | sources=${newInfo.sourceLists}")
-
-                // Same variant, merge sources - FIXED LOGIC
-                val newSources = if (newInfo.sourceLists.isEmpty()) {
-                    listOf(currentList)
-                } else {
-                    newInfo.sourceLists
-                }
-
-                val mergedSources = (existingInfo.sourceLists + newSources + currentList)
-                    .filter { it.isNotEmpty() }
-                    .distinct()
-                    .sorted()
-
-                //FileLogger.logDebug(context, "MergeDebug", "  Merged sources: $mergedSources")
-
-                // Create merged DownloadInfo with ALL fields from existing (preserving data)
-                // but updated sourceLists
-                mergedMap[k] = existingInfo.copy(
-                    sourceLists = mergedSources,
-                    // Preserve other fields from existing info since it has more complete data
-                    directDownload = existingInfo.directDownload ?: newInfo.directDownload,
-                    nexusFileId = existingInfo.nexusFileId ?: newInfo.nexusFileId,
-                    fileSize = existingInfo.fileSize ?: newInfo.fileSize,
-                    extractTo = existingInfo.extractTo ?: newInfo.extractTo,
-                    extractedSizeBytes = existingInfo.extractedSizeBytes ?: newInfo.extractedSizeBytes,
-                    actionsByList = existingInfo.actionsByList + newInfo.actionsByList
-                )
-            }
-        }
-
-        val result = mergedMap.values
-            .filter { !it.fileName.isNullOrBlank() }
-            .toList()
-
-        /*
-        FileLogger.logDebug(
-            context,
-            "MergeDebug",
-            "Final merged download info count: ${result.size}"
-        )
-        result.forEachIndexed { index, info ->
-            FileLogger.logDebug(
-                context,
-                "MergeDebug",
-                "Result[$index]: ${info.fileName} | sources=${info.sourceLists}"
-            )
-        }
-         */
-        return result
-    }
-
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertOrReplace(mods: List<ModDesc>)
-
-    @Query("SELECT slug FROM mods")
-    suspend fun getAllModSlugs(): List<String>
-
-    @Insert(onConflict = OnConflictStrategy.IGNORE)
-    suspend fun insertAll(mods: List<ModDesc>): List<Long>
-
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertOrUpdateMod(mod: ModDesc)
-
-    @Query("SELECT * FROM mods WHERE tags LIKE '%' || :tag || '%' ORDER BY name COLLATE NOCASE ASC")
-    suspend fun getModsByTag(tag: String): List<ModDesc>
-
-    @Query("SELECT DISTINCT category FROM mods ORDER BY category COLLATE NOCASE ASC")
-    suspend fun getAllCategories(): List<String>
-
-    @Update
-    suspend fun update(mod: ModDesc)
-
-    // on_lists is a JSON array of strings, so quoting the name matches the whole entry only
-    // (a bare LIKE '%x%' also matched every list whose name merely contains x).
-    @Query("SELECT * FROM mods WHERE on_lists LIKE '%\"' || :modList || '\"%' ORDER BY name COLLATE NOCASE ASC")
-    suspend fun getModsByModList(modList: String): List<ModDesc>
-
-    @Query("SELECT * FROM mods WHERE on_lists LIKE '%\"' || :modList || '\"%' ORDER BY name COLLATE NOCASE ASC")
-    fun getModsByModListFlow(modList: String): Flow<List<ModDesc>>
-
-    @Query("SELECT * FROM mods WHERE modId = :modId")
-    suspend fun getModsByModId(modId: String): List<ModDesc>
-
-    @Query("SELECT * FROM mods WHERE modId = :modId")
-    suspend fun getModById(modId: String): ModDesc?
-
-    @Query("SELECT * FROM mods WHERE modId = :modId")
-    fun getModsByModIdFlow(modId: String): Flow<List<ModDesc>>
-}
-
-class Converters {
-    private val json = Json {
-        ignoreUnknownKeys = true
-        coerceInputValues = true
-    }
-
-    @TypeConverter
-    fun fromStringList(value: List<String>): String = json.encodeToString(value)
-
-    @TypeConverter
-    fun toStringList(value: String): List<String> = json.decodeFromString(value)
-
-    @TypeConverter
-    fun fromDownloadInfoList(value: List<DownloadInfo>): String {
-        return json.encodeToString(value)
-    }
-
-    @TypeConverter
-    fun toDownloadInfoList(value: String): List<DownloadInfo> {
-        return json.decodeFromString(value)
-    }
-}
-
-@Serializable
-data class DownloadInfo(
-    @SerialName("direct_download") val directDownload: String? = null,
-    @SerialName("file_name") val fileName: String? = null,
-    @SerialName("extract_to") val extractTo: String? = null,
-    @SerialName("nexus_file_id") val nexusFileId: String? = null,
-    @SerialName("size_kb") val fileSize: String? = null,
-    @SerialName("versions") val versions: List<Version> = emptyList(),
-    @SerialName("source_lists") val sourceLists: List<String> = emptyList(),
-    val extractedSizeBytes: Long? = null,
-    /** As the site serves them for one list; moved into [actionsByList] when the list is synced. */
-    val actions: List<ModAction> = emptyList(),
-    /** What to run after extracting this archive, per mod list: the same archive can differ between lists. */
-    val actionsByList: Map<String, List<ModAction>> = emptyMap(),
-){
-    fun actionsFor(list: String): List<ModAction> = actionsByList[list].orEmpty()
-
-    /** This archive as listed by [list], with the actions the site served moved under that list. */
-    fun forList(list: String) = copy(
-        sourceLists = listOf(list),
-        actions = emptyList(),
-        actionsByList = if (actions.isEmpty()) emptyMap() else mapOf(list to actions),
-    )
-
-    @Serializable
-    data class Version(
-        @SerialName("file_name") val fileName: String,
-        @SerialName("file_id") val fileId: String,
-        @SerialName("version") val version: String?,
-        @SerialName("size_kb") val sizeKb: String?,
-        @SerialName("category_name") val category: String
-    )
-}
-
-@Entity(tableName = "mods")
-@TypeConverters(Converters::class)
-@Serializable
-data class ModDesc(
-    val modId: String = "",
-    @PrimaryKey val slug: String = "",
-    val name: String = "",
-    val author: String = "",
-    val description: String = "",
-    val url: String = "",
-    val category: String = "",
-    @ColumnInfo(name = "dl_url") @SerialName("dl_url") val dlUrl: String? = null,
-    @ColumnInfo(name = "usage_notes") @SerialName("usage_notes") val usageNotes: String? = null,
-    val compat: Int = 0,
-    val dir: String = "",
-    @ColumnInfo(name = "date_added") @SerialName("date_added") val dateAdded: String? = null,
-    @ColumnInfo(name = "date_updated") @SerialName("date_updated") val dateUpdated: String? = null,
-    val tags: List<String> = emptyList(),
-    @ColumnInfo(name = "on_lists") @SerialName("on_lists") val onLists: List<String> = emptyList(),
-    @ColumnInfo(name = "data_paths") @SerialName("data_paths") val dataPaths: List<String> = emptyList(),
-    @ColumnInfo(name = "gallery_urls") val galleryUrls: List<String> = emptyList(),
-    val plugins: List<String> = emptyList(),
-    @SerialName("download_info") val downloadInfo: List<DownloadInfo> = emptyList(),
-    @ColumnInfo(name = "gitlab_project_id") @SerialName("gitlab_project_id") val gitlabProjectId: String? = null,
-    @ColumnInfo(name = "gitlab_package_id") @SerialName("gitlab_package_id") val gitlabPackageId: String? = null
-)
-
-@Database(
-    entities = [ModDesc::class],
-    version = 21,
-    exportSchema = false
-)
-@TypeConverters(Converters::class)
-abstract class ModDatabase : RoomDatabase() {
-    abstract fun modDao(): ModDao
-
-    companion object {
-        @Volatile
-        private var INSTANCE: ModDatabase? = null
-
-        fun getDatabase(context: Context): ModDatabase {
-            return INSTANCE ?: synchronized(this) {
-                // Check again inside the lock, or two threads can each build a database on the same file
-                INSTANCE?.let { return it }
-                val instance = Room.databaseBuilder(
-                    context.applicationContext,
-                    ModDatabase::class.java,
-                    "mods_database.db"
-                )
-                    .fallbackToDestructiveMigration()
-                    .build()
-                INSTANCE = instance
-                instance
-            }
-        }
-    }
-}
 
 @Composable
 fun ModListScreen() {
-    val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val modDao = remember { ModDatabase.getDatabase(context).modDao() }
+    val modDao = remember { ModDatabase.getDatabase().modDao() }
 
     // Track which mods have been processed to prevent duplicate work
     val processedMods = remember { mutableStateSetOf<String>() }
@@ -499,7 +107,7 @@ fun ModListScreen() {
         scope.launch {
             mods.forEach { mod ->
                 if (!processedMods.contains(mod.slug)) {
-                    val currentUnixTimestamp = Instant.now().epochSecond
+                    val currentUnixTimestamp = (currentTimeMillis() / 1000)
 
                     val updatedDownloadInfoList = mod.downloadInfo.map { info ->
                         val expiresTimestamp = info.directDownload?.let { extractExpiresValue(it) }
@@ -509,7 +117,7 @@ fun ModListScreen() {
                         if (isExpired && info.nexusFileId != null) {
                             try {
                                 val updatedInfo = withContext(Dispatchers.IO) {
-                                    getDirectDownload(context, mod, info)
+                                    getDirectDownload(mod, info)
                                 }
                                 Log.d("Refresh", "Updated download info for ${mod.slug}")
                                 updatedInfo
@@ -581,7 +189,6 @@ fun stripHtml(html: String): String {
 
 @Composable
 fun ModItem(mod: ModDesc, onDelete: () -> Unit, modDao: ModDao) {
-    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var expanded by remember { mutableStateOf(false) }
     var detailsExpanded by remember { mutableStateOf(false) }
@@ -589,7 +196,7 @@ fun ModItem(mod: ModDesc, onDelete: () -> Unit, modDao: ModDao) {
     val pagerState = rememberPagerState(pageCount = { currentMod.galleryUrls.size })
     val downloadingMap = remember { mutableStateMapOf<String, Boolean>() }
     val isDownloading = downloadingMap[mod.slug] ?: false
-    val currentUnixTimestamp = Instant.now().epochSecond
+    val currentUnixTimestamp = (currentTimeMillis() / 1000)
     val progressText = downloadProgressMap[mod.slug]
         ?: downloadProgressMap.entries.firstOrNull { it.key.startsWith("${mod.slug}|") }?.value
     val coroutineScope = rememberCoroutineScope()
@@ -996,7 +603,7 @@ fun ModItem(mod: ModDesc, onDelete: () -> Unit, modDao: ModDao) {
                                         coroutineScope.launch {
                                             try {
                                                 if (mod.url.contains("nexusmods.com")) {
-                                                    val currentUnixTimestamp = Instant.now().epochSecond
+                                                    val currentUnixTimestamp = (currentTimeMillis() / 1000)
 
                                                     val updatedDownloadInfoList =
                                                         mod.downloadInfo.map { info ->
@@ -1013,8 +620,7 @@ fun ModItem(mod: ModDesc, onDelete: () -> Unit, modDao: ModDao) {
                                                                     val updatedInfo =
                                                                         withContext(Dispatchers.IO) {
                                                                             getDirectDownload(
-                                                                                context,
-                                                                                mod,
+mod,
                                                                                 info
                                                                             )
                                                                         }
@@ -1035,7 +641,7 @@ fun ModItem(mod: ModDesc, onDelete: () -> Unit, modDao: ModDao) {
                                                     val updatedMod =
                                                         mod.copy(downloadInfo = updatedDownloadInfoList)
                                                     val modDao =
-                                                        ModDatabase.getDatabase(context).modDao()
+                                                        ModDatabase.getDatabase().modDao()
                                                     modDao.insertOrUpdateMod(updatedMod)
                                                     Log.d(
                                                         "Refresh",
@@ -1346,7 +952,7 @@ fun ModItem(mod: ModDesc, onDelete: () -> Unit, modDao: ModDao) {
                                                                 if (isPremium == true) {
                                                                     downloadModFile(mod, info)
                                                                 } else {
-                                                                    NxmDownloads.open(context, mod, info)
+                                                                    NxmDownloads.open(mod, info)
                                                                 }
                                                             } else {
                                                                 downloadModFile(mod, info)
@@ -1429,7 +1035,7 @@ fun ModItem(mod: ModDesc, onDelete: () -> Unit, modDao: ModDao) {
 @Composable
 fun InfoRow(label: String, value: String?, isLink: Boolean = false, fileName: String? = null) {
     if (value.isNullOrEmpty()) return
-    val context = LocalContext.current
+    val uriHandler = LocalUriHandler.current
 
     Row(
         modifier = Modifier.padding(vertical = 2.dp),
@@ -1441,44 +1047,14 @@ fun InfoRow(label: String, value: String?, isLink: Boolean = false, fileName: St
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
         )
         if (isLink) {
-            ClickableText(
-                text = AnnotatedString(value),
-                onClick = {
-                    try {
-                        // Use DownloadManager for direct file downloads
-                        val request = DownloadManager.Request(value.toUri())
-                        request.setTitle("$label Download")
-                        request.setDescription("Downloading $label")
-                        request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                        // Use provided fileName for "Direct Download", otherwise fallback to generic name
-                        val destinationFileName = if (label == "Direct Download" && !fileName.isNullOrEmpty()) {
-                            fileName
-                        } else {
-                            "mod_${System.currentTimeMillis()}.zip"
-                        }
-                        // Set destination to cache directory
-                        val cacheDir = File(OpenMWPaths.CACHE_DIR)
-                        if (!cacheDir.exists()) {
-                            cacheDir.mkdirs() // Ensure cache directory exists
-                        }
-                        val destinationFile = File(cacheDir, destinationFileName)
-                        request.setDestinationUri(Uri.fromFile(destinationFile))
-                        request.setAllowedNetworkTypes(
-                            DownloadManager.Request.NETWORK_WIFI or DownloadManager.Request.NETWORK_MOBILE
-                        )
-
-                        val downloadManager = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
-                        downloadManager.enqueue(request)
-                    } catch (e: Exception) {
-                        // Fallback to opening URL in browser if DownloadManager fails
-                        Toast.makeText(context, "Failed to start download: ${e.message}", Toast.LENGTH_SHORT).show()
-                        val intent = Intent(Intent.ACTION_VIEW, value.toUri())
-                        context.startActivity(intent)
-                    }
-                },
-                style = MaterialTheme.typography.bodySmall.copy(
-                    color = MaterialTheme.colorScheme.primary
-                )
+            Text(
+                text = value,
+                style = MaterialTheme.typography.bodySmall.copy(color = MaterialTheme.colorScheme.primary),
+                modifier = Modifier.clickable {
+                    // The platform downloads direct links itself (Android's DownloadManager); otherwise the browser opens it
+                    val host = host
+                    if (host != null) host.openLink(value, label, fileName) else uriHandler.openUri(value)
+                }
             )
         } else {
             Text(
@@ -1489,49 +1065,8 @@ fun InfoRow(label: String, value: String?, isLink: Boolean = false, fileName: St
     }
 }
 
-// HTML Text Composable (from previous implementation)
+/** Text that may carry HTML (a mod's author is often a link): shown without the tags. */
 @Composable
 fun HtmlText(html: String, style: TextStyle) {
-    AndroidView(
-        factory = { context ->
-            TextView(context).apply {
-                setTextAppearance(context, android.R.style.TextAppearance)
-                movementMethod = LinkMovementMethod.getInstance()
-            }
-        },
-        update = { tv ->
-            tv.text = Html.fromHtml(html, Html.FROM_HTML_MODE_COMPACT)
-            tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, style.fontSize.value)
-            tv.setTextColor(style.color.toArgb())
-        }
-    )
-}
-
-fun shouldSkipExtraction(archiveFiles: List<ZipUtils.ArchiveFile>, targetFolder: File): Boolean {
-    archiveFiles.forEach { archiveFile ->
-        if (archiveFile.isFolder) return@forEach // Skip folders
-
-        val targetFile = File(targetFolder, archiveFile.path)
-        if (!targetFile.exists()) {
-            Log.i("ExtractionCheck", "Missing file: ${archiveFile.path}")
-            return false
-        }
-
-        if (targetFile.length() != archiveFile.size) {
-            Log.i("ExtractionCheck", "Size mismatch: ${archiveFile.path}")
-            return false
-        }
-    }
-
-    Log.i("ExtractionCheck", "All files match — skipping extraction")
-    return true
-}
-
-
-fun formatSize(kb: Long): String {
-    return when {
-        //kb >= 1024 * 1024 -> "${kb / (1024 * 1024)} GB"
-        kb >= 1024 -> "${kb / 1024} MB"
-        else -> "$kb KB"
-    }
+    Text(text = stripHtml(html).replace("&amp;", "&"), style = style)
 }

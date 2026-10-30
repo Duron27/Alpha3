@@ -97,6 +97,14 @@ class File(path: String) {
         fs.appendingSink(okioPath).buffer().use { it.writeUtf8(text) }
     }
 
+    /** A stream into the file, replacing it or added to its end. */
+    fun sink(append: Boolean = false): okio.Sink {
+        parentFile?.takeIf { !it.exists() }?.mkdirs()
+        return if (append) fs.appendingSink(okioPath) else fs.sink(okioPath)
+    }
+
+    fun source(): okio.Source = fs.source(okioPath)
+
     fun copyTo(target: File, overwrite: Boolean = false): File {
         if (target.exists()) {
             if (!overwrite) throw IllegalStateException("Target ${target.path} already exists")

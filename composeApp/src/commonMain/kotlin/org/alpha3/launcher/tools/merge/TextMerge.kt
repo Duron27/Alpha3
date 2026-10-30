@@ -8,7 +8,7 @@ internal class TextHunk(
     val before: List<String> = emptyList(), val atEnd: Boolean = false,
 )
 
-private fun asString(b: ByteArray) = String(CharArray(b.size) { (b[it].toInt() and 0xff).toChar() })
+private fun asString(b: ByteArray) = CharArray(b.size) { (b[it].toInt() and 0xff).toChar() }.concatToString()
 private fun asBytes(s: String) = ByteArray(s.length) { s[it].code.toByte() }
 
 /** Lines with their line ends kept, so putting them back together gives the exact text. */

@@ -86,7 +86,7 @@ private fun lowerAscii(s: String): String {
     var changed = false
     for (c in s) if (c in 'A'..'Z') { changed = true; break }
     if (!changed) return s
-    return String(CharArray(s.length) { val c = s[it]; if (c in 'A'..'Z') c + 32 else c })
+    return CharArray(s.length) { val c = s[it]; if (c in 'A'..'Z') c + 32 else c }.concatToString()
 }
 
 private fun le32(b: ByteArray, o: Int) =
@@ -94,7 +94,7 @@ private fun le32(b: ByteArray, o: Int) =
 
 private fun leFloat(b: ByteArray, o: Int) = Float.fromBits(le32(b, o))
 
-private fun tagAt(b: ByteArray, o: Int): String = String(CharArray(4) { (b[o + it].toInt() and 0xff).toChar() })
+private fun tagAt(b: ByteArray, o: Int): String = CharArray(4) { (b[o + it].toInt() and 0xff).toChar() }.concatToString()
 
 /** Calls [f] with each subrecord's tag, data offset and size, from [start]; stops when [f] returns false. Returns the offset it stopped at. */
 private inline fun walkSubs(b: ByteArray, start: Int, f: (String, Int, Int) -> Boolean): Int {
@@ -334,7 +334,7 @@ internal fun loadEsmData(content: List<String>, vfs: Vfs, fs: ToolFs, codec: Tex
     }
 
     val models = HashMap<String, ModelRecord>()
-    for (m in listOf(acti, cont, door, stat)) for ((k, v) in m) if (!v.deleted) models.putIfAbsent(k, v.value)
+    for (m in listOf(acti, cont, door, stat)) for ((k, v) in m) if (!v.deleted) models.getOrPut(k) { v.value }
     val landList = lands.values.filter { !it.deleted }.sortedWith(compareBy({ it.x }, { it.y }))
     return EsmData(cellList.filter { !it.deleted }, landList, models, gmst, plugins)
 }

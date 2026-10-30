@@ -4,6 +4,7 @@
 // built with double precision for OpenMW, so everything here is Double, in Bullet's operation order.
 package org.alpha3.launcher.tools.navmesh
 
+import kotlin.jvm.JvmField
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.sin

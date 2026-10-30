@@ -9,7 +9,8 @@ namespace Alpha3
     // OpenMW's compatibility shaders are written in GLSL 1.20 and rely on its built-in variables. OSG here is built
     // for OpenGL ES 3 (no fixed function: matrices and vertex attributes come as the uniforms and attributes
     // osg_ModelViewMatrix, osg_Vertex, ...), so a context cannot be handed the sources as they are:
-    //   * Gles32: the OpenGL ES 3.2 driver of the phone. The whole source is moved to "#version 320 es".
+    //   * Gles: the system's OpenGL ES driver, 3.2 on Android phones, 3.0 on iOS (glesVersion()). The whole source is moved
+    //     to "#version 320 es" or "#version 300 es".
     //   * DesktopCompat: desktop OpenGL (compatibility profile) through Mesa Zink. Stays "#version 120"; only what the OSG
     //     build cannot feed is changed: matrices read in fragment shaders (OSG renames the built-ins of vertex shaders by
     //     itself, but not of other stages).
@@ -17,8 +18,12 @@ namespace Alpha3
     {
         Desktop, // sources used as they are
         DesktopCompat,
-        Gles32,
+        Gles,
     };
+
+    // The ESSL version shaders are translated to: 300 when OPENMW_GLES_VERSION asks for OpenGL ES 3.0 ("30", which the
+    // iOS app sets: Apple's OpenGL ES stops at 3.0), 310 for "31", else 320
+    unsigned int glesVersion();
 
     enum class GlslStage
     {
@@ -27,7 +32,7 @@ namespace Alpha3
         Compute,
     };
 
-    // The target of this run: Mesa Zink (OSG_USE_ZINK) takes desktop GLSL, anything else is OpenGL ES 3.2
+    // The target of this run: Mesa Zink (OSG_USE_ZINK) takes desktop GLSL, anything else is OpenGL ES (glesVersion())
     GlslTarget glslTarget();
 
     // Returns the source translated for the target, or the source itself when there is nothing to do (a target of Desktop,

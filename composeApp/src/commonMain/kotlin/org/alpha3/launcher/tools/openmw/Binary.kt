@@ -76,7 +76,7 @@ internal inline fun subs(b: ByteArray, fn: (String, ByteArray) -> Unit) {
 }
 
 internal fun tagString(b: ByteArray, off: Int): String =
-    String(CharArray(4) { (b[off + it].toInt() and 0xff).toChar() })
+    CharArray(4) { (b[off + it].toInt() and 0xff).toChar() }.concatToString()
 
 internal fun ByteBuilder.sub(tag: String, data: ByteArray): ByteBuilder =
     appendAscii(tag).appendU32(data.size.toLong()).append(data)

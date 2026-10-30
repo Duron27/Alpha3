@@ -30,8 +30,6 @@ import kotlinx.coroutines.launch
 import org.alpha3.launcher.utils.FileBrowserMode
 import org.alpha3.launcher.utils.PlatformFeatures
 import org.alpha3.launcher.utils.Uri
-import org.openmw.modDownloader.SSOHome
-import org.openmw.modDownloader.StatusInfo
 import org.openmw.utils.UserManageAssets
 import java.io.File
 import java.lang.ref.WeakReference
@@ -99,8 +97,6 @@ class AndroidPlatformFeatures(private val app: Application) : PlatformFeatures()
         inputMethodManager.toggleSoftInput(InputMethodManager.SHOW_FORCED, 0)
     }
 
-    override val isProcessingMods: Boolean get() = StatusInfo.processing
-
     override fun prepareResources() {
         assets.resourcePrepare()
         // The stock engine's resources are copied here too, so it happens while the launch button shows its progress;
@@ -113,13 +109,12 @@ class AndroidPlatformFeatures(private val app: Application) : PlatformFeatures()
 
     override fun runNavMesh() = runNavMesh(app)
 
-    override val supportsModDownloader get() = true
+    override val modDownloaderHost get() = org.openmw.mods.AndroidModDownloaderHost
     override val toolFs get() = org.alpha3.launcher.tools.openmw.AndroidToolFs
     override val toolPlatform get() = org.alpha3.launcher.tools.openmw.androidToolPlatform()
     override val supportsTerminal get() = true
     @Composable override fun Terminal() = org.openmw.utils.Terminal()
     @Composable override fun UqmDownloads() = org.openmw.utils.UqmDownloads()
-    @Composable override fun ModDownloader() = SSOHome()
     // libkram.so is only built with the fork (see cpp/CMakeLists.txt); stock OpenMW has the texture pre-pass instead
     override val kramRunner get() = if (BuildConfig.OPENMW_FORK) org.openmw.utils.AndroidKramRunner() else null
     override val texturePrepass: org.alpha3.launcher.utils.TexturePrepassRunner by lazy { org.openmw.utils.TexturePrepass(app) }

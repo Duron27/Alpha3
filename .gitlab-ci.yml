@@ -8,6 +8,9 @@ variables:
 
   ANDROID_COMPILE_SDK: "36"
 
+  # Runner tag of the Mac that builds the iOS app (iosTestFlight)
+  IOS_RUNNER_TAG: "macos"
+
   ANDROID_BUILD_TOOLS: "35.0.0"
 
 stages:
@@ -102,6 +105,51 @@ buildingJob:
     expire_in: never
     reports:
       dotenv: job.env
+
+
+# iOS: build for devices and upload to TestFlight. Needs a Mac with Xcode registered as a GitLab runner (shell executor) with
+# the tag in IOS_RUNNER_TAG, and the App Store Connect API key (Users and Access > Integrations, role Admin or App Manager):
+#   AuthKey_<id>.p8             in Settings > CI/CD > Secure files, as downloaded from App Store Connect (or instead, the
+#                               variable ASC_KEY_P8_BASE64 with it base64 encoded: base64 -i AuthKey_XXXX.p8 | pbcopy)
+#   ASC_KEY_ID, ASC_ISSUER_ID   CI/CD variables (Settings > CI/CD > Variables, masked and protected)
+# Signing is automatic through that key (iosApp/ci/testflight.sh), so no certificate or profile has to be on the runner.
+# The version is the tag without a leading "v" (3.0 -> 3.0), the build number the pipeline's IID. Runs on tags, and by hand
+# (Run pipeline, or the play button) from any branch.
+iosTestFlight:
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: always
+    - if: $CI_PIPELINE_SOURCE == "web"
+      when: manual
+    - when: never
+  interruptible: true
+  stage: building
+  tags:
+    - $IOS_RUNNER_TAG
+  variables:
+    # The vcpkg tree and OpenMW build in composeApp/build take hours from scratch: a shell runner keeps them between jobs
+    GIT_CLEAN_FLAGS: -ffdx -e composeApp/build/
+    APP_VERSION: $CI_COMMIT_TAG
+    BUILD_NUMBER: $CI_PIPELINE_IID
+  before_script:
+    - xcodebuild -version
+    # The key from Secure files, if it is there; downloads to .secure_files/ under its own name
+    - curl --silent --show-error --fail "https://gitlab.com/gitlab-org/incubation-engineering/mobile-devops/download-secure-files/-/raw/main/installer" | bash
+    - key=$(ls .secure_files/AuthKey_*.p8 2>/dev/null | head -n 1); if [ -n "$key" ]; then export ASC_KEY_P8="$PWD/$key"; fi
+    - test -n "$ASC_KEY_ID" && test -n "$ASC_ISSUER_ID" && { test -n "${ASC_KEY_P8:-}" || test -n "${ASC_KEY_P8_BASE64:-}"; } || { echo "ASC_KEY_ID, ASC_ISSUER_ID and the key (AuthKey_<id>.p8 in Secure files, or ASC_KEY_P8_BASE64) must be set (see the comment above this job)"; exit 1; }
+    - chmod +x ./gradlew iosApp/ci/testflight.sh
+  script:
+    # Without a tag (a manual run), the version stays the one in iosApp/Configuration/Config.xcconfig
+    - if [ -z "$CI_COMMIT_TAG" ]; then unset APP_VERSION; fi
+    - set -o pipefail; iosApp/ci/testflight.sh 2>&1 | tee ./ios-build.log
+  after_script:
+    - rm -f build/ios-release/AuthKey_*.p8 .secure_files/AuthKey_*.p8
+  artifacts:
+    when: always
+    paths:
+      - ./ios-build.log
+      - build/ios-release/Alpha3.xcarchive/dSYMs
+    expire_in: 90 days
 
 
 # Create a release with the apk attached, named after the tag which triggered the CI:

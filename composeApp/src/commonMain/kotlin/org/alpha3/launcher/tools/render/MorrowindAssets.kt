@@ -190,7 +190,7 @@ internal fun decodeDds(b: ByteArray): Bitmap? {
     val height = le32(b, 12)
     val width = le32(b, 16)
     val pfFlags = le32(b, 80)
-    val fourCC = String(b, 84, 4, Charsets.ISO_8859_1)
+    val fourCC = CharArray(4) { (b[84 + it].toInt() and 0xff).toChar() }.concatToString()
     val bpp = le32(b, 88)
     val px = IntArray(width * height)
     var p = 128

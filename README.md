@@ -242,6 +242,15 @@ Xcode's build phase calls `./gradlew :composeApp:embedAndSignAppleFrameworkForXc
 which also triggers the native build for the platform Xcode is targeting.
 `-PnativeIos=false` skips the native build. Signed `.ipa`: `cmake --build composeApp/build/cmake-ios --target device_ipa`.
 
+iOS runs stock OpenMW (`cpp/openmw-upstream`, patches `common/` + `ios/`) on Apple's OpenGL ES 3.0, through glad and the
+same OSG GLES patches as Android (`cpp/vcpkg-extras/ports/openmw-osg`). Apple's OpenGL ES stops at 3.0, so there are no
+compute shaders (clustered lighting and compute ripples are off). `-DALPHA3_IOS_OPENMW_FORK=ON` builds the Vulkan fork
+(MoltenVK) instead.
+
+TestFlight: `iosApp/ci/testflight.sh` builds the device libraries, archives and uploads to App Store Connect, signed
+automatically through an App Store Connect API key (`ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_KEY_P8` or `ASC_KEY_P8_BASE64`).
+The GitLab job `iosTestFlight` runs it on tags (and by hand) on a Mac runner tagged `$IOS_RUNNER_TAG` (default `macos`).
+
 ## Licensing
 
 See `LICENSE`, `THIRD_PARTY_NOTICES.md`, `RELEASE_COMPLIANCE.md` and `3rdparty-licenses.txt`.

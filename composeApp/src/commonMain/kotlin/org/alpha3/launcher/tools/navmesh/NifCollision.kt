@@ -3,6 +3,7 @@
 // double arithmetic (osg::Matrixf is single precision, Bullet is double).
 package org.alpha3.launcher.tools.navmesh
 
+import kotlin.jvm.JvmField
 import kotlin.math.sqrt
 
 /** The row-major 4x4 float matrix of osg::Matrixf, indexed [row * 4 + column]. */

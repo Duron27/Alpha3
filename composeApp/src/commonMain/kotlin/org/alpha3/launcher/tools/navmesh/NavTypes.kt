@@ -2,6 +2,7 @@
 // Data types and settings helpers of OpenMW's navmesh generation (components/detournavigator).
 package org.alpha3.launcher.tools.navmesh
 
+import kotlin.jvm.JvmField
 import kotlin.math.floor
 
 /** Recast area ids as OpenMW's AreaType. */

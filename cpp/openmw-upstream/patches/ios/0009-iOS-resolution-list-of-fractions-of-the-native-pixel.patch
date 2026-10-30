@@ -1,0 +1,340 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Fri, 30 Oct 2026 01:30:00 -0400
+Subject: [PATCH 9/9] iOS: resolution list of fractions of the native pixels as
+ a render scale, gamma slider as interface scale
+
+What common/0008 does for Android, on iOS. SDL lists the screen in points, once per orientation; the settings window offers 100% down to 25% of its pixels instead, applied at once. The window keeps filling the screen in points: a resolution is the scale SDL's view is rendered at (Alpha3::setRenderResolution in the support library), [Video] resolution is applied that way at startup too. The interface keeps its size on the screen at any scale, and the gamma slider sets it ([GUI] scaling factor).
+Mouse positions are scaled from points to pixels by a fraction instead of a whole number, and a Metal window (ANGLE) reports its pixels through SDL_Metal_GetDrawableSize (SDLUtil::getDrawableSize).
+---
+diff --git a/apps/openmw/engine.cpp b/apps/openmw/engine.cpp
+--- a/apps/openmw/engine.cpp
++++ b/apps/openmw/engine.cpp
+@@ -3,6 +3,9 @@
+ #ifdef __APPLE__
+ #include <TargetConditionals.h>
+ #endif
++#if TARGET_OS_IPHONE
++#include <alpha3/upstream.hpp>
++#endif
+ 
+ #include <cerrno>
+ #include <chrono>
+@@ -627,7 +630,7 @@
+         int w, h;
+         SDL_GetWindowSize(mWindow, &w, &h);
+         int dw, dh;
+-        SDL_GL_GetDrawableSize(mWindow, &dw, &dh);
++        SDLUtil::getDrawableSize(mWindow, &dw, &dh);
+         if (dw != w || dh != h)
+         {
+             SDL_SetWindowSize(mWindow, width / (dw / w), height / (dh / h));
+@@ -637,7 +640,7 @@
+ 
+         osg::ref_ptr<osg::GraphicsContext::Traits> traits = new osg::GraphicsContext::Traits;
+         SDL_GetWindowPosition(mWindow, &traits->x, &traits->y);
+-        SDL_GL_GetDrawableSize(mWindow, &traits->width, &traits->height);
++        SDLUtil::getDrawableSize(mWindow, &traits->width, &traits->height);
+         traits->windowName = SDL_GetWindowTitle(mWindow);
+         traits->windowDecoration = !(SDL_GetWindowFlags(mWindow) & SDL_WINDOW_BORDERLESS);
+         traits->screenNum = SDL_GetWindowDisplayIndex(mWindow);
+@@ -676,6 +679,10 @@
+     osg::ref_ptr<osg::Camera> camera = mViewer->getCamera();
+     camera->setGraphicsContext(graphicsWindow);
+     camera->setViewport(0, 0, graphicsWindow->getTraits()->width, graphicsWindow->getTraits()->height);
++#if TARGET_OS_IPHONE
++    // The window is made at the screen's size in points; [Video] resolution is the scale it is rendered at
++    Alpha3::setRenderResolution(mWindow, graphicsWindow, width, height);
++#endif
+ 
+     osg::ref_ptr<SceneUtil::OperationSequence> realizeOperations = new SceneUtil::OperationSequence(false);
+     mViewer->setRealizeOperation(realizeOperations);
+diff --git a/apps/openmw/mwgui/settingswindow.cpp b/apps/openmw/mwgui/settingswindow.cpp
+--- a/apps/openmw/mwgui/settingswindow.cpp
++++ b/apps/openmw/mwgui/settingswindow.cpp
+@@ -15,6 +15,13 @@
+ 
+ #include <SDL_video.h>
+ 
++#ifdef __APPLE__
++#include <TargetConditionals.h>
++#endif
++#if TARGET_OS_IPHONE
++#include <alpha3/upstream.hpp>
++#endif
++
+ #include <components/debug/debuglog.hpp>
+ #include <components/files/configurationmanager.hpp>
+ #include <components/l10n/manager.hpp>
+@@ -269,7 +276,7 @@
+         getWidget(unusedSlider, widgetName);
+         unusedSlider->setVisible(false);
+ 
+-#ifdef ANDROID
++#if defined(ANDROID) || TARGET_OS_IPHONE
+         {
+             // Gamma does nothing on Android: its slider sets the interface scale instead, applied at once
+             MyGUI::ScrollBar* scaleSlider;
+@@ -332,7 +339,7 @@
+         getWidget(mObjectShadowsButton, "ObjectShadowsButton");
+         getWidget(mShadowMapResolution, "ShadowMapResolution");
+ 
+-#if !defined(WIN32) && !defined(ANDROID)
++#if !defined(WIN32) && !defined(ANDROID) && !TARGET_OS_IPHONE
+         // hide gamma controls since it currently does not work under Linux
+         MyGUI::ScrollBar* gammaSlider;
+         getWidget(gammaSlider, "GammaSlider");
+@@ -401,14 +408,21 @@
+         // fill resolution list
+         const int screen = Settings::video().mScreen;
+         std::vector<std::pair<int, int>> resolutions;
+-#ifdef ANDROID
++#if defined(ANDROID) || TARGET_OS_IPHONE
+         // SDL lists only the native mode on Android. Offer fractions of it: choosing one resizes the surface in place
+         // (see VideoWrapper::setVideoMode), so this works as a render scale.
++        // iOS: SDL lists the screen in points, in both orientations; the fractions are of its pixels, and choosing one
++        // sets the scale the window is rendered at (Alpha3::setRenderResolution), the window itself stays the same.
+         SDL_DisplayMode nativeMode;
+         if (SDL_GetDesktopDisplayMode(screen, &nativeMode) == 0)
+         {
+-            const int nativeW = std::max(nativeMode.w, nativeMode.h);
+-            const int nativeH = std::min(nativeMode.w, nativeMode.h);
++#if TARGET_OS_IPHONE
++            const float pixelsPerPoint = Alpha3::nativeScreenScale();
++#else
++            const float pixelsPerPoint = 1.f;
++#endif
++            const int nativeW = static_cast<int>(std::max(nativeMode.w, nativeMode.h) * pixelsPerPoint);
++            const int nativeH = static_cast<int>(std::min(nativeMode.w, nativeMode.h) * pixelsPerPoint);
+             for (const int percent : { 100, 90, 80, 75, 67, 60, 50, 40, 33, 25 })
+             {
+                 const int w = (nativeW * percent / 100) / 2 * 2;
+@@ -542,7 +556,7 @@
+         if (index == MyGUI::ITEM_NONE)
+             return;
+ 
+-#ifdef ANDROID
++#if defined(ANDROID) || TARGET_OS_IPHONE
+         // Applies at once, and a bad pick is one tap away from being undone.
+         onResolutionAccept();
+         return;
+diff --git a/apps/openmw/mwgui/windowmanagerimp.cpp b/apps/openmw/mwgui/windowmanagerimp.cpp
+--- a/apps/openmw/mwgui/windowmanagerimp.cpp
++++ b/apps/openmw/mwgui/windowmanagerimp.cpp
+@@ -15,6 +15,15 @@
+ #include <MyGUI_LayerManager.h>
+ #include <MyGUI_PointerManager.h>
+ #include <MyGUI_UString.h>
++
++#ifdef __APPLE__
++#include <TargetConditionals.h>
++#endif
++#if TARGET_OS_IPHONE
++#include <alpha3/upstream.hpp>
++#endif
++
++#include <components/sdlutil/drawablesize.hpp>
+ 
+ // For BT_NO_PROFILE
+ #include <LinearMath/btQuickprof.h>
+@@ -210,7 +219,7 @@
+         int w, h;
+         SDL_GetWindowSize(window, &w, &h);
+         int dw, dh;
+-        SDL_GL_GetDrawableSize(window, &dw, &dh);
++        SDLUtil::getDrawableSize(window, &dw, &dh);
+ 
+         mScalingFactor = Settings::gui().mScalingFactor * (dw / w);
+         constexpr VFS::Path::NormalizedView resourcePath("mygui");
+@@ -1325,7 +1334,7 @@
+                 mVideoWrapper->setSyncToVBlank(Settings::video().mVsyncMode);
+             else if (setting.first == "Video" && (setting.second == "gamma" || setting.second == "contrast"))
+                 mVideoWrapper->setGammaContrast(Settings::video().mGamma, Settings::video().mContrast);
+-#ifdef ANDROID
++#if defined(ANDROID) || TARGET_OS_IPHONE
+             // the settings window's interface scale slider: laid out again at once, as after a resize
+             else if (setting.first == "GUI" && setting.second == "scaling factor")
+                 windowResized(Settings::video().mResolutionX, Settings::video().mResolutionY);
+@@ -1359,6 +1368,11 @@
+         // the settings window's interface scale slider may have changed it
+         mScalingFactor = Settings::gui().mScalingFactor;
+         mGuiPlatform->getRenderManagerPtr()->setScalingFactor(mScalingFactor);
++#elif TARGET_OS_IPHONE
++        // the settings window's interface scale slider may have changed it. The resolution is a render scale on iOS: the
++        // interface keeps its size on the screen whatever it is, as on a HiDPI desktop.
++        mScalingFactor = Settings::gui().mScalingFactor * Alpha3::renderScale();
++        mGuiPlatform->getRenderManagerPtr()->setScalingFactor(mScalingFactor);
+ #endif
+         mGuiPlatform->getRenderManagerPtr()->setViewSize(x, y);
+ 
+diff --git a/components/sdlutil/sdlgraphicswindow.cpp b/components/sdlutil/sdlgraphicswindow.cpp
+--- a/components/sdlutil/sdlgraphicswindow.cpp
++++ b/components/sdlutil/sdlgraphicswindow.cpp
+@@ -68,7 +68,7 @@
+         int w, h;
+         SDL_GetWindowSize(mWindow, &w, &h);
+         int dw, dh;
+-        SDL_GL_GetDrawableSize(mWindow, &dw, &dh);
++        SDLUtil::getDrawableSize(mWindow, &dw, &dh);
+ 
+         SDL_SetWindowPosition(mWindow, x, y);
+         SDL_SetWindowSize(mWindow, width / (dw / w), height / (dh / h));
+diff --git a/components/sdlutil/sdlgraphicswindow.hpp b/components/sdlutil/sdlgraphicswindow.hpp
+--- a/components/sdlutil/sdlgraphicswindow.hpp
++++ b/components/sdlutil/sdlgraphicswindow.hpp
+@@ -13,6 +13,7 @@
+ 
+ #include <osgViewer/GraphicsWindow>
+ 
++#include "drawablesize.hpp"
+ #include "vsyncmode.hpp"
+ 
+ #ifdef ANDROID
+diff --git a/components/sdlutil/sdlinputwrapper.cpp b/components/sdlutil/sdlinputwrapper.cpp
+--- a/components/sdlutil/sdlinputwrapper.cpp
++++ b/components/sdlutil/sdlinputwrapper.cpp
+@@ -1,4 +1,5 @@
+ #include "sdlinputwrapper.hpp"
++#include "drawablesize.hpp"
+ 
+ #include <components/debug/debuglog.hpp>
+ #include <components/settings/values.hpp>
+@@ -45,9 +46,9 @@
+         int w, h;
+         SDL_GetWindowSize(mSDLWindow, &w, &h);
+         int dw, dh;
+-        SDL_GL_GetDrawableSize(mSDLWindow, &dw, &dh);
+-        mScaleX = static_cast<Uint16>(dw / w);
+-        mScaleY = static_cast<Uint16>(dh / h);
++        SDLUtil::getDrawableSize(mSDLWindow, &dw, &dh);
++        mScaleX = static_cast<float>(dw) / w;
++        mScaleY = static_cast<float>(dh) / h;
+     }
+ 
+     void InputWrapper::capture(bool windowEventsOnly)
+@@ -258,7 +259,7 @@
+                 break;
+             case SDL_WINDOWEVENT_SIZE_CHANGED:
+                 int w, h;
+-                SDL_GL_GetDrawableSize(mSDLWindow, &w, &h);
++                SDLUtil::getDrawableSize(mSDLWindow, &w, &h);
+                 int x, y;
+                 SDL_GetWindowPosition(mSDLWindow, &x, &y);
+ 
+@@ -336,6 +337,9 @@
+     /// \brief Moves the mouse to the specified point within the viewport
+     void InputWrapper::warpMouse(int x, int y)
+     {
++        // x and y are drawable pixels, like the positions handed to the engine; SDL wants window points
++        x = static_cast<int>(x / mScaleX);
++        y = static_cast<int>(y / mScaleY);
+         SDL_WarpMouseInWindow(mSDLWindow, x, y);
+         mWarpCompensate = true;
+         mWarpX = static_cast<Uint16>(x);
+@@ -440,10 +444,10 @@
+ 
+         if (evt.type == SDL_MOUSEMOTION)
+         {
+-            packEvt.x = evt.motion.x * mScaleX;
+-            packEvt.y = evt.motion.y * mScaleY;
+-            packEvt.xrel = evt.motion.xrel * mScaleX;
+-            packEvt.yrel = evt.motion.yrel * mScaleY;
++            packEvt.x = static_cast<Sint32>(evt.motion.x * mScaleX);
++            packEvt.y = static_cast<Sint32>(evt.motion.y * mScaleY);
++            packEvt.xrel = static_cast<Sint32>(evt.motion.xrel * mScaleX);
++            packEvt.yrel = static_cast<Sint32>(evt.motion.yrel * mScaleY);
+             packEvt.type = SDL_MOUSEMOTION;
+             if (mFirstMouseMove)
+             {
+@@ -466,8 +470,8 @@
+             packEvt.z = mMouseZ;
+             packEvt.type = SDL_MOUSEWHEEL;
+ 
+-            packEvt.x = evt.wheel.mouseX * mScaleX;
+-            packEvt.y = evt.wheel.mouseY * mScaleY;
++            packEvt.x = static_cast<Sint32>(evt.wheel.mouseX * mScaleX);
++            packEvt.y = static_cast<Sint32>(evt.wheel.mouseY * mScaleY);
+         }
+         else
+         {
+diff --git a/components/sdlutil/sdlinputwrapper.hpp b/components/sdlutil/sdlinputwrapper.hpp
+--- a/components/sdlutil/sdlinputwrapper.hpp
++++ b/components/sdlutil/sdlinputwrapper.hpp
+@@ -78,8 +78,9 @@
+         bool mWindowHasFocus;
+         bool mMouseInWindow;
+ 
+-        Uint16 mScaleX;
+-        Uint16 mScaleY;
++        // window points to drawable pixels; not a whole number on iOS, where the resolution is a render scale
++        float mScaleX;
++        float mScaleY;
+     };
+ 
+ }
+diff --git a/components/sdlutil/sdlvideowrapper.cpp b/components/sdlutil/sdlvideowrapper.cpp
+--- a/components/sdlutil/sdlvideowrapper.cpp
++++ b/components/sdlutil/sdlvideowrapper.cpp
+@@ -13,6 +13,13 @@
+ #include <jni.h>
+ #endif
+ 
++#ifdef __APPLE__
++#include <TargetConditionals.h>
++#endif
++#if TARGET_OS_IPHONE
++#include <alpha3/upstream.hpp>
++#endif
++
+ namespace SDLUtil
+ {
+ #ifdef ANDROID
+@@ -116,6 +123,11 @@
+         if (setAndroidSurfaceResolution(width, height))
+             return;
+ #endif
++#if TARGET_OS_IPHONE
++        // The window always fills the screen; the resolution is the scale it is rendered at
++        Alpha3::setRenderResolution(mWindow, mViewer->getCamera()->getGraphicsContext(), width, height);
++        return;
++#endif
+ 
+         SDL_SetWindowFullscreen(mWindow, 0);
+ 
+@@ -125,7 +137,7 @@
+         int w, h;
+         SDL_GetWindowSize(mWindow, &w, &h);
+         int dw, dh;
+-        SDL_GL_GetDrawableSize(mWindow, &dw, &dh);
++        SDLUtil::getDrawableSize(mWindow, &dw, &dh);
+ 
+         if (windowMode == Settings::WindowMode::Fullscreen || windowMode == Settings::WindowMode::WindowedFullscreen)
+         {
+diff --git a/components/sdlutil/drawablesize.hpp b/components/sdlutil/drawablesize.hpp
+new file mode 100644
+--- /dev/null
++++ b/components/sdlutil/drawablesize.hpp
+@@ -0,0 +1,20 @@
++#ifndef OPENMW_COMPONENTS_SDLUTIL_DRAWABLESIZE_H
++#define OPENMW_COMPONENTS_SDLUTIL_DRAWABLESIZE_H
++
++#include <SDL_metal.h>
++#include <SDL_video.h>
++
++namespace SDLUtil
++{
++    // The size of the window in pixels. SDL_GL_GetDrawableSize only knows SDL's own OpenGL views: for a Metal window
++    // (iOS with ANGLE) it gives the size in points, the Metal layer has the pixels.
++    inline void getDrawableSize(SDL_Window* window, int* width, int* height)
++    {
++        if (SDL_GetWindowFlags(window) & SDL_WINDOW_METAL)
++            SDL_Metal_GetDrawableSize(window, width, height);
++        else
++            SDL_GL_GetDrawableSize(window, width, height);
++    }
++}
++
++#endif
+-- 
+2.50.1
+

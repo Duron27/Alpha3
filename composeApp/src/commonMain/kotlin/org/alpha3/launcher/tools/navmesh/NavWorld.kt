@@ -4,6 +4,8 @@
 package org.alpha3.launcher.tools.navmesh
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.IO
+import org.alpha3.launcher.tools.sortedIndexOf
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -145,7 +147,7 @@ internal class WorldspaceData(private val settings: RecastSettings) {
     /** TileCachedRecastMeshManager::getMesh; null when nothing touches the tile. */
     fun makeMesh(tile: TilePos): RecastMesh? {
         if (sortedTiles == null) tiles()
-        val pos = tileKeys.binarySearch(tileKey(tile.x, tile.y))
+        val pos = tileKeys.sortedIndexOf(tileKey(tile.x, tile.y))
         if (pos < 0) return null
         val builder = RecastMeshBuilder(settings.realTileBoundsWithBorder(tile))
         for (k in waterIndex.offsets[pos] until waterIndex.offsets[pos + 1]) waters[waterIndex.data[k]].let { builder.addWater(it.cellX, it.cellY, it.water) }
@@ -191,7 +193,7 @@ private class TileIndex(val offsets: IntArray, val data: IntArray) {
                 for (i in 0 until count) {
                     if (!rangeOf(i, r)) continue
                     for (x in r[0] until r[2]) for (y in r[1] until r[3]) {
-                        val p = keys.binarySearch(tileKey(x, y))
+                        val p = keys.sortedIndexOf(tileKey(x, y))
                         if (pass == 0) offsets[p + 1]++ else data[fill!![p]++] = i
                     }
                 }

@@ -4,6 +4,8 @@
 // what the collision shapes need: the node tree, transforms, names, string extra data and the triangle data.
 package org.alpha3.launcher.tools.navmesh
 
+import kotlin.jvm.JvmField
+
 internal class NavMeshException(message: String) : Exception(message)
 
 internal fun navFail(message: String): Nothing = throw NavMeshException(message)
@@ -130,7 +132,7 @@ internal fun parseNif(bytes: ByteArray): NifFile {
     var nl = 0
     while (nl < bytes.size && bytes[nl].toInt() != '\n'.code) nl++
     if (nl >= bytes.size) navFail("Invalid NIF header")
-    val head = String(CharArray(nl) { (bytes[it].toInt() and 0xff).toChar() })
+    val head = CharArray(nl) { (bytes[it].toInt() and 0xff).toChar() }.concatToString()
     if (!head.startsWith("NetImmerse File Format") && !head.startsWith("Gamebryo File Format")) navFail("Invalid NIF header: $head")
     val s = NifIn(bytes, nl + 1)
     val version = s.u32()

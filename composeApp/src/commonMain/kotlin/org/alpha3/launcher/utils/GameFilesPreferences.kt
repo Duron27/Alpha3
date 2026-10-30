@@ -47,7 +47,7 @@ object GameFilesPreferences {
     val FRAME_GENERATION_KEY = booleanPreferencesKey("frameGeneration")
     /** Frames shown per rendered one with frame generation on: 2, 3 or 4 (OPENMW_FRAMEGEN_FRAMES is one less). */
     val FRAME_GENERATION_MULTIPLIER_KEY = intPreferencesKey("frameGenerationMultiplier")
-    /** The stock OpenMW engine's OpenGL renderer: "gles" (the device's driver), "angle" (ANGLE on Vulkan) or "zink" (Mesa Zink on Vulkan). */
+    /** The stock OpenMW engine's OpenGL renderer: "gles" (the device's driver), "angle" (ANGLE, on Vulkan on Android and on Metal on iOS) or "zink" (Mesa Zink on Vulkan). */
     val GL_RENDERER_KEY = stringPreferencesKey("glRenderer")
     /** Zink frame pacing: the share of each frame's interval (50 to 100 percent) a frame may take before it gets a longer one. */
     val ZINK_FRAME_BUDGET_KEY = intPreferencesKey("zinkFrameBudget")

@@ -3,6 +3,7 @@ cmake_minimum_required(VERSION 3.22.1)
 project(Angle C CXX)
 
 # ANGLE (OpenGL ES on top of Vulkan) for Android, built with CMake only (no gn, no depot_tools).
+# For iOS (OpenGL ES on top of Metal) ios.cmake builds it instead.
 #
 # It builds the same four libraries as
 #     gn gen out --args='target_os="android" target_cpu="arm64" angle_enable_vulkan=true angle_enable_gl=false
@@ -33,8 +34,8 @@ set(ANGLE_VMA_COMMIT "cb0597213b0fcb999caa9ed08c2f88dc45eb7d50")
 set(ANGLE_JSONCPP_COMMIT "42e892d96e47b1f6e29844cc705e148ec4856448")
 set(ANGLE_CPU_FEATURES_COMMIT "936b9ab5515dead115606559502e3864958f7f6e")
 
-if(NOT ANDROID)
-    message(FATAL_ERROR "This builds ANGLE for Android only")
+if(NOT ANDROID AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    message(FATAL_ERROR "This builds ANGLE for Android and iOS only")
 endif()
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
@@ -76,6 +77,11 @@ function(angle_fetch name repo commit)
     endif()
     set(${name}_SOURCE_DIR "${${content}_SOURCE_DIR}" PARENT_SCOPE)
 endfunction()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    include(${CMAKE_CURRENT_LIST_DIR}/ios.cmake)
+    return()
+endif()
 
 angle_fetch(angle angle/angle ${ANGLE_COMMIT})
 set(ANGLE_ROOT "${angle_SOURCE_DIR}")

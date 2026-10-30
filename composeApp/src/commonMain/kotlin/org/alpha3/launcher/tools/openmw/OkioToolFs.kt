@@ -39,7 +39,8 @@ open class OkioToolFs(private val fs: FileSystem = FileSystem.SYSTEM) : ToolFs {
     override fun delete(path: String) = fs.deleteRecursively(path.toPath(), mustExist = false)
 
     override fun patch(path: String, offset: Long, data: ByteArray) {
-        fs.openReadWrite(path.toPath()).use { it.write(offset, data, 0, data.size) }
+        val handle = fs.openReadWrite(path.toPath())
+        try { handle.write(offset, data, 0, data.size) } finally { handle.close() }
     }
 
     override fun lastModified(path: String) = fs.metadataOrNull(path.toPath())?.lastModifiedAtMillis ?: 0L

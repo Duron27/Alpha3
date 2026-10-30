@@ -1,6 +1,7 @@
 package org.alpha3.launcher.tools.render
 
 import kotlin.math.PI
+import org.alpha3.launcher.tools.sortedIndexOf
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.sin
@@ -267,7 +268,7 @@ internal class GuardActor private constructor(
 
     private fun sampleQuat(k: NifKeys, t: Float, out: FloatArray) {
         val times = k.rotTimes
-        var hi = times.binarySearch(t).let { if (it >= 0) it else -it - 1 }
+        var hi = times.sortedIndexOf(t).let { if (it >= 0) it else -it - 1 }
         if (hi <= 0) { for (c in 0..3) out[c] = k.rotValues[c]; return }
         if (hi >= times.size) { for (c in 0..3) out[c] = k.rotValues[(times.size - 1) * 4 + c]; return }
         val lo = hi - 1
@@ -286,7 +287,7 @@ internal class GuardActor private constructor(
 
     private fun sampleVec3(k: NifKeys, t: Float): FloatArray {
         val times = k.transTimes
-        val hi = times.binarySearch(t).let { if (it >= 0) it else -it - 1 }
+        val hi = times.sortedIndexOf(t).let { if (it >= 0) it else -it - 1 }
         if (hi <= 0) return floatArrayOf(k.transValues[0], k.transValues[1], k.transValues[2])
         if (hi >= times.size) { val o = (times.size - 1) * 3; return floatArrayOf(k.transValues[o], k.transValues[o + 1], k.transValues[o + 2]) }
         val lo = hi - 1
@@ -324,7 +325,7 @@ internal class GuardActor private constructor(
                 if (b.type != "NiNode" || b.name == "Bounding Box") return
                 val idx = nodes.size
                 nodes += SkelNode(b.name, parent, b.matrix, b.translation, b.scale)
-                byName.putIfAbsent(b.name, idx)
+                byName.getOrPut(b.name) { idx }
                 b.children.forEach { walk(it, idx) }
             }
             walk(0, -1)

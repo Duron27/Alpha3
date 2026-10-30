@@ -1,20 +1,19 @@
 cmake_minimum_required(VERSION 3.22.1)
 
-project(openmw-upstream-android)
+project(openmw-upstream)
 
-# Stock OpenMW (https://gitlab.com/OpenMW/openmw), built next to the fork in ../openmw. Everything Android specific
-# lives in patches/android here (git format-patch series, see patches/README.md), none of it is shared with the fork's
-# patch set so either can move on its own.
+# Stock OpenMW (https://gitlab.com/OpenMW/openmw) for Android (next to the fork in ../openmw) and iOS (in place of it).
+# The changes to OpenMW are git format-patch series (see patches/README.md): patches/common for both platforms (Android-only
+# hunks are inside #ifdef ANDROID / if (ANDROID)), then patches/ios on iOS. None of it is shared with the fork's patch set,
+# so either can move on its own.
 #
 # Differences from the fork's build:
-#   * no Vulkan renderer: OpenGL only. renderer = "opengl" is desktop GL through Mesa Zink (libOSMesa_8.so), "opengl es 3.2"
-#     is the phone's own GLES driver; no Vulkan driver choice (freedreno/Turnip) is made for the engine itself
-#   * Lua is LuaJIT (upstream's default), cross compiled here; the fork uses Luau
-#   * the library is libopenmw_upstream.so and the assets live in assets/libopenmw-upstream
-
-if(NOT ALPHA3_IS_ANDROID)
-    return()
-endif()
+#   * no Vulkan renderer: OpenGL only. Android: renderer = "opengl" is desktop GL through Mesa Zink (libOSMesa_8.so),
+#     "opengl es 3.2" is the phone's own GLES driver. iOS: Apple's OpenGL ES 3.0 (OpenGLES.framework), through glad
+#   * Lua is LuaJIT (upstream's default), cross compiled here; the fork uses Luau. iOS forbids generated code, so LuaJIT
+#     runs as an interpreter there
+#   * Android: the library is libopenmw_upstream.so and the assets live in assets/libopenmw-upstream. iOS: the library is
+#     libopenmw.framework and the assets are iosApp/OpenMWAssets, where the fork's build put its own
 
 set(OPENMW_UPSTREAM_SRC "" CACHE PATH "Path to a local checkout of stock OpenMW")
 
@@ -24,8 +23,8 @@ set(OPENMW_UPSTREAM_REPO https://gitlab.com/OpenMW/openmw.git)
 set(OPENMW_UPSTREAM_COMMIT 33184cd19434203e408ecedf135b2094706b38d7)
 
 # ----------------------------------------------------------------------------------------------------------------------
-# LuaJIT, cross compiled with the NDK. Its build tools (minilua, buildvm) run on the build machine, so HOST_CC must be a
-# compiler for the host, not the NDK one. The target is 64 bit, so the host compiler needs no -m32.
+# LuaJIT, cross compiled with the NDK or Xcode's iOS clang. Its build tools (minilua, buildvm) run on the build machine, so
+# HOST_CC must be a compiler for the host, not the target one. The target is 64 bit, so the host compiler needs no -m32.
 # ----------------------------------------------------------------------------------------------------------------------
 # rubic0n: a LuaJIT 2.1 build tuned for speed. "development" is a moving tag, so the hash has to be updated with it.
 set(OPENMW_UPSTREAM_LUAJIT_URL https://github.com/DreamWeave-MP/rubic0n/archive/refs/tags/development.tar.gz)
@@ -38,19 +37,39 @@ if(NOT OPENMW_UPSTREAM_HOST_CC)
     message(FATAL_ERROR "LuaJIT needs a host C compiler (cc/gcc/clang) to build its code generators")
 endif()
 
-set(ndk_cc ${NDK_TOOLCHAIN_BIN}/${NDK_TRIPLET}${ANDROID_API}-clang)
-set(luajit_make_args
-    HOST_CC=${OPENMW_UPSTREAM_HOST_CC}
-    CROSS=${NDK_TOOLCHAIN_BIN}/llvm-
-    "STATIC_CC=${ndk_cc} -fPIC"
-    "DYNAMIC_CC=${ndk_cc} -fPIC"
-    TARGET_LD=${ndk_cc}
-    "TARGET_AR=${NDK_TOOLCHAIN_BIN}/llvm-ar rcus"
-    TARGET_STRIP=${NDK_TOOLCHAIN_BIN}/llvm-strip
-    TARGET_SYS=Linux
-    BUILDMODE=static
-    PREFIX=${luajit_prefix}
-)
+if(ALPHA3_IS_ANDROID)
+    set(ndk_cc ${NDK_TOOLCHAIN_BIN}/${NDK_TRIPLET}${ANDROID_API}-clang)
+    set(luajit_make_args
+        HOST_CC=${OPENMW_UPSTREAM_HOST_CC}
+        CROSS=${NDK_TOOLCHAIN_BIN}/llvm-
+        "STATIC_CC=${ndk_cc} -fPIC"
+        "DYNAMIC_CC=${ndk_cc} -fPIC"
+        TARGET_LD=${ndk_cc}
+        "TARGET_AR=${NDK_TOOLCHAIN_BIN}/llvm-ar rcus"
+        TARGET_STRIP=${NDK_TOOLCHAIN_BIN}/llvm-strip
+        TARGET_SYS=Linux
+        BUILDMODE=static
+        PREFIX=${luajit_prefix}
+    )
+    set(luajit_env "")
+else()
+    # TARGET_SYS=iOS: LuaJIT turns its JIT compiler off (no executable memory for apps), the interpreter stays
+    execute_process(COMMAND xcrun --sdk ${SDK_NAME} -f strip OUTPUT_VARIABLE ios_strip OUTPUT_STRIP_TRAILING_WHITESPACE)
+    set(luajit_make_args
+        HOST_CC=${OPENMW_UPSTREAM_HOST_CC}
+        "STATIC_CC=${IOS_CLANG} -fPIC"
+        "DYNAMIC_CC=${IOS_CLANG} -fPIC"
+        TARGET_LD=${IOS_CLANG}
+        "TARGET_AR=${IOS_AR} rcus"
+        TARGET_STRIP=${ios_strip}
+        "TARGET_FLAGS=-arch ${ARCH} -isysroot ${IOS_SDK_PATH} ${MIN_VERSION_FLAG}"
+        TARGET_SYS=iOS
+        BUILDMODE=static
+        PREFIX=${luajit_prefix}
+    )
+    # the host tools are built for macOS: an SDKROOT for iOS left by Xcode would send them to the iOS SDK
+    set(luajit_env ${CMAKE_COMMAND} -E env --unset=SDKROOT --unset=IPHONEOS_DEPLOYMENT_TARGET)
+endif()
 
 ExternalProject_Add(luajit
     URL ${OPENMW_UPSTREAM_LUAJIT_URL}
@@ -59,8 +78,8 @@ ExternalProject_Add(luajit
     UPDATE_COMMAND ""
     CONFIGURE_COMMAND ""
     BUILD_IN_SOURCE 1
-    BUILD_COMMAND make -j${NPROC} amalg ${luajit_make_args}
-    INSTALL_COMMAND make install ${luajit_make_args}
+    BUILD_COMMAND ${luajit_env} make -j${NPROC} amalg ${luajit_make_args}
+    INSTALL_COMMAND ${luajit_env} make install ${luajit_make_args}
     BUILD_BYPRODUCTS ${luajit_prefix}/lib/libluajit-5.1.a
     USES_TERMINAL_BUILD ON
 )
@@ -69,16 +88,21 @@ ExternalProject_Add(luajit
 # OpenMW
 # ----------------------------------------------------------------------------------------------------------------------
 set(assets_upstream_dir ${assets_dir}/libopenmw-upstream)
-set(patch_dir ${CMAKE_CURRENT_SOURCE_DIR}/patches/android)
 
-file(GLOB OPENMW_UPSTREAM_PATCHES CONFIGURE_DEPENDS ${patch_dir}/*.patch)
+# patches/common on every platform, then the platform's own series (patches/ios)
+file(GLOB OPENMW_UPSTREAM_PATCHES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/patches/common/*.patch)
 list(SORT OPENMW_UPSTREAM_PATCHES)
+if(ALPHA3_IS_IOS)
+    file(GLOB OPENMW_UPSTREAM_IOS_PATCHES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/patches/ios/*.patch)
+    list(SORT OPENMW_UPSTREAM_IOS_PATCHES)
+    list(APPEND OPENMW_UPSTREAM_PATCHES ${OPENMW_UPSTREAM_IOS_PATCHES})
+endif()
 # Editing a patch re-runs the patch step
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${OPENMW_UPSTREAM_PATCHES})
 
 # Multiplayer (Lua networking, avatars, host/join menu): the fork's multiplayer, ported to stock OpenMW (LuaJIT, sol2). The
 # new files live in support/multiplayer/tree and are copied into the OpenMW sources; patches/multiplayer holds only the
-# edits to OpenMW's own files, applied after the Android ones; support/multiplayer/CMakeLists.txt adds the sources to the
+# edits to OpenMW's own files, applied after the common and platform ones; support/multiplayer/CMakeLists.txt adds the sources to the
 # engine and puts the Lua mod into resources/vfs (mp.omwscripts is loaded as a built-in script list).
 # -DALPHA3_MULTIPLAYER=OFF builds plain OpenMW.
 option(ALPHA3_MULTIPLAYER "Build OpenMW with multiplayer (support/multiplayer)" ON)
@@ -191,8 +215,6 @@ set(OPENMW_UPSTREAM_COMMON
     -DBUILD_MWINIIMPORTER=0
     -DBUILD_ESSIMPORTER=0
     -DBUILD_OPENCS=0
-    # libopenmw-navmeshtool.so: the app's navmesh baking loads it and calls its SDL_main
-    -DBUILD_NAVMESHTOOL=1
     -DBUILD_WIZARD=0
     -DBUILD_BULLETOBJECTTOOL=0
     -DOPENMW_USE_SYSTEM_SQLITE3=OFF
@@ -204,19 +226,89 @@ set(OPENMW_UPSTREAM_COMMON
     "-DCMAKE_CXX_FLAGS=-std=gnu++20 -I${prefix}/include/ ${ALPHA3_SWAPPY_INCLUDE} ${VCPKG_CXX_FLAGS} -DOSG_GLES_FIXED_FUNCTION_SHIMS"
     -DMyGUI_LIBRARY=${prefix}/lib/libMyGUIEngineStatic.a
     -Dcollada_dom_DIR=${prefix}/share/collada-dom
-    # GL comes from glad (built by the vcpkg step in the top-level CMakeLists), which loads the system GLES driver or
-    # Zink's OSMesa at runtime, instead of linking libGLESv3 directly
-    -DOPENGL_gl_LIBRARY=${prefix}/lib/libglad.so
     -DOPENGL_INCLUDE_DIR=${prefix}/include
     # LuaJIT, built above
     -DUSE_LUAJIT=ON
     -DLuaJit_INCLUDE_DIR=${luajit_prefix}/include/luajit-2.1
     -DLuaJit_LIBRARY=${luajit_prefix}/lib/libluajit-5.1.a
-    # -Bsymbolic-functions: calls between the engine's own functions (OSG and Bullet are linked in statically) are bound
-    # at link time instead of going through the PLT, which showed up as 5% of the main thread
-    "-DCMAKE_SHARED_LINKER_FLAGS=${VCPKG_LINKER_FLAGS} ${ALPHA3_EXTRA_LIBS} -Wl,-Bsymbolic-functions"
-    "-DCMAKE_EXE_LINKER_FLAGS=${VCPKG_LINKER_FLAGS} ${ALPHA3_EXTRA_LIBS}"
 )
+if(ALPHA3_IS_ANDROID)
+    list(APPEND OPENMW_UPSTREAM_COMMON
+        # libopenmw-navmeshtool.so: the app's navmesh baking loads it and calls its SDL_main
+        -DBUILD_NAVMESHTOOL=1
+        # GL comes from glad (built by the vcpkg step in the top-level CMakeLists), which loads the system GLES driver or
+        # Zink's OSMesa at runtime, instead of linking libGLESv3 directly
+        -DOPENGL_gl_LIBRARY=${prefix}/lib/libglad.so
+        # -Bsymbolic-functions: calls between the engine's own functions (OSG and Bullet are linked in statically) are
+        # bound at link time instead of going through the PLT, which showed up as 5% of the main thread
+        "-DCMAKE_SHARED_LINKER_FLAGS=${VCPKG_LINKER_FLAGS} ${ALPHA3_EXTRA_LIBS} -Wl,-Bsymbolic-functions"
+        "-DCMAKE_EXE_LINKER_FLAGS=${VCPKG_LINKER_FLAGS} ${ALPHA3_EXTRA_LIBS}"
+    )
+else()
+    # iOS: glad is a static library that loads OpenGLES.framework's functions at runtime; the Apple frameworks SDL, OpenAL
+    # and FFmpeg need are linked straight into libopenmw. vcpkg's static freetype pulls in brotli for WOFF2 fonts.
+    set(OPENMW_UPSTREAM_IOS_FRAMEWORKS
+        OpenGLES Metal QuartzCore IOSurface UIKit Foundation CoreGraphics CoreFoundation AudioToolbox AVFoundation
+        CoreMedia CoreVideo VideoToolbox CoreAudio CoreHaptics GameController CoreMotion CoreBluetooth Security)
+    set(OPENMW_UPSTREAM_IOS_LINK_FLAGS "${VCPKG_LINKER_FLAGS} -lc++ -lbrotlidec -lbrotlicommon")
+    foreach(fw IN LISTS OPENMW_UPSTREAM_IOS_FRAMEWORKS)
+        string(APPEND OPENMW_UPSTREAM_IOS_LINK_FLAGS " -framework ${fw}")
+    endforeach()
+    list(APPEND OPENMW_UPSTREAM_COMMON
+        # no navmesh tool process on iOS: the engine builds the navmesh while it plays
+        -DBUILD_NAVMESHTOOL=0
+        -DOPENGL_gl_LIBRARY=${prefix}/lib/libglad.a
+        -DBUILD_MYGUI_PLUGIN=0
+        # cmake/CheckLuaCustomAllocator.cmake runs a test program, which an iOS build cannot (OpenMW skips it on Android).
+        # LuaJIT on arm64 is GC64 by default, which is what the check is about: the allocator works.
+        -DRUN_RESULT_VAR=0
+        -DRUN_RESULT_VAR__TRYRUN_OUTPUT=
+        "-DCMAKE_SHARED_LINKER_FLAGS=${OPENMW_UPSTREAM_IOS_LINK_FLAGS}"
+        "-DCMAKE_EXE_LINKER_FLAGS=${OPENMW_UPSTREAM_IOS_LINK_FLAGS}"
+    )
+endif()
+
+if(ALPHA3_IS_ANDROID)
+    set(OPENMW_UPSTREAM_INSTALL
+        INSTALL_COMMAND ${CMAKE_COMMAND} -E make_directory ${assets_upstream_dir}/openmw
+        COMMAND ${CMAKE_COMMAND} -E remove_directory ${assets_upstream_dir}/resources
+        COMMAND ${CMAKE_COMMAND} -E copy_directory resources ${assets_upstream_dir}/resources
+        COMMAND ${CMAKE_COMMAND} -E copy defaults.bin gamecontrollerdb.txt ${assets_upstream_dir}/openmw/
+        COMMAND ${CMAKE_COMMAND} -E copy libopenmw_upstream.so libopenmw-navmeshtool.so libalpha3_texconv.so ${jni_libs_dir}/
+        COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/settings.fallback.cfg ${assets_upstream_dir}/openmw/
+        # upstream's own global config: it carries the fallback= values (FontColor_*, ...) that stock OpenMW reads from
+        # openmw.cfg and aborts without; the fork's copy has none. Paths in it are fixed up at install time in the app.
+        COMMAND ${CMAKE_COMMAND} -E copy openmw.cfg ${assets_upstream_dir}/openmw/
+        COMMAND ${CMAKE_COMMAND} -E copy ${ALPHA3_REPO_DIR}/3rdparty-licenses.txt ${assets_upstream_dir}/
+        COMMAND ${CMAKE_COMMAND} -E copy ${ALPHA3_REPO_DIR}/LICENSE ${ALPHA3_REPO_DIR}/THIRD_PARTY_NOTICES.md ${assets_upstream_dir}/
+    )
+else()
+    # iOS: libopenmw.dylib (built into the macOS bundle layout, OpenMW.app/Contents/MacOS) becomes
+    # iosApp/EmbeddedLibs*/libopenmw.framework, the data files go to iosApp/OpenMWAssets; the same names the fork's build
+    # used, so the Xcode project and OpenMWLauncher.swift take either engine.
+    set(ios_assets_dir "${ALPHA3_IOSAPP_DIR}/OpenMWAssets")
+    alpha3_ios_framework(ios_openmw_framework libopenmw <BINARY_DIR>/OpenMW.app/Contents/MacOS/libopenmw.dylib)
+    # openmw.cfg is the macOS one (resources=../Resources/resources); on iOS the resources sit next to it
+    set(ios_cfg_fixup "${CMAKE_CURRENT_BINARY_DIR}/fix_openmw_cfg.cmake")
+    file(WRITE ${ios_cfg_fixup} [=[
+file(READ "${CFG}" content)
+string(REPLACE "../Resources/resources" "resources" content "${content}")
+file(WRITE "${CFG}" "${content}")
+]=])
+    set(OPENMW_UPSTREAM_INSTALL
+        INSTALL_COMMAND ${CMAKE_COMMAND} -E make_directory ${ios_assets_dir}
+        COMMAND ${CMAKE_COMMAND} -E remove_directory ${ios_assets_dir}/resources
+        COMMAND ${CMAKE_COMMAND} -E copy_directory resources ${ios_assets_dir}/resources
+        COMMAND ${CMAKE_COMMAND} -E copy defaults.bin gamecontrollerdb.txt openmw.cfg ${ios_assets_dir}/
+        COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/settings.fallback.cfg ${ios_assets_dir}/
+        COMMAND ${CMAKE_COMMAND} -E copy ${ALPHA3_COMPOSEAPP_DIR}/settings.cfg ${ios_assets_dir}/
+        # GPL text and third-party notices travel with the app
+        COMMAND ${CMAKE_COMMAND} -E copy ${ALPHA3_REPO_DIR}/LICENSE ${ALPHA3_REPO_DIR}/THIRD_PARTY_NOTICES.md
+                ${ALPHA3_REPO_DIR}/3rdparty-licenses.txt ${ios_assets_dir}/
+        COMMAND ${CMAKE_COMMAND} -DCFG=${ios_assets_dir}/openmw.cfg -P ${ios_cfg_fixup}
+        ${ios_openmw_framework}
+    )
+endif()
 
 ExternalProject_Add(openmw_upstream
     DEPENDS vcpkg luajit
@@ -233,17 +325,7 @@ ExternalProject_Add(openmw_upstream
     ${OPENMW_UPSTREAM_COMMON}
     BUILD_COMMAND ${wrapper_command} make -j${NPROC}
 
-    INSTALL_COMMAND ${CMAKE_COMMAND} -E make_directory ${assets_upstream_dir}/openmw
-    COMMAND ${CMAKE_COMMAND} -E remove_directory ${assets_upstream_dir}/resources
-    COMMAND ${CMAKE_COMMAND} -E copy_directory resources ${assets_upstream_dir}/resources
-    COMMAND ${CMAKE_COMMAND} -E copy defaults.bin gamecontrollerdb.txt ${assets_upstream_dir}/openmw/
-    COMMAND ${CMAKE_COMMAND} -E copy libopenmw_upstream.so libopenmw-navmeshtool.so libalpha3_texconv.so ${jni_libs_dir}/
-    COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/settings.fallback.cfg ${assets_upstream_dir}/openmw/
-    # upstream's own global config: it carries the fallback= values (FontColor_*, ...) that stock OpenMW reads from
-    # openmw.cfg and aborts without; the fork's copy has none. Paths in it are fixed up at install time in the app.
-    COMMAND ${CMAKE_COMMAND} -E copy openmw.cfg ${assets_upstream_dir}/openmw/
-    COMMAND ${CMAKE_COMMAND} -E copy ${ALPHA3_REPO_DIR}/3rdparty-licenses.txt ${assets_upstream_dir}/
-    COMMAND ${CMAKE_COMMAND} -E copy ${ALPHA3_REPO_DIR}/LICENSE ${ALPHA3_REPO_DIR}/THIRD_PARTY_NOTICES.md ${assets_upstream_dir}/
+    ${OPENMW_UPSTREAM_INSTALL}
 
     USES_TERMINAL_BUILD ON
     USES_TERMINAL_INSTALL ON

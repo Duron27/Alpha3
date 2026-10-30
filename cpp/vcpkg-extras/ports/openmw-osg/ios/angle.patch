@@ -1,0 +1,20 @@
+diff --git a/src/osg/GLExtensions.cpp b/src/osg/GLExtensions.cpp
+--- a/src/osg/GLExtensions.cpp
++++ b/src/osg/GLExtensions.cpp
+@@ -377,6 +377,16 @@
+         #endif
+ 
+     #elif defined(__APPLE__)
++
++        #if defined(OSG_GLES3_AVAILABLE) && TARGET_OS_IPHONE
++            // ANGLE on Metal (OSG_USE_ANGLE): the functions are those of the app's ANGLE, not OpenGLES.framework's, which
++            // the engine links as well. Alpha3's support library has opened the same file for the context.
++            if (getenv("OSG_USE_ANGLE") != nullptr)
++            {
++                static void *angle = dlopen("@executable_path/Frameworks/libGLESv2_angle.framework/libGLESv2_angle", RTLD_NOW | RTLD_LOCAL);
++                return angle ? dlsym(angle, funcName) : NULL;
++            }
++        #endif
+ 
+         #if defined(USE_APPLE_LEGACY_NSSYMBOL)
+             std::string temp( "_" );

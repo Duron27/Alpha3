@@ -140,16 +140,13 @@ enum OpenMWLauncher {
         }
     }
 
-    /// gl4es resolves GLES symbols through this hook. It must be a C function
-    /// pointer, so the driver handle lives in a global rather than a capture.
+    /// OpenGLES.framework, loaded globally: OSG and glad look the GL functions up by name at runtime.
     private static var glesDriverHandle: UnsafeMutableRawPointer?
 
-    /// Kept alive for the process lifetime: gl4es's hardware probe needs a
-    /// current GL context, and SDL doesn't create one until the engine starts.
+    /// A context made once to log what the driver offers (Apple's OpenGL ES stops at 3.0). SDL makes the engine's own.
     private static var bootstrapGLContext: EAGLContext?
 
-    /// Prepares the OpenGL ES driver and runs its one-time initialization so 
-    /// per-context state exists before the engine's first GL call.
+    /// Loads the OpenGL ES driver and logs its version and extensions.
     private static func initializeGLES() throws {
         glesDriverHandle = dlopen("/System/Library/Frameworks/OpenGLES.framework/OpenGLES", RTLD_NOW)
         guard glesDriverHandle != nil else {
@@ -197,6 +194,11 @@ enum OpenMWLauncher {
 
         try ensureIosOverrides()
 
+        // The Launch options environment, shared with Android (OPENMW_DECOMPRESS_TEXTURES is on by default there:
+        // Apple's OpenGL ES has no S3TC, so DXT textures are converted to ASTC or decoded on the CPU). The
+        // variables below are what iOS needs to run at all and are set after, so they win.
+        IosLaunchEnvironmentKt.applyLaunchEnvironment()
+
         // The engine resolves its "local" (base) configuration from this
         // directory; see components/files/macospath.cpp. It chains to the
         // user config through `config="?userconfig?"`.
@@ -205,21 +207,22 @@ enum OpenMWLauncher {
         setenv("OSG_LIBRARY_PATH", "", 1)
         // The app has its own keyboards (Compose, and a system input view); SDL must not present one.
         setenv("SDL_ENABLE_SCREEN_KEYBOARD", "0", 1)
+        // Stock OpenMW on Apple's OpenGL ES 3.0: the context SDL makes, and the ESSL version the support library
+        // translates the shaders to (#version 300 es)
         setenv("OPENMW_GLES_VERSION", "30", 1)
-        setenv("LIBGL_ES", "3", 1)
         setenv("OSG_GL_CONTEXT_VERSION", "3.0", 1)
-        setenv("OSG_GLES3_AVAILABLE", "1", 1)
         setenv("OSG_VERTEX_BUFFER_HINT", "VBO", 1)
         setenv("OSG_TEXT_SHADER_TECHNIQUE", "ALL", 1)
         setenv("OPENMW_DEBUG_OPENGL", "1", 1)
         setenv("OSG_GL_ERROR_CHECKING", "OFF", 1)
         setenv("OSG_NOTIFY_LEVEL", "WARN", 1)
-        // MoltenVK: raise per-stage sampler limit above Metal's 16 (needs Tier 2 argument buffers, A13+)
-        setenv("MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS", "1", 1)
 
         guard let fwPath = Bundle.main.privateFrameworksPath else { throw LaunchError.dylibMissing }
 
-        try initializeGLES()
+        // ANGLE on Metal (the launcher's renderer, or OSG_USE_ANGLE in the Launch options) brings its own OpenGL ES
+        if getenv("OSG_USE_ANGLE") == nil {
+            try initializeGLES()
+        }
 
         let frameworkPath = fwPath + "/libopenmw.framework/libopenmw"
         guard FileManager.default.fileExists(atPath: frameworkPath) else { throw LaunchError.dylibMissing }
@@ -232,8 +235,16 @@ enum OpenMWLauncher {
         typealias MainFn = @convention(c) (Int32, UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?) -> Int32
         let engineMain = unsafeBitCast(sym, to: MainFn.self)
 
-        var argv: [UnsafeMutablePointer<CChar>?] = [strdup("openmw"), nil]
-        let code = engineMain(1, &argv)
+        var args = ["openmw"] + IosLaunchEnvironmentKt.launchArguments()
+#if DEBUG
+        // Dev hook, like Android's omw_args extra: everything after -autoplay goes to the engine, e.g.
+        // xcrun simctl launch <device> org.alpha3.launcher.Alpha3 -autoplay --load-savegame <file>
+        let cli = ProcessInfo.processInfo.arguments
+        if let i = cli.firstIndex(of: "-autoplay") { args += cli[(i + 1)...] }
+#endif
+        print("OpenMW arguments: \(args)")
+        var argv: [UnsafeMutablePointer<CChar>?] = args.map { strdup($0) } + [nil]
+        let code = engineMain(Int32(args.count), &argv)
         // The engine returning means the game quit; there is no launcher UI
         // to return to in a meaningful state, so end the process cleanly.
         exit(code)

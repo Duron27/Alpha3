@@ -24,7 +24,7 @@ private const val DESC_LENGTH = 256
 
 private fun stripNuls(s: String) = s.trimEnd('\u0000')
 
-private fun latin1(b: ByteArray) = String(CharArray(b.size) { (b[it].toInt() and 0xff).toChar() })
+private fun latin1(b: ByteArray) = CharArray(b.size) { (b[it].toInt() and 0xff).toChar() }.concatToString()
 private fun latin1Bytes(s: String) = ByteArray(s.length) { s[it].code.toByte() }
 
 /** `pack("a<n>")`: padded with NULs or cut to [n] bytes. */

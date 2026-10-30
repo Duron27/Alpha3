@@ -180,7 +180,8 @@ namespace Alpha3
             const std::size_t end = glsl.find('\n', at);
             glsl.erase(at, end == std::string::npos ? std::string::npos : end - at);
         }
-        Misc::StringUtils::replaceAll(glsl, "#version 320 es", "#version 460");
+        for (const char* es : { "#version 320 es", "#version 310 es", "#version 300 es" })
+            Misc::StringUtils::replaceAll(glsl, es, "#version 460");
         Misc::StringUtils::replaceAll(glsl, "defined(GL_ES)", "1");
 
         std::vector<unsigned int> spirv;
@@ -201,9 +202,11 @@ namespace Alpha3
         const std::size_t afterVersion = essl.find('\n');
         if (afterVersion != std::string::npos)
             essl.insert(afterVersion + 1,
-                "#extension GL_OES_standard_derivatives : enable\n#extension GL_EXT_clip_cull_distance : enable\n"
+                std::string("#extension GL_OES_standard_derivatives : enable\n#extension GL_EXT_clip_cull_distance : enable\n"
                 "precision highp float;\nprecision highp int;\nprecision highp sampler2D;\nprecision highp sampler3D;\n"
-                "precision highp sampler2DShadow;\nprecision highp sampler2DArray;\nprecision highp image2D;\n");
+                "precision highp sampler2DShadow;\nprecision highp sampler2DArray;\n")
+                // image types came with ESSL 3.10
+                + (glesVersion >= 310 ? "precision highp image2D;\n" : ""));
         return essl;
     }
 }

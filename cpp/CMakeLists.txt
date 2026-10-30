@@ -41,7 +41,8 @@ set(ALPHA3_PLATFORM "" CACHE STRING
         "Target platform: android | ios | ios-simulator (auto-detected when empty)")
 option(ALPHA3_DEPS_ONLY "Only build the vcpkg dependency tree, no app targets" OFF)
 option(ALPHA3_OPENMW_UPSTREAM "Android: also build stock OpenMW (gitlab.com/OpenMW/openmw, openmw-upstream/) next to the fork" ON)
-option(ALPHA3_OPENMW_FORK "Android: build the clockwork-alpha fork (cpp/openmw, libopenmw.so). OFF ships only stock OpenMW; iOS always builds the fork" ON)
+option(ALPHA3_OPENMW_FORK "Android: build the clockwork-alpha fork (cpp/openmw, libopenmw.so). OFF ships only stock OpenMW" ON)
+option(ALPHA3_IOS_OPENMW_FORK "iOS: build the clockwork-alpha fork (cpp/openmw, Vulkan through MoltenVK) instead of stock OpenMW (cpp/openmw-upstream, OpenGL ES through glad)" OFF)
 option(ALPHA3_USE_OPENMW_DEPS "Use OpenMW/openmw-deps-build as a vcpkg overlay" ON)
 set(ALPHA3_OPENMW_DEPS_TAG "master" CACHE STRING
         "openmw-deps-build git ref (pin to a commit for reproducible builds)")
@@ -356,9 +357,9 @@ set(COMMON_CMAKE_ARGS ${VCPKG_CMAKE_CONFIGURE_OPTIONS})
 # The patch is for device builds only; the simulator slice is built without it.
 # The build happens once at configure time and is reused while the lib exists.
 # The static lib and the headers are copied into the vcpkg prefix (lib/, include/) after
-# the vcpkg install.
+# the vcpkg install. Only the fork needs it (ALPHA3_IOS_OPENMW_FORK); stock OpenMW is OpenGL ES only.
 # =============================================================================
-if(ALPHA3_IS_IOS)
+if(ALPHA3_IS_IOS AND ALPHA3_IOS_OPENMW_FORK)
     # Plain set() (not CACHE) so changing the tag here always applies to existing build dirs
     set(ALPHA3_MOLTENVK_TAG "v1.4.2")
     set(ALPHA3_MOLTENVK_PATCH "${CMAKE_CURRENT_SOURCE_DIR}/patches/moltenvk-tier2-sampler-limit.patch")
@@ -537,16 +538,27 @@ ExternalProject_Add(vcpkg
         USES_TERMINAL_INSTALL ON
 )
 
-# Android: build GLAD and install it into the vcpkg prefix before vcpkg builds any port, so that
-# openmw-osg (android/glad.patch) finds glad/gles2.h and libglad in ${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}.
+# Android and iOS (stock OpenMW): build GLAD and install it into the vcpkg prefix before vcpkg builds any port, so that
+# openmw-osg (android/glad.patch, ios/glad.patch) finds glad/gles2.h and libglad in ${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}.
 # Runs after the vcpkg clone/bootstrap (a re-clone would wipe the prefix) and before `vcpkg install`.
+# On iOS it is a static library (GLAD/CMakeLists.txt) that loads the functions of OpenGLES.framework at runtime.
 if(ALPHA3_IS_ANDROID)
+    set(ALPHA3_GLAD_CONFIGURE_ARGS
+            -DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}
+            -DANDROID_ABI=${app_abi}
+            -DANDROID_PLATFORM=${android_platform})
+elseif(NOT ALPHA3_IOS_OPENMW_FORK)
+    set(ALPHA3_GLAD_CONFIGURE_ARGS
+            -DCMAKE_SYSTEM_NAME=iOS
+            -DCMAKE_OSX_SYSROOT=${SDK_NAME}
+            -DCMAKE_OSX_ARCHITECTURES=${ARCH}
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=${DEPLOYMENT_TARGET})
+endif()
+if(DEFINED ALPHA3_GLAD_CONFIGURE_ARGS)
     set(ALPHA3_GLAD_BUILD_DIR "${CMAKE_BINARY_DIR}/glad")
     ExternalProject_Add_Step(vcpkg glad
             COMMAND ${CMAKE_COMMAND} -S ${CMAKE_CURRENT_SOURCE_DIR}/GLAD -B ${ALPHA3_GLAD_BUILD_DIR}
-                    -DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}
-                    -DANDROID_ABI=${app_abi}
-                    -DANDROID_PLATFORM=${android_platform}
+                    ${ALPHA3_GLAD_CONFIGURE_ARGS}
                     -DCMAKE_BUILD_TYPE=Release
                     -DCMAKE_INSTALL_PREFIX=${prefix}
             COMMAND ${CMAKE_COMMAND} --build ${ALPHA3_GLAD_BUILD_DIR}
@@ -639,6 +651,7 @@ if(ALPHA3_IS_IOS)
             DEPENDEES install
             COMMENT "Packaging vcpkg dylibs as frameworks into ${ALPHA3_IOS_EMBED_DIR}"
     )
+    if(ALPHA3_IOS_OPENMW_FORK)
     ExternalProject_Add_Step(vcpkg moltenvk
             COMMAND ${CMAKE_COMMAND} -E make_directory ${prefix}/lib
             COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_mvk_src_lib} ${prefix}/lib/
@@ -648,6 +661,7 @@ if(ALPHA3_IS_IOS)
             DEPENDEES install
             COMMENT "Installing MoltenVK (${_mvk_slice}) into ${prefix}"
     )
+    endif()
 endif()
 
 message(STATUS "vcpkg triplet : ${VCPKG_TRIPLET}")
@@ -658,8 +672,22 @@ message(STATUS "overlay ports : ${ALPHA3_OVERLAY_PORTS}")
 # App targets (skipped with -DALPHA3_DEPS_ONLY=ON)
 # =============================================================================
 if(NOT ALPHA3_DEPS_ONLY)
-    if(NOT ALPHA3_IS_ANDROID OR ALPHA3_OPENMW_FORK)
+    if(ALPHA3_IS_ANDROID)
+        if(ALPHA3_OPENMW_FORK)
+            add_subdirectory(openmw)
+        endif()
+    elseif(ALPHA3_IOS_OPENMW_FORK)
         add_subdirectory(openmw)
+    else()
+        # Stock OpenMW: libopenmw.framework and OpenMWAssets in iosApp, as the fork's install step made them
+        add_subdirectory(openmw-upstream)
+        # ANGLE on Metal, the renderer the launcher offers next to Apple's OpenGL ES: libGLESv2_angle.framework, which the
+        # engine opens at runtime when it is picked
+        add_subdirectory(Angle)
+        alpha3_ios_framework(_fw_angle libGLESv2_angle $<TARGET_FILE:angle_libGLESv2>)
+        add_custom_target(angle_ios_framework ALL ${_fw_angle}
+                COMMENT "Packaging ANGLE as libGLESv2_angle.framework into ${ALPHA3_IOS_EMBED_DIR}")
+        add_dependencies(angle_ios_framework angle_libGLESv2)
     endif()
     if(ALPHA3_IS_ANDROID)  # Android-only for now
         if(NOT ALPHA3_OPENMW_FORK)
@@ -703,8 +731,13 @@ endif()
 # Device build with ALPHA3_ALSO_BUILD_SIMULATOR: build this same project again for the simulator
 # into <build dir>-sim (the dir Gradle's buildNativeIosSimulator uses), after the device build.
 if(ALPHA3_ALSO_BUILD_SIMULATOR AND ALPHA3_PLATFORM STREQUAL "ios" AND NOT ALPHA3_DEPS_ONLY)
+    if(ALPHA3_IOS_OPENMW_FORK)
+        set(_alpha3_ios_engine openmw)
+    else()
+        set(_alpha3_ios_engine openmw_upstream)
+    endif()
     ExternalProject_Add(alpha3-simulator
-            DEPENDS openmw
+            DEPENDS ${_alpha3_ios_engine}
             SOURCE_DIR ${CMAKE_SOURCE_DIR}
             BINARY_DIR ${CMAKE_BINARY_DIR}-sim
             CMAKE_ARGS
