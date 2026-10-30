@@ -220,10 +220,28 @@ actual object OpenMWPaths {
         }
     }
 
+    /**
+     * The engine's cache (converted textures, shader programs; support/src/settings.cpp). It lives in Application
+     * Support because iOS empties Library/Caches when storage runs low, and with it hours of texture conversion; it is
+     * kept out of backups, since it can be made again.
+     */
+    val ENGINE_CACHE: String
+        get() = "$USER_FILE_STORAGE/cache"
+
+    /** Moves the cache earlier builds kept in Library/Caches/openmw, and keeps it out of iCloud and computer backups. */
+    private fun setupEngineCache() {
+        val fm = NSFileManager.defaultManager
+        val old = "${cachesDir()}/openmw"
+        if (fm.fileExistsAtPath(old) && !fm.fileExistsAtPath(ENGINE_CACHE)) fm.moveItemAtPath(old, ENGINE_CACHE, null)
+        ensureDir(ENGINE_CACHE)
+        NSURL.fileURLWithPath(ENGINE_CACHE).setResourceValue(true, NSURLIsExcludedFromBackupKey, null)
+    }
+
     actual fun setupResources() {
         val stamp = bundleStamp()
         val engineChanged = File(VERSION_STAMP).let { !it.exists() || it.readText() != stamp }
         setupConfigs(engineChanged)
+        setupEngineCache()
         migrateContainerPaths()
         val fm = NSFileManager.defaultManager
         val bundlePath = "${NSBundle.mainBundle.resourcePath}/OpenMWAssets/resources"

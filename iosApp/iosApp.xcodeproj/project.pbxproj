@@ -13,6 +13,7 @@
 		BB00000000000000000000A4 /* libopenal.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = AA00000000000000000000A4 /* libopenal.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		BB00000000000000000000A6 /* libcollada.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = AA00000000000000000000A6 /* libcollada.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		BB00000000000000000000A8 /* libGLESv2_angle.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = AA00000000000000000000A8 /* libGLESv2_angle.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		BB00000000000000000000A9 /* libalpha3_texconv.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = AA00000000000000000000A9 /* libalpha3_texconv.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -27,6 +28,7 @@
 				BB00000000000000000000A4 /* libopenal.framework in Embed Frameworks */,
 				BB00000000000000000000A6 /* libcollada.framework in Embed Frameworks */,
 				BB00000000000000000000A8 /* libGLESv2_angle.framework in Embed Frameworks */,
+				BB00000000000000000000A9 /* libalpha3_texconv.framework in Embed Frameworks */,
 			);
 			name = "Embed Frameworks";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -41,6 +43,7 @@
 		AA00000000000000000000A4 /* libopenal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = libopenal.framework; sourceTree = "<group>"; };
 		AA00000000000000000000A6 /* libcollada.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = libcollada.framework; sourceTree = "<group>"; };
 		AA00000000000000000000A8 /* libGLESv2_angle.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = libGLESv2_angle.framework; sourceTree = "<group>"; };
+		AA00000000000000000000A9 /* libalpha3_texconv.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = libalpha3_texconv.framework; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -99,6 +102,7 @@
 				AA00000000000000000000A4 /* libopenal.framework */,
 				AA00000000000000000000A6 /* libcollada.framework */,
 				AA00000000000000000000A8 /* libGLESv2_angle.framework */,
+				AA00000000000000000000A9 /* libalpha3_texconv.framework */,
 			);
 			path = EmbeddedLibs;
 			sourceTree = "<group>";

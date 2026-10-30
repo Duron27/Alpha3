@@ -51,6 +51,8 @@ class IosPlatformFeatures : PlatformFeatures() {
 
     override val modDownloaderHost get() = org.alpha3.launcher.mods.downloader.IosModDownloaderHost
 
+    override val texturePrepass: org.alpha3.launcher.utils.TexturePrepassRunner get() = IosTexturePrepass
+
     override val toolFs get() = IosToolFs
     override val toolPlatform get() = iosToolPlatform()
 

@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <sstream>
@@ -25,7 +26,9 @@
 #include <unordered_set>
 #include <vector>
 
+#ifdef __ANDROID__
 #include <jni.h>
+#endif
 
 #include <osgDB/Options>
 #include <osgDB/ReaderWriter>
@@ -35,12 +38,14 @@
 
 USE_OSGPLUGIN(dds)
 
+#ifdef __ANDROID__
 // osg::Image::readPixels refers to these glad pointers (the engine defines them); nothing here draws, so they stay null
 extern "C"
 {
     PFNGLPIXELSTOREIPROC glad_glPixelStorei = nullptr;
     PFNGLREADPIXELSPROC glad_glReadPixels = nullptr;
 }
+#endif
 
 namespace
 {
@@ -298,6 +303,120 @@ namespace Alpha3
     }
 }
 
+namespace
+{
+    // The pre-pass itself, for the platform's entry point below. report(phase, done, total, converted, cached, failed)
+    // is called a few times a second from the calling thread.
+    using Report = std::function<void(int, int, int, int, int, int)>;
+
+    int runPrepass(const std::vector<std::string>& configs, const std::string& settingsFile, const std::string& cacheDir,
+        int workers, const Report& report)
+    {
+        std::unique_lock running(sRunMutex, std::try_to_lock);
+        if (!running.owns_lock())
+            return Busy;
+        sCancel = false;
+
+        auto progress = [&](int phase, size_t done, size_t total) {
+            const Alpha3::TextureConversionCounts counts = Alpha3::textureConversionCounts();
+            static Alpha3::TextureConversionCounts start{};
+            if (phase == 0 && done == 0)
+                start = counts;
+            report(phase, static_cast<int>(done), static_cast<int>(total), static_cast<int>(counts.converted - start.converted),
+                static_cast<int>(counts.cached - start.cached), static_cast<int>(counts.failed - start.failed));
+        };
+
+        // The settings are read once per process (textureconversion.cpp keeps them), as in the game
+        if (sSettings.empty())
+            readSettings(settingsFile);
+        if (sCacheDirectory.empty())
+            sCacheDirectory = cacheDir;
+        if (!Alpha3::textureConversionEnabled())
+            return ConversionOff;
+
+        Config config;
+        for (const std::string& path : configs)
+            readConfig(path, config);
+
+        const auto started = std::chrono::steady_clock::now();
+        Index index;
+        progress(0, 0, config.data.size());
+        for (const std::string& archive : config.archives)
+        {
+            // the last data directory that has it, as Files::Collections finds it
+            for (auto dir = config.data.rbegin(); dir != config.data.rend(); ++dir)
+            {
+                std::error_code ec;
+                if (std::filesystem::exists(*dir / archive, ec))
+                {
+                    addArchive(*dir / archive, index);
+                    break;
+                }
+            }
+        }
+        for (size_t i = 0; i < config.data.size(); ++i)
+        {
+            if (sCancel)
+                return Cancelled;
+            addDirectory(config.data[i], index);
+            progress(0, i + 1, config.data.size());
+        }
+
+        std::vector<std::pair<std::string, const Source*>> jobs;
+        for (const auto& [name, source] : index.files)
+        {
+            if (name.compare(name.size() - 4, 4, ".dds") != 0)
+                continue;
+            if (index.files.count(name.substr(0, name.size() - 4) + ".ktx"))
+                continue;
+            jobs.emplace_back(name, &source);
+        }
+        // the big ones first, so the last minutes are not one texture on one core
+        std::sort(jobs.begin(), jobs.end(), [](const auto& a, const auto& b) {
+            return a.second->size > b.second->size;
+        });
+        Log(Debug::Info) << "Texture pre-pass: " << jobs.size() << " DDS textures in " << config.data.size()
+                         << " data directories and " << index.archives.size() << " archives, listed in "
+                         << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count()
+                         << " ms";
+
+        osgDB::ReaderWriter* reader = osgDB::Registry::instance()->getReaderWriterForExtension("dds");
+        const osg::ref_ptr<osgDB::Options> options = new osgDB::Options("dds_dxt1_detect_rgba ignoreTga2Fields");
+        std::atomic<size_t> next{ 0 }, done{ 0 };
+        auto work = [&] {
+            std::vector<char> bytes;
+            for (size_t i; !sCancel && (i = next++) < jobs.size(); ++done)
+            {
+                if (!reader || !readBytes(index, *jobs[i].second, bytes))
+                    continue;
+                MemoryBuffer buffer(bytes);
+                std::istream stream(&buffer);
+                osgDB::ReaderWriter::ReadResult result = reader->readImage(stream, options.get());
+                if (const osg::Image* image = result.getImage())
+                    Alpha3::transcodeDxt(*image, jobs[i].first);
+            }
+        };
+        std::vector<std::thread> threads;
+        for (int i = 0; i < std::max(1, static_cast<int>(workers)); ++i)
+            threads.emplace_back(work);
+        while (done < jobs.size() && !sCancel)
+        {
+            progress(1, done, jobs.size());
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        }
+        for (std::thread& thread : threads)
+            thread.join();
+        progress(1, done, jobs.size());
+        const Alpha3::TextureConversionCounts counts = Alpha3::textureConversionCounts();
+        Log(Debug::Info) << "Texture pre-pass " << (sCancel ? "cancelled" : "done") << " after "
+                         << std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - started).count()
+                         << " s: " << counts.converted << " converted, " << counts.cached << " already in the cache, "
+                         << counts.failed << " failed";
+        return sCancel ? Cancelled : Done;
+    }
+}
+
+#ifdef __ANDROID__
 // TexturePrepass.runNative(configs, settingsFile, cacheDir, workers, listener): the openmw.cfg files in the order the game
 // reads them, the user's settings.cfg ([Textures]), the game's cache directory (the cache is its astc folder unless
 // [Textures] astc cache path says otherwise). listener.onProgress(phase, done, total, converted, cached, failed) is called
@@ -306,11 +425,6 @@ namespace Alpha3
 extern "C" JNIEXPORT jint JNICALL Java_org_openmw_utils_TexturePrepass_runNative(JNIEnv* env, jobject /* thiz */,
     jobjectArray configs, jstring settingsFile, jstring cacheDir, jint workers, jobject listener)
 {
-    std::unique_lock running(sRunMutex, std::try_to_lock);
-    if (!running.owns_lock())
-        return Busy;
-    sCancel = false;
-
     auto string = [env](jstring value) {
         const char* chars = env->GetStringUTFChars(value, nullptr);
         std::string result = chars;
@@ -326,110 +440,39 @@ extern "C" JNIEXPORT jint JNICALL Java_org_openmw_utils_TexturePrepass_runNative
         Log(Debug::Error) << "Texture pre-pass: TexturePrepass$Listener.onProgress not found";
         return Busy;
     }
-    auto progress = [&](int phase, size_t done, size_t total) {
-        const Alpha3::TextureConversionCounts counts = Alpha3::textureConversionCounts();
-        static Alpha3::TextureConversionCounts start{};
-        if (phase == 0 && done == 0)
-            start = counts;
-        env->CallVoidMethod(listener, onProgress, phase, static_cast<jint>(done), static_cast<jint>(total),
-            static_cast<jint>(counts.converted - start.converted), static_cast<jint>(counts.cached - start.cached),
-            static_cast<jint>(counts.failed - start.failed));
-    };
-
-    // The settings are read once per process (textureconversion.cpp keeps them), as in the game
-    if (sSettings.empty())
-        readSettings(string(settingsFile));
-    if (sCacheDirectory.empty())
-        sCacheDirectory = string(cacheDir);
-    if (!Alpha3::textureConversionEnabled())
-        return ConversionOff;
-
-    Config config;
+    std::vector<std::string> paths;
     for (jsize i = 0; i < env->GetArrayLength(configs); ++i)
     {
         auto path = static_cast<jstring>(env->GetObjectArrayElement(configs, i));
-        readConfig(string(path), config);
+        paths.push_back(string(path));
         env->DeleteLocalRef(path);
     }
-
-    const auto started = std::chrono::steady_clock::now();
-    Index index;
-    progress(0, 0, config.data.size());
-    for (const std::string& archive : config.archives)
-    {
-        // the last data directory that has it, as Files::Collections finds it
-        for (auto dir = config.data.rbegin(); dir != config.data.rend(); ++dir)
-        {
-            std::error_code ec;
-            if (std::filesystem::exists(*dir / archive, ec))
-            {
-                addArchive(*dir / archive, index);
-                break;
-            }
-        }
-    }
-    for (size_t i = 0; i < config.data.size(); ++i)
-    {
-        if (sCancel)
-            return Cancelled;
-        addDirectory(config.data[i], index);
-        progress(0, i + 1, config.data.size());
-    }
-
-    std::vector<std::pair<std::string, const Source*>> jobs;
-    for (const auto& [name, source] : index.files)
-    {
-        if (name.compare(name.size() - 4, 4, ".dds") != 0)
-            continue;
-        if (index.files.count(name.substr(0, name.size() - 4) + ".ktx"))
-            continue;
-        jobs.emplace_back(name, &source);
-    }
-    // the big ones first, so the last minutes are not one texture on one core
-    std::sort(jobs.begin(), jobs.end(), [](const auto& a, const auto& b) {
-        return a.second->size > b.second->size;
-    });
-    Log(Debug::Info) << "Texture pre-pass: " << jobs.size() << " DDS textures in " << config.data.size()
-                     << " data directories and " << index.archives.size() << " archives, listed in "
-                     << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count()
-                     << " ms";
-
-    osgDB::ReaderWriter* reader = osgDB::Registry::instance()->getReaderWriterForExtension("dds");
-    const osg::ref_ptr<osgDB::Options> options = new osgDB::Options("dds_dxt1_detect_rgba ignoreTga2Fields");
-    std::atomic<size_t> next{ 0 }, done{ 0 };
-    auto work = [&] {
-        std::vector<char> bytes;
-        for (size_t i; !sCancel && (i = next++) < jobs.size(); ++done)
-        {
-            if (!reader || !readBytes(index, *jobs[i].second, bytes))
-                continue;
-            MemoryBuffer buffer(bytes);
-            std::istream stream(&buffer);
-            osgDB::ReaderWriter::ReadResult result = reader->readImage(stream, options.get());
-            if (const osg::Image* image = result.getImage())
-                Alpha3::transcodeDxt(*image, jobs[i].first);
-        }
-    };
-    std::vector<std::thread> threads;
-    for (int i = 0; i < std::max(1, static_cast<int>(workers)); ++i)
-        threads.emplace_back(work);
-    while (done < jobs.size() && !sCancel)
-    {
-        progress(1, done, jobs.size());
-        std::this_thread::sleep_for(std::chrono::milliseconds(250));
-    }
-    for (std::thread& thread : threads)
-        thread.join();
-    progress(1, done, jobs.size());
-    const Alpha3::TextureConversionCounts counts = Alpha3::textureConversionCounts();
-    Log(Debug::Info) << "Texture pre-pass " << (sCancel ? "cancelled" : "done") << " after "
-                     << std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - started).count()
-                     << " s: " << counts.converted << " converted, " << counts.cached << " already in the cache, "
-                     << counts.failed << " failed";
-    return sCancel ? Cancelled : Done;
+    return runPrepass(paths, string(settingsFile), string(cacheDir), workers,
+        [&](int phase, int done, int total, int converted, int cached, int failed) {
+            env->CallVoidMethod(listener, onProgress, phase, done, total, converted, cached, failed);
+        });
 }
 
 extern "C" JNIEXPORT void JNICALL Java_org_openmw_utils_TexturePrepass_cancelNative(JNIEnv*, jobject)
 {
     sCancel = true;
 }
+#else
+// iOS: the same as Android's runNative, as a C function the launcher looks up with dlsym in libalpha3_texconv.framework.
+// onProgress(context, phase, done, total, converted, cached, failed).
+extern "C" __attribute__((visibility("default"))) int alpha3_texconv_run(const char* const* configs, int configCount,
+    const char* settingsFile, const char* cacheDir, int workers,
+    void (*onProgress)(void*, int, int, int, int, int, int), void* context)
+{
+    const std::vector<std::string> paths(configs, configs + configCount);
+    return runPrepass(paths, settingsFile, cacheDir, workers,
+        [&](int phase, int done, int total, int converted, int cached, int failed) {
+            onProgress(context, phase, done, total, converted, cached, failed);
+        });
+}
+
+extern "C" __attribute__((visibility("default"))) void alpha3_texconv_cancel()
+{
+    sCancel = true;
+}
+#endif

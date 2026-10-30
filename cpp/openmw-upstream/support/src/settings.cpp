@@ -68,9 +68,10 @@ namespace Alpha3
 #ifdef __ANDROID__
         return Files::AndroidPath("openmw").getCachePath();
 #else
-        // iOS: the app container's Library/Caches (HOME is the container)
+        // iOS: Library/Application Support of the app container (HOME is the container), not Library/Caches, which iOS
+        // empties when storage runs low and with it hours of texture conversion. The launcher keeps it out of backups.
         const char* home = std::getenv("HOME");
-        return std::filesystem::path(home ? home : ".") / "Library" / "Caches" / "openmw";
+        return std::filesystem::path(home ? home : ".") / "Library" / "Application Support" / "Alpha3" / "cache";
 #endif
     }
 

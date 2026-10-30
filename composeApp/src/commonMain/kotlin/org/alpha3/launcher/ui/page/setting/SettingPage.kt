@@ -511,6 +511,7 @@ fun GraphicsSettingsSection() {
                     }
                 }
             }
+            TexturePrepassRow()
         }
 
         // Frame pacing (Swappy) only exists on Android's OpenGL ES renderer

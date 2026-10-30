@@ -288,6 +288,8 @@ else()
     # used, so the Xcode project and OpenMWLauncher.swift take either engine.
     set(ios_assets_dir "${ALPHA3_IOSAPP_DIR}/OpenMWAssets")
     alpha3_ios_framework(ios_openmw_framework libopenmw <BINARY_DIR>/OpenMW.app/Contents/MacOS/libopenmw.dylib)
+    # the launcher's texture pre-pass (support/CMakeLists.txt)
+    alpha3_ios_framework(ios_texconv_framework libalpha3_texconv <BINARY_DIR>/libalpha3_texconv.dylib)
     # openmw.cfg is the macOS one (resources=../Resources/resources); on iOS the resources sit next to it
     set(ios_cfg_fixup "${CMAKE_CURRENT_BINARY_DIR}/fix_openmw_cfg.cmake")
     file(WRITE ${ios_cfg_fixup} [=[
@@ -307,6 +309,7 @@ file(WRITE "${CFG}" "${content}")
                 ${ALPHA3_REPO_DIR}/3rdparty-licenses.txt ${ios_assets_dir}/
         COMMAND ${CMAKE_COMMAND} -DCFG=${ios_assets_dir}/openmw.cfg -P ${ios_cfg_fixup}
         ${ios_openmw_framework}
+        ${ios_texconv_framework}
     )
 endif()
 

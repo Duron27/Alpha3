@@ -121,7 +121,27 @@ if (NOT ANDROID)
     if (ALPHA3_MULTIPLAYER)
         add_subdirectory(multiplayer)
     endif()
-    # The rest (mimalloc, the navmesh tool's logcat, the launcher's texture pre-pass) is Android's
+    # The launcher's texture pre-pass, as on Android below: libalpha3_texconv.dylib, which the build wraps as
+    # libalpha3_texconv.framework. The launcher opens it at runtime and calls alpha3_texconv_run; only that and
+    # alpha3_texconv_cancel are exported.
+    add_library(alpha3_texconv SHARED texconv/texconv.cpp src/textureconversion.cpp src/blobstore.cpp)
+    target_include_directories(alpha3_texconv BEFORE PRIVATE texconv/shim src)
+    target_include_directories(alpha3_texconv PRIVATE ${OPENSCENEGRAPH_INCLUDE_DIRS})
+    target_compile_options(alpha3_texconv PRIVATE -fvisibility=hidden -fvisibility-inlines-hidden)
+    target_link_libraries(alpha3_texconv PRIVATE
+        osgdb_dds
+        ${OSGDB_LIBRARIES}
+        ${OSG_LIBRARIES}
+        ${OPENTHREADS_LIBRARIES}
+        alpha3_astcenc
+        alpha3_etcpak
+        # iOS's OSG refers to many more GL function pointers than Android's; glad (static, never loaded here) has them
+        ${OPENGL_gl_LIBRARY}
+        z
+    )
+    target_link_options(alpha3_texconv PRIVATE -Wl,-dead_strip)
+    set_target_properties(alpha3_texconv PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+    # The rest (mimalloc, the navmesh tool's logcat) is Android's
     return()
 endif()
 
