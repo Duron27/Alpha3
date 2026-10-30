@@ -38,6 +38,8 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <unordered_map>
+#include <unordered_set>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -165,7 +167,9 @@ namespace Alpha3
 
         std::string readAll(std::istream& stream)
         {
-            return std::string(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
+            std::ostringstream out;
+            out << stream.rdbuf();
+            return std::move(out).str();
         }
 
         // ---- the files
@@ -1391,6 +1395,23 @@ namespace Alpha3
 
             bool contains(const BlobKey& key) const { return mStore && mStore->size(key) != 0; }
 
+            // An entry that names another: a mesh's by its name and time, pointing at the one by its bytes
+            bool follow(const BlobKey& link, BlobKey& target) const
+            {
+                std::uint64_t words[2];
+                if (!mStore || mStore->size(link) != sizeof(words) || !mStore->read(link, 0, words, sizeof(words)))
+                    return false;
+                target = BlobKey{ words[0], words[1] };
+                return true;
+            }
+
+            void link(const BlobKey& link, const BlobKey& target)
+            {
+                const std::uint64_t words[2] = { target.mLow, target.mHigh };
+                if (mStore)
+                    mStore->append(link, words, sizeof(words));
+            }
+
             void store(const BlobKey& key, const std::string& nif, const std::string& dds)
             {
                 if (!mStore)
@@ -1443,6 +1464,29 @@ namespace Alpha3
             return static_cast<std::uint64_t>(file.getLastModified().time_since_epoch().count());
         }
 
+        // A mesh by its name and time, found without reading it: links to the entry keyed by its bytes
+        BlobKey linkKey(std::string_view path, std::uint64_t time, std::uint64_t settings)
+        {
+            return BlobKey{ fnv1a(path, 0xcbf29ce484222325ull) ^ time, fnv1a(path, 0x84222325cbf29ce4ull) ^ settings
+                    ^ 0x11dc000000000000ull };
+        }
+
+        // The time of a mesh, read once a run (each of its levels asks)
+        std::uint64_t modifiedOnce(const std::string& path, const VFS::File& file)
+        {
+            static std::mutex mutex;
+            static std::unordered_map<std::string, std::uint64_t> times;
+            {
+                std::lock_guard lock(mutex);
+                if (const auto found = times.find(path); found != times.end())
+                    return found->second;
+            }
+            const std::uint64_t time = modified(file);
+            std::lock_guard lock(mutex);
+            times.emplace(path, time);
+            return time;
+        }
+
         // By its name alone: the listing reads the time (a stat, slow on Android's shared storage) only of the few
         // meshes that have this
         BlobKey failedOnceKey(std::string_view path, std::uint64_t settings)
@@ -1487,38 +1531,92 @@ namespace Alpha3
             void make()
             {
                 std::call_once(mMade, [this] {
-                    std::string sourceBytes;
-                    try
-                    {
-                        sourceBytes = readAll(*mSource->open());
-                    }
-                    catch (const std::exception& e)
-                    {
-                        Log(Debug::Warning) << "Distant mesh of " << mSourcePath << ": " << e.what();
-                        if (mKind == Kind::Card)
-                            mDds = writeDds(std::vector<unsigned char>(4, 0), 1, 1);
-                        return;
-                    }
-                    const std::uint64_t settings = settingsHash(mKind, mSettings, mLevel);
-                    const BlobKey key{ fnv1a(sourceBytes, 0xcbf29ce484222325ull),
-                        fnv1a(sourceBytes, 0x84222325cbf29ce4ull) ^ settings };
-                    Cache& cache = Cache::get();
-                    if (cache.load(key, mNif, mDds) && !mNif.empty())
-                        return;
-                    if (!build(sourceBytes))
-                    {
-                        mNif.clear();
-                        // a card's texture name is listed whatever happens; nothing reads it
-                        mDds = mKind == Kind::Card ? writeDds(std::vector<unsigned char>(4, 0), 1, 1) : std::string();
-                        cache.store(failureKey(mSourcePath.value(), modified(*mSource), settings), std::string(),
-                            std::string());
-                        cache.store(failedOnceKey(mSourcePath.value(), settings), std::string(), std::string());
-                        ++sNotMade;
-                        return;
-                    }
-                    cache.store(key, mNif, mDds);
-                    ++sMade;
+                    const auto start = std::chrono::steady_clock::now();
+                    const Outcome outcome = makeNow();
+                    count(outcome, std::chrono::steady_clock::now() - start);
                 });
+            }
+
+            enum class Outcome
+            {
+                Made,
+                NotMade,
+                FromCache
+            };
+
+            // What making them costs, logged now and then: first visits of an area pay for it
+            static void count(Outcome outcome, std::chrono::steady_clock::duration time)
+            {
+                static std::mutex mutex;
+                static unsigned counts[3] = {};
+                static double ms[3] = {};
+                std::lock_guard lock(mutex);
+                const int index = static_cast<int>(outcome);
+                ++counts[index];
+                ms[index] += std::chrono::duration<double, std::milli>(time).count();
+                if ((counts[0] + counts[1] + counts[2]) % 100 == 0)
+                    Log(Debug::Verbose) << "Distant meshes so far: " << counts[0] << " made (" << ms[0] << " ms), "
+                                        << counts[1] << " not made (" << ms[1] << " ms), " << counts[2]
+                                        << " from the cache (" << ms[2] << " ms)";
+            }
+
+            // Sources that could not be made at level 0: the farther levels of the same mesh are not tried either
+            static bool failedAtLevel0(const std::string& path, bool add)
+            {
+                static std::mutex mutex;
+                static std::unordered_set<std::string> failed;
+                std::lock_guard lock(mutex);
+                return add ? failed.insert(path).second : failed.contains(path);
+            }
+
+            Outcome makeNow()
+            {
+                const std::string path(mSourcePath.value());
+                const std::uint64_t settings = settingsHash(mKind, mSettings, mLevel);
+                Cache& cache = Cache::get();
+                // made before: found by name and time, without reading the source (a read and hash of each was most of
+                // what loading an area from the cache took)
+                const BlobKey byName = linkKey(path, modifiedOnce(path, *mSource), settings);
+                BlobKey key;
+                if (cache.follow(byName, key) && cache.load(key, mNif, mDds) && !mNif.empty())
+                    return Outcome::FromCache;
+
+                std::string sourceBytes;
+                try
+                {
+                    sourceBytes = readAll(*mSource->open());
+                }
+                catch (const std::exception& e)
+                {
+                    Log(Debug::Warning) << "Distant mesh of " << mSourcePath << ": " << e.what();
+                    if (mKind == Kind::Card)
+                        mDds = writeDds(std::vector<unsigned char>(4, 0), 1, 1);
+                    return Outcome::NotMade;
+                }
+                key = BlobKey{ fnv1a(sourceBytes, 0xcbf29ce484222325ull),
+                    fnv1a(sourceBytes, 0x84222325cbf29ce4ull) ^ settings };
+                if (cache.load(key, mNif, mDds) && !mNif.empty())
+                {
+                    cache.link(byName, key);
+                    return Outcome::FromCache;
+                }
+                const bool skip = mLevel > 0 && failedAtLevel0(path, false);
+                if (skip || !build(sourceBytes))
+                {
+                    if (mLevel == 0)
+                        failedAtLevel0(path, true);
+                    mNif.clear();
+                    // a card's texture name is listed whatever happens; nothing reads it
+                    mDds = mKind == Kind::Card ? writeDds(std::vector<unsigned char>(4, 0), 1, 1) : std::string();
+                    cache.store(failureKey(path, modifiedOnce(path, *mSource), settings), std::string(), std::string());
+                    cache.store(failedOnceKey(path, settings), std::string(), std::string());
+                    ++sNotMade;
+                    return Outcome::NotMade;
+                }
+                cache.store(key, mNif, mDds);
+                cache.link(byName, key);
+                ++sMade;
+                return Outcome::Made;
             }
 
             bool build(const std::string& sourceBytes)

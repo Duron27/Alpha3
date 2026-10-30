@@ -156,10 +156,8 @@ namespace Alpha3
                             }
                             try
                             {
-                                setStreamingPath(&mPrevious[index]);
                                 osg::ref_ptr<osg::Image> image
                                     = mManager->getImage(VFS::Path::Normalized(mPrevious[index]));
-                                setStreamingPath(nullptr);
                                 if (image == nullptr || image == mManager->getWarningImage())
                                     continue;
                                 bytes->fetch_add(image->getTotalSizeInBytesIncludingMipmaps());
@@ -168,7 +166,6 @@ namespace Alpha3
                             }
                             catch (const std::exception&)
                             {
-                                setStreamingPath(nullptr);
                             }
                         }
                     });

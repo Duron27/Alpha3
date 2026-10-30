@@ -1,0 +1,34 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Fri, 30 Oct 2026 13:30:00 -0400
+Subject: [PATCH 18/18] Textures: the image manager names the file it reads
+
+Texture streaming reads large textures at a few hundred pixels first, but keeps pictures shown flat on the screen (menu
+art, splash screens, the GUI) at full size; it tells them by their path, which the DDS reader is not given.
+---
+ components/resource/imagemanager.cpp | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/components/resource/imagemanager.cpp b/components/resource/imagemanager.cpp
+index 917bf487bd..4b765bc85d 100644
+--- a/components/resource/imagemanager.cpp
++++ b/components/resource/imagemanager.cpp
+@@ -11,6 +11,8 @@
+ 
+ #include "objectcache.hpp"
+ 
++#include <alpha3/upstream.hpp>
++
+ #ifdef OSG_LIBRARY_STATIC
+ // This list of plugins should match with the list in the top-level CMakelists.txt.
+ USE_OSGPLUGIN(png)
+@@ -138,7 +140,9 @@ namespace Resource
+                 stream->seekg(0);
+             }
+ 
++            Alpha3::readingImage(path.value());
+             osgDB::ReaderWriter::ReadResult result = reader->readImage(*stream, mOptions);
++            Alpha3::readingImage({});
+             if (!result.success())
+             {
+                 Log(Debug::Error) << "Error loading " << path << ": " << result.message() << " code "

@@ -1045,7 +1045,8 @@ namespace Alpha3
                             drawOccluder(buffer, scratch, *mToDraw[i].first, mToDraw[i].second);
                     };
                     Helpers& helpers = this->helpers();
-                    const unsigned count = mToDraw.size() > 1 ? helpers.count() : 0;
+                    // hot: the cull thread alone, the frames are held longer then anyway (thermal.cpp)
+                    const unsigned count = mToDraw.size() > 1 && thermalPressure() < 2 ? helpers.count() : 0;
                     if (count > 0)
                         helpers.start([&](DepthBuffer& buffer, std::vector<osg::Vec3f>& scratch) {
                             buffer.reset(mBuffer.width(), mBuffer.height());

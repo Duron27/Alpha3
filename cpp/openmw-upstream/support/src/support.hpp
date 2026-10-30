@@ -99,12 +99,11 @@ namespace Alpha3
     osg::ref_ptr<osg::Image> textureStreamingRead(
         osg::Image& image, osg::ref_ptr<osg::Image> (*prepare)(osg::Image&));
     void textureStreamingTextureLoading(const osg::Image& image);
-    // The engine's main thread: what it reads (the GUI, the loading screens, what a cell needs right away) is never
-    // streamed, it is needed at full quality now. Noted when the engine sets up, and every frame.
+    // The engine's main thread: an image it reads without a name (not through the image manager, which names its files
+    // through readingImage) is not streamed. Noted when the engine sets up, and every frame.
     void noteMainThread();
-    // The texture preload's thread names the file it is about to read (null: none), so the streaming can tell an image
-    // shown in full on the screen (menus, splash screens, book art) from a texture of the world
-    void setStreamingPath(const std::string* path);
+    // The file the image manager is reading on this thread (empty: none), as it named it through readingImage
+    std::string_view readingImagePath();
     // the scene camera's cull drawing something: its small textures are made full size once it covers more pixels across
     // than they have
     void textureStreamingDrawableAdded(osg::NodeVisitor& cullVisitor, osg::Drawable& drawable, const osg::Matrix& modelView);
@@ -116,6 +115,12 @@ namespace Alpha3
     bool occlusionNodeOccluded(osg::CullStack& cullStack, const osg::Node& node);
     bool occlusionBoxOccluded(osg::CullStack& cullStack, const osg::BoundingBox& box);
     void occlusionDrawableAdded(osg::NodeVisitor& cullVisitor, osg::Drawable& drawable, const osg::Matrix& modelView);
+
+    // ---- thermal.cpp ([General] thermal mode): how close Android forecasts the phone is to throttling, checked at most
+    // every two seconds by whoever asks. 0: cool, or the mode is full; 1: warm; 2: hot.
+    int thermalPressure();
+    // threads for background work: all of them when cool, half when warm, one when hot
+    unsigned thermalThreads(unsigned threads);
 
     // ---- allocator.cpp: [General] allocator, once the settings are loaded
     void applyAllocatorSetting();

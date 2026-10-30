@@ -144,6 +144,7 @@ namespace Alpha3
 
             uint64_t mPeriod = 0;
             uint64_t mMaxPeriods = 2;
+            bool mThermalHeld = false;
             bool mAdaptive = true;
             Clock::time_point mLastSwap = Clock::now();
             Clock::time_point mWindowStart = mLastSwap;
@@ -192,6 +193,14 @@ namespace Alpha3
                 {
                     sPacedInterval = 0;
                     return true;
+                }
+                // hot (thermal.cpp): at least two display periods a frame, so the GPU rests before Android clamps every core
+                if (const bool hot = thermalPressure() >= 2; hot != mThermalHeld)
+                {
+                    mThermalHeld = hot;
+                    SwappyGL_setSwapIntervalNS(mPeriod * (hot ? 2 : 1));
+                    Log(Debug::Info) << "Frame pacing: "
+                                     << (hot ? "two display periods at least while the phone is hot" : "the phone has cooled");
                 }
                 SwappyGL_swap(display, surface);
                 adapt(Clock::now());
@@ -262,30 +271,6 @@ namespace Alpha3
             std::atomic<int64_t> mPeriod{ 0 };
         };
 
-        // How close the phone is to throttling (Android 11+, AThermal_getThermalHeadroom): 1 is where it starts to clamp the
-        // CPU and GPU. Looked up at run time, since the app runs on older Android too; NaN where it is not known.
-        class ThermalHeadroom
-        {
-        public:
-            float forecast(int seconds)
-            {
-                if (!mTried)
-                {
-                    mTried = true;
-                    void* lib = dlopen("libandroid.so", RTLD_NOW);
-                    auto acquire = lib ? reinterpret_cast<void* (*)()>(dlsym(lib, "AThermal_acquireManager")) : nullptr;
-                    mGet = lib ? reinterpret_cast<float (*)(void*, int)>(dlsym(lib, "AThermal_getThermalHeadroom")) : nullptr;
-                    mManager = acquire && mGet ? acquire() : nullptr;
-                }
-                return mManager ? mGet(mManager, seconds) : std::numeric_limits<float>::quiet_NaN();
-            }
-
-        private:
-            bool mTried = false;
-            void* mManager = nullptr;
-            float (*mGet)(void*, int) = nullptr;
-        };
-
         // Zink posts each frame as soon as it is copied, so frames of 30 ms show for one, two or three refreshes in turn.
         // Held to a whole number of display periods instead. The holding is done at the start of the engine's main loop: a
         // draw thread that waited before its post would hold the main thread too (OSG lets it cull the next frame only once
@@ -296,7 +281,7 @@ namespace Alpha3
         // The number of periods follows the main loop's own time per frame, with part of each interval left spare (the GPU
         // rests, the phone stays cooler): up when a quarter of the frames over a second need more than the budget
         // (OPENMW_ZINK_FRAME_BUDGET, percent, the launcher's slider, 80 by default), down when nine in ten over two seconds
-        // would fit in five sixths of the budget of one period fewer. One more period while Android forecasts throttling.
+        // would fit in five sixths of the budget of one period fewer. One more period while the phone is warm (thermal.cpp).
         struct ZinkPacing
         {
             static constexpr int64_t sMargin = 1500000; // after the vertical sync, so the post lands in the right period
@@ -319,11 +304,9 @@ namespace Alpha3
             int64_t mStart = 0; // when the next frame is to start
             int64_t mLastWake = 0;
             int64_t mWindowStart = 0;
-            int64_t mLastThermalCheck = 0;
             unsigned mWindowFrames = 0;
             unsigned mMissed = 0;
             unsigned mWouldFitLower = 0;
-            ThermalHeadroom mThermal;
 
             // draw thread
             int64_t mLastTarget = 0;
@@ -348,26 +331,12 @@ namespace Alpha3
                 mWindowFrames = mMissed = mWouldFitLower = 0;
             }
 
-            // every two seconds (asked more often, Android answers NaN)
-            void checkThermal(int64_t now)
+            void checkThermal()
             {
-                if (now - mLastThermalCheck < 2000000000)
-                    return;
-                mLastThermalCheck = now;
-                const float headroom = mThermal.forecast(10);
-                if (std::isnan(headroom))
-                    return;
-                if (mThermalExtra == 0 && headroom >= 0.9f)
-                {
-                    mThermalExtra = 1;
-                    Log(Debug::Info) << "Frame pacing: the phone is heating up (thermal headroom " << headroom
-                                     << "), one display period more per frame";
-                }
-                else if (mThermalExtra == 1 && headroom < 0.7f)
-                {
-                    mThermalExtra = 0;
-                    Log(Debug::Info) << "Frame pacing: the phone has cooled (thermal headroom " << headroom << ")";
-                }
+                const int extra = thermalPressure() >= 1 ? 1 : 0;
+                if (extra != mThermalExtra)
+                    Log(Debug::Info) << "Frame pacing: " << (extra ? "one display period more per frame while the phone is warm" : "the phone has cooled");
+                mThermalExtra = extra;
             }
 
             // main loop, before each frame
@@ -382,7 +351,7 @@ namespace Alpha3
                 // thread's wait for its vertical sync
                 if (mLastWake != 0)
                     adapt(now, std::max<int64_t>(now - mLastWake - drawWait, 0), period);
-                checkThermal(now);
+                checkThermal();
                 const int interval = std::min(mBase + mThermalExtra, sMaxInterval);
                 if (interval != mInterval.load(std::memory_order_relaxed))
                     Log(Debug::Verbose) << "Frame pacing: " << interval << " display periods per frame";
@@ -499,6 +468,25 @@ namespace Alpha3
             if (traits != nullptr
                 && frameGenSwap(gc, traits->width, traits->height, true, [&](int64_t) { gc.swapBuffersImplementation(); }))
                 return;
+        }
+        else
+        {
+            // plain swaps (Swappy off): while the phone is hot (thermal.cpp) every other vertical sync at most, then the
+            // swap interval it had
+            static int sHeldFrom = -1;
+            const bool hot = thermalPressure() >= 2;
+            if (hot && sHeldFrom < 0)
+            {
+                sHeldFrom = SDL_GL_GetSwapInterval();
+                SDL_GL_SetSwapInterval(2);
+                Log(Debug::Info) << "Frame pacing: every other vertical sync at most while the phone is hot";
+            }
+            else if (!hot && sHeldFrom >= 0)
+            {
+                SDL_GL_SetSwapInterval(sHeldFrom);
+                sHeldFrom = -1;
+                Log(Debug::Info) << "Frame pacing: the phone has cooled";
+            }
         }
         gc.swapBuffersImplementation();
     }

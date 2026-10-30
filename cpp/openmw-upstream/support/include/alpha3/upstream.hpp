@@ -5,6 +5,7 @@
 // library works through OSG's RuntimeHooks and needs no call; these are the few places the engine has to ask.
 
 #include <memory>
+#include <string_view>
 
 #include <osg/Camera>
 #include <osg/Matrixd>
@@ -49,6 +50,10 @@ namespace Alpha3
     // sides ([Terrain] impostors), the rest simplified ([Terrain] distant mesh simplification). Object paging reads them
     // only outside the active grid.
     void addDistantMeshes(VFS::Manager& vfs);
+
+    // The image manager names the file it is about to read on this thread (empty after it): texture streaming keeps
+    // pictures shown flat on the screen (menu art, splash screens, the GUI) at full size, by their path.
+    void readingImage(std::string_view path);
 
     // Frame generation (OPENMW_FRAMEGEN) builds the frame between two rendered ones from the camera's motion and the
     // scene's depth when the engine hands them over: each frame, from the main thread before it is rendered.

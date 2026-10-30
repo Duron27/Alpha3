@@ -140,7 +140,7 @@ namespace Alpha3
             // ASTC textures need a GPU that can sample ASTC; ETC2 is part of OpenGL ES 3
             if (textureConversionUsesEtc2() || gl->isTextureCompressionASTCSupported)
             {
-                if (osg::ref_ptr<osg::Image> converted = transcodeDxt(image, image.getFileName()))
+                if (osg::ref_ptr<osg::Image> converted = transcodeDxt(image, image.getFileName().empty() ? readingImagePath() : image.getFileName()))
                     return converted;
             }
             else

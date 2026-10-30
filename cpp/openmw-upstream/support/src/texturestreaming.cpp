@@ -16,6 +16,8 @@
 // engine needs to know: the textures that use it change with it.
 #include "support.hpp"
 
+#include <alpha3/upstream.hpp>
+
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -58,7 +60,7 @@ namespace Alpha3
         }
 
         std::atomic<std::thread::id> sMainThread{};
-        thread_local const std::string* tlPath = nullptr;
+        thread_local std::string tlPath; // the image being read, as the image manager names it
 
         bool onMainThread()
         {
@@ -174,7 +176,8 @@ namespace Alpha3
 
             osg::ref_ptr<osg::Image> read(osg::Image& image, Prepare prepare)
             {
-                if (onMainThread() || (tlPath != nullptr && fullQualityImages().contains(*tlPath)))
+                // by name; an image read without one (not through the image manager) is kept whole on the main thread
+                if (tlPath.empty() ? onMainThread() : fullQualityImages().contains(tlPath))
                     return nullptr;
                 osg::ref_ptr<osg::Image> small = withoutTopLevels(image, streamingSettings().mStartSize);
                 if (!small)
@@ -429,9 +432,14 @@ namespace Alpha3
         sMainThread.store(std::this_thread::get_id(), std::memory_order_relaxed);
     }
 
-    void setStreamingPath(const std::string* path)
+    void readingImage(std::string_view path)
     {
         tlPath = path;
+    }
+
+    std::string_view readingImagePath()
+    {
+        return tlPath;
     }
 
     void textureStreamingDrawableAdded(osg::NodeVisitor& cullVisitor, osg::Drawable& drawable, const osg::Matrix& modelView)

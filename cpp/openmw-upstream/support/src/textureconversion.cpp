@@ -270,8 +270,9 @@ namespace Alpha3
                 if (astcenc_compress_image(context, &image, &swizzle, out, size, index) != ASTCENC_SUCCESS)
                     ok = false;
             };
+            // fewer than the context has while the phone is warm: the others are not asked for
             std::vector<std::thread> helpers;
-            for (unsigned i = 1; i < s.threads; ++i)
+            for (unsigned i = 1, threads = thermalThreads(s.threads); i < threads; ++i)
                 helpers.emplace_back(work, i);
             work(0);
             for (std::thread& helper : helpers)
@@ -632,7 +633,7 @@ namespace Alpha3
             }
             if (s.etc2)
             {
-                encodeEtc2(rgba.data(), lw, lh, alpha, data.data() + offset, s.threads);
+                encodeEtc2(rgba.data(), lw, lh, alpha, data.data() + offset, thermalThreads(s.threads));
                 offset += sizes[l];
                 continue;
             }
@@ -666,7 +667,7 @@ namespace Alpha3
         {
             ++sSlow;
             Log(Debug::Info) << (s.etc2 ? "ETC2" : "ASTC") << " converted " << path << " " << w << "x" << h << " (" << levels << " levels, "
-                             << keyBytes / 1024 << " KB of the first level DXT -> " << total / 1024
+                             << image.getTotalSizeInBytesIncludingMipmaps() / 1024 << " KB of DXT -> " << total / 1024
                              << " KB) in " << micros / 1000 << " ms";
         }
         maybeReport();

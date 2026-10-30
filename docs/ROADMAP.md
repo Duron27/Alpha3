@@ -38,6 +38,13 @@ Everything still open, in rough order. The sections below have the details.
 **Other**
 
 - [ ] Find why the debug APK grew from 150 MB to 200 MB.
+- [ ] "Build Alpha3 cache" in the launcher's mod tools: the texture pre-pass and every distant mesh and card, before playing, so first visits load like later ones. Not the navmesh (navmeshtool takes too long; `write to navmeshdb = true` caches each area as it is visited).
+- [ ] Thermal mode: check the thresholds over a long session (the Note 10+ forecasts headroom from its skin temperature, since its thermal HAL gives no thresholds).
+
+## Thermal mode
+
+- `[General] thermal mode = auto` (default) follows Android's thermal headroom forecast (Android 11+, checked every 2 s). Warm (0.85 or more): background texture conversion on half its threads, and Zink one display period more per frame. Hot (0.95 or more): conversion on one thread, frames held to two display periods at least (Swappy's minimum interval, or the swap interval of plain swaps), occlusion culling without its helper threads. Each level is left 0.1 below where it starts. `full` never backs off.
+- On the Note 10+ while charging after a long test run, the forecast was 1.22 (skin 48.9 °C), so it started hot.
 
 ## 1. Distant objects as sprites (impostors)
 
@@ -57,6 +64,7 @@ Far away, draw a flat 2D picture of an object (a tree, a rock, a house) instead 
   - **Left as they are:** animated meshes, particles, billboards, effects, skinned meshes, meshes under 200 triangles, and meshes that don't get at least 20% smaller. The cache remembers them, so from the next start they are not listed and the engine doesn't keep them twice.
   - **Farther levels** (`[Terrain] simplified mesh levels`, 3): paging asks for `<mesh>_dist_<n>.nif` for its chunks of 2^n cells, so each simplified mesh is also listed as `_dist_1` and `_dist_2`, with 2x and 4x the error. A level is only kept if it is at least 20% smaller than the one before; otherwise paging falls back to the level before. On the vanilla and expansion BSAs, 1280 meshes get a level 1 (236k triangles) and 818 get a level 2 (73k). Level 0 is unchanged, so existing caches stay valid.
   - **Card atlas as DXT5** (etcpak's BC3 encoder, which takes RGBA as stored; the first build swapped red and blue, so trees looked blue): 4x smaller than RGBA8. The atlas is padded to a power of two (256×128 for the usual 192×128), since GLES can't use mipmapped compressed textures of other sizes. On GPUs without S3TC, the image hooks convert it to ASTC/ETC2 like any other DDS. The host test checks the atlas colours.
+  - **Cache hits without reading the mesh:** each entry is also linked from a key of the mesh's name, file time and settings, so a mesh made before is found without reading its file. Before, every hit read the whole NIF (one character at a time) and hashed it twice, about 7.5 ms each: 4.4 s of an 8.5 s `coc` from Molag Mar to Balmora. Now about 1.5 ms. The first run after the change still reads each mesh once, to add its link; caches already on disk stay valid.
   - **Startup:** a mesh that was not made is remembered by its name and settings, and only those few get their file time read (a `stat`, slow on Android's shared storage). Before, every mesh and level was stat'ed while listing, about 1.8 s on the phone. The log line gives the listing time.
 - **Next:**
   - **Real-device check:** lighting on the cards (their normals point up), the alpha test at low mips, the pop at the active grid edge, and FPS with paging in Vivec and the Ascadian Isles.
