@@ -18,10 +18,11 @@ Far away, draw a flat 2D picture of an object (a tree, a rock, a house) instead 
   - **Cards** (`[Terrain] impostors`, the trees in `impostor meshes`): the mesh is drawn on the CPU from 6 sides into one texture, written as 3 crossed two-sided quads. All 72 vanilla trees, about 7 ms each.
   - **Simplified meshes** (`[Terrain] distant mesh simplification`, every other mesh by default, `simplified meshes = *`): shapes are gathered by material and simplified with meshoptimizer, with borders locked so the pieces still meet. They keep their own textures and properties, so paging merges them with everything else. On the vanilla and expansion BSAs at the 2% default: 2387 meshes simplified (431 `ex_` buildings, 91 rocks), 2.46M → 1.00M triangles, about 0.5 ms each on a PC. Examples: Vivec canton 9214 → 5768, Ald'ruhn building 4226 → 1802, Bitter Coast rock 916 → 228. They look the same at a distance.
   - **Left as they are:** animated meshes, particles, billboards, effects, skinned meshes, meshes under 200 triangles, and meshes that don't get at least 20% smaller. The cache remembers them, so from the next start they are not listed and the engine doesn't keep them twice.
+  - **Farther levels** (`[Terrain] simplified mesh levels`, 3): paging asks for `<mesh>_dist_<n>.nif` for its chunks of 2^n cells, so each simplified mesh is also listed as `_dist_1` and `_dist_2`, with 2x and 4x the error. A level is only kept if it is at least 20% smaller than the one before; otherwise paging falls back to the level before. On the vanilla and expansion BSAs, 1280 meshes get a level 1 (236k triangles) and 818 get a level 2 (73k). Level 0 is unchanged, so existing caches stay valid.
+  - **Card atlas as DXT5** (etcpak's BC3 encoder): 4x smaller than RGBA8 (32 KB instead of 128 KB for a 192×128 atlas with mips). On GPUs without S3TC, the image hooks convert it to ASTC/ETC2 like any other DDS.
 - **Next:**
   - **Real-device check:** lighting on the cards (their normals point up), the alpha test at low mips, the pop at the active grid edge, and FPS with paging in Vivec and the Ascadian Isles.
-  - **More reduction for buildings:** many Morrowind buildings are open pieces, and their locked borders limit the simplifier. Try meshoptimizer's attribute-aware simplifier, welding positions across materials, or a texture-baked proxy mesh for the farthest LOD level (`_dist_1`, `_dist_2`, which paging already asks for).
-  - **Compress the card atlas:** use ETC2/ASTC with the encoders already linked, about 4x smaller.
+  - **More reduction for buildings:** many Morrowind buildings are open pieces, and their locked borders limit the simplifier, so the farther levels gain little on them (Vivec canton: 5768 at level 0, 5742 at level 1, so no level 1 is made). Try meshoptimizer's attribute-aware simplifier, welding positions across materials, unlocked borders at the farther levels, or a texture-baked proxy mesh.
 
 ## 2. Low quality while loading, better when close (LOD and streaming)
 
@@ -29,6 +30,8 @@ Load something cheap first, so a cell shows up fast, then upgrade what's near th
 
 - Show distant terrain and objects at the lowest LOD (or as sprites, see above) while a cell loads, then load full detail by distance.
 - Tie into the existing `viewing distance` and `object paging min size` settings, with mobile presets.
+- **Status: started.** Distant objects now get coarser the farther away they are (the distant mesh levels, item 1), and texture streaming keeps far textures small (item 3).
+- **Not done yet:** showing the low levels first while a cell loads, then swapping in detail. That needs a hook in OpenMW's paging or cell loading, not just the VFS. Also not done: mobile presets for `viewing distance` and `object paging min size`.
 
 ## 2b. Pre-built object paging chunks
 
@@ -46,12 +49,12 @@ OpenMW builds every paging chunk in game: it collects the references, loads the 
 - Builds on the `[Textures]` conversion cache: converted textures already store their mips, so loading part of a file should be cheap.
 - **Status: first version done, no OpenMW or OSG patch.** See `cpp/openmw-upstream/support/src/texturestreaming.cpp`, off by default (`[Textures] streaming`).
   1. A mipmapped DDS larger than `streaming start size` (256) is read as its smaller levels only. With texture conversion on, only those levels are converted while the cell loads.
-  2. The first time that small texture is uploaded, the full image is prepared on a background thread.
+  2. Once something drawn with it covers more pixels across on the screen than the small texture has, the full image is prepared on a background thread. The scene camera's cull tells, through the occlusion hooks' `drawableAdded`. Far away the texture stays small. A texture uploaded but never drawn by the scene camera (sky, GUI) is made full size about 5 seconds after its upload.
   3. After a later frame, on the draw thread, the full data replaces the small image's data in place, up to `streaming swaps per frame` per frame. OSG sees the change and remakes the texture at full size. Every texture sharing that image changes with it.
 - **Tested:** on a desktop GL context, a texture remade at the new size from the same image. In a host test, 210 textures from Morrowind.bsa (start size lowered to 64) read small first (1.1 MB instead of 11 MB), then byte-identical to the full image after the swap, with and without a conversion step. Vanilla textures are 256 px or smaller, so at the default this only affects high-res texture packs.
 - **Next:**
   - **Memory budget:** drop textures not drawn for a while back to their small levels, which needs a "drawn this frame" signal (a hook in `Texture::apply`, or the cull visitor).
-  - **Upgrade by distance or screen size** instead of on first upload: today a texture compiled ahead for a cell becomes full size even if it is only seen far away.
+  - ~~Upgrade by screen size instead of on first upload~~: done. Tested in a cull with a 1024 px texture on a wall: it stays at 256 px from far away (about 40 px on screen), and goes full size up close.
   - **Device check:** load times of a cell with a 2K texture pack, with and without streaming.
 
 ## 4. Occlusion culling
@@ -73,5 +76,5 @@ Skip drawing things hidden behind other things, like buildings behind a wall in 
 - **Next:**
   - **Device check:** culled counts and the CPU cost (the verbose log prints both every 600 frames) in Vivec, Balmora and on open ground. Tune the buffer width and triangle budget.
   - **Draw the buffer on a worker thread** while the previous frame is drawn, instead of at the start of the cull.
-  - **Simplified occluder meshes** from the distant mesh simplifier, so a building costs fewer triangles.
-  - **Object paging chunks** usually go over the budget and are skipped, because one chunk is a whole cell's merged geometry. Drawing only their large pieces would let distant towns hide what is behind them.
+  - ~~Simplified occluders~~: done. An occluder over 1000 triangles (a building, an object paging chunk) is simplified once on a background thread (positions welded, 1% error, open edges locked) and drawn in its place. It's drawn whole (or skipped if over budget) until the simplified version is ready, and kept only if at least 20% smaller. A 64×64 grid wall goes from 8192 to 818 triangles and culls the same. This is what lets paging chunks fit in the budget.
+  - **Conservative simplification:** the simplified surface can be up to 1% of the mesh's size in front of the real one, so something just behind a wall could be culled a little early. Check on the device; a smaller error or an inward offset would fix it.

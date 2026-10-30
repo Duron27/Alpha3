@@ -11,12 +11,21 @@
 //
 // Only the scene camera's traversal is tested (not shadows, water reflections or the sky). An occluder that was not in
 // view last frame is simply missing, which only means less is culled; one that moved is a frame late.
+//
+// An occluder of many triangles (a building, an object paging chunk: a cell's merged meshes) is simplified once on a
+// background thread (meshoptimizer, 1% of its size, open edges kept where they are), and that is drawn in its place, so
+// it fits in the budget. Until it is ready the occluder is drawn as it is, or skipped when it does not fit.
 #include "support.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
+#include <deque>
 #include <limits>
+#include <memory>
+#include <mutex>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -32,6 +41,8 @@
 #include <osgUtil/StateGraph>
 
 #include <components/debug/debuglog.hpp>
+
+#include <meshoptimizer.h>
 
 namespace Alpha3
 {
@@ -54,6 +65,8 @@ namespace Alpha3
             return settings;
         }
 
+        constexpr unsigned sSimplifyAbove = 1000; // triangles: an occluder with more is simplified
+        constexpr float sSimplifyError = 0.01f; // of the mesh's size
         constexpr float sNear = 1.f; // view depth where triangles are clipped and bounds count as touching the camera
         constexpr int sTile = 8;
         const std::string sSceneCamera = "SceneCam"; // OpenMW's Constants::SceneCamera
@@ -157,9 +170,17 @@ namespace Alpha3
             return verdict;
         }
 
+        // An occluder's triangles, simplified: positions only, welded
+        struct SimplifiedOccluder
+        {
+            std::vector<osg::Vec3f> mPositions;
+            std::vector<unsigned> mIndices;
+        };
+
         struct Occluder
         {
             osg::ref_ptr<const osg::Geometry> mGeometry;
+            std::shared_ptr<const SimplifiedOccluder> mSimplified; // drawn in place of the geometry when there is one
             osg::Matrix mWorld;
             bool mCullBack;
             bool mCullFront;
@@ -357,6 +378,142 @@ namespace Alpha3
             osg::Matrix mProjection;
         };
 
+        struct IndexCollector
+        {
+            std::vector<unsigned>* mIndices = nullptr;
+            std::size_t mVertices = 0;
+            void operator()(unsigned a, unsigned b, unsigned c)
+            {
+                if (a < mVertices && b < mVertices && c < mVertices)
+                    mIndices->insert(mIndices->end(), { a, b, c });
+            }
+        };
+
+        SimplifiedOccluder simplifyOccluder(const osg::Geometry& geometry)
+        {
+            const auto& vertices = static_cast<const osg::Vec3Array&>(*geometry.getVertexArray());
+            std::vector<unsigned> indices;
+            osg::TriangleIndexFunctor<IndexCollector> collector;
+            collector.mIndices = &indices;
+            collector.mVertices = vertices.size();
+            geometry.accept(collector);
+            if (indices.empty())
+                return {};
+
+            // one vertex per position: the copies for other normals or texture coordinates would be borders
+            SimplifiedOccluder result;
+            std::vector<unsigned> remap(vertices.size());
+            const std::size_t unique = meshopt_generateVertexRemap(remap.data(), indices.data(), indices.size(),
+                &vertices.front(), vertices.size(), sizeof(osg::Vec3f));
+            result.mPositions.resize(unique);
+            meshopt_remapVertexBuffer(
+                result.mPositions.data(), &vertices.front(), vertices.size(), sizeof(osg::Vec3f), remap.data());
+            std::vector<unsigned> welded(indices.size());
+            meshopt_remapIndexBuffer(welded.data(), indices.data(), indices.size(), remap.data());
+
+            result.mIndices.resize(welded.size());
+            const std::size_t target = std::max<std::size_t>(welded.size() / 3 / 10, 64) * 3;
+            result.mIndices.resize(meshopt_simplify(result.mIndices.data(), welded.data(), welded.size(),
+                &result.mPositions[0].x(), result.mPositions.size(), sizeof(osg::Vec3f), target, sSimplifyError,
+                meshopt_SimplifyLockBorder, nullptr));
+            return result;
+        }
+
+        // Simplified versions of the large occluders, made on a background thread, kept while they are used
+        class OccluderSimplifier
+        {
+        public:
+            ~OccluderSimplifier()
+            {
+                {
+                    std::lock_guard lock(mMutex);
+                    mStopped = true;
+                    mQueue.clear();
+                }
+                mWake.notify_all();
+                if (mWorker.joinable())
+                    mWorker.join();
+            }
+
+            // The simplified version, null while it is being made or when simplifying does not make it smaller
+            std::shared_ptr<const SimplifiedOccluder> get(const osg::Geometry& geometry, unsigned frame)
+            {
+                std::lock_guard lock(mMutex);
+                Entry& entry = mEntries[&geometry];
+                if (!entry.mGeometry.valid())
+                {
+                    // new, or a geometry freed whose address is used again (not while the worker reads it: it holds it)
+                    entry = Entry();
+                    entry.mGeometry = &geometry;
+                    mQueue.emplace_back(&geometry);
+                    if (!mWorker.joinable())
+                        mWorker = std::thread([this] { work(); });
+                    mWake.notify_one();
+                }
+                entry.mLastUsed = frame;
+                return entry.mSimplified;
+            }
+
+            // Lets go of what has not been used for a while
+            void sweep(unsigned frame)
+            {
+                std::lock_guard lock(mMutex);
+                std::erase_if(mEntries, [&](const auto& item) {
+                    const Entry& entry = item.second;
+                    return !entry.mGeometry.valid() || (!entry.mBusy && frame - entry.mLastUsed > 1200);
+                });
+            }
+
+        private:
+            struct Entry
+            {
+                osg::observer_ptr<const osg::Geometry> mGeometry;
+                std::shared_ptr<const SimplifiedOccluder> mSimplified;
+                unsigned mLastUsed = 0;
+                bool mBusy = false;
+            };
+
+            void work()
+            {
+                while (true)
+                {
+                    osg::ref_ptr<const osg::Geometry> geometry;
+                    {
+                        std::unique_lock lock(mMutex);
+                        mWake.wait(lock, [this] { return mStopped || !mQueue.empty(); });
+                        if (mStopped)
+                            return;
+                        const bool alive = mQueue.front().lock(geometry);
+                        mQueue.pop_front();
+                        if (!alive)
+                            continue;
+                        const auto found = mEntries.find(geometry.get());
+                        if (found == mEntries.end())
+                            continue;
+                        found->second.mBusy = true;
+                    }
+                    // the engine does not change a static mesh's arrays once it is drawn: read here as they are
+                    auto simplified = std::make_shared<SimplifiedOccluder>(simplifyOccluder(*geometry));
+                    const unsigned before = triangleCount(*geometry);
+                    std::lock_guard lock(mMutex);
+                    const auto found = mEntries.find(geometry.get());
+                    if (found == mEntries.end())
+                        continue;
+                    found->second.mBusy = false;
+                    // a fifth smaller at least, or the geometry is drawn as it is
+                    if (simplified->mIndices.size() / 3 * 5 <= before * 4 && !simplified->mIndices.empty())
+                        found->second.mSimplified = std::move(simplified);
+                }
+            }
+
+            std::mutex mMutex;
+            std::condition_variable mWake;
+            std::unordered_map<const osg::Geometry*, Entry> mEntries;
+            std::deque<osg::observer_ptr<const osg::Geometry>> mQueue;
+            std::thread mWorker;
+            bool mStopped = false;
+        };
+
         // Draws the triangles of an occluder, with vertices already in view space
         struct TriangleDrawer
         {
@@ -484,13 +641,22 @@ namespace Alpha3
                 const StateVerdict& verdict = found->second;
                 if (!verdict.mOccluder || (verdict.mCullBack && verdict.mCullFront))
                     return;
-                const unsigned triangles = triangleCount(*geometry);
+                unsigned triangles = triangleCount(*geometry);
                 if (triangles == 0)
                     return;
+                std::shared_ptr<const SimplifiedOccluder> simplified;
+                if (triangles > sSimplifyAbove)
+                {
+                    simplified = mSimplifier.get(*geometry, mFrame);
+                    if (simplified)
+                        triangles = static_cast<unsigned>(simplified->mIndices.size() / 3);
+                }
                 const float distance = std::max(1.f, (box.center() * modelView).length() - radius);
-                mRecording.push_back({ geometry, modelView * mInverseView, verdict.mCullBack, verdict.mCullFront,
-                    radius / distance, triangles });
+                mRecording.push_back({ geometry, std::move(simplified), modelView * mInverseView, verdict.mCullBack,
+                    verdict.mCullFront, radius / distance, triangles });
             }
+
+            unsigned drawnTriangles() const { return mDrawnTriangles; }
 
         private:
             void newFrame(unsigned frame)
@@ -542,13 +708,26 @@ namespace Alpha3
                         continue;
                     budget -= occluder.mTriangles;
                     const osg::Matrix toView = occluder.mWorld * mView;
-                    const auto& vertices = static_cast<const osg::Vec3Array&>(*occluder.mGeometry->getVertexArray());
-                    mViewVertices.resize(vertices.size());
-                    for (std::size_t i = 0; i < vertices.size(); ++i)
-                        mViewVertices[i] = vertices[i] * toView;
                     drawer.mCullBack = occluder.mCullBack;
                     drawer.mCullFront = occluder.mCullFront;
-                    occluder.mGeometry->accept(drawer);
+                    if (occluder.mSimplified)
+                    {
+                        const SimplifiedOccluder& mesh = *occluder.mSimplified;
+                        mViewVertices.resize(mesh.mPositions.size());
+                        for (std::size_t i = 0; i < mesh.mPositions.size(); ++i)
+                            mViewVertices[i] = mesh.mPositions[i] * toView;
+                        for (std::size_t i = 0; i + 2 < mesh.mIndices.size(); i += 3)
+                            drawer(mesh.mIndices[i], mesh.mIndices[i + 1], mesh.mIndices[i + 2]);
+                    }
+                    else
+                    {
+                        const auto& vertices
+                            = static_cast<const osg::Vec3Array&>(*occluder.mGeometry->getVertexArray());
+                        mViewVertices.resize(vertices.size());
+                        for (std::size_t i = 0; i < vertices.size(); ++i)
+                            mViewVertices[i] = vertices[i] * toView;
+                        occluder.mGeometry->accept(drawer);
+                    }
                     ++mDrawnOccluders;
                     mDrawnTriangles += occluder.mTriangles;
                 }
@@ -567,6 +746,8 @@ namespace Alpha3
 
             void logStatistics()
             {
+                if (mFrames % 600 == 0)
+                    mSimplifier.sweep(mFrame);
                 mSumTested += mTested;
                 mSumCulled += mCulled;
                 if (++mFrames % 600 != 0)
@@ -587,6 +768,7 @@ namespace Alpha3
             bool mViewKnown = false, mDrawn = false, mUsable = false;
             DepthBuffer mBuffer;
             std::vector<osg::Vec3f> mViewVertices;
+            OccluderSimplifier mSimplifier;
             unsigned mTested = 0, mCulled = 0, mDrawnOccluders = 0, mDrawnTriangles = 0, mFrames = 0;
             std::size_t mSumTested = 0, mSumCulled = 0;
             double mDrawTime = 0;

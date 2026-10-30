@@ -99,6 +99,9 @@ namespace Alpha3
     osg::ref_ptr<osg::Image> textureStreamingRead(
         osg::Image& image, osg::ref_ptr<osg::Image> (*prepare)(osg::Image&));
     void textureStreamingTextureLoading(const osg::Image& image);
+    // the scene camera's cull drawing something: its small textures are made full size once it covers more pixels across
+    // than they have
+    void textureStreamingDrawableAdded(osg::NodeVisitor& cullVisitor, osg::Drawable& drawable, const osg::Matrix& modelView);
     void textureStreamingFrame(); // on the draw thread, after the frame is drawn
     void textureStreamingStop(); // before the context closes
 

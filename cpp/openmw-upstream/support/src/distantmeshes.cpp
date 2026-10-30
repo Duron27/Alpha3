@@ -10,6 +10,8 @@
 //   gathered by material (textures, alpha, material colours, vertex colours, stencil, z buffer, specular, as the NIF's
 //   properties set them), each gathered shape is simplified (meshoptimizer, its borders locked so the pieces still meet),
 //   and written as a NIF that uses the mesh's own textures, so paging merges it with everything else drawn with them.
+//   Coarser versions go under the names of paging's farther levels (x_dist_1.nif for chunks of 2 cells, x_dist_2.nif for
+//   4, ...), each with twice the error of the one before, so the farther a chunk is, the fewer triangles it has.
 //
 // Both go to a cache in the cache directory, keyed by the mesh's contents and the settings, so a mesh is only made once.
 // A mesh that cannot be made (animated, particles, billboards, effects, skinned, not a Morrowind NIF, too small to be
@@ -21,6 +23,7 @@
 
 #include <alpha3/upstream.hpp>
 
+#include <ProcessDxtc.hpp>
 #include <meshoptimizer.h>
 
 #include <algorithm>
@@ -126,8 +129,12 @@ namespace Alpha3
 
             bool mSimplify = false;
             std::vector<std::string> mSimplifyPatterns;
-            float mSimplifyError = 0.02f; // of the mesh's size
+            float mSimplifyError = 0.02f; // of the mesh's size, at level 0
             int mSimplifyMinTriangles = 200;
+            int mSimplifyLevels = 3; // _dist, _dist_1, _dist_2
+
+            // the error of a level: twice the one before
+            float simplifyError(int level) const { return std::min(0.5f, mSimplifyError * static_cast<float>(1 << level)); }
         };
 
         Settings readSettings()
@@ -141,6 +148,7 @@ namespace Alpha3
             s.mSimplifyPatterns = splitPatterns(setting("Terrain", "simplified meshes", "*"));
             s.mSimplifyError = std::clamp(settingFloat("Terrain", "simplified mesh error", 0.02f), 0.0001f, 0.5f);
             s.mSimplifyMinTriangles = std::max(0, settingInt("Terrain", "simplified mesh min triangles", 200));
+            s.mSimplifyLevels = std::clamp(settingInt("Terrain", "simplified mesh levels", 3), 1, 6);
             return s;
         }
 
@@ -543,6 +551,27 @@ namespace Alpha3
         }
 
         // Uncompressed RGBA DDS with its mip levels (alpha weighted box filter)
+        // One mip level as DXT5 (etcpak takes BGRA, in rows padded to blocks of 4)
+        void compressBc3(const std::vector<unsigned char>& rgba, int width, int height, std::string& out)
+        {
+            const int pw = (width + 3) & ~3, ph = (height + 3) & ~3;
+            std::vector<std::uint32_t> padded(static_cast<std::size_t>(pw) * ph);
+            for (int y = 0; y < ph; ++y)
+                for (int x = 0; x < pw; ++x)
+                {
+                    const unsigned char* in
+                        = &rgba[(static_cast<std::size_t>(std::min(y, height - 1)) * width + std::min(x, width - 1)) * 4];
+                    const unsigned char bgra[4] = { in[2], in[1], in[0], in[3] };
+                    std::memcpy(&padded[static_cast<std::size_t>(y) * pw + x], bgra, 4);
+                }
+            const std::size_t blocks = static_cast<std::size_t>(pw / 4) * (ph / 4);
+            std::vector<std::uint64_t> compressed(blocks * 2);
+            CompressBc3(padded.data(), compressed.data(), static_cast<std::uint32_t>(blocks), static_cast<std::size_t>(pw));
+            out.append(reinterpret_cast<const char*>(compressed.data()), compressed.size() * sizeof(std::uint64_t));
+        }
+
+        // The card's texture with its mip levels, as DXT5: a quarter of RGBA8. Where the GPU has no S3TC, the image hooks
+        // convert it like any other DDS.
         std::string writeDds(const std::vector<unsigned char>& rgba, int width, int height)
         {
             std::vector<std::vector<unsigned char>> levels{ rgba };
@@ -582,27 +611,24 @@ namespace Alpha3
             Writer w;
             w.mData = "DDS ";
             w.put<std::uint32_t>(124);
-            w.put<std::uint32_t>(0x1 | 0x2 | 0x4 | 0x8 | 0x1000 | 0x20000); // caps, height, width, pitch, format, mips
+            w.put<std::uint32_t>(0x1 | 0x2 | 0x4 | 0x1000 | 0x20000 | 0x80000); // caps, height, width, format, mips, size
             w.put<std::uint32_t>(static_cast<std::uint32_t>(height));
             w.put<std::uint32_t>(static_cast<std::uint32_t>(width));
-            w.put<std::uint32_t>(static_cast<std::uint32_t>(width * 4));
+            w.put<std::uint32_t>(static_cast<std::uint32_t>(((width + 3) / 4) * ((height + 3) / 4) * 16));
             w.put<std::uint32_t>(0); // depth
             w.put<std::uint32_t>(static_cast<std::uint32_t>(levels.size()));
             for (int i = 0; i < 11; ++i)
                 w.put<std::uint32_t>(0);
             w.put<std::uint32_t>(32);
-            w.put<std::uint32_t>(0x40 | 0x1); // RGB, alpha
-            w.put<std::uint32_t>(0); // no four CC
-            w.put<std::uint32_t>(32);
-            w.put<std::uint32_t>(0x000000ff);
-            w.put<std::uint32_t>(0x0000ff00);
-            w.put<std::uint32_t>(0x00ff0000);
-            w.put<std::uint32_t>(0xff000000);
+            w.put<std::uint32_t>(0x4); // four CC
+            w.mData += "DXT5";
+            for (int i = 0; i < 5; ++i)
+                w.put<std::uint32_t>(0);
             w.put<std::uint32_t>(0x1000 | 0x8 | 0x400000); // texture, complex, mip map
             for (int i = 0; i < 4; ++i)
                 w.put<std::uint32_t>(0);
-            for (const auto& level : levels)
-                w.mData.append(reinterpret_cast<const char*>(level.data()), level.size());
+            for (std::size_t i = 0; i < levels.size(); ++i)
+                compressBc3(levels[i], sizes[i].first, sizes[i].second, w.mData);
             return std::move(w.mData);
         }
 
@@ -878,12 +904,9 @@ namespace Alpha3
 
         // ---- simplified meshes
 
-        std::string makeSimplified(const std::vector<Group>& input, const Settings& settings)
+        std::vector<Group> simplifyGroups(const std::vector<Group>& input, const Settings& settings, int level)
         {
-            const std::size_t before = triangleCount(input);
-            if (before < static_cast<std::size_t>(settings.mSimplifyMinTriangles))
-                throw NotMade{ std::to_string(before) + " triangles, small enough already" };
-
+            const float error = settings.simplifyError(level);
             std::vector<Group> output;
             for (const Group& source : input)
             {
@@ -906,10 +929,11 @@ namespace Alpha3
 
                 // locked borders: where this group meets another, or a mesh's open edge, stays where it is
                 std::vector<unsigned int> simplified(indices.size());
-                const std::size_t target = indices.size() / 3 / 4 * 3;
+                // a quarter of the triangles at level 0, half of that at each level after
+                const std::size_t target = std::max<std::size_t>(1, indices.size() / 3 / (4u << level)) * 3;
                 const std::size_t count = meshopt_simplify(simplified.data(), indices.data(), indices.size(),
-                    group.mVertices[0].mPosition, group.mVertices.size(), sizeof(Vertex), target,
-                    settings.mSimplifyError, meshopt_SimplifyLockBorder, nullptr);
+                    group.mVertices[0].mPosition, group.mVertices.size(), sizeof(Vertex), target, error,
+                    meshopt_SimplifyLockBorder, nullptr);
                 simplified.resize(count);
                 if (simplified.empty())
                     continue;
@@ -922,10 +946,21 @@ namespace Alpha3
                 group.mIndices.assign(simplified.begin(), simplified.end());
                 output.push_back(std::move(group));
             }
+            return output;
+        }
 
+        std::string makeSimplified(const std::vector<Group>& input, const Settings& settings, int level)
+        {
+            const std::size_t original = triangleCount(input);
+            if (original < static_cast<std::size_t>(settings.mSimplifyMinTriangles))
+                throw NotMade{ std::to_string(original) + " triangles, small enough already" };
+            // a level is worth keeping only when it is a fifth smaller than the one paging would use without it
+            const std::size_t before = level == 0 ? original : triangleCount(simplifyGroups(input, settings, level - 1));
+            const std::vector<Group> output = simplifyGroups(input, settings, level);
             const std::size_t after = triangleCount(output);
             if (after == 0 || after * 5 > before * 4)
-                throw NotMade{ std::to_string(before) + " triangles, simplified only to " + std::to_string(after) };
+                throw NotMade{ std::to_string(before) + " triangles" + (level == 0 ? "" : " at the level before")
+                    + ", simplified only to " + std::to_string(after) };
             return writeNif(sSimplifiedRootName, output);
         }
 
@@ -1375,12 +1410,14 @@ namespace Alpha3
         };
 
         // What the settings of a kind change in what is made
-        std::uint64_t settingsHash(Kind kind, const Settings& settings)
+        std::uint64_t settingsHash(Kind kind, const Settings& settings, int level)
         {
             if (kind == Kind::Card)
-                return 1 + (static_cast<std::uint64_t>(settings.mCardSize) << 8);
+                return 1 + (static_cast<std::uint64_t>(settings.mCardSize) << 8) + (1ull << 40); // 1 << 40: DXT5
+            // level 0 has the hash it had before there were levels, so cached meshes stay valid
+            const float levelError = settings.simplifyError(level);
             std::uint32_t error;
-            std::memcpy(&error, &settings.mSimplifyError, 4);
+            std::memcpy(&error, &levelError, 4);
             return 2 + (static_cast<std::uint64_t>(error) << 8)
                 + (static_cast<std::uint64_t>(settings.mSimplifyMinTriangles) << 40);
         }
@@ -1396,11 +1433,12 @@ namespace Alpha3
         class DistantMesh
         {
         public:
-            DistantMesh(const VFS::Manager& vfs, Kind kind, const Settings& settings, VFS::File* source,
+            DistantMesh(const VFS::Manager& vfs, Kind kind, const Settings& settings, int level, VFS::File* source,
                 VFS::Path::Normalized sourcePath, std::string texturePath)
                 : mVfs(vfs)
                 , mKind(kind)
                 , mSettings(settings)
+                , mLevel(level)
                 , mSource(source)
                 , mSourcePath(std::move(sourcePath))
                 , mTexturePath(std::move(texturePath))
@@ -1441,7 +1479,7 @@ namespace Alpha3
                             mDds = writeDds(std::vector<unsigned char>(4, 0), 1, 1);
                         return;
                     }
-                    const std::uint64_t settings = settingsHash(mKind, mSettings);
+                    const std::uint64_t settings = settingsHash(mKind, mSettings, mLevel);
                     const BlobKey key{ fnv1a(sourceBytes, 0xcbf29ce484222325ull),
                         fnv1a(sourceBytes, 0x84222325cbf29ce4ull) ^ settings };
                     Cache& cache = Cache::get();
@@ -1474,7 +1512,7 @@ namespace Alpha3
                     if (mKind == Kind::Card)
                         std::tie(mNif, mDds) = makeCard(mVfs, groups, mSettings.mCardSize, mTexturePath);
                     else
-                        mNif = makeSimplified(groups, mSettings);
+                        mNif = makeSimplified(groups, mSettings, mLevel);
                     return true;
                 }
                 catch (const NotMade& e)
@@ -1491,6 +1529,7 @@ namespace Alpha3
             const VFS::Manager& mVfs;
             Kind mKind;
             const Settings& mSettings;
+            int mLevel; // simplified meshes: 0 for _dist, n for _dist_n
             VFS::File* mSource; // belongs to an archive listed before this one
             VFS::Path::Normalized mSourcePath;
             std::string mTexturePath; // cards only
@@ -1563,42 +1602,62 @@ namespace Alpha3
                         found.push_back({ path, file, Kind::Simplified });
                 }
 
-                unsigned cards = 0, simplified = 0, skipped = 0;
+                unsigned cards = 0, simplified = 0, levels = 0, skipped = 0;
                 for (Found& f : found)
                 {
                     const std::string_view name = f.mPath.value();
                     const std::string_view base = name.substr(0, name.size() - nif.size());
-                    VFS::Path::Normalized distant(std::string(base) + std::string(sDistantSuffix) + std::string(nif));
+                    const auto distantName = [&](int level) {
+                        std::string result = std::string(base) + std::string(sDistantSuffix);
+                        if (level > 0)
+                            result += "_" + std::to_string(level);
+                        return VFS::Path::Normalized(result + std::string(nif));
+                    };
                     // a mesh with distant versions of its own keeps them (paging also looks for _dist_0 ...)
-                    if (out.contains(distant)
+                    if (out.contains(distantName(0))
                         || out.contains(VFS::Path::Normalized(std::string(base) + std::string(sDistantSuffix) + "_0.nif")))
                         continue;
-                    // not made before: listing it would only have the engine keep the mesh twice
-                    if (Cache::get().contains(failureKey(name, *f.mFile, settingsHash(f.mKind, mSettings))))
-                    {
-                        ++skipped;
-                        continue;
-                    }
 
                     std::string flat(base.substr(meshes.size()));
                     std::replace(flat.begin(), flat.end(), '/', '_');
                     const std::string texturePath
                         = f.mKind == Kind::Card ? std::string(sTextureDirectory) + flat + ".dds" : std::string();
-                    auto mesh = std::make_shared<DistantMesh>(mVfs, f.mKind, mSettings, f.mFile, f.mPath, texturePath);
-
                     const std::string stem = std::string(base.substr(base.rfind('/') + 1)) + std::string(sDistantSuffix);
-                    add(out, std::move(distant), std::make_unique<DistantMeshFile>(mesh, false, stem));
-                    if (f.mKind == Kind::Card)
+                    // paging asks for _dist_<n> for its chunks of 2^n cells, and takes the nearest level below that
+                    // exists: a level that was not made is not listed, and the one before it is used
+                    const int levelCount = f.mKind == Kind::Card ? 1 : mSettings.mSimplifyLevels;
+                    for (int level = 0; level < levelCount; ++level)
                     {
-                        add(out, VFS::Path::Normalized(texturePath), std::make_unique<DistantMeshFile>(mesh, true, flat));
-                        ++cards;
+                        if (out.contains(distantName(level)))
+                            continue; // a mod's own
+                        // not made before: listing it would only have the engine keep the mesh twice
+                        if (Cache::get().contains(
+                                failureKey(name, *f.mFile, settingsHash(f.mKind, mSettings, level))))
+                        {
+                            if (level == 0)
+                                ++skipped;
+                            continue;
+                        }
+                        auto mesh = std::make_shared<DistantMesh>(
+                            mVfs, f.mKind, mSettings, level, f.mFile, f.mPath, texturePath);
+                        add(out, distantName(level),
+                            std::make_unique<DistantMeshFile>(
+                                mesh, false, level == 0 ? stem : stem + "_" + std::to_string(level)));
+                        if (f.mKind == Kind::Card)
+                        {
+                            add(out, VFS::Path::Normalized(texturePath),
+                                std::make_unique<DistantMeshFile>(mesh, true, flat));
+                            ++cards;
+                        }
+                        else if (level == 0)
+                            ++simplified;
+                        else
+                            ++levels;
                     }
-                    else
-                        ++simplified;
                 }
                 if (cards + simplified > 0)
                     Log(Debug::Info) << "Distant meshes: " << cards << " drawn as cards, " << simplified
-                                     << " simplified past the active grid, " << skipped
+                                     << " simplified past the active grid (" << levels << " farther levels), " << skipped
                                      << " left as they are (cache " << (cacheDirectory() / "impostors").string()
                                      << ")";
             }

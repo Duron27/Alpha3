@@ -1,9 +1,11 @@
 // Texture streaming ([Textures] streaming): a large texture is read as its smaller mip levels only, so a cell is ready
 // sooner (on a GPU without S3TC only those levels are converted to ASTC or ETC2, the slow part of a first load) and its
-// textures go to the GPU small. The first time the small texture is uploaded (it is drawn, or compiled ahead for a cell
-// about to be drawn) the full image is prepared on a background thread, and after a later frame its data replaces the
-// small image's: OSG sees the image change and remakes the texture at full size (osg::Texture2D::textureObjectValid).
-// A few are swapped per frame, so the uploads are spread out instead of stalling one frame.
+// textures go to the GPU small. It is made full size once something drawn with it covers more pixels on the screen than
+// the small texture has across: the scene camera's cull tells (the occlusion hooks' drawableAdded). Then the full image
+// is prepared on a background thread, and after a later frame its data replaces the small image's: OSG sees the image
+// change and remakes the texture at full size (osg::Texture2D::textureObjectValid). A few are swapped per frame, so the
+// uploads are spread out instead of stalling one frame. A texture uploaded that the scene camera never draws (the sky,
+// the GUI) is made full size a few seconds after its upload.
 //
 // The image object is the one the engine's image manager keeps and every texture of that file shares, so nothing in the
 // engine needs to know: the textures that use it change with it.
@@ -11,16 +13,21 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <condition_variable>
 #include <cstring>
 #include <deque>
+#include <limits>
 #include <mutex>
 #include <thread>
 #include <unordered_map>
 #include <vector>
 
 #include <osg/Image>
+#include <osg/Texture>
 #include <osg/observer_ptr>
+#include <osgUtil/CullVisitor>
+#include <osgUtil/StateGraph>
 
 #include <components/debug/debuglog.hpp>
 
@@ -111,6 +118,7 @@ namespace Alpha3
                 pending.mSmall = small;
                 pending.mFull = &image;
                 pending.mPrepare = prepare;
+                mPendingCount.store(mPending.size(), std::memory_order_relaxed);
                 ++mStreamed;
                 return small;
             }
@@ -119,17 +127,31 @@ namespace Alpha3
             {
                 std::lock_guard lock(mMutex);
                 const auto found = mPending.find(&image);
-                if (found == mPending.end())
-                    return;
-                // only once: the swap makes the image change, and its next upload comes here again
-                Pending pending = std::move(found->second);
-                mPending.erase(found);
-                if (!pending.mSmall.valid())
-                    return;
-                mQueue.push_back(std::move(pending));
-                if (!mWorker.joinable())
-                    mWorker = std::thread([this] { work(); });
-                mWake.notify_one();
+                if (found != mPending.end() && !found->second.mUploaded)
+                {
+                    found->second.mUploaded = true;
+                    found->second.mUploadFrame = mFrames;
+                }
+            }
+
+            bool anyPending() const { return mPendingCount.load(std::memory_order_relaxed) != 0; }
+
+            // Of these images, the ones still small, with the largest side of each
+            void pendingOf(const std::vector<const osg::Image*>& images, std::vector<std::pair<const osg::Image*, int>>& out)
+            {
+                std::lock_guard lock(mMutex);
+                for (const osg::Image* image : images)
+                    if (mPending.find(image) != mPending.end())
+                        out.emplace_back(image, std::max(image->s(), image->t()));
+            }
+
+            // Drawn over this many pixels: the images smaller than that are made full size
+            void drawn(const std::vector<std::pair<const osg::Image*, int>>& images, float pixels)
+            {
+                std::lock_guard lock(mMutex);
+                for (const auto& [image, size] : images)
+                    if (pixels > static_cast<float>(size))
+                        upgrade(image);
             }
 
             void frame()
@@ -140,6 +162,17 @@ namespace Alpha3
                     // small images the engine let go of before they were drawn: their full images are not needed
                     if (++mFrames % 600 == 0)
                         std::erase_if(mPending, [](const auto& entry) { return !entry.second.mSmall.valid(); });
+                    // uploaded, and never drawn by the scene camera since: not something it decides for
+                    if (mFrames % 60 == 0)
+                    {
+                        std::vector<const osg::Image*> unseen;
+                        for (const auto& [image, pending] : mPending)
+                            if (pending.mUploaded && !pending.mSeen && mFrames - pending.mUploadFrame > sUnseenFrames)
+                                unseen.push_back(image);
+                        for (const osg::Image* image : unseen)
+                            upgrade(image);
+                    }
+                    mPendingCount.store(mPending.size(), std::memory_order_relaxed);
                     const std::size_t n = std::min<std::size_t>(mReady.size(), streamingSettings().mSwapsPerFrame);
                     swaps.assign(std::make_move_iterator(mReady.begin()), std::make_move_iterator(mReady.begin() + n));
                     mReady.erase(mReady.begin(), mReady.begin() + n);
@@ -158,6 +191,15 @@ namespace Alpha3
                                         << " textures at full size";
             }
 
+            // The scene camera drew it (small or not): it decides when the image is made full size
+            void seen(const std::vector<std::pair<const osg::Image*, int>>& images)
+            {
+                std::lock_guard lock(mMutex);
+                for (const auto& entry : images)
+                    if (const auto found = mPending.find(entry.first); found != mPending.end())
+                        found->second.mSeen = true;
+            }
+
             void stop()
             {
                 {
@@ -166,6 +208,7 @@ namespace Alpha3
                     mQueue.clear();
                     mReady.clear();
                     mPending.clear();
+                    mPendingCount = 0;
                 }
                 mWake.notify_all();
                 if (mWorker.joinable())
@@ -175,12 +218,35 @@ namespace Alpha3
             ~TextureStreaming() { stop(); }
 
         private:
+            static constexpr unsigned sUnseenFrames = 300;
+
             struct Pending
             {
                 osg::observer_ptr<osg::Image> mSmall; // what the engine has; gone when it let the texture go
                 osg::ref_ptr<osg::Image> mFull; // as read
                 Prepare mPrepare = nullptr;
+                bool mUploaded = false;
+                unsigned mUploadFrame = 0;
+                bool mSeen = false; // drawn by the scene camera
             };
+
+            // Queues the full image of a small one, once: the swap makes the image change, and it is no longer pending
+            // (with the mutex held)
+            void upgrade(const osg::Image* image)
+            {
+                const auto found = mPending.find(image);
+                if (found == mPending.end())
+                    return;
+                Pending pending = std::move(found->second);
+                mPending.erase(found);
+                mPendingCount.store(mPending.size(), std::memory_order_relaxed);
+                if (!pending.mSmall.valid())
+                    return;
+                mQueue.push_back(std::move(pending));
+                if (!mWorker.joinable())
+                    mWorker = std::thread([this] { work(); });
+                mWake.notify_one();
+            }
 
             struct Ready
             {
@@ -222,6 +288,7 @@ namespace Alpha3
             bool mStopped = false;
             unsigned mFrames = 0;
             std::atomic<unsigned> mStreamed{ 0 }, mSwapped{ 0 };
+            std::atomic<std::size_t> mPendingCount{ 0 };
         };
 
         TextureStreaming& streaming()
@@ -229,6 +296,36 @@ namespace Alpha3
             static TextureStreaming instance;
             return instance;
         }
+
+        // The images of the textures a state graph leaf draws with, from its root down
+        void imagesOf(const osgUtil::StateGraph* leaf, std::vector<const osg::Image*>& out)
+        {
+            for (const osgUtil::StateGraph* graph = leaf; graph != nullptr; graph = graph->_parent)
+            {
+                const osg::StateSet* set = graph->getStateSet();
+                if (set == nullptr)
+                    continue;
+                const osg::StateSet::TextureAttributeList& units = set->getTextureAttributeList();
+                for (unsigned unit = 0; unit < units.size(); ++unit)
+                {
+                    const auto* texture
+                        = static_cast<const osg::Texture*>(set->getTextureAttribute(unit, osg::StateAttribute::TEXTURE));
+                    if (texture == nullptr)
+                        continue;
+                    for (unsigned i = 0; i < texture->getNumImages(); ++i)
+                        if (const osg::Image* image = texture->getImage(i))
+                            out.push_back(image);
+                }
+            }
+        }
+
+        // What the scene camera's cull has found this frame, per state graph: the small images it draws with
+        struct CullCache
+        {
+            unsigned mFrame = ~0u;
+            std::unordered_map<const osgUtil::StateGraph*, std::vector<std::pair<const osg::Image*, int>>> mPending;
+            std::vector<const osg::Image*> mScratch;
+        };
     }
 
     osg::ref_ptr<osg::Image> textureStreamingRead(osg::Image& image, osg::ref_ptr<osg::Image> (*prepare)(osg::Image&))
@@ -247,6 +344,53 @@ namespace Alpha3
     {
         if (streamingSettings().mEnabled)
             streaming().textureLoading(image);
+    }
+
+    void textureStreamingDrawableAdded(osg::NodeVisitor& cullVisitor, osg::Drawable& drawable, const osg::Matrix& modelView)
+    {
+        if (!streamingSettings().mEnabled || !streaming().anyPending())
+            return;
+        auto& cv = static_cast<osgUtil::CullVisitor&>(cullVisitor);
+        const osg::Camera* camera = cv.getCurrentCamera();
+        const osg::FrameStamp* stamp = cv.getFrameStamp();
+        const osg::Viewport* viewport = cv.getViewport();
+        if (camera == nullptr || stamp == nullptr || viewport == nullptr || camera->getName() != "SceneCam")
+            return;
+
+        thread_local CullCache cache;
+        if (stamp->getFrameNumber() != cache.mFrame)
+        {
+            cache.mFrame = stamp->getFrameNumber();
+            cache.mPending.clear(); // the state graphs are rebuilt (and may be freed) every frame
+        }
+        const osgUtil::StateGraph* graph = cv.getCurrentStateGraph();
+        auto found = cache.mPending.find(graph);
+        if (found == cache.mPending.end())
+        {
+            cache.mScratch.clear();
+            imagesOf(graph, cache.mScratch);
+            found = cache.mPending.emplace(graph, std::vector<std::pair<const osg::Image*, int>>()).first;
+            streaming().pendingOf(cache.mScratch, found->second);
+            streaming().seen(found->second);
+        }
+        if (found->second.empty())
+            return;
+
+        // how many pixels the drawable covers across, at its nearest
+        const osg::BoundingBox& box = drawable.getBoundingBox();
+        if (!box.valid())
+            return;
+        const double scale = std::sqrt(std::max({ modelView(0, 0) * modelView(0, 0) + modelView(0, 1) * modelView(0, 1)
+                + modelView(0, 2) * modelView(0, 2),
+            modelView(1, 0) * modelView(1, 0) + modelView(1, 1) * modelView(1, 1) + modelView(1, 2) * modelView(1, 2),
+            modelView(2, 0) * modelView(2, 0) + modelView(2, 1) * modelView(2, 1) + modelView(2, 2) * modelView(2, 2) }));
+        const double radius = box.radius() * scale;
+        const double distance = (box.center() * modelView).length() - radius;
+        const osg::Matrix& projection = *cv.getProjectionMatrix();
+        const float pixels = distance <= 1.0
+            ? std::numeric_limits<float>::infinity()
+            : static_cast<float>(radius / distance * std::abs(projection(1, 1)) * viewport->height());
+        streaming().drawn(found->second, pixels);
     }
 
     void textureStreamingFrame()

@@ -39,8 +39,9 @@ target_compile_definitions(alpha3_astcenc PRIVATE ${ALPHA3_ASTCENC_ISA} ASTCENC_
 target_compile_options(alpha3_astcenc PRIVATE -O3 -fPIC -fvisibility=hidden -Wno-everything)
 target_include_directories(alpha3_astcenc PUBLIC ${ASTCENC_SOURCE_DIR})
 
-# wolfpld's etcpak (BSD): the fast DXT to ETC2 option
-add_library(alpha3_etcpak STATIC ${ETCPAK_SOURCE_DIR}/ProcessRGB.cpp ${ETCPAK_SOURCE_DIR}/Tables.cpp ${ETCPAK_SOURCE_DIR}/Dither.cpp)
+# wolfpld's etcpak (BSD): the fast DXT to ETC2 option, and the DXT5 encoder of the impostor cards (src/distantmeshes.cpp)
+add_library(alpha3_etcpak STATIC ${ETCPAK_SOURCE_DIR}/ProcessRGB.cpp ${ETCPAK_SOURCE_DIR}/Tables.cpp ${ETCPAK_SOURCE_DIR}/Dither.cpp
+    ${ETCPAK_SOURCE_DIR}/ProcessDxtc.cpp ${ETCPAK_SOURCE_DIR}/bc7enc.cpp)
 target_compile_options(alpha3_etcpak PRIVATE -O3 -fPIC -fvisibility=hidden -Wno-everything)
 target_include_directories(alpha3_etcpak PUBLIC ${ETCPAK_SOURCE_DIR})
 

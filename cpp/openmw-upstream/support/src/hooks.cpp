@@ -309,6 +309,7 @@ namespace Alpha3
             void drawableAdded(osg::NodeVisitor& cullVisitor, osg::Drawable& drawable, const osg::Matrix& modelView) override
             {
                 occlusionDrawableAdded(cullVisitor, drawable, modelView);
+                textureStreamingDrawableAdded(cullVisitor, drawable, modelView);
             }
 
             bool translateShaderSource(const osg::Shader& shader, std::string& source) override
