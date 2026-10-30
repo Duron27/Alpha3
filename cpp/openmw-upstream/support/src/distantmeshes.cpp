@@ -1091,7 +1091,7 @@ namespace Alpha3
         struct Card
         {
             int mSize; // texels per view
-            int mAtlasWidth, mAtlasHeight; // 3 x 2 views
+            int mAtlasWidth, mAtlasHeight; // 3 x 2 views, in the top left of a power of two
             std::vector<unsigned char> mRgba;
             osg::Vec3f mCenter; // on the ground plane through the middle of the bounds
             float mBottom, mTop;
@@ -1227,8 +1227,16 @@ namespace Alpha3
             if (!bounds.valid())
                 throw NotMade{ "nothing to draw" };
             card.mSize = viewSize;
-            card.mAtlasWidth = viewSize * 3;
-            card.mAtlasHeight = viewSize * 2;
+            // powers of two: OSG cannot use a mipmapped compressed texture of another size on OpenGL ES (it can only
+            // rescale uncompressed ones), so the space right of and below the 3 x 2 views is left empty
+            const auto powerOfTwo = [](int n) {
+                int p = 1;
+                while (p < n)
+                    p *= 2;
+                return p;
+            };
+            card.mAtlasWidth = powerOfTwo(viewSize * 3);
+            card.mAtlasHeight = powerOfTwo(viewSize * 2);
             card.mCenter = osg::Vec3f(bounds.center().x(), bounds.center().y(), 0.f);
             card.mBottom = bounds.zMin();
             card.mTop = bounds.zMax();
@@ -1413,7 +1421,7 @@ namespace Alpha3
         std::uint64_t settingsHash(Kind kind, const Settings& settings, int level)
         {
             if (kind == Kind::Card)
-                return 1 + (static_cast<std::uint64_t>(settings.mCardSize) << 8) + (1ull << 40); // 1 << 40: DXT5
+                return 1 + (static_cast<std::uint64_t>(settings.mCardSize) << 8) + (2ull << 40); // 2: DXT5, power of two
             // level 0 has the hash it had before there were levels, so cached meshes stay valid
             const float levelError = settings.simplifyError(level);
             std::uint32_t error;

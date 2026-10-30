@@ -2,6 +2,43 @@
 
 Things to add, mostly aimed at FPS and load times on phones.
 
+## To do
+
+Everything still open, in rough order. The sections below have the details.
+
+**Test on a device first** (the numbers decide the tuning):
+
+- [ ] Distant meshes: check lighting on the tree cards, leaf edges after ASTC conversion (try `astc block size = 4x4` if blotchy), the pop at the active grid edge, and FPS with paging in Vivec and the Ascadian Isles.
+- [ ] Texture streaming: compare cell load times with a 2K texture pack, with and without streaming.
+- [ ] Occlusion culling: check how much is culled and the CPU cost (the verbose log, every 600 frames) in Vivec, Balmora and on open ground. Then tune `occlusion buffer width` and `occluder triangle budget`.
+- [ ] Occlusion culling: watch for objects just behind walls disappearing early (the simplified occluders can sit up to 1% of a mesh's size in front of the real surface).
+- [ ] Profile the paging thread on a phone (silt strider ride), before deciding on 2b.
+
+**1. Distant meshes**
+
+- [ ] More reduction for buildings: their locked open edges stop the simplifier, so most get no farther levels. Options: unlock borders at the farther levels, weld positions across materials, meshoptimizer's attribute-aware simplifier, or a texture-baked proxy mesh for the farthest level.
+- [ ] If the cards look soft: keep the atlas uncompressed so the conversion encodes ASTC from the original pixels, not from DXT5.
+
+**2. LOD while loading**
+
+- [ ] Show the low levels first while a cell loads, then swap in detail. This needs a hook in OpenMW's cell loading or paging (an OpenMW patch), so it needs an OK first.
+- [ ] Mobile presets for `viewing distance` and `object paging min size`.
+- [ ] 2b: pre-built object paging chunks (only if profiling shows paging is the bottleneck).
+
+**3. Texture streaming**
+
+- [ ] Memory budget: drop textures not drawn for a while back to their small levels.
+
+**4. Occlusion culling**
+
+- [ ] Too costly as it is: on the phone (Seyda Neen, Bitter Coast) it culled 1–11% of what it tested, for 2–5 ms per frame, and the cost was out of line with the triangles drawn (3.3 ms with 1404). Log the drawing and the tests separately to find where the time goes. Keep it off until then.
+- [ ] Draw the depth buffer on a worker thread instead of at the start of the cull.
+- [ ] A smaller simplification error or an inward offset for the occluders, if the device test shows early culling.
+
+**Other**
+
+- [ ] Find why the debug APK grew from 150 MB to 200 MB.
+
 ## 1. Distant objects as sprites (impostors)
 
 Far away, draw a flat 2D picture of an object (a tree, a rock, a house) instead of the 3D mesh. The picture always turns to face the camera, like the enemies in Doom 2. Up close, the real mesh comes back.
