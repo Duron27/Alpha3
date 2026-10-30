@@ -93,6 +93,9 @@ open class PlatformFeatures {
     /** Converts the mod list's textures for the stock OpenMW engine ahead of the game; null where unavailable. */
     open val texturePrepass: TexturePrepassRunner? get() = null
 
+    /** Makes the mod list's distant meshes for the stock OpenMW engine ahead of the game; null where unavailable. */
+    open val distantMeshPrepass: DistantMeshPrepassRunner? get() = null
+
     @Composable
     open fun FileBrowserPopup(
         initialDirectory: String,

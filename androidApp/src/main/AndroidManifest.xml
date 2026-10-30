@@ -122,6 +122,12 @@
             android:process=":navmesh"
             android:exported="false" />
 
+        <!-- The cache builder (Mod tools): the engine's library loaded for it alone, let go of with the process -->
+        <service
+            android:name=".utils.CacheBuildService"
+            android:process=":cache"
+            android:exported="false" />
+
         <activity
             android:name="org.openmw.EngineActivity"
             android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|uiMode|smallestScreenSize|density"

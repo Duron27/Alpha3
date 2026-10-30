@@ -141,6 +141,29 @@ fun ModToolsScreen() {
                     enabled = !runner.running,
                 )
             }
+            if (Alpha3Cache.available) item {
+                Column {
+                    ToolRow(
+                        title = "Build Alpha3 cache",
+                        description = "Converts the mod list's textures and makes every distant mesh and tree card now, so " +
+                            "the game loads a new area as fast as one it has seen. Run it again after changing mods; what " +
+                            "is already cached is skipped. It uses every core whatever [General] thermal mode says.",
+                        actions = {
+                            if (Alpha3Cache.running) SmallAction("Stop", true, Alpha3Cache::cancel)
+                            else SmallAction("Build", !runner.running, Alpha3Cache::start)
+                        },
+                    )
+                    // the progress shows whether the row is open or not
+                    if (Alpha3Cache.status.isNotEmpty()) {
+                        Text(
+                            Alpha3Cache.status,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color.White.copy(alpha = 0.7f),
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                        )
+                    }
+                }
+            }
             item {
                 ToolRow(
                     title = "Replace cleaned plugins",

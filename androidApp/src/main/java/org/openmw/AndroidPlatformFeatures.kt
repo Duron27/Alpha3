@@ -118,6 +118,7 @@ class AndroidPlatformFeatures(private val app: Application) : PlatformFeatures()
     // libkram.so is only built with the fork (see cpp/CMakeLists.txt); stock OpenMW has the texture pre-pass instead
     override val kramRunner get() = if (BuildConfig.OPENMW_FORK) org.openmw.utils.AndroidKramRunner() else null
     override val texturePrepass: org.alpha3.launcher.utils.TexturePrepassRunner by lazy { org.openmw.utils.TexturePrepass(app) }
+    override val distantMeshPrepass: org.alpha3.launcher.utils.DistantMeshPrepassRunner by lazy { org.openmw.utils.DistantMeshPrepass(app) }
     override val plugins: org.alpha3.launcher.utils.PluginManager by lazy { org.openmw.plugins.AndroidPluginManager(app) }
     override val gpuDrivers: org.alpha3.launcher.utils.GpuDriverManager by lazy { org.openmw.utils.AndroidGpuDriverManager(app) }
 

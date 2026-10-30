@@ -114,10 +114,12 @@ target_include_directories(components PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/includ
 target_include_directories(openmw-lib PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(components alpha3_support)
 
-# Objects that work by being there (they install themselves when the library loads): always linked into the engine
+# Objects that work by being there (they install themselves when the library loads, or are called through JNI): always
+# linked into the engine
 if (ANDROID)
     add_library(alpha3_support_init OBJECT
         src/allocator.cpp
+        src/cachebuild.cpp
         src/hooks.cpp
         src/logcat.cpp
     )
@@ -136,7 +138,7 @@ if (NOT ANDROID)
     # The launcher's texture pre-pass, as on Android below: libalpha3_texconv.dylib, which the build wraps as
     # libalpha3_texconv.framework. The launcher opens it at runtime and calls alpha3_texconv_run; only that and
     # alpha3_texconv_cancel are exported.
-    add_library(alpha3_texconv SHARED texconv/texconv.cpp src/textureconversion.cpp src/blobstore.cpp src/thermal.cpp)
+    add_library(alpha3_texconv SHARED texconv/texconv.cpp src/textureconversion.cpp src/blobstore.cpp)
     target_include_directories(alpha3_texconv BEFORE PRIVATE texconv/shim src)
     target_include_directories(alpha3_texconv PRIVATE ${OPENSCENEGRAPH_INCLUDE_DIRS})
     target_compile_options(alpha3_texconv PRIVATE -fvisibility=hidden -fvisibility-inlines-hidden)
@@ -183,7 +185,7 @@ endif()
 # libalpha3_texconv.so with a logcat stand-in for OpenMW's log (texconv/shim) and no other part of the engine. It is
 # loaded into the same process as the engine, so it keeps its OSG, libc++ and everything else to itself: only its JNI
 # functions are exported.
-add_library(alpha3_texconv SHARED texconv/texconv.cpp src/textureconversion.cpp src/blobstore.cpp src/thermal.cpp)
+add_library(alpha3_texconv SHARED texconv/texconv.cpp src/textureconversion.cpp src/blobstore.cpp)
 target_include_directories(alpha3_texconv BEFORE PRIVATE texconv/shim src)
 target_include_directories(alpha3_texconv PRIVATE ${OPENSCENEGRAPH_INCLUDE_DIRS})
 target_compile_options(alpha3_texconv PRIVATE -fvisibility=hidden -fvisibility-inlines-hidden)

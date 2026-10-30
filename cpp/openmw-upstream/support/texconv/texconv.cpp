@@ -273,6 +273,18 @@ namespace
 
 namespace Alpha3
 {
+    // The pre-pass is run by the player, who waits for it: always on every core, whatever [General] thermal mode says
+    // (thermal.cpp is the game's)
+    int thermalPressure()
+    {
+        return 0;
+    }
+
+    unsigned thermalThreads(unsigned threads)
+    {
+        return threads;
+    }
+
     std::string setting(std::string_view category, std::string_view name, std::string_view fallback)
     {
         const auto it = sSettings.find(std::string(category) + "/" + std::string(name));

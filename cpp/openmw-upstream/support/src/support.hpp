@@ -3,6 +3,7 @@
 
 // Internal to the support library: what its parts give each other
 
+#include <atomic>
 #include <filesystem>
 #include <functional>
 #include <string>
@@ -92,6 +93,15 @@ namespace Alpha3
 
     // ---- distantmeshes.cpp: true while the distant meshes read a texture for the CPU; the image hooks leave it as it is
     bool imageHooksBypassed();
+    // Every distant mesh the VFS lists made, or found in the cache, on that many threads, for
+    // the launcher's cache builder (cachebuild.cpp). progress is called on the calling thread a few times a second; false
+    // when cancelled or no distant mesh archive was added.
+    struct DistantMeshProgress
+    {
+        unsigned done, total, made, notMade;
+    };
+    bool buildDistantMeshes(
+        unsigned threads, const std::function<void(const DistantMeshProgress&)>& progress, const std::atomic<bool>& cancel);
 
     // ---- texturestreaming.cpp ([Textures] streaming): a large mipmapped image read as its smaller levels only, given to
     // prepare (null from it: as it is); the full image follows, through prepare on a background thread, once the small one

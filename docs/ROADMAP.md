@@ -38,7 +38,8 @@ Everything still open, in rough order. The sections below have the details.
 **Other**
 
 - [ ] Find why the debug APK grew from 150 MB to 200 MB.
-- [ ] "Build Alpha3 cache" in the launcher's mod tools: the texture pre-pass and every distant mesh and card, before playing, so first visits load like later ones. Not the navmesh (navmeshtool takes too long; `write to navmeshdb = true` caches each area as it is visited).
+- [ ] "Build Alpha3 cache" (Mod tools): built. The texture pre-pass, then every distant mesh and card in a `:cache` process (CacheBuildService, `support/src/cachebuild.cpp`), both on every core whatever the thermal mode. Not the navmesh (navmeshtool takes too long; `write to navmeshdb = true` caches each area as it is visited). The texture half is tested on the phone; the distant mesh half still needs a full run.
+- [ ] Kotlin navmesh generator: 229 ms per tile of 18 triangles in the last run (rasterize 55, compact+erode 89), far from native Recast. Profile it on the phone (interpreter in the debug APK?) before replacing libopenmw-navmeshtool.so.
 - [ ] Thermal mode: check the thresholds over a long session (the Note 10+ forecasts headroom from its skin temperature, since its thermal HAL gives no thresholds).
 
 ## Thermal mode

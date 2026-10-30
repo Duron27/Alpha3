@@ -33,6 +33,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <iterator>
 #include <limits>
 #include <map>
@@ -43,6 +44,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <tuple>
 #include <vector>
 
@@ -1525,6 +1527,14 @@ namespace Alpha3
 
             VFS::File* source() const { return mSource; }
 
+            // The cache builder's: made (or found in the cache), then let go of, since nothing opens it in that process
+            void buildAndRelease()
+            {
+                make();
+                std::string().swap(mNif);
+                std::string().swap(mDds);
+            }
+
             static std::atomic<unsigned> sMade, sNotMade;
 
         private:
@@ -1678,6 +1688,8 @@ namespace Alpha3
 
             std::string getStem() const override { return mStem; }
 
+            const std::shared_ptr<DistantMesh>& mesh() const { return mMesh; }
+
         private:
             std::shared_ptr<DistantMesh> mMesh;
             bool mTexture;
@@ -1793,6 +1805,17 @@ namespace Alpha3
 
             std::string getDescription() const override { return "Distant meshes"; }
 
+            // Each mesh listed once (a card is listed as its NIF and its texture)
+            std::vector<std::shared_ptr<DistantMesh>> meshes() const
+            {
+                std::vector<std::shared_ptr<DistantMesh>> result;
+                std::unordered_set<const DistantMesh*> seen;
+                for (const auto& [path, file] : mFiles)
+                    if (seen.insert(file->mesh().get()).second)
+                        result.push_back(file->mesh());
+                return result;
+            }
+
         private:
             void add(VFS::FileMap& out, VFS::Path::Normalized path, std::unique_ptr<DistantMeshFile> file)
             {
@@ -1806,6 +1829,12 @@ namespace Alpha3
         };
     }
 
+    namespace
+    {
+        // the last one added: the cache builder's process has one VFS
+        DistantMeshArchive* sArchive = nullptr;
+    }
+
     bool imageHooksBypassed()
     {
         return sBypassImageHooks;
@@ -1813,6 +1842,44 @@ namespace Alpha3
 
     void addDistantMeshes(VFS::Manager& vfs)
     {
-        vfs.addArchive(std::make_unique<DistantMeshArchive>(vfs));
+        auto archive = std::make_unique<DistantMeshArchive>(vfs);
+        sArchive = archive.get();
+        vfs.addArchive(std::move(archive));
+    }
+
+    bool buildDistantMeshes(
+        unsigned threads, const std::function<void(const DistantMeshProgress&)>& progress, const std::atomic<bool>& cancel)
+    {
+        if (sArchive == nullptr)
+            return false;
+        const std::vector<std::shared_ptr<DistantMesh>> meshes = sArchive->meshes();
+        const unsigned madeBefore = DistantMesh::sMade, notMadeBefore = DistantMesh::sNotMade;
+        std::atomic<std::size_t> next{ 0 }, done{ 0 };
+        std::atomic<unsigned> running{ threads };
+        // all of them whatever the phone's temperature: the player waits for this (thermal.cpp is for the game)
+        std::vector<std::thread> workers;
+        for (unsigned index = 0; index < threads; ++index)
+            workers.emplace_back([&] {
+                for (std::size_t i = next++; i < meshes.size() && !cancel; i = next++)
+                {
+                    meshes[i]->buildAndRelease();
+                    ++done;
+                }
+                --running;
+            });
+        // the progress goes out on the calling thread (the launcher's, attached to Java)
+        const auto report = [&] {
+            progress({ static_cast<unsigned>(done), static_cast<unsigned>(meshes.size()), DistantMesh::sMade - madeBefore,
+                DistantMesh::sNotMade - notMadeBefore });
+        };
+        while (running > 0)
+        {
+            report();
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        }
+        for (std::thread& worker : workers)
+            worker.join();
+        report();
+        return !cancel;
     }
 }
