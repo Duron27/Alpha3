@@ -62,6 +62,7 @@ set(ALPHA3_SUPPORT_SOURCES
     src/bcdecode.cpp
     src/blobstore.cpp
     src/glesdialect.cpp
+    src/impostors.cpp
     src/ktxtextures.cpp
     src/programcache.cpp
     src/settings.cpp

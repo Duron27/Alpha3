@@ -42,7 +42,12 @@ namespace Alpha3
 
     // .ktx textures (made ahead of time, e.g. by kram) are read in place of the .dds of the same name: adds the archive that
     // lists them under that name. Call after the data directories and archives are added, before the index is built.
+    // Also adds the impostor archive after it (addImpostors), so the engine's one call covers both.
     void addKtxTextures(VFS::Manager& vfs);
+
+    // [Terrain] impostors: distant versions (x_dist.nif) of the meshes [Terrain] impostor meshes names, drawn as cards
+    // from six sides on first use (src/impostors.cpp). Object paging reads them only outside the active grid.
+    void addImpostors(VFS::Manager& vfs);
 
     // Frame generation (OPENMW_FRAMEGEN) builds the frame between two rendered ones from the camera's motion and the
     // scene's depth when the engine hands them over: each frame, from the main thread before it is rendered.

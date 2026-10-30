@@ -136,4 +136,44 @@ namespace Alpha3
         result->setFileName(image.getFileName());
         return result;
     }
+
+    bool decodeS3tcRgba8(const osg::Image& image, std::vector<unsigned char>& rgba)
+    {
+        const GLenum format = image.getPixelFormat();
+        if (format != sDxt1Rgb && format != sDxt1Rgba && format != sDxt3Rgba && format != sDxt5Rgba)
+            return false;
+        const int width = image.s(), height = image.t();
+        if (image.r() != 1 || width <= 0 || height <= 0 || !image.data())
+            return false;
+        const std::size_t blockBytes = (format == sDxt1Rgb || format == sDxt1Rgba) ? 8 : 16;
+        const int blocksX = (width + 3) / 4, blocksY = (height + 3) / 4;
+        if (static_cast<std::size_t>(blocksX) * blocksY * blockBytes > image.getTotalSizeInBytesIncludingMipmaps())
+            return false;
+
+        rgba.assign(static_cast<std::size_t>(width) * height * 4, 0);
+        for (int by = 0; by < blocksY; ++by)
+        {
+            for (int bx = 0; bx < blocksX; ++bx)
+            {
+                const unsigned char* block = image.data() + (static_cast<std::size_t>(by) * blocksX + bx) * blockBytes;
+                unsigned char decoded[4 * 4 * 4];
+                if (format == sDxt1Rgb || format == sDxt1Rgba)
+                    bcdec_bc1(block, decoded, 4 * 4);
+                else if (format == sDxt3Rgba)
+                    bcdec_bc2(block, decoded, 4 * 4);
+                else
+                    bcdec_bc3(block, decoded, 4 * 4);
+                const int columns = std::min(4, width - bx * 4), rows = std::min(4, height - by * 4);
+                for (int y = 0; y < rows; ++y)
+                    std::memcpy(&rgba[(static_cast<std::size_t>(by * 4 + y) * width + bx * 4) * 4], decoded + y * 16,
+                        static_cast<std::size_t>(columns) * 4);
+                // DXT1 without its alpha bit read as opaque
+                if (format == sDxt1Rgb)
+                    for (int y = 0; y < rows; ++y)
+                        for (int x = 0; x < columns; ++x)
+                            rgba[(static_cast<std::size_t>(by * 4 + y) * width + bx * 4 + x) * 4 + 3] = 255;
+            }
+        }
+        return true;
+    }
 }

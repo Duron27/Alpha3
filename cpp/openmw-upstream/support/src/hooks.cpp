@@ -284,6 +284,9 @@ namespace Alpha3
 
             osg::ref_ptr<osg::Image> imageRead(osg::Image& image, const std::string& extension) override
             {
+                // a texture the impostors draw from on the CPU
+                if (imageHooksBypassed())
+                    return nullptr;
                 // the first image the engine reads starts the preload of the last session's textures
                 texturePreloadImageRead();
                 if (extension != "dds" || image.data() == nullptr)
