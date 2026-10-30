@@ -4,7 +4,7 @@ Date: Fri, 30 Oct 2026 01:30:00 -0400
 Subject: [PATCH 9/9] iOS: resolution list of fractions of the native pixels as
  a render scale, gamma slider as interface scale
 
-What common/0008 does for Android, on iOS. SDL lists the screen in points, once per orientation; the settings window offers 100% down to 25% of its pixels instead, applied at once. The window keeps filling the screen in points: a resolution is the scale SDL's view is rendered at (Alpha3::setRenderResolution in the support library), [Video] resolution is applied that way at startup too. The interface keeps its size on the screen at any scale, and the gamma slider sets it ([GUI] scaling factor).
+What common/0008 does for Android, on iOS. SDL lists the screen in points, once per orientation; the settings window offers 100% down to 25% of its pixels instead, applied at once. The window keeps filling the screen in points: a resolution is the scale SDL's view is rendered at (Alpha3::setRenderResolution in the support library), [Video] resolution is applied that way at startup too. As on Android, a smaller resolution makes the interface larger on the screen, and the gamma slider sets its scale ([GUI] scaling factor).
 Mouse positions are scaled from points to pixels by a fraction instead of a whole number, and a Metal window (ANGLE) reports its pixels through SDL_Metal_GetDrawableSize (SDLUtil::getDrawableSize).
 ---
 diff --git a/apps/openmw/engine.cpp b/apps/openmw/engine.cpp
@@ -160,9 +160,9 @@ diff --git a/apps/openmw/mwgui/windowmanagerimp.cpp b/apps/openmw/mwgui/windowma
          mScalingFactor = Settings::gui().mScalingFactor;
          mGuiPlatform->getRenderManagerPtr()->setScalingFactor(mScalingFactor);
 +#elif TARGET_OS_IPHONE
-+        // the settings window's interface scale slider may have changed it. The resolution is a render scale on iOS: the
-+        // interface keeps its size on the screen whatever it is, as on a HiDPI desktop.
-+        mScalingFactor = Settings::gui().mScalingFactor * Alpha3::renderScale();
++        // the settings window's interface scale slider may have changed it. As on Android, the interface is laid out in
++        // the resolution's pixels: a smaller resolution makes it larger on the screen.
++        mScalingFactor = Settings::gui().mScalingFactor;
 +        mGuiPlatform->getRenderManagerPtr()->setScalingFactor(mScalingFactor);
  #endif
          mGuiPlatform->getRenderManagerPtr()->setViewSize(x, y);
