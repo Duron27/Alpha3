@@ -296,6 +296,21 @@ namespace Alpha3
             // the engine's main thread, between its update and the frame's rendering
             void renderingTraversals() override { omw_frame_update(); }
 
+            bool nodeOccluded(osg::CullStack& cullStack, const osg::Node& node) override
+            {
+                return occlusionNodeOccluded(cullStack, node);
+            }
+
+            bool drawableOccluded(osg::CullStack& cullStack, const osg::Drawable&, const osg::BoundingBox& box) override
+            {
+                return occlusionDrawableOccluded(cullStack, box);
+            }
+
+            void drawableAdded(osg::NodeVisitor& cullVisitor, osg::Drawable& drawable, const osg::Matrix& modelView) override
+            {
+                occlusionDrawableAdded(cullVisitor, drawable, modelView);
+            }
+
             bool translateShaderSource(const osg::Shader& shader, std::string& source) override
             {
                 return Alpha3::translateShaderSource(shader, source);

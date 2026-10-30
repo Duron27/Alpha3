@@ -63,3 +63,15 @@ Skip drawing things hidden behind other things, like buildings behind a wall in 
   - A small CPU software rasterizer that draws big occluders (terrain, large buildings) into a low-res depth buffer and tests object bounding boxes against it. This avoids GPU readbacks, which are slow on mobile and on ANGLE/Metal.
 - Exteriors in towns gain the most. Interiors already get most of the benefit from cell boundaries.
 - Measure first: profile a few heavy spots (Vivec, Balmora, Ald'ruhn) to see whether the draw calls are the bottleneck.
+- **Status: first version done, the CPU rasterizer.** See `cpp/openmw-upstream/support/src/occlusionculling.cpp`, off by default (`[Camera] occlusion culling`). The only OSG change is `occlusion-hooks.patch` in the openmw-osg port: three `RuntimeHooks` calls in the cull visitor. There is no OpenMW patch.
+  1. While the scene camera is culled, large opaque drawables are remembered as occluders, with their world matrices. These are terrain chunks, buildings and rocks over `occluder min size` (300 units). Drawables that are blended, alpha tested, don't write depth, or are outside the default render bin are skipped.
+  2. At the first test of the next frame, those occluders are drawn with that frame's camera into a 256×128 depth buffer, largest on screen first, up to `occluder triangle budget` (20000). Back faces are skipped where the mesh culls them. Each pixel keeps the farthest depth its triangle has anywhere in the pixel.
+  3. A node or drawable that passed the frustum test is culled when every pixel under its bounds, plus one pixel around them, holds a nearer surface.
+  - Only the scene camera's traversal is touched; shadows, water reflections and the sky are not. Lights are collected in the update traversal, so culling a hidden node doesn't turn its light off.
+  - An occluder that was off screen last frame is missing (less is culled). One that moved is a frame late, so a swinging door could pop for one frame.
+- **Tested:** a host test (a wall and boxes through a real `osgUtil::SceneView` cull) checks these cases: behind is culled; in front, above, and past the end are not; back faces hide nothing; alpha-tested and blended walls hide nothing; `AlphaFunc ALWAYS` still hides; the camera inside the wall culls nothing; small meshes and other cameras are left alone. The buffer is checked to never be nearer than the surface. Speed: 60000 terrain triangles in about 3 ms on a desktop CPU.
+- **Next:**
+  - **Device check:** culled counts and the CPU cost (the verbose log prints both every 600 frames) in Vivec, Balmora and on open ground. Tune the buffer width and triangle budget.
+  - **Draw the buffer on a worker thread** while the previous frame is drawn, instead of at the start of the cull.
+  - **Simplified occluder meshes** from the distant mesh simplifier, so a building costs fewer triangles.
+  - **Object paging chunks** usually go over the budget and are skipped, because one chunk is a whole cell's merged geometry. Drawing only their large pieces would let distant towns hide what is behind them.

@@ -9,13 +9,19 @@
 #include <string_view>
 #include <vector>
 
+#include <osg/BoundingBox>
 #include <osg/Image>
+#include <osg/Matrix>
 #include <osg/Program>
 #include <osg/ref_ptr>
 
 namespace osg
 {
+    class CullStack;
+    class Drawable;
     class GraphicsContext;
+    class Node;
+    class NodeVisitor;
     class State;
 }
 
@@ -95,6 +101,12 @@ namespace Alpha3
     void textureStreamingTextureLoading(const osg::Image& image);
     void textureStreamingFrame(); // on the draw thread, after the frame is drawn
     void textureStreamingStop(); // before the context closes
+
+    // ---- occlusionculling.cpp ([Camera] occlusion culling): the OSG cull visitor's occlusion hooks. Each is a no-op
+    // returning false for any traversal but the scene camera's.
+    bool occlusionNodeOccluded(osg::CullStack& cullStack, const osg::Node& node);
+    bool occlusionDrawableOccluded(osg::CullStack& cullStack, const osg::BoundingBox& box);
+    void occlusionDrawableAdded(osg::NodeVisitor& cullVisitor, osg::Drawable& drawable, const osg::Matrix& modelView);
 
     // ---- allocator.cpp: [General] allocator, once the settings are loaded
     void applyAllocatorSetting();

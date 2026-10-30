@@ -1,0 +1,115 @@
+diff --git a/include/osg/CullStack b/include/osg/CullStack
+index d196662..ca86e5d 100644
+--- a/include/osg/CullStack
++++ b/include/osg/CullStack
+@@ -18,6 +18,7 @@
+ #include <osg/CullSettings>
+ #include <osg/Viewport>
+ #include <osg/fast_back_stack>
++#include <osg/RuntimeHooks>
+ #include <osg/Transform>
+ 
+ namespace osg {
+@@ -113,7 +114,10 @@ class OSG_EXPORT CullStack : public osg::CullSettings
+             {
+                 if (!node.getBound().valid())
+                     return true;
+-                return getCurrentCullingSet().isCulled(node.getBound());
++                if (getCurrentCullingSet().isCulled(node.getBound()))
++                    return true;
++                RuntimeHooks* hooks = RuntimeHooks::get();
++                return hooks && hooks->nodeOccluded(*this, node);
+             }
+             else
+             {
+diff --git a/include/osg/RuntimeHooks b/include/osg/RuntimeHooks
+index 0cf3a9d..4826c9a 100644
+--- a/include/osg/RuntimeHooks
++++ b/include/osg/RuntimeHooks
+@@ -16,6 +16,8 @@
+ 
+ #include <osg/Image>
+ #include <osg/Program>
++#include <osg/BoundingBox>
++#include <osg/Matrix>
+ #include <osg/Vec4d>
+ 
+ #include <string>
+@@ -23,8 +25,12 @@
+ 
+ namespace osg {
+ 
++class CullStack;
++class Drawable;
+ class GraphicsContext;
+ class GLExtensions;
++class Node;
++class NodeVisitor;
+ class State;
+ 
+ /** Points where an application can change how OSG drives the GL implementation, without changes to the application
+@@ -95,6 +101,17 @@ class OSG_EXPORT RuntimeHooks : public Referenced
+           * its update, whatever the threading model. */
+         virtual void renderingTraversals() {}
+ 
++        /** Occlusion culling: a node has passed the view frustum test of a cull traversal (the cull stack is the cull
++          * visitor; its model view matrix is the one of the node's parent). Returns true to cull the node. */
++        virtual bool nodeOccluded(CullStack& /*cullStack*/, const Node& /*node*/) { return false; }
++
++        /** The same for a drawable, with its bounding box (in the cull stack's current model view frame). */
++        virtual bool drawableOccluded(CullStack& /*cullStack*/, const Drawable& /*drawable*/, const BoundingBoxf& /*bb*/) { return false; }
++
++        /** A cull traversal (an osgUtil::CullVisitor) is adding a drawable to its render graph, with this model view
++          * matrix; the visitor's current state graph is the drawable's. */
++        virtual void drawableAdded(NodeVisitor& /*cullVisitor*/, Drawable& /*drawable*/, const Matrix& /*modelView*/) {}
++
+     protected:
+ 
+         virtual ~RuntimeHooks() {}
+diff --git a/include/osgUtil/CullVisitor b/include/osgUtil/CullVisitor
+index 93d7b8e..8609eb2 100644
+--- a/include/osgUtil/CullVisitor
++++ b/include/osgUtil/CullVisitor
+@@ -27,6 +27,7 @@
+ #include <osg/ClearNode>
+ #include <osg/Camera>
+ #include <osg/Notify>
++#include <osg/RuntimeHooks>
+ 
+ #include <osg/CullStack>
+ 
+@@ -423,6 +424,8 @@ class OSGUTIL_EXPORT CullVisitor : public osg::NodeVisitor, public osg::CullStac
+ 
+ inline void CullVisitor::addDrawable(osg::Drawable* drawable,osg::RefMatrix* matrix)
+ {
++    if (osg::RuntimeHooks* hooks = osg::RuntimeHooks::get()) hooks->drawableAdded(*this, *drawable, *matrix);
++
+     if (_currentStateGraph->leaves_empty())
+     {
+         // this is first leaf to be added to StateGraph
+@@ -437,6 +440,8 @@ inline void CullVisitor::addDrawable(osg::Drawable* drawable,osg::RefMatrix* mat
+ /** Add a drawable and depth to current render graph.*/
+ inline void CullVisitor::addDrawableAndDepth(osg::Drawable* drawable,osg::RefMatrix* matrix,float depth)
+ {
++    if (osg::RuntimeHooks* hooks = osg::RuntimeHooks::get()) hooks->drawableAdded(*this, *drawable, *matrix);
++
+     if (_currentStateGraph->leaves_empty())
+     {
+         // this is first leaf to be added to StateGraph
+diff --git a/src/osgUtil/CullVisitor.cpp b/src/osgUtil/CullVisitor.cpp
+index 119d9bd..1019ede 100644
+--- a/src/osgUtil/CullVisitor.cpp
++++ b/src/osgUtil/CullVisitor.cpp
+@@ -921,6 +921,12 @@ void CullVisitor::apply(osg::Drawable& drawable)
+ 
+     if (drawable.isCullingActive() && isCulled(bb)) return;
+ 
++    if (drawable.isCullingActive() && bb.valid())
++    {
++        osg::RuntimeHooks* hooks = osg::RuntimeHooks::get();
++        if (hooks && hooks->drawableOccluded(*this, drawable, bb)) return;
++    }
++
+ 
+     if (_computeNearFar && bb.valid())
+     {

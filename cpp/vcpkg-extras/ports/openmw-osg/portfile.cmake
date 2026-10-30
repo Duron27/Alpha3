@@ -34,6 +34,8 @@ set(ALPHA3_GLES_PATCHES
     "android/vao-custom-drawing.patch"
     # the model view projection and normal matrices are only worked out for programs that read them
     "android/lazy-matrix-uniforms.patch"
+    # occlusion culling by the support library: the cull visitor asks it about each node and drawable in view
+    "android/occlusion-hooks.patch"
 )
 
 if(VCPKG_TARGET_IS_IOS)
