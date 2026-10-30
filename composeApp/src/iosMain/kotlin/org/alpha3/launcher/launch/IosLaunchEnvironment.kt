@@ -5,6 +5,7 @@ package org.alpha3.launcher.launch
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import org.alpha3.launcher.paths.Profiles
 import org.alpha3.launcher.utils.GameFilesPreferences
 import org.alpha3.launcher.utils.dataStore
 import platform.posix.getenv
@@ -26,4 +27,8 @@ fun applyLaunchEnvironment() {
 }
 
 /** The engine's command line options chosen in the Launch options dialog, as Android passes them. Values stay whole. */
-fun launchArguments(): List<String> = runBlocking { LaunchArguments.effective() }
+fun launchArguments(): List<String> {
+    // The default profile is the engine's own user config; another one is a config folder of its own
+    val profile = if (Profiles.isDefault) emptyList() else Profiles.engineArguments()
+    return profile + runBlocking { LaunchArguments.effective() }
+}

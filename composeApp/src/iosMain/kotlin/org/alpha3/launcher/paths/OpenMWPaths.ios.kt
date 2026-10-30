@@ -72,15 +72,16 @@ actual object OpenMWPaths {
         p
     }
 
-    // Profiles are not used on iOS: the active profile is always the plain config folder
     actual val BASE_CONFIG: String
         get() = USER_CONFIG
 
+    // As on Android: the default profile keeps everything where it always was; any other profile is a folder below the
+    // config folder that is also its user-data folder.
     actual val ACTIVE_CONFIG: String
-        get() = USER_CONFIG
+        get() = Profiles.folder
 
     actual val USER_DATA: String
-        get() = USER_FILE_STORAGE
+        get() = if (Profiles.isDefault) USER_FILE_STORAGE else Profiles.folder
 
     actual val USER_RESOURCES: String by lazy {
         val p = "$USER_FILE_STORAGE/resources"
@@ -88,29 +89,23 @@ actual object OpenMWPaths {
         p
     }
 
-    actual val USER_SAVES: String by lazy {
-        val p = "$USER_FILE_STORAGE/saves"
-        ensureDir(p)
-        p
-    }
+    actual val USER_SAVES: String
+        get() = "$USER_DATA/saves".also { ensureDir(it) }
 
-    actual val USER_GENERATED: String by lazy {
-        val p = "$USER_FILE_STORAGE/alpha3_generated"
-        ensureDir(p)
-        p
-    }
+    actual val USER_GENERATED: String
+        get() = "$USER_DATA/alpha3_generated".also { ensureDir(it) }
 
     actual val USER_OPENMW_CFG: String
-        get() = "$USER_CONFIG/openmw.cfg"
+        get() = "$ACTIVE_CONFIG/openmw.cfg"
 
     actual val SETTINGS_FILE: String
-        get() = "$USER_CONFIG/settings.cfg"
+        get() = "$ACTIVE_CONFIG/settings.cfg"
 
     actual val LOGCAT_FILE: String
-        get() = "$USER_CONFIG/openmw_logcat.txt"
+        get() = "$ACTIVE_CONFIG/openmw_logcat.txt"
 
     actual val OPENMW_LOG: String
-        get() = "$USER_CONFIG/openmw.log"
+        get() = "$ACTIVE_CONFIG/openmw.log"
 
     actual val CRASH_FILE: String
         get() = "$USER_CONFIG/crash.log"
@@ -207,7 +202,10 @@ actual object OpenMWPaths {
         val home = NSHomeDirectory()
         val current = oldContainer.find("$home/")?.value ?: return
         fun fix(text: String) = oldContainer.replace(text, current)
-        for (cfg in listOf(USER_OPENMW_CFG, OPENMW_CFG)) {
+        // Every profile's openmw.cfg, not just the active one, and the mod lists' generated cfgs a profile is made from
+        val listCfgs = File("$USER_FILE_STORAGE/OpenMW").listFiles { it.isFile && it.name.endsWith(".cfg") }.orEmpty().map { it.absolutePath }
+        val cfgs = listOf(OPENMW_CFG, "$USER_CONFIG/openmw.cfg") + Profiles.list().map { "${Profiles.folderOf(it)}/openmw.cfg" } + listCfgs
+        for (cfg in cfgs) {
             if (!NSFileManager.defaultManager.fileExistsAtPath(cfg)) continue
             val text = File(cfg).readText()
             val fixed = fix(text)
