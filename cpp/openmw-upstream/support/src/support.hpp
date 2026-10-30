@@ -84,7 +84,7 @@ namespace Alpha3
     void texturePreloadTextureLoading(const osg::Image& image);
     void texturePreloadStop();
 
-    // ---- impostors.cpp: true while the impostors read a texture for the CPU; the image hooks leave it as it is
+    // ---- distantmeshes.cpp: true while the distant meshes read a texture for the CPU; the image hooks leave it as it is
     bool imageHooksBypassed();
 
     // ---- allocator.cpp: [General] allocator, once the settings are loaded

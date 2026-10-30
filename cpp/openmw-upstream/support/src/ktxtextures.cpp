@@ -183,6 +183,6 @@ namespace Alpha3
     void addKtxTextures(VFS::Manager& vfs)
     {
         vfs.addArchive(std::make_unique<KtxArchive>());
-        addImpostors(vfs);
+        addDistantMeshes(vfs);
     }
 }

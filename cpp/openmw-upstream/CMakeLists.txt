@@ -173,6 +173,20 @@ if(NOT EXISTS ${ETCPAK_EXTRACT_DIR}/etcpak-${ETCPAK_VERSION}/ProcessRGB.cpp)
     file(ARCHIVE_EXTRACT INPUT ${ETCPAK_ARCHIVE} DESTINATION ${ETCPAK_EXTRACT_DIR})
 endif()
 
+# Arseny Kapoulkine's meshoptimizer (MIT), compiled into the support library: simplified distant meshes, see
+# support/src/distantmeshes.cpp
+set(MESHOPTIMIZER_VERSION 0.22)
+set(MESHOPTIMIZER_ARCHIVE ${download_dir}/meshoptimizer-${MESHOPTIMIZER_VERSION}.tar.gz)
+if(NOT EXISTS ${MESHOPTIMIZER_ARCHIVE})
+    file(DOWNLOAD https://github.com/zeux/meshoptimizer/archive/refs/tags/v${MESHOPTIMIZER_VERSION}.tar.gz
+        ${MESHOPTIMIZER_ARCHIVE}
+        EXPECTED_HASH SHA512=6fbb9c5a98dad8616562d60ed5eb08030c101edd81fb028d906ea0aa8261369e942c0eeadf163283c8acac7858728b9277ef557cb8d38e972c7fe97771c0b4c4)
+endif()
+set(MESHOPTIMIZER_EXTRACT_DIR ${CMAKE_CURRENT_BINARY_DIR}/meshoptimizer)
+if(NOT EXISTS ${MESHOPTIMIZER_EXTRACT_DIR}/meshoptimizer-${MESHOPTIMIZER_VERSION}/src/meshoptimizer.h)
+    file(ARCHIVE_EXTRACT INPUT ${MESHOPTIMIZER_ARCHIVE} DESTINATION ${MESHOPTIMIZER_EXTRACT_DIR})
+endif()
+
 # Microsoft's mimalloc (MIT): operator new of the engine, see support/src/allocator.cpp
 set(MIMALLOC_VERSION 2.1.7)
 set(MIMALLOC_ARCHIVE ${download_dir}/mimalloc-${MIMALLOC_VERSION}.tar.gz)
@@ -205,6 +219,7 @@ set(OPENMW_UPSTREAM_COMMON
     -DASTCENC_SOURCE_DIR=${ASTCENC_EXTRACT_DIR}/astc-encoder-${ASTCENC_VERSION}/Source
     -DETCPAK_SOURCE_DIR=${ETCPAK_EXTRACT_DIR}/etcpak-${ETCPAK_VERSION}
     -DMIMALLOC_SOURCE_DIR=${MIMALLOC_EXTRACT_DIR}/mimalloc-${MIMALLOC_VERSION}
+    -DMESHOPTIMIZER_SOURCE_DIR=${MESHOPTIMIZER_EXTRACT_DIR}/meshoptimizer-${MESHOPTIMIZER_VERSION}/src
     # Alpha3's support library, added to the engine's build by patch 0004 (OSG RuntimeHooks and what the engine calls)
     -DALPHA3_SUPPORT_DIR=${CMAKE_CURRENT_SOURCE_DIR}/support
     -DBUILD_OPENMW=ON

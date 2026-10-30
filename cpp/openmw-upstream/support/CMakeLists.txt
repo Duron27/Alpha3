@@ -9,7 +9,7 @@
 # Files::AndroidPath) and OSG.
 #
 # Inputs from cpp/openmw-upstream/CMakeLists.txt: ASTCENC_SOURCE_DIR, ETCPAK_SOURCE_DIR, MIMALLOC_SOURCE_DIR,
-# ALPHA3_MULTIPLAYER.
+# MESHOPTIMIZER_SOURCE_DIR, ALPHA3_MULTIPLAYER.
 #
 # CMake version: the Android SDK's CMake is 3.22, which has no $<LINK_LIBRARY:WHOLE_ARCHIVE,...> (3.24). The objects
 # that must be linked although nothing calls them (hooks.cpp, allocator.cpp, logcat.cpp) are therefore an OBJECT library
@@ -44,6 +44,12 @@ add_library(alpha3_etcpak STATIC ${ETCPAK_SOURCE_DIR}/ProcessRGB.cpp ${ETCPAK_SO
 target_compile_options(alpha3_etcpak PRIVATE -O3 -fPIC -fvisibility=hidden -Wno-everything)
 target_include_directories(alpha3_etcpak PUBLIC ${ETCPAK_SOURCE_DIR})
 
+# meshoptimizer (MIT): the simplifier of the distant meshes, see src/distantmeshes.cpp
+file(GLOB ALPHA3_MESHOPTIMIZER_SOURCES ${MESHOPTIMIZER_SOURCE_DIR}/*.cpp)
+add_library(alpha3_meshoptimizer STATIC ${ALPHA3_MESHOPTIMIZER_SOURCES})
+target_compile_options(alpha3_meshoptimizer PRIVATE -O3 -fPIC -fvisibility=hidden -Wno-everything)
+target_include_directories(alpha3_meshoptimizer PUBLIC ${MESHOPTIMIZER_SOURCE_DIR})
+
 # Microsoft's mimalloc (MIT) behind operator new, see src/allocator.cpp (Android only)
 if (ANDROID)
     add_library(alpha3_mimalloc STATIC ${MIMALLOC_SOURCE_DIR}/src/static.c)
@@ -62,7 +68,7 @@ set(ALPHA3_SUPPORT_SOURCES
     src/bcdecode.cpp
     src/blobstore.cpp
     src/glesdialect.cpp
-    src/impostors.cpp
+    src/distantmeshes.cpp
     src/ktxtextures.cpp
     src/programcache.cpp
     src/settings.cpp
@@ -87,6 +93,7 @@ target_link_libraries(alpha3_support
     components
     alpha3_astcenc
     alpha3_etcpak
+    alpha3_meshoptimizer
     glslang::glslang
     glslang::SPIRV
     glslang::glslang-default-resource-limits
