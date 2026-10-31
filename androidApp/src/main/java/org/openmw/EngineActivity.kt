@@ -460,7 +460,7 @@ class EngineActivity : SDLActivity() {
                 if (key.isNotEmpty() && value.isNotEmpty()) setEnv(key, value)
             }
             // Launcher switch: plain buffer swaps instead of Swappy frame pacing (read by the engine's SDL window)
-            val noSwappy = runBlocking { dataStore.data.first()[GameFilesPreferences.DISABLE_SWAPPY_KEY] == true }
+            val noSwappy = runBlocking { dataStore.data.first()[GameFilesPreferences.DISABLE_SWAPPY_KEY] != false } // (off unless turned on)
             if (noSwappy) setEnv("OPENMW_NO_SWAPPY", "1") else Os.unsetenv("OPENMW_NO_SWAPPY")
             // Launcher switch: an extra generated frame between the rendered ones (read by the engine's SDL window)
             val frameGeneration = runBlocking { dataStore.data.first()[GameFilesPreferences.FRAME_GENERATION_KEY] == true }

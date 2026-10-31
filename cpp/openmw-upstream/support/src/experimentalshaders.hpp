@@ -34,10 +34,14 @@ namespace Alpha3
         float mGrassHeight = 1.f;
         float mGrassDistance = 2500.f;
         float mGrassWind = 1.f;
+        bool mGrassClearance = true; // no blades through rocks, walls and what else stands on the ground
+        float mGrassStorm = 1.f; // how hard it leans with the storm in blizzards and ash and blight storms, 0: not
+        bool mGrassVariety = true; // seed stalks, short broad clumps and drier patches among the blades
+        bool mGrassAntialiasing = true; // no blade thinner than a pixel, the widened ones faded into the ground
         bool mTreeSway = false;
-        float mTreeSwayStrength = 1.f;
+        float mTreeSwayStrength = 2.5f;
         std::string mTreeSwayTextures; // what leafy textures' names contain, comma separated; empty: the defaults
-        float mTrunkSway = 0.5f; // the trunks' bend, 0: they stay still
+        float mTrunkSway = 1.5f; // the trunks' bend, 0: they stay still
         std::string mTrunkSwayTextures; // what the trunks' textures' names contain; empty: the defaults
     };
 

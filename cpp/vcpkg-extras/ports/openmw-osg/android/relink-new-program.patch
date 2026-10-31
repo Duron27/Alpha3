@@ -1,0 +1,49 @@
+Alpha3: a GL program object is linked only once; a program linked again gets a new one (Adreno crashed after a
+second link of the same object).
+
+diff --git a/include/osg/Program b/include/osg/Program
+--- a/include/osg/Program
++++ b/include/osg/Program
+@@ -383,6 +383,8 @@
+ 
+                 /** Does the glProgram handle belongs to this class? */
+                 bool _ownsProgramHandle;
++                /** Alpha3: linked once already: a link again goes to a new GL program object */
++                bool _linkedBefore;
+ 
+                 ActiveUniformMap _uniformInfoMap;
+                 // The same locations indexed by the uniform's name id (small, sequential), -1 where this program has none
+diff --git a/src/osg/Program.cpp b/src/osg/Program.cpp
+--- a/src/osg/Program.cpp
++++ b/src/osg/Program.cpp
+@@ -712,7 +712,8 @@
+         _glProgramHandle(programHandle),
+         _loadedBinary(false),
+         _contextID( contextID ),
+-        _ownsProgramHandle(false)
++        _ownsProgramHandle(false),
++        _linkedBefore(false)
+ {
+     _program = program;
+     if (_glProgramHandle == 0)
+@@ -755,6 +756,20 @@
+ 
+     if (!_glProgramHandle) return;
+ 
++    // Alpha3: a program linked again (its shaders changed, as OpenMW does when a lighting setting is toggled) is linked
++    // in a new GL program object, the old one deleted. Adreno's driver crashed in a draw after the same program object
++    // had been linked a second time.
++    if (_linkedBefore && _ownsProgramHandle)
++    {
++        GLuint fresh = _extensions->glCreateProgram();
++        if (fresh)
++        {
++            osg::get<GLProgramManager>(_contextID)->scheduleGLObjectForDeletion(_glProgramHandle);
++            _glProgramHandle = fresh;
++        }
++    }
++    _linkedBefore = true;
++
+     OSG_INFO << "Linking osg::Program \"" << _program->getName() << "\""
+              << " id=" << _glProgramHandle
+              << " contextID=" << _contextID

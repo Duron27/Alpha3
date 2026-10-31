@@ -81,10 +81,14 @@ namespace Alpha3
             s.mGrassHeight = std::clamp(settingFloat(sCategory, "grass height", 1.f), 0.2f, 3.f);
             s.mGrassDistance = std::clamp(settingFloat(sCategory, "grass distance", 2500.f), 500.f, 8000.f);
             s.mGrassWind = std::clamp(settingFloat(sCategory, "grass wind", 1.f), 0.f, 3.f);
+            s.mGrassClearance = settingBool(sCategory, "grass clearance", true);
+            s.mGrassStorm = std::clamp(settingFloat(sCategory, "grass storm", 1.f), 0.f, 3.f);
+            s.mGrassVariety = settingBool(sCategory, "grass variety", true);
+            s.mGrassAntialiasing = settingBool(sCategory, "grass antialiasing", true);
             s.mTreeSway = settingBool(sCategory, "tree sway", false);
-            s.mTreeSwayStrength = std::clamp(settingFloat(sCategory, "tree sway strength", 1.f), 0.f, 4.f);
+            s.mTreeSwayStrength = std::clamp(settingFloat(sCategory, "tree sway strength", 2.5f), 0.f, 4.f);
             s.mTreeSwayTextures = setting(sCategory, "tree sway textures", "");
-            s.mTrunkSway = std::clamp(settingFloat(sCategory, "tree trunk sway", 0.5f), 0.f, 2.f);
+            s.mTrunkSway = std::clamp(settingFloat(sCategory, "tree trunk sway", 1.5f), 0.f, 2.f);
             s.mTrunkSwayTextures = setting(sCategory, "tree trunk textures", "");
             return s;
         }
@@ -345,7 +349,7 @@ namespace Alpha3
                 switch (mKind)
                 {
                     case MapKind::Normal:
-                        data = writeDds(normalHeight, true, mMaterial, grainAlongU(diffuse));
+                        data = writeDds(forParallax(normalHeight, settings), true, mMaterial, grainAlongU(diffuse));
                         break;
                     case MapKind::Specular:
                         data = writeDds(makeSpecular(diffuse, normalHeight, mMaterial), false, mMaterial, false);
@@ -452,8 +456,10 @@ namespace Alpha3
                 const std::vector<MaterialRule> rules
                     = parseMaterialRules(s.mRules.empty() ? defaultMaterialRules() : s.mRules);
                 const std::string normalPattern = s.mParallax ? "_nh" : "_n";
+                // (the version: maps made by an older generator are made again; 2: gentler parallax height)
+                constexpr std::string_view generatorVersion = "2";
                 const std::uint64_t settingsHash = fnv1a(fixed(s.mNormalStrength), 0xcbf29ce484222325ull)
-                    ^ fnv1a(s.mRules, 0x84222325cbf29ce4ull);
+                    ^ fnv1a(s.mRules, 0x84222325cbf29ce4ull) ^ fnv1a(generatorVersion, 0x9e3779b97f4a7c15ull);
                 // the endings of maps: a texture with one of them is a map itself
                 static constexpr std::string_view mapEndings[]
                     = { "_n", "_nh", "_spec", "_diffusespec", "_g", "_glow", "_bump", "_b", "_h", "_disp", "_em" };

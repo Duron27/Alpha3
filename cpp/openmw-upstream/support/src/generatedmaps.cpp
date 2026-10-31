@@ -313,6 +313,24 @@ namespace Alpha3
         return result;
     }
 
+    RgbaImage forParallax(const RgbaImage& normalHeight, const MapSettings& settings)
+    {
+        // OpenMW shifts the texture by up to 0.02 of it where the height is used for parallax, made for real height maps.
+        // Relief guessed from colours is noisy and full range, which made surfaces swim, so the map's height is softened
+        // and keeps only a part of its range, following the strength (about a third at 1, a fifteenth at 0.2).
+        const int w = normalHeight.mWidth, h = normalHeight.mHeight;
+        const std::size_t count = static_cast<std::size_t>(w) * h;
+        std::vector<float> height(count);
+        for (std::size_t i = 0; i < count; ++i)
+            height[i] = normalHeight.mRgba[i * 4 + 3] / 255.f;
+        blur(height, w, h, 1.5f * std::max(w, h) / 256.f);
+        const float depth = std::clamp(0.35f * settings.mNormalStrength, 0.f, 1.f);
+        RgbaImage result = normalHeight;
+        for (std::size_t i = 0; i < count; ++i)
+            result.mRgba[i * 4 + 3] = toByte(0.5f + (height[i] - 0.5f) * depth);
+        return result;
+    }
+
     RgbaImage makeSpecular(const RgbaImage& diffuse, const RgbaImage& normalHeight, Material material)
     {
         const MaterialLook& l = look(material);

@@ -76,9 +76,9 @@ namespace Alpha3
         const OcclusionSettings& occlusionSettings()
         {
             static const OcclusionSettings settings{ settingBool("Camera", "occlusion culling", false),
-                std::clamp(settingInt("Camera", "occlusion buffer width", 256), 64, 1024) & ~7,
+                std::clamp(settingInt("Camera", "occlusion buffer width", 2048), 64, 4096) & ~7,
                 std::max(0.f, settingFloat("Camera", "occluder min size", 300.f)),
-                std::clamp(settingInt("Camera", "occluder triangle budget", 20000), 1000, 2000000) };
+                std::clamp(settingInt("Camera", "occluder triangle budget", 80000), 1000, 2000000) };
             return settings;
         }
 

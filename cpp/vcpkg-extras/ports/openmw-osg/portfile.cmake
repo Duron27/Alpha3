@@ -39,6 +39,8 @@ set(ALPHA3_GLES_PATCHES
     # the experimental graphics of the support library: state for one drawable (trees swaying), defines it adds to
     # shaders, and the state's defines in the source before it is translated (glslang runs the preprocessor)
     "android/experimental-hooks.patch"
+    # a program linked again goes to a new GL program object (Adreno crashed after relinks: lighting settings toggled)
+    "android/relink-new-program.patch"
 )
 
 if(VCPKG_TARGET_IS_IOS)

@@ -59,6 +59,9 @@ namespace Alpha3
     // carries the material (see materialTag).
     RgbaImage makeNormalHeight(const RgbaImage& diffuse, const MapSettings& settings);
     // OpenMW's object specular map: colour in rgb, shininess / 255 in alpha
+    // The normal map with its height (alpha) made gentle enough for OpenMW's parallax
+    RgbaImage forParallax(const RgbaImage& normalHeight, const MapSettings& settings);
+
     RgbaImage makeSpecular(const RgbaImage& diffuse, const RgbaImage& normalHeight, Material material);
     // The terrain's "diffuse specular" map: the diffuse colour, the specular strength in alpha
     RgbaImage makeDiffuseSpecular(const RgbaImage& diffuse, const RgbaImage& normalHeight, Material material);

@@ -406,7 +406,7 @@ fun GraphicsSettingsSection() {
     // the bundled Turnip runs on Adreno only: on Mali the custom driver (PanVK) is something to opt into
     val mali = Platform.features.gpuDrivers?.gpuFamily == GpuFamily.MALI
     val useFreedreno by GameFilesPreferences.getPreference(GameFilesPreferences.USE_FREEDRENO, !mali).collectAsState(initial = !mali)
-    val disableSwappy by GameFilesPreferences.getPreference(GameFilesPreferences.DISABLE_SWAPPY_KEY, false).collectAsState(initial = false)
+    val disableSwappy by GameFilesPreferences.getPreference(GameFilesPreferences.DISABLE_SWAPPY_KEY, true).collectAsState(initial = true)
     val frameGeneration by GameFilesPreferences.getPreference(GameFilesPreferences.FRAME_GENERATION_KEY, false).collectAsState(initial = false)
 
     SettingSectionCard(
