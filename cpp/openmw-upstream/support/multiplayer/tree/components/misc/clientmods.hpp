@@ -72,6 +72,10 @@ namespace Misc::ClientMods
     // The data directories and *.omwscripts files of the installed mods, for the engine to load at startup.
     void startupEntries(std::vector<std::filesystem::path>& dataDirs, std::vector<std::string>& scriptFiles);
 
+    // Whether this file of this mod was there when the game started, so the engine already knows it and reloading the Lua
+    // scripts reads its new contents (a file it did not know needs a restart).
+    bool wasLoaded(std::string_view id, std::string_view path);
+
     // Asks the program to start itself again once it has shut down (see relaunch).
     void requestRestart();
     bool restartRequested();

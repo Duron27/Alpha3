@@ -19,8 +19,9 @@ To decide: what a player who declines gets (now: they cannot join that server), 
 - Shared loot ignores containers that have no stable id (made at runtime) and the edges of exterior cells (only the cell the
   player stands in is watched).
 - NAT traversal for hosted games: UPnP port mapping and/or a public relay.
-- State is broadcast to everyone, so cost grows with the square of the player count (127 players max, ~30 comfortable on a
-  small VPS): skip positions of players in other cells.
-- The server forgets bans and settings on restart; passwords cross the network in plain text.
+- Interest: positions, animations, shots and numbers go only to players who can see the sender (same interior, or both
+  outside within three cells); everybody else gets a position once a second for the map. Global chat, profiles and looks
+  still go to everybody.
+- Passwords cross the network in plain text. (Bans are kept in `bans.txt` next to where the server runs.)
 - Not yet tried in a real game: shared fights, projectiles and spell effects of others, healing a party member, trading made-up
   items, reconnecting. Also: the engine with the mod built in (`OPENMW_BUILTIN_MULTIPLAYER`).

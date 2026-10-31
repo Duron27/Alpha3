@@ -258,7 +258,8 @@ namespace
                 if (!answer.empty())
                     std::printf("%s\n", answer.c_str());
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            // the next tick as soon as a message arrives (a relayed position waits for nothing), at the latest in 10 ms
+            core.waitForEvents(10);
         }
         std::puts("[server] stopping");
         core.shutdown();

@@ -87,7 +87,7 @@ function M.connect(host, port)
     M.disconnect()
     clientId = net.connect(host, port)
     -- told to the server if the game is closed normally: it is not a lost connection, nothing to hold for us
-    if clientId then net.setFarewell(clientId, M.encodeJson({ t = 'bye' })) end
+    if clientId and net.setFarewell then net.setFarewell(clientId, M.encodeJson({ t = 'bye' })) end -- (older engines lack it)
 end
 
 function M.isConnected() return clientUp end

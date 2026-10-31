@@ -1,6 +1,7 @@
 #ifndef OPENMW_COMPONENTS_NET_SOCKETS_H
 #define OPENMW_COMPONENTS_NET_SOCKETS_H
 
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -70,6 +71,10 @@ namespace Net
         std::string remoteAddress(std::uint32_t id) const;
 
         std::vector<SocketEvent> poll();
+
+        // Blocks until there is something for poll() or the timeout has passed (a server's loop: it answers a message
+        // the moment it arrives instead of on its next tick). True if there is something.
+        bool waitForEvents(std::chrono::milliseconds timeout);
 
     private:
         class Impl;

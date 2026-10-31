@@ -2,7 +2,7 @@
 -- `openmw.modstore` is available in global scripts. It manages the client mods folder (`<user data>/clientmods/<id>/`):
 -- folders of Lua scripts and their assets that a multiplayer server hands out. At startup every mod folder that holds
 -- an `.omwscripts` file is added to the data directories and its `.omwscripts` files are loaded like the built-in ones, so
--- a change takes effect after a restart (see @{#modstore.restart}).
+-- a new file takes effect after a restart (see @{#modstore.restart}); a changed one after @{#modstore.reloadScripts}.
 --
 -- Everything is checked: mod names are `[a-z0-9_-]` (at most 40), file paths are relative, at most 6 parts deep, with
 -- letters, digits and `. _ -` and an allowed type (lua, omwscripts, yaml, txt, tga, dds, png, jpg, nif, kf, wav, mp3,
@@ -53,6 +53,19 @@
 -- @function [parent=#modstore] base64Decode
 -- @param #string text
 -- @return #string The data, or nil if the text is not valid base64
+
+---
+-- Whether the game loaded this file of this mod at startup. Such files are read again by @{#modstore.reloadScripts};
+-- a file the game did not know needs a restart.
+-- @function [parent=#modstore] wasLoaded
+-- @param #string id The mod
+-- @param #string path The file, inside the mod
+-- @return #boolean
+
+---
+-- Reloads every Lua script at the end of the frame, reading the installed mods' files again. Scripts keep their saved
+-- data, as when a game is saved and loaded.
+-- @function [parent=#modstore] reloadScripts
 
 ---
 -- Quits the game and starts it again with the same arguments, so that newly installed mods are loaded. Only possible on

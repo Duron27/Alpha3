@@ -29,6 +29,9 @@ namespace Misc::ClientMods
         std::string sExtraList;
         const std::vector<std::string> sExtraFolders = { "scripts", "l10n", "textures" };
         std::atomic<bool> sRestart{ false };
+        // "<mod>/<path>" of every file of the mods loaded at startup (startupEntries): what the engine can read again
+        // without starting over
+        std::set<std::string> sLoaded;
 
         bool nameChar(char c)
         {
@@ -472,8 +475,18 @@ namespace Misc::ClientMods
                 continue;
             std::sort(scripts.begin(), scripts.end());
             dataDirs.push_back(dir);
+            for (const File& file : filesOf(dir, false))
+                sLoaded.insert(id + "/" + file.mPath);
             scriptFiles.insert(scriptFiles.end(), scripts.begin(), scripts.end());
         }
+    }
+
+    bool wasLoaded(std::string_view id, std::string_view path)
+    {
+        std::string key(id);
+        key += '/';
+        key += path;
+        return sLoaded.count(key) > 0;
     }
 
     void requestRestart()

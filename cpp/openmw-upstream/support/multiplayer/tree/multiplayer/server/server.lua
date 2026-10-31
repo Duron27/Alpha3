@@ -10,7 +10,29 @@ net.callbacks = {
     onClientMessage = relay.onClientMessage,
 }
 
+-- Bans outlive a restart: one name a line in bans.txt where the server runs (or OPTIONS.bansFile)
+local BANS_FILE = OPTIONS.bansFile or 'bans.txt'
+local function loadBans()
+    local f = io and io.open(BANS_FILE, 'r')
+    if not f then return {} end
+    local list = {}
+    for line in f:lines() do
+        line = line:match('^%s*(.-)%s*$')
+        if line ~= '' and not line:find('^#') then list[#list + 1] = line end
+    end
+    f:close()
+    return list
+end
+local function saveBans(list)
+    local f = io and io.open(BANS_FILE, 'w')
+    if not f then print('[server] cannot write ' .. BANS_FILE) return end
+    f:write('# names banned from this server, one a line (lower case); delete a line to unban\n')
+    for _, name in ipairs(list) do f:write(name, '\n') end
+    f:close()
+end
+
 local err = relay.start(OPTIONS.port, {
+    onBansChanged = saveBans,
     dedicated = true,
     password = OPTIONS.password,
     adminPassword = OPTIONS.adminPassword,
@@ -22,6 +44,9 @@ local err = relay.start(OPTIONS.port, {
     startHour = OPTIONS.startHour,
 })
 if err then error('cannot listen on port ' .. tostring(OPTIONS.port) .. ': ' .. tostring(err), 0) end
+local banned = loadBans()
+relay.setBans(banned)
+if #banned > 0 then print(string.format('[server] %d banned name(s) from %s', #banned, BANS_FILE)) end
 
 print(string.format('[server] listening on port %d%s', OPTIONS.port, OPTIONS.password ~= '' and ' (password protected)' or ' (no password)'))
 print(string.format('[server] up to %d players; weather %s; time starts at %s and runs %gx',

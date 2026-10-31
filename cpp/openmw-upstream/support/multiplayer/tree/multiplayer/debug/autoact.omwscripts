@@ -1,0 +1,2 @@
+PLAYER: scripts/mp_debug/mpactive.lua
+PLAYER: scripts/mp_debug/autoact.lua

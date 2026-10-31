@@ -29,10 +29,13 @@ mod/scripts/mp/
   relay.lua              the server logic that runs inside the host's game
   bot.lua                a fake player living inside the relay (for testing the UI with one game)
   global.lua             the client: sync, avatars, parties, commands, time/weather
-  player.lua             UI: chat, party panel, invites, arrows over players, status line, avatar menu
+  player.lua             UI: chat, party frames, invites, avatar menu; drives hud.lua and observe.lua
+  hud.lua                nameplates, floating numbers, target frame, connection line
+  observe.lua            what others see of us: animations, readied spell, visible magic, damage/healing/skills
+  interp.lua             timed playback of other players' positions
   menu.lua               main-menu screen (host/join, port, password, test player) and settings renderers
   remote.lua             runs on avatars/stand-ins: movement, attacks, head tilt, death pose, reading pose
-  shots.lua              arrows, thrown weapons and spell bolts of other players (visuals only)
+  shots.lua              arrows, thrown weapons and spell bolts of other players (visuals, glow, sounds, bursts)
   proxies.lua            stand-ins for party members' actors, shared kills, no duplicate NPCs
   items.lua              describes, keys and rebuilds items made while playing (enchanted gear, potions, scrolls)
   trade.lua, damage.lua  trade window, damage/kill delivery to real actors
@@ -132,12 +135,17 @@ loads `relay.lua` unchanged, so a server behaves exactly like a hosted game (res
 - **Sky:** the server owns time of day and weather. Time advances on its own clock (`--time-scale`, `--start-hour`), the
   weather changes by itself every ~15 minutes (or stays fixed with `--weather rain`) and applies wherever each player is.
   The date is never synced: everybody keeps their own day.
+- **Bans** are kept in `bans.txt` in the folder the server runs in (one name a line; delete a line to unban), so they
+  outlive a restart.
 - **Admins:** players type `/login <admin password>`; admins can `/kick /ban /unban /mute /unmute /announce`, `/who`
   (name, latency, address and location of everyone), `/weather [id|cycle]` and `/time <hour>`.
 - **Console:** type into the server's terminal: `players` (or `who`), `kick|ban|unban|mute|unmute <name>`,
   `announce <text>`, `weather [id|cycle]`, `time <hour>`, `quit`. Latency is measured by the server's pings; the address is
   where the player connects from; the location is their cell (or exterior grid square) and position.
 - Addresses go only to admins and the console, never into the player list everybody receives.
+- **Latency:** the server relays a message the moment it arrives (it waits on its sockets, it does not poll on a timer),
+  well under a millisecond on the machine itself; positions, animations and shots go only to the players who can see the
+  sender, the others get a position once a second for their map.
 - **Log:** the console prints a timestamped line for connections (with the address), joins, refusals (wrong password,
   version, full, banned), leaving, losing connection and coming back, global chat (not party chat, and whispers only as who
   wrote to whom), parties, trades, admin logins and commands, weather changes, and once a minute how many messages a player
@@ -172,16 +180,35 @@ A player trusts the server's owner with this: the scripts run in their game like
 
 ## Playing together
 Every player keeps their **own** world; nothing a group member does changes yours, except the shared things below.
-- **Presence:** everyone appears as a stand-in NPC (look and gear) when you share a cell, with an arrow and name that
-  shows through walls, and a marker on the map, the minimap and (outdoors) the global map. **Orange is your group, green is
-  everyone else**, for the arrow and the marker alike. `/markers` and `/arrows` (or the settings page) switch the map markers
-  and the arrows on and off. Activate someone for a menu: invite to party, trade, ...
-- **Animation:** walking, running, strafing and backing up relative to where they face, jumping (once per jump), sneaking,
-  swimming, attacks (wind-up on press, swing size by how long it was charged, chop/slash/thrust), spells, head and body tilt
+- **Presence:** everyone appears as a stand-in NPC (look and gear) when you share a cell, with a **nameplate** (name,
+  level, health bar) that shows through walls but not through magic (invisible or mostly chameleon players have none,
+  except for their party), and a marker on the map, the minimap and (outdoors) the global map. **Orange is your group, green
+  is everyone else**, for the nameplate and the marker alike. Point your crosshair at someone for a **target frame** (level,
+  race, class, health, latency). `/markers` and `/arrows` (or the settings page) switch the map markers and the nameplates
+  on and off. Activate someone for a menu: invite to party, trade, ...
+- **Movement:** their position messages carry the time they were taken and are played back a little behind (about one
+  message apart plus the jitter of the connection, typically 50-80 ms), on a smooth curve between two messages
+  (`interp.lua`), so a late message changes nothing on screen and a stop, a turn or a jump happens where it did. The avatar
+  walks with their velocity plus a pull toward where they are (its legs move as theirs, at their speed), a small gap is
+  pulled in a little every frame and only a big one is jumped. With the engine hook `animation.setMovementOverride` (the
+  multiplayer patch) the avatar moves at exactly that velocity, its legs paced to match; without it the walk animation
+  moves it at about that speed. Standing still, an avatar that cannot get any closer (something in the way) stands
+  instead of walking on the spot. 30 messages a second while moving, two a second standing still; a change of stance,
+  sneaking, a jump or a menu goes at once.
+- **Animation:** every animation their engine plays that is not walking or idling is played on the avatar exactly as it
+  was played (the same keys, speed, start point and bone priorities; `observe.lua` hears it through
+  `I.AnimationController`), at the moment the shown position reaches it: attacks with their wind-up and charge, spell casts
+  of each kind (self, touch, target), bows, crossbows and throwing, hits taken, knock-downs. Plus head and body tilt
   following their aim, a death pose, and a "reading a book" pose while they have a menu open (their game is paused).
-  Attacks are animation only: an avatar never damages anything in your world. Arrows, thrown weapons and spell bolts
-  fly as visuals (the shooter's game works out where the shot ends), spells show their cast effect on the avatar's hand and,
-  on the caster, their own effect; hit effects play where a shot ends.
+  Attacks are animation only: an avatar never damages anything in your world.
+- **Magic you can see:** a readied spell lights the avatar's hands and arms in the spell's colour (a fireball in hand is
+  fire), as the engine does for a caster. A cast shows its cast effects and sound on the avatar, a spell on themselves its
+  hit effect. Spell bolts fly with their model, glow in the spell's colour and hum their sound, and burst where they really
+  hit in the caster's world (the caster sends the impact point; the area burst is as big as the spell's area). Lasting magic
+  on them shows: shields, sanctuary, reflect and the like loop their effect, and light, chameleon and invisibility are put on
+  the avatar for real, so it glows, fades or vanishes. Arrows and thrown weapons fly as visuals too.
+- **Numbers over heads:** damage a player takes (red), healing (green) and skills that rise (gold, and a line in party
+  chat) float up over them for everybody who can see them.
 - **Parties (max 3):** shared party chat, vitals panel (with their poison, diseases and other harmful effects, so a healer
   knows what to cure; cast a helpful spell such as a heal or cure at a member's avatar and it takes effect on them), and stand-ins for actors that are alive in a member's world but dead
   or missing in yours (one per actor, never next to a living twin). **Kills are shared** (setting, on by default): if a member
@@ -196,6 +223,13 @@ Every player keeps their **own** world; nothing a group member does changes your
   world; the owner never hears of it. At most eight at a time, only for players in your cell.
 - **Time and weather:** the host's clock and the weather in the host's region.
 - **Chat:** Enter or Y opens the input (the game keeps running); Tab switches Global/Party.
+- **Party frames:** one per member: name, level, how far, health/magicka/fatigue bars with their numbers, and every effect
+  on them as icons with the seconds left (bordered by kind: poison green, disease brown, burning/freezing/shock/bleeding
+  orange, other harm red, good blue), with what ails them named underneath for a healer.
+- **Idle camera:** in multiplayer the camera stays still while you stand idle (no slow turn around your character);
+  Settings > Multiplayer > Camera turns the usual one back on. Single-player games are not affected.
+- **Players window:** F2 or `/players`: everyone online with level, where they are and latency; whisper, invite, trade
+  and (party) go to from there.
 
 ### Commands
 `/players`, `/markers [on|off]`, `/arrows [on|off]`, `/me text`, `/w name text`, `/r text`, `/g text`, `/p text`, `/goto name`, `/ip` (look up your address again),
@@ -213,4 +247,4 @@ Stand-ins for actors that are alive but unloaded in your world. Trades of items 
 (enchanted weapons/armor/clothing, your own potions and scrolls) rebuild them from a description; traded items always arrive
 with full condition and charge. Shared fights are approximate: damage to an actor alive in several worlds is synced as "lowest health wins"
 (setting *Damage to actors is shared*), so simultaneous hits by two players are not added up. Projectiles do not collide with
-anything in your world and spell effects other than cast/hit visuals are not shown.
+anything in your world (they fly to where they ended in the shooter's world).

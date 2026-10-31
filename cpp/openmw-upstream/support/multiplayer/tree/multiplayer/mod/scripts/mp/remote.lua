@@ -5,10 +5,12 @@
 -- damage done to them locally so the owner's real actor can take it.
 local self = require('openmw.self')
 local core = require('openmw.core')
+local DEBUG = false -- log every mirrored animation, look change and how well the avatar keeps up
 local types = require('openmw.types')
 local nearby = require('openmw.nearby')
 local I = require('openmw.interfaces')
 local anim = require('openmw.animation')
+local util = require('openmw.util')
 
 local Actor = types.Actor
 
@@ -43,20 +45,30 @@ local function applyFloat(on)
     end)
 end
 
-local WALK_START, WALK_STOP = 18, 6 -- distance hysteresis (game units); the target is already extrapolated
+local WALK_START, WALK_STOP = 14, 5 -- distance hysteresis (game units)
+local START_SPEED, STOP_SPEED = 30, 12 -- and the same for how fast they move (units per second)
+local CATCH_UP = 3 -- per second: how much of the gap to them is closed by walking a bit faster or slower
+-- They stand still and we cannot get closer (something in the way, or the last few steps too small to take): stand
+-- where we are rather than walk on the spot. A gap this small is left to the global script's nudge.
+local STILL_SPEED = 25 -- their speed below which they count as standing
+local SETTLE_DIST = 70 -- a gap we may stand at
+local STALL_TIME = 0.3 -- seconds of not closing in before we give up walking
+local CLOSING = 20 -- units per second that count as closing in
+local lookTimer = 0
 local RUN_SPEED = 230 -- the player's speed (units/s) above which they are shown running
 local SNAP_DIST = 350
 local TURN_RATE = 14 -- rad/s
+-- Standing, any turn at all plays the turning animation instead of the idle (and its little moves): small differences
+-- in facing are left until they grow past TURN_START, then turned away completely (to TURN_STOP).
+local TURN_START, TURN_STOP = 0.12, 0.015
+local turningInPlace = false
 local DAMAGE_REPORT_INTERVAL = 0.2
 
-local playAttack
+local playMirrored
+local castHands
 local setReading
 local setDown
 local downed = false
-local ATTACK_TIME = 1.0 -- a swing is cut off after this long, whatever the animation does
-local attackLeft, attackGroup, attackHeld
-local followPending -- { group, from, to, speed }: the follow-through that plays when the swing is over
-local SWING_SPEED = 1.3
 local speedTimer
 local jumpLeft
 local curPitch = 0
@@ -66,8 +78,22 @@ local dbgT, dbgPos
 local isProxy, key
 local target -- { pos, yaw, stance, sneak, hp }
 local walking = false
+-- An engine with animation.setMovementOverride moves the avatar at exactly the velocity we ask for (its legs still
+-- follow the controls); without it the walk animation moves it, at about the speed the controls ask for.
+local exactMove = anim.setMovementOverride ~= nil
+local overriding = false
+local function setMove(v)
+    if not exactMove then return end
+    if v == nil and not overriding then return end
+    overriding = v ~= nil
+    pcall(anim.setMovementOverride, self, v)
+end
+local settled = false -- standing a little off their spot on purpose (see SETTLE_DIST)
+local stallTime, lastDist = 0, nil
 local desiredEquip
+local wornEquip -- what they wear, by slot (desiredEquip is that, minus the weapon while their hands hold a spell)
 local equipTimer = 0
+local drawWaitSince -- when we started waiting for their weapon to be in hand before drawing it
 local snapTimer = 0
 local aiOff = false
 local aggro = false -- proxies: once the guest hits one it fights back with its own AI
@@ -81,13 +107,29 @@ local function wrap(a)
     return a
 end
 
+local RIGHT = Actor.EQUIPMENT_SLOT.CarriedRight
+
 local function equipMatches()
     local cur = Actor.getEquipment(self)
     for slot, id in pairs(desiredEquip) do
         local o = cur[slot]
         if not o or o.recordId ~= id then return false end
     end
-    return true
+    return desiredEquip[RIGHT] ~= nil or cur[RIGHT] == nil
+end
+
+-- Their weapon is put away while they hold a spell; the engine hides it only if its own draw/sheathe ran through
+-- uninterrupted, which their mirrored animations can cut short. Taking it out of the hand shows the same thing for sure.
+local function equipForStance(stance)
+    if not wornEquip then return true end
+    local want = {}
+    for slot, id in pairs(wornEquip) do want[slot] = id end
+    if stance == Actor.STANCE.Spell then want[RIGHT] = nil end
+    desiredEquip = want
+    if equipMatches() then return true end
+    Actor.setEquipment(self, want)
+    equipTimer = 1
+    return false
 end
 
 local function healthStat() return Actor.stats.dynamic.health(self) end
@@ -164,7 +206,6 @@ setDown = function(on)
     downed = on
     if on then
         pcall(function()
-            if attackGroup then anim.cancel(self, attackGroup) attackGroup = nil end
             setReading(false)
             anim.playBlended(self, 'death1', { priority = anim.PRIORITY.Scripted, loops = 0, autoDisable = false })
         end)
@@ -176,7 +217,7 @@ end
 setReading = function(on)
     if on == reading then return end
     reading = on
-    print('[mp-anim] reading ' .. tostring(on) .. ' book ' .. tostring(findBook()) .. ' group ' .. tostring(anim.hasGroup(self, READ_GROUP)))
+    if DEBUG then print('[mp-anim] reading ' .. tostring(on) .. ' book ' .. tostring(findBook()) .. ' group ' .. tostring(anim.hasGroup(self, READ_GROUP))) end
     if on then
         local model = findBook()
         if model then pcall(anim.addVfx, self, model, { boneName = 'Bip01 L Hand', vfxId = 'mp_book', loop = true,
@@ -193,111 +234,189 @@ setReading = function(on)
     end
 end
 
-local Weapon = types.Weapon
-local ONE_HAND = { [Weapon.TYPE.ShortBladeOneHand] = true, [Weapon.TYPE.LongBladeOneHand] = true,
-    [Weapon.TYPE.BluntOneHand] = true, [Weapon.TYPE.AxeOneHand] = true }
-local TWO_HAND = { [Weapon.TYPE.LongBladeTwoHand] = true, [Weapon.TYPE.BluntTwoClose] = true,
-    [Weapon.TYPE.AxeTwoHand] = true }
-local TWO_WIDE = { [Weapon.TYPE.BluntTwoWide] = true, [Weapon.TYPE.SpearTwoWide] = true }
+------------------------------------------------------------------ the player's own animations (observe.lua)
 
--- animation group and keys for the weapon in hand
-local function attackAnimation(kind)
-    if kind == 'cast' then return 'spellcast', 'self start', 'self stop' end
-    local w = Actor.getEquipment(self)[Actor.EQUIPMENT_SLOT.CarriedRight]
-    local ok, rec = pcall(function() return w and Weapon.record(w) end)
-    local t = ok and rec and rec.type
-    if t == Weapon.TYPE.MarksmanBow then return 'bowandarrow', 'shoot start', 'shoot follow stop' end
-    if t == Weapon.TYPE.MarksmanCrossbow then return 'crossbow', 'shoot start', 'shoot follow stop' end
-    if t == Weapon.TYPE.MarksmanThrown then return 'throwweapon', 'shoot start', 'shoot follow stop' end
-    local group = 'handtohand'
-    if ONE_HAND[t] then group = 'weapononehand' elseif TWO_HAND[t] then group = 'weapontwohand'
-    elseif TWO_WIDE[t] then group = 'weapontwowide' end
-    return group, kind .. ' start', kind .. ' small follow stop'
-end
+-- Played as their engine played it: same keys, speed, start point, priorities and bone groups. An attack's wind-up,
+-- its strength, a cast's kind (self, touch, target), a bow's draw, a hit they took: all exactly theirs.
+-- Mirrored groups playing their last part (to a '... stop' key): once it ends we let go of it. The engine holds an
+-- animation on its last frame, above the idle, so without this the avatar would stand frozen in the end of its swing or
+-- cast instead of breathing and shifting its grip like they do. (A pause mid-action, a drawn bow or a raised sword
+-- waiting for the swing, ends at another key and is held as it should be.)
+local finishing = {}
+local mirrored -- { group, left }: what we play now (for the aim and to stop a held pose that never got its follow-up)
+local WEAPON_GROUPS = { handtohand = true, weapononehand = true, weapontwohand = true, weapontwowide = true,
+    bowandarrow = true, crossbow = true, throwweapon = true, spellcast = true }
 
-local function hasKey(group, key)
-    for _, name in ipairs({ group .. ': ' .. key, key }) do
-        local ok, t = pcall(anim.getTextKeyTime, self, name)
-        if ok and type(t) == 'number' and t >= 0 then return true end
-    end
-    return false
-end
-
--- first key that exists in this group (an unknown stop key makes the animation run to its very end,
--- which looks like several punches in a row)
-local function firstKey(group, keys)
-    for _, k in ipairs(keys) do if hasKey(group, k) then return k end end
-    return nil
-end
-
-local function keyTime(group, k)
-    for _, name in ipairs({ group .. ': ' .. k, k }) do
-        local okT, t = pcall(anim.getTextKeyTime, self, name)
-        if okT and type(t) == 'number' and t >= 0 then return t end
-    end
-end
-
-local RANGED = { bowandarrow = true, crossbow = true, throwweapon = true }
-
--- Plays [from, to] of a group on the upper body. hold = keep the last frame until replaced (a charged attack).
-local function playSegment(group, from, to, speed, hold)
-    local ok = pcall(function()
-        if not anim.hasGroup(self, group) then error('no group') end
-        if attackGroup then pcall(anim.cancel, self, attackGroup) end
-        -- Blended on the upper body only, so walking, strafing and jumping carry on underneath. (A queued animation
-        -- takes over the whole actor and left it stuck.)
-        anim.playBlended(self, group, {
-            startKey = from, stopKey = to, priority = anim.PRIORITY.Weapon, blendMask = anim.BLEND_MASK.UpperBody,
-            autoDisable = not hold, speed = speed,
-        })
-    end)
-    if not ok then print('[mp-anim] could not play ' .. tostring(group) .. ' ' .. tostring(from)) return false end
-    local t0, t1 = keyTime(group, from), keyTime(group, to)
-    local length = (t0 and t1 and t1 > t0) and (t1 - t0) / speed or 0.6
-    attackGroup = group
-    attackLeft = hold and 5 or math.min(2.5, length + 0.15) -- a held wind-up gives up after 5 s
-    attackHeld = hold
-    print(string.format('[mp-anim] %s %s -> %s (%.2fs)%s', group, from, to, length, hold and ' held' or ''))
-    return true
-end
-
--- A player pressed attack (wind-up, held until they release) or released it (the swing, harder when charged longer).
--- Spells have no charge: they are cast on press.
-playAttack = function(d)
-    if Actor.isDead(self) then return end
-    followPending = nil
-    local kind = d.kind
-    local group, from = attackAnimation(kind)
-    if group == 'spellcast' then
-        if d.phase == 'press' then playSegment(group, 'self start', 'self stop', 1, false) end
-        return
-    end
-    if RANGED[group] then
-        if d.phase == 'press' then
-            playSegment(group, 'shoot start', firstKey(group, { 'shoot max attack', 'shoot min attack' }) or 'shoot start', 1, true)
-        else
-            local rel = firstKey(group, { 'shoot release' }) or 'shoot start'
-            playSegment(group, rel, firstKey(group, { 'shoot follow stop' }) or 'shoot follow stop', 1.2, false)
+playMirrored = function(d)
+    if Actor.isDead(self) or downed or type(d.g) ~= 'string' or type(d.o) ~= 'table' then return end
+    local o = d.o
+    local ok, err = pcall(function()
+        if not anim.hasGroup(self, d.g) then error('no group ' .. d.g) end
+        local priority = o.pr
+        if type(priority) == 'table' then
+            priority = { [0] = priority[1], [1] = priority[2], [2] = priority[3], [3] = priority[4] }
         end
-        return
+        local options = {
+            startKey = o.s, stopKey = o.e, speed = tonumber(o.sp) or 1, startPoint = math.max(0, math.min(1, tonumber(o.pt) or 0)),
+            loops = math.max(0, math.min(1000, tonumber(o.l) or 0)), autoDisable = o.ad and true or false,
+            forceLoop = o.fl and true or false, priority = priority or anim.PRIORITY.Weapon,
+        }
+        if o.bm then options.blendMask = o.bm end
+        -- a group that already ran to its stop key stays held there and would not start again: the engine clears it
+        -- before each new part of an attack, and so do we
+        anim.cancel(self, d.g)
+        anim.playBlended(self, d.g, options)
+    end)
+    if not ok then print('[mp-anim] could not play ' .. tostring(d.g) .. ': ' .. tostring(err)) return end
+    if DEBUG then print(string.format('[mp-anim] %s %s -> %s x%.2f from %.2f', d.g, tostring(o.s), tostring(o.e), tonumber(o.sp) or 1, tonumber(o.pt) or 0)) end
+    finishing[d.g] = type(o.e) == 'string' and o.e:sub(-4) == 'stop' or nil
+    if WEAPON_GROUPS[d.g] then
+        mirrored = { group = d.g, left = 4 }
+        -- the hands light up as the cast starts, in the colour of the spell (as the engine does for a caster)
+        if d.g == 'spellcast' and type(o.s) == 'string' and o.s:sub(-5) == 'start' then castHands() end
     end
-    if d.phase == 'press' then
-        -- wind up: raise the weapon and hold it there
-        local top = firstKey(group, { kind .. ' max attack', kind .. ' min attack' })
-        if top then playSegment(group, kind .. ' start', top, 1, true) end
-    else
-        local str = d.str or 0
-        local size = str < 0.33 and 'small' or str < 0.66 and 'medium' or 'large'
-        -- The swing runs from the charged pose to the point of impact. The follow-through that comes after it is played
-        -- separately and only for this strength: the animation holds all three (large, medium, small) one after the
-        -- other, so playing on from the hit to a later stop key would swing again and again.
-        local from = firstKey(group, { kind .. ' max attack', kind .. ' min attack', kind .. ' start' }) or (kind .. ' start')
-        local hit = firstKey(group, { kind .. ' min hit', kind .. ' hit' }) or (kind .. ' hit')
-        local fStart = firstKey(group, { kind .. ' ' .. size .. ' follow start' })
-        local fStop = firstKey(group, { kind .. ' ' .. size .. ' follow stop' })
-        local speed = 1.0 + 0.5 * str -- a hard swing is a bit faster and carries further
-        if playSegment(group, from, hit, speed, false) then
-            followPending = fStart and fStop and { group = group, from = fStart, to = fStop, speed = speed } or nil
+end
+
+------------------------------------------------------------------ magic that shows on them
+
+local function staticModel(id)
+    if not id or id == '' then return nil end
+    local ok, rec = pcall(function() return types.Static.records[id] end)
+    return ok and rec and rec.model or nil
+end
+local function effectRecord(id)
+    local ok, rec = pcall(function() return core.magic.effects.records[id] end)
+    return ok and rec or nil
+end
+
+local look = {} -- the last MpLook: { fx = { { e, m } }, spell = { first, last, range, list } }
+local handsOn -- particle texture of the glowing hands while a spell is ready ('' for the default), nil when not shown
+local shownFx = {} -- effect id -> 'vfx' | 'spell' (what we put on the avatar for it)
+
+local function handsModel() return staticModel('VFX_Hands') end
+
+local function setReadyHands(particle)
+    if particle == handsOn then return end
+    pcall(anim.removeVfx, self, 'mp_ready_l')
+    pcall(anim.removeVfx, self, 'mp_ready_r')
+    handsOn = particle
+    local model = particle and handsModel()
+    if not model then handsOn = nil return end
+    for _, side in ipairs({ { 'L', 'mp_ready_l' }, { 'R', 'mp_ready_r' } }) do
+        pcall(anim.addVfx, self, model, { boneName = 'Bip01 ' .. side[1] .. ' Hand', vfxId = side[2], loop = true,
+            particleTextureOverride = particle, useAmbientLight = false })
+    end
+end
+
+castHands = function()
+    local spell = look.spell
+    local last = spell and effectRecord(spell.last)
+    local model = handsModel()
+    if not model or not last then return end
+    for _, bone in ipairs({ 'Bip01 L Hand', 'Bip01 R Hand' }) do
+        pcall(anim.addVfx, self, model, { boneName = bone, loop = false, particleTextureOverride = last.particle,
+            useAmbientLight = false })
+    end
+end
+
+-- A spell record that has this effect, to put the effect on the avatar for real (light, chameleon, invisibility: the
+-- engine then draws them the way it draws anyone under that spell)
+local spellWith = {}
+local function spellWithEffect(effectId)
+    if spellWith[effectId] == nil then
+        spellWith[effectId] = false
+        pcall(function()
+            for _, rec in ipairs(core.magic.spells.records) do
+                for i, fx in ipairs(rec.effects) do
+                    if fx.id == effectId then spellWith[effectId] = { id = rec.id, index = fx.index or (i - 1) } return end
+                end
+            end
+        end)
+    end
+    return spellWith[effectId] or nil
+end
+local STATE_EFFECTS = { light = true, chameleon = true, invisibility = true }
+
+-- The engine lets an actor ready magic only with a spell selected: our copy of them gets one with the right look (their
+-- readied spell's first effect), or any at all.
+local function selectSomeSpell()
+    if Actor.getSelectedSpell(self) then return end
+    local sp = (look.spell and spellWithEffect(look.spell.first)) or spellWithEffect('firedamage')
+    if not sp then return end
+    pcall(function()
+        Actor.spells(self):add(sp.id)
+        Actor.setSelectedSpell(self, sp.id)
+    end)
+end
+
+local function removeSpellEffect(effectId)
+    local sp = spellWithEffect(effectId)
+    if not sp then return end
+    pcall(function()
+        for _, active in pairs(Actor.activeSpells(self)) do
+            if active.id == sp.id and active.temporary then Actor.activeSpells(self):remove(active.activeSpellId) end
+        end
+    end)
+end
+
+local function applyLook()
+    local want = {}
+    for _, f in ipairs(look.fx or {}) do if type(f) == 'table' and type(f.e) == 'string' then want[f.e] = tonumber(f.m) or 0 end end
+    -- gone
+    for id, how in pairs(shownFx) do
+        if want[id] == nil then
+            if how == 'spell' then removeSpellEffect(id) else pcall(anim.removeVfx, self, 'mp_fx_' .. id) end
+            shownFx[id] = nil
+        end
+    end
+    -- new
+    for id, magnitude in pairs(want) do
+        if not shownFx[id] then
+            local mgef = effectRecord(id)
+            local sp = STATE_EFFECTS[id] and spellWithEffect(id)
+            if sp then
+                pcall(function()
+                    Actor.activeSpells(self):add({ id = sp.id, effects = { { index = sp.index, magnitudeMin = magnitude,
+                        magnitudeMax = magnitude, duration = 3600 } }, ignoreResistances = true, ignoreReflect = true,
+                        ignoreSpellAbsorption = true })
+                end)
+                shownFx[id] = 'spell'
+            elseif mgef then
+                local model = staticModel(mgef.hitStatic)
+                if model then
+                    pcall(anim.addVfx, self, model, { vfxId = 'mp_fx_' .. id, loop = mgef.continuousVfx and true or false,
+                        particleTextureOverride = mgef.particle, useAmbientLight = false })
+                end
+                shownFx[id] = 'vfx'
+            end
+        end
+    end
+    local stanceSpell = Actor.getStance(self) == Actor.STANCE.Spell
+    local last = look.spell and effectRecord(look.spell.last)
+    setReadyHands(stanceSpell and last and (last.particle or '') or nil)
+end
+
+-- They cast a spell (the release of their cast): its cast effects on them, its sound, and if it was on themselves its
+-- hit effects too.
+local function castVfx(d)
+    local played = {}
+    for i, f in ipairs(type(d.fx) == 'table' and d.fx or {}) do
+        local mgef = type(f) == 'table' and effectRecord(f.e)
+        if mgef then
+            local cast = staticModel(mgef.castStatic) or staticModel('VFX_DefaultCast')
+            if cast and not played[cast] then
+                played[cast] = true
+                pcall(anim.addVfx, self, cast, { loop = false, particleTextureOverride = mgef.particle, useAmbientLight = false })
+            end
+            if i == 1 and mgef.castSound and mgef.castSound ~= '' then pcall(core.sound.playSound3d, mgef.castSound, self) end
+            if f.r == core.magic.RANGE.Self then
+                local hit = staticModel(mgef.hitStatic)
+                if hit and not played[hit] then
+                    played[hit] = true
+                    pcall(anim.addVfx, self, hit, { loop = false, particleTextureOverride = mgef.particle, useAmbientLight = false })
+                end
+                if i == 1 and mgef.hitSound and mgef.hitSound ~= '' then pcall(core.sound.playSound3d, mgef.hitSound, self) end
+            end
         end
     end
 end
@@ -318,16 +437,20 @@ return {
             end
             if not aiOff and not aggro then self:enableAI(false); aiOff = true end
             local c = self.controls
-            if attackGroup then
-                attackLeft = attackLeft - dt
-                local playing = anim.isPlaying(self, attackGroup)
-                if attackLeft <= 0 or (not playing and not attackHeld) then
-                    if playing then pcall(anim.cancel, self, attackGroup) end
-                    attackGroup, attackLeft, attackHeld = nil, nil, nil
-                    local f = followPending
-                    followPending = nil
-                    if f then playSegment(f.group, f.from, f.to, f.speed, false) end
+            for g in pairs(finishing) do
+                if not anim.isPlaying(self, g) then
+                    finishing[g] = nil
+                    pcall(anim.cancel, self, g)
                 end
+            end
+            if mirrored then
+                mirrored.left = mirrored.left - dt
+                if mirrored.left <= 0 or not anim.isPlaying(self, mirrored.group) then mirrored = nil end
+            end
+            lookTimer = lookTimer - dt
+            if lookTimer <= 0 then
+                lookTimer = 1 -- (a stance change shows or hides the ready hands; an effect may have worn off)
+                applyLook()
             end
 
             if isProxy then trackHealth(dt) else keepAvatarUnhurt() end
@@ -340,7 +463,7 @@ return {
                 end
             end
 
-            if not target or aggro or Actor.isDead(self) then return end
+            if not target or aggro or Actor.isDead(self) then setMove(nil) return end
             setDown(target.dead and true or false)
             if downed then return end -- lying on the ground: nothing else to show
             setReading(target.reading and true or false)
@@ -350,12 +473,17 @@ return {
             local step = math.max(-PITCH_RATE * dt, math.min(PITCH_RATE * dt, wantPitch - curPitch))
             curPitch = curPitch + step
             -- while attacking the whole upper body follows the aim, not just the head
-            attackBlend = attackBlend + math.max(-6 * dt, math.min(6 * dt, (attackGroup and 1 or 0) - attackBlend))
+            attackBlend = attackBlend + math.max(-6 * dt, math.min(6 * dt, (mirrored and 1 or 0) - attackBlend))
             local look = -curPitch -- the engine's positive is "down", the camera's is the other way round
             pcall(anim.setHeadPitch, self, look * (1 - 0.6 * attackBlend), math.max(-0.9, math.min(0.9, look * 0.8 * attackBlend)))
             snapTimer = snapTimer - dt
 
-            local delta = target.pos - self.position
+            -- Where they are now: the target as sent, moved on by their velocity for the moment since (a frame or two)
+            local now = core.getRealTime()
+            local vel = target.vel
+            local want = target.pos
+            if vel and target.at then want = want + vel * math.min(0.1, math.max(0, now - target.at)) end
+            local delta = want - self.position
             local dist = math.sqrt(delta.x * delta.x + delta.y * delta.y)
             if dist > SNAP_DIST and snapTimer <= 0 then
                 snapTimer = 1
@@ -365,27 +493,53 @@ return {
             -- just after a jump, let the landing finish: stepping off to catch up cuts it short and looks like a second,
             -- smaller landing. (Only when it is close and the player has stopped; running on from a jump has to keep up.)
             if not Actor.isOnGround(self) then landSettle = LAND_SETTLE else landSettle = math.max(0, landSettle - dt) end
+
+            -- The velocity to walk with: theirs, plus a pull toward where they are that closes a gap in about a third of
+            -- a second. Fed straight to the legs (speed as a fraction of walking or running), so the avatar moves as
+            -- they move instead of chasing a point.
+            local vx, vy = (vel and vel.x or 0) + delta.x * CATCH_UP, (vel and vel.y or 0) + delta.y * CATCH_UP
+            local speed = math.sqrt(vx * vx + vy * vy)
+            local still = not vel or (vel.x * vel.x + vel.y * vel.y) < STILL_SPEED * STILL_SPEED
             if walking then
-                if dist < WALK_STOP then walking = false end
-            elseif dist > WALK_START and (landSettle <= 0 or dist > LAND_SETTLE_DIST or (target.speed or 0) > LAND_MOVING) then
-                walking = true
+                if speed < STOP_SPEED and dist < WALK_STOP then walking = false
+                elseif still then
+                    if lastDist and dist > lastDist - CLOSING * dt then stallTime = stallTime + dt else stallTime = 0 end
+                    if stallTime > STALL_TIME and dist < SETTLE_DIST then walking, settled = false, true end
+                end
+            elseif settled then
+                if not still or dist > SETTLE_DIST then settled = false end -- (walking again from the next frame)
+            elseif (speed > START_SPEED or dist > WALK_START)
+                and (landSettle <= 0 or dist > LAND_SETTLE_DIST or (target.speed or 0) > LAND_MOVING) then
+                walking, stallTime = true, 0
             end
+            lastDist = dist
 
             -- always face where the player faces; travel relative to that (so strafing and backing up look right)
             local yaw = self.rotation:getYaw()
             local err = wrap(target.yaw - yaw)
             local maxTurn = TURN_RATE * dt
-            c.yawChange = math.max(-maxTurn, math.min(maxTurn, err))
-            if walking and dist > 0 then
-                local dx, dy = delta.x / dist, delta.y / dist
+            if walking then turningInPlace = false
+            elseif turningInPlace then turningInPlace = math.abs(err) > TURN_STOP
+            else turningInPlace = math.abs(err) > TURN_START end
+            if walking or turningInPlace then c.yawChange = math.max(-maxTurn, math.min(maxTurn, err)) else c.yawChange = 0 end
+            if walking and speed > 0 then
+                local walkSpeed = math.max(1, Actor.getWalkSpeed(self))
+                local runSpeed = math.max(walkSpeed, Actor.getRunSpeed(self))
+                local run = speed > walkSpeed * 1.1 or (target.speed or 0) > RUN_SPEED
+                local factor = math.max(0.25, math.min(1, speed / (run and runSpeed or walkSpeed)))
+                local dx, dy = vx / speed, vy / speed
                 local sy, cy = math.sin(yaw), math.cos(yaw)
-                c.movement = dx * sy + dy * cy -- forward component
-                c.sideMovement = dx * cy - dy * sy -- right component
+                c.movement = (dx * sy + dy * cy) * factor -- forward component
+                c.sideMovement = (dx * cy - dy * sy) * factor -- right component
+                c.run = run
+                -- (catching up on a big gap no faster than half again their running speed: bigger ones are snapped)
+                local cap = math.max(runSpeed, target.speed or 0) * 1.5
+                local k = speed > cap and cap / speed or 1
+                setMove(util.vector3(vx * k, vy * k, 0))
             else
-                c.movement, c.sideMovement = 0, 0
+                c.movement, c.sideMovement, c.run = 0, 0, false
+                setMove(util.vector3(0, 0, 0))
             end
-            -- run when the player runs, or when we are far behind and need to catch up
-            c.run = walking and ((target.speed or 0) > RUN_SPEED or dist > 120)
             c.sneak = target.sneak or false
             if jumpLeft then
                 jumpLeft = jumpLeft - dt
@@ -405,7 +559,7 @@ return {
                 end
             end
             dbgT = (dbgT or 0) + dt
-            if dbgT >= 0.5 and not isProxy then
+            if DEBUG and dbgT >= 0.5 and not isProxy then
                 local moved = (self.position - (dbgPos or self.position)):length() / dbgT
                 print(string.format('[mp-move] dist %.0f targetSpeed %.0f actualSpeed %.0f fwd %.2f side %.2f run %s walking %s',
                     dist, target.speed or 0, moved, c.movement, c.sideMovement, tostring(c.run), tostring(walking)))
@@ -415,33 +569,40 @@ return {
     },
     eventHandlers = {
         MpTarget = function(d)
-            target = { pos = d.pos, yaw = d.yaw, sneak = d.sneak, hp = d.hp, speed = d.speed, rs = d.rs, pitch = d.pitch, reading = d.reading, dead = d.dead }
-            if d.stance and Actor.getStance(self) ~= d.stance then Actor.setStance(self, d.stance) end
+            target = { pos = d.pos, vel = d.vel, at = d.at, yaw = d.yaw, sneak = d.sneak, hp = d.hp, speed = d.speed, rs = d.rs,
+                pitch = d.pitch, reading = d.reading, dead = d.dead }
+            selectSomeSpell() -- (ahead of time: the engine may take a moment to take it)
+            if d.stance and Actor.getStance(self) ~= d.stance then
+                -- the weapon back in hand before drawing it: the engine takes new equipment a frame later, and drawing an
+                -- empty hand first shows fists and then never the weapon
+                local now = core.getRealTime()
+                drawWaitSince = drawWaitSince or now
+                if equipForStance(d.stance) or d.stance == Actor.STANCE.Spell or now - drawWaitSince > 0.5 then
+                    Actor.setStance(self, d.stance)
+                    drawWaitSince = nil
+                end
+                lookTimer = 0.3 -- (the hands light up once the spell is drawn)
+            end
         end,
-        -- Another player attacked or cast: show the animation only. (The avatar has no AI and never deals damage.)
-        MpAttack = function(d) playAttack(d) end,
+        -- One of their animations (attack, cast, draw, hit...), exactly as their engine played it
+        MpAnim = function(d) playMirrored(d) end,
+        -- The spell they have ready and the magic on them that shows
+        MpLook = function(d)
+            look = d or {}
+            if DEBUG then print('[mp-look] ' .. #(look.fx or {}) .. ' effects, spell ' .. tostring(look.spell and look.spell.first)) end
+            applyLook()
+        end,
         MpJump = function() jumpLeft = 0.15 end,
         MpFloat = function(d)
             floatOn = d.on and true or false
             floatCheck = 0
             applyFloat(floatOn)
         end,
-        -- The player cast a spell: its cast effect on their hands, or its effect on themselves
-        MpCastVfx = function(d)
-            local function static(id)
-                if not id or id == '' then return nil end
-                local ok, rec = pcall(function() return types.Static.records[id] end)
-                return ok and rec and rec.model or nil
-            end
-            local cast, hit = static(d.cast), static(d.hit)
-            if cast then
-                pcall(anim.addVfx, self, cast, { boneName = 'Bip01 L Hand', vfxId = 'mp_cast', loop = false,
-                    useAmbientLight = false })
-            end
-            if hit then pcall(anim.addVfx, self, hit, { vfxId = 'mp_selfhit', loop = false, useAmbientLight = false }) end
-        end,
+        -- They cast a spell: its cast effects on them, and on themselves its hit effects
+        MpCastVfx = function(d) castVfx(d) end,
         MpEquip = function(d)
-            desiredEquip = d.slots
+            wornEquip = d.slots
+            equipForStance(Actor.getStance(self))
             equipTimer = 0
         end,
         MpKill = function()

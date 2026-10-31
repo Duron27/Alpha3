@@ -28,23 +28,23 @@ local function count(id, t) local n = 0 for _, m in ipairs(sent[id] or {}) do if
 local function say(id, msg) relay.onClientMessage(id, json.encode(msg)) end
 local function join(id, name, password, proto)
     relay.onClientConnected(id)
-    say(id, { t = 'join', proto = proto or 2, name = name, password = password })
+    say(id, { t = 'join', proto = proto or 3, name = name, password = password })
 end
 local function tick(seconds) now = now + seconds; relay.update(seconds) end
 
 -- ---------------------------------------------------------------- join checks
 check(relay.start(25565, { password = 'secret', maxPlayers = 3, motd = 'hello all' }) == nil, 'start')
 relay.onClientConnected(1)
-check(last(1, 'hello') and last(1, 'hello').proto == 2 and last(1, 'hello').needPassword, 'hello announces protocol and password')
+check(last(1, 'hello') and last(1, 'hello').proto == 3 and last(1, 'hello').needPassword, 'hello announces protocol and password')
 say(1, { t = 'chat', scope = 'global', text = 'sneaky' })
 check(not last(1, 'chat'), 'nothing is accepted before join')
-say(1, { t = 'join', proto = 2, name = 'Host', password = 'secret' })
+say(1, { t = 'join', proto = 3, name = 'Host', password = 'secret' })
 check(last(1, 'join_result') and last(1, 'join_result').ok and last(1, 'join_result').motd == 'hello all', 'host joins, gets motd')
 
 join(2, 'Alice', 'wrong')
 check(last(2, 'join_result') and last(2, 'join_result').reason == 'password', 'wrong password refused')
 tick(1); check(kicked[2], 'refused client is disconnected')
-join(3, 'Bob', 'secret', 1)
+join(3, 'Bob', 'secret', 2)
 check(last(3, 'join_result').reason == 'version', 'old protocol refused')
 tick(1)
 join(4, 'Alice', 'secret')
@@ -112,6 +112,31 @@ tick(3)
 local list = last(1, 'players')
 check(list and #list.list >= 2, 'player list is broadcast')
 
+-- ---------------------------------------------------------------- interest: who sees whom
+-- 1 and 4 stand together outside, 9 is in an interior: 9 gets 4's position only now and then, and none of 4's shots
+join(9, 'Dee', 'secret')
+say(1, { t = 'state', ts = 1, cell = '', pos = { 0, 0, 0 } })
+say(9, { t = 'state', ts = 1, cell = 'Balmora, Guild of Mages', pos = { 0, 0, 0 } })
+local statesTo1, statesTo9 = count(1, 'state'), count(9, 'state')
+for i = 1, 10 do say(4, { t = 'state', ts = 1 + i / 30, cell = '', pos = { 100 + i, 0, 0 } }) end
+check(count(1, 'state') == statesTo1 + 10, 'a player nearby gets every position')
+check(count(9, 'state') == statesTo9 + 1, 'a player elsewhere gets a position only once a second')
+tick(1.1)
+say(4, { t = 'state', ts = 3, cell = '', pos = { 120, 0, 0 } })
+check(count(9, 'state') == statesTo9 + 2, '... and again a second later')
+say(4, { t = 'anim', g = 'weapononehand', o = { s = 'chop start', e = 'chop max attack' }, ts = 3 })
+check(last(1, 'anim') and last(1, 'anim').id == 4 and not last(9, 'anim'), 'animations go to those who can see')
+say(4, { t = 'look', fx = { { e = 'fireshield', m = 10 } } })
+check(last(9, 'look') and last(1, 'look'), 'how a player looks goes to everyone (kept for when they come near)')
+say(4, { t = 'ev', k = 'dmg', n = 12 })
+check(last(1, 'ev') and last(1, 'ev').n == 12 and not last(9, 'ev'), 'damage numbers go to those who can see')
+-- far away outside: as good as elsewhere
+say(1, { t = 'state', ts = 2, cell = '', pos = { 90000, 0, 0 } })
+local anims = count(1, 'anim')
+say(4, { t = 'anim', g = 'spellcast', o = { s = 'target start', e = 'target stop' }, ts = 4 })
+check(count(1, 'anim') == anims, 'nothing but positions for a player far away outside')
+say(1, { t = 'state', ts = 3, cell = '', pos = { 0, 0, 0 } })
+
 -- ---------------------------------------------------------------- shots
 local shotsBefore = count(1, 'shot')
 say(4, { t = 'shot', k = 'arrow', rec = 'iron arrow', from = { 0, 0, 0 }, to = { 100, 0, 0 }, spd = 2000 })
@@ -152,12 +177,12 @@ check(away, 'the player list marks her as away')
 say(12, { t = 'chat', scope = 'global', text = 'ghost' })
 check(not last(13, 'chat'), 'a closed socket cannot talk any more')
 
-join(15, 'Alice', '', 2) -- no token: a different player, the name is reserved
+join(15, 'Alice', '', 3) -- no token: a different player, the name is reserved
 check(last(15, 'join_result').name == 'Alice (2)' and not last(15, 'join_result').resumed, 'without the token the name is taken')
 relay.onClientDisconnected(15)
 
 relay.onClientConnected(16)
-say(16, { t = 'join', proto = 2, name = 'Alice', token = token })
+say(16, { t = 'join', proto = 3, name = 'Alice', token = token })
 local jr = last(16, 'join_result')
 check(jr and jr.ok and jr.resumed and jr.id == 12 and jr.name == 'Alice', 'the token gives her old id and name back')
 check(count(13, 'back') == 1, 'others hear that she is back')
@@ -166,7 +191,7 @@ say(16, { t = 'chat', scope = 'party', text = 'hello again' })
 check(last(13, 'chat') and last(13, 'chat').id == 12, 'she can talk with the new connection')
 
 relay.onClientConnected(17) -- a second connection with the same token takes over, the old one is cut
-say(17, { t = 'join', proto = 2, name = 'Alice', token = token })
+say(17, { t = 'join', proto = 3, name = 'Alice', token = token })
 check(kicked[16], 'taking the place over closes the old socket')
 say(16, { t = 'chat', scope = 'global', text = 'old socket' })
 check(count(13, 'chat') == 1, 'the old socket is ignored')

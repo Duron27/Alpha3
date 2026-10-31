@@ -17,7 +17,7 @@ async def player(port, i, result, hold):
     except Exception:
         result['refused'] += 1
         return
-    w.write((json.dumps({'t': 'join', 'proto': 2, 'name': f'P{i}'}) + '\n').encode())
+    w.write((json.dumps({'t': 'join', 'proto': 3, 'name': f'P{i}'}) + '\n').encode())
     verdict, end = None, time.time() + 8
     while time.time() < end and verdict is None:
         try:

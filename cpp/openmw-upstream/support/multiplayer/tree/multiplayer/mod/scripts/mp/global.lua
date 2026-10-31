@@ -18,9 +18,11 @@ local items = require('scripts/mp/items')
 local relay = require('scripts/mp/relay')
 local clientmods = require('scripts/mp/clientmods')
 local bot = require('scripts/mp/bot')
+local interp = require('scripts/mp/interp')
 
 local SETTINGS = 'SettingsGlobalMultiplayer'
-local SEND_INTERVAL = 0.05
+local SEND_INTERVAL = 1 / 30 -- while moving; standing still, IDLE_INTERVAL (a change of stance, sneaking... goes at once)
+local IDLE_INTERVAL = 0.5
 local EQUIP_INTERVAL = 1
 local RETRY_INTERVAL = 3
 local REMOTE_SCRIPT = 'scripts/mp/remote.lua'
@@ -28,7 +30,7 @@ local VITALS_INTERVAL = 0.5
 local UI_INTERVAL = 0.5
 local INVITE_TTL = 60
 local MAX_PARTY = 3
-local DEBUG = true -- log avatar/proxy visibility changes (helps diagnose flicker)
+local DEBUG = false -- log avatar/proxy visibility, drift and the player list (helps diagnose flicker and lag)
 
 -- the settings page itself is registered by player.lua (pages can't be registered from global scripts)
 I.Settings.registerGroup {
@@ -44,7 +46,7 @@ I.Settings.registerGroup {
           argument = { integer = true, min = 2, max = 64 } },
         { key = 'Motd', renderer = 'textLine', name = 'Message of the day when hosting', default = '' },
         { key = 'ShowMapMarkers', renderer = 'checkbox', name = 'Show other players on the map and minimap (orange: your group, green: everyone else)', default = true },
-        { key = 'ShowPlayerArrows', renderer = 'checkbox', name = 'Show an arrow and name over other players in your cell', default = true },
+        { key = 'ShowPlayerArrows', renderer = 'checkbox', name = 'Show nameplates (name, level, health) over other players in your cell', default = true },
         { key = 'SharedKills', renderer = 'checkbox', name = 'Kills are shared with your group', default = true },
         { key = 'OtherWorldStandins', renderer = 'checkbox', name = "Show characters that are alive in other players' worlds (after a few minutes)", default = true },
         { key = 'SharedLoot', renderer = 'checkbox', name = 'Ordinary loot taken from containers is shared with your group', default = true },
@@ -84,6 +86,14 @@ local clock = 0
 local vitalsTimer, uiTimer = 0, 0
 
 local function log(...) print('[mp]', ...) end
+local guardedErrors = {} -- what -> last error text, so a repeating failure is logged once
+local function guarded(what, fn, ...)
+    local ok, err = pcall(fn, ...)
+    if not ok and guardedErrors[what] ~= tostring(err) then
+        guardedErrors[what] = tostring(err)
+        print('[mp] ' .. what .. ' failed: ' .. tostring(err))
+    end
+end
 local function player() return world.players[1] end
 local function cellKey(cell) return cell.isExterior and '' or cell.name end
 local function inParty() return #party.members > 1 end
@@ -169,6 +179,7 @@ local function connect()
 end
 
 local clearRemotes
+local onEv
 local onShot
 local onAid
 local spellHelps
@@ -197,6 +208,13 @@ clientmods.init({
     toUi = toUi,
     notice = notice,
     now = core.getRealTime,
+    -- the mods changed only files the game already has: leave cleanly and reload every script; the reloaded scripts
+    -- join again by themselves, now with the server's mods
+    reload = function()
+        net.disconnect()
+        clearRemotes()
+        clientmods.reloadScripts()
+    end,
     declined = function()
         -- without the server's mods the game would not match the others': leave
         refusedBy = 'mods'
@@ -330,7 +348,15 @@ loot.init({
     containerOpen = function() return myInput.mode == 'Container' end,
 })
 
-local function sendState()
+local myLook = { fx = {} } -- from observe.lua (MpLook): the spell we have ready and the magic on us that shows
+
+local function q(x) return math.floor(x + 0.5) end -- positions to whole units (1.4 cm): plenty, and short on the wire
+local lastFlags = ''
+local sentIdle = false
+
+-- Where we are and what we look like doing it, 30 times a second while moving (less when standing still). Each message
+-- carries our clock, so the others play us back evenly however the messages arrive (interp.lua).
+local function sendState(force)
     local p = player()
     if not p then return end
     local pos = p.position
@@ -340,43 +366,65 @@ local function sendState()
     if lastSent and lastSent.cell == cell and now > lastSent.time then
         local dt = now - lastSent.time
         local v = (pos - lastSent.pos) / dt
-        if v:length() < 1500 then vel = { v.x, v.y, v.z } end -- bigger means a teleport
+        if v:length() < 1500 then vel = { q(v.x), q(v.y), q(v.z) } end -- bigger means a teleport
     end
-    lastSent = { pos = pos, time = now, cell = cell }
+    local moving = vel[1] ~= 0 or vel[2] ~= 0 or vel[3] ~= 0
+        or (lastSent and math.abs(p.rotation:getYaw() - lastSent.yaw) > 0.01)
+        or (lastSent and math.abs((myInput.pitch or 0) - lastSent.pitch) > 0.02)
+    local stance = types.Actor.getStance(p)
+    local dead = types.Actor.isDead(p)
+    local hp = 1
+    pcall(function()
+        local h = types.Actor.stats.dynamic.health(p)
+        hp = math.max(0, math.min(1, h.current / math.max(1, h.base + h.modifier)))
+    end)
+    hp = math.floor(hp * 100 + 0.5) / 100
+    local flags = table.concat({ cell, tostring(dead), stance, tostring(myInput.sneak), tostring(myInput.fly),
+        tostring(myInput.reading), tostring(myInput.jseq), hp }, '|')
+    local changed = flags ~= lastFlags
+    -- standing still: a message now and then is enough (the first one after stopping goes at once, so we stop exactly)
+    if not force and not changed and not moving and sentIdle and lastSent and now - lastSent.time < IDLE_INTERVAL then return end
+    sentIdle = not moving
+    lastFlags = flags
+    lastSent = { pos = pos, time = now, cell = cell, yaw = p.rotation:getYaw(), pitch = myInput.pitch or 0 }
     net.send(net.encodeJson({
-        t = 'state',
+        t = 'state', ts = math.floor(now * 1000 + 0.5) / 1000,
         cell = cell,
-        dead = types.Actor.isDead(p),
-        pos = { pos.x, pos.y, pos.z },
+        dead = dead or nil,
+        pos = { q(pos.x), q(pos.y), q(pos.z) },
         vel = vel,
-        yaw = p.rotation:getYaw(),
-        stance = types.Actor.getStance(p),
-        rs = types.Actor.getRunSpeed(p),
-        sneak = myInput.sneak, fly = myInput.fly or nil, atk = myInput.atk, seq = myInput.seq, jseq = myInput.jseq,
-        rkind = myInput.rkind, rseq = myInput.rseq, str = myInput.str,
-        reading = myInput.reading, pitch = myInput.pitch,
+        yaw = math.floor(p.rotation:getYaw() * 1000 + 0.5) / 1000,
+        stance = stance,
+        rs = q(types.Actor.getRunSpeed(p)),
+        hp = hp,
+        sneak = myInput.sneak or nil, fly = myInput.fly or nil, jseq = myInput.jseq,
+        reading = myInput.reading or nil, pitch = math.floor((myInput.pitch or 0) * 100 + 0.5) / 100,
     }))
 end
 
 ------------------------------------------------------------------ avatars of group members
 
-local MAX_EXTRAPOLATION = 0.25 -- seconds; beyond this we assume the player stopped
+-- Where the player is shown right now: their messages played back evenly a little behind (interp.lua). r.pos, r.vel
+-- and r.yaw are refreshed once a frame by sampleRemote.
+local function sampleRemote(r, now)
+    if not r.buf then return end
+    local pos, vel, yaw = r.buf:sample(now)
+    if not pos then return end
+    r.pos = util.vector3(pos[1], pos[2], pos[3])
+    r.vel = util.vector3(vel[1], vel[2], vel[3])
+    r.yaw = yaw
+end
 
 local function stateVectors(r)
     local s = r.state
-    return util.vector3(s.pos[1], s.pos[2], s.pos[3]), util.transform.rotateZ(s.yaw or 0)
+    local pos = r.pos or util.vector3(s.pos[1], s.pos[2], s.pos[3])
+    return pos, util.transform.rotateZ(r.yaw or s.yaw or 0)
 end
 
--- Where the player probably is right now: last known position plus velocity * time since the update.
 local function predictedPosition(r)
+    if r.pos then return r.pos end
     local s = r.state
-    local pos = util.vector3(s.pos[1], s.pos[2], s.pos[3])
-    local v = s.vel
-    if type(v) == 'table' and r.stateAt then
-        local age = math.min(MAX_EXTRAPOLATION, core.getRealTime() - r.stateAt)
-        pos = pos + util.vector3(v[1], v[2], v[3]) * age
-    end
-    return pos
+    return util.vector3(s.pos[1], s.pos[2], s.pos[3])
 end
 
 local function placeRemote(r)
@@ -448,6 +496,7 @@ local function spawnRemote(r)
     r.obj:addScript(REMOTE_SCRIPT, {})
     placeRemote(r)
     r.equipSent = false
+    r.lookDirty = true
     r.hidden = false
     log('spawned avatar for ' .. tostring(r.profile.name))
 end
@@ -485,7 +534,8 @@ local function setHidden(r, hidden, reason)
     end
 end
 
-local DRIFT_NEAR, DRIFT_FAR, DRIFT_TIME = 60, 220, 0.5
+local DRIFT_NEAR, DRIFT_FAR, DRIFT_TIME = 45, 220, 0.35
+local NUDGE, NUDGE_RATE = 35, 6 -- units off that get pulled in, and how fast (per second)
 local FLOAT_HOLD, FLOAT_EASE = 6, 10 -- units of height difference that are put right / how fast the height eases (per second)
 
 -- Desync protection: the avatar walks toward the predicted position, but collisions, steps or a bad
@@ -519,6 +569,16 @@ local function checkDrift(r, dt)
         -- (sideways it walks as usual: only a big miss is snapped back, below)
         if math.abs(gap) < DRIFT_NEAR then off = (util.vector2(r.obj.position.x - want.x, r.obj.position.y - want.y)):length() end
     end
+    -- A gap the legs cannot close quickly (the engine eases an actor's starts, stops and turns; the player reversed or
+    -- dodged): pull the avatar a part of the way each frame, so it never lags far and never has to jump back.
+    local pos = r.obj.position
+    local flat = util.vector2(want.x - pos.x, want.y - pos.y):length() -- (up and down is the jump's own business)
+    if not flying and flat > NUDGE and off <= DRIFT_FAR and dt > 0 then
+        local pull = math.min(1, dt * NUDGE_RATE) * (1 - NUDGE / flat)
+        local to = util.vector3(pos.x + (want.x - pos.x) * pull, pos.y + (want.y - pos.y) * pull, pos.z)
+        r.obj:teleport(r.state.cell, to, { rotation = r.obj.rotation })
+        return
+    end
     if off > DRIFT_FAR then
         r.offTime = DRIFT_TIME
     elseif off > DRIFT_NEAR then
@@ -529,7 +589,7 @@ local function checkDrift(r, dt)
     if (r.offTime or 0) >= DRIFT_TIME then
         r.offTime = 0
         dlog('avatar', tostring(r.id), 'drifted ' .. math.floor(off) .. ' units, snapping')
-        r.obj:teleport(r.state.cell, want, { rotation = util.transform.rotateZ(r.state.yaw or 0) })
+        r.obj:teleport(r.state.cell, want, { rotation = util.transform.rotateZ(r.yaw or r.state.yaw or 0) })
     end
 end
 
@@ -538,6 +598,7 @@ local function updateRemote(r, dt)
     if not (p and r.profile and r.state) then return end
     local here = cellKey(p.cell)
     if r.state.cell ~= here then
+        r.anims = nil -- what they did elsewhere is not replayed when they come in
         if r.obj and r.obj:isValid() and r.obj.enabled then r.obj.enabled = false end
         setHidden(r, true, 'cell ' .. tostring(r.state.cell) .. ' vs ' .. tostring(here))
         return
@@ -556,32 +617,34 @@ local function updateRemote(r, dt)
     setHidden(r, false)
     checkDrift(r, dt)
     if not r.equipSent and r.equip then stockEquipment(r) end
-    local v = r.state.vel
     local dead = r.state.dead and true or false
     if dead ~= (r.wasDead or false) then
         r.wasDead = dead
         notice(nameOf(r.id) .. (dead and ' died.' or ' is back on their feet.'))
     end
+    local v = r.vel
     r.obj:sendEvent('MpTarget', {
         dead = dead,
-        pos = predictedPosition(r), yaw = r.state.yaw, stance = r.state.stance,
-        speed = type(v) == 'table' and math.sqrt(v[1] * v[1] + v[2] * v[2]) or 0,
+        pos = predictedPosition(r), yaw = r.yaw or r.state.yaw, stance = r.state.stance, at = core.getRealTime(),
+        vel = v, speed = v and math.sqrt(v.x * v.x + v.y * v.y) or 0,
         sneak = r.state.sneak, rs = r.state.rs, pitch = r.state.pitch, reading = r.state.reading,
     })
     -- one jump per take-off (not for as long as the player is in the air)
     local jseq = r.state.jseq
     if jseq and r.lastJSeq and jseq ~= r.lastJSeq then r.obj:sendEvent('MpJump', {}) end
     r.lastJSeq = jseq or r.lastJSeq
-    -- play each new attack once (the first state we ever see only sets the baseline): wind-up on press,
-    -- the swing on release, with its strength
-    local seq, rseq = r.state.seq, r.state.rseq
-    if seq and r.lastSeq and seq ~= r.lastSeq and r.state.atk then
-        r.obj:sendEvent('MpAttack', { phase = 'press', kind = r.state.atk })
+    -- their animations, each when the position shown has reached the moment it was played
+    if r.anims and #r.anims > 0 then
+        local now = core.getRealTime()
+        while r.anims[1] and r.anims[1].due <= now do
+            local a = table.remove(r.anims, 1)
+            r.obj:sendEvent('MpAnim', a.msg)
+        end
     end
-    if rseq and r.lastRSeq and rseq ~= r.lastRSeq and r.state.rkind then
-        r.obj:sendEvent('MpAttack', { phase = 'release', kind = r.state.rkind, str = r.state.str or 0 })
+    if r.lookDirty then
+        r.lookDirty = false
+        r.obj:sendEvent('MpLook', r.look or {})
     end
-    r.lastSeq, r.lastRSeq = seq or r.lastSeq, rseq or r.lastRSeq
 end
 
 ------------------------------------------------------------------ party / ui plumbing
@@ -595,7 +658,9 @@ local function readAilments(p)
         for _, spell in types.Actor.activeSpells(p) do
             local rec = core.magic.spells.records[spell.id]
             local disease = rec and (rec.type == core.magic.SPELL_TYPE.Disease or rec.type == core.magic.SPELL_TYPE.Blight)
-            for _, fx in ipairs(spell.effects) do
+            -- (a race's or birthsign's weaknesses are part of who they are, nothing to cure)
+            local ability = rec and rec.type == core.magic.SPELL_TYPE.Ability
+            for _, fx in ipairs(ability and {} or spell.effects) do
                 local mgef = core.magic.effects.records[fx.id]
                 if mgef and mgef.harmful and not seen[fx.name] then
                     seen[fx.name] = true
@@ -608,6 +673,48 @@ local function readAilments(p)
     local rank = { p = 1, d = 2, x = 3 }
     table.sort(found, function(a, b) return rank[a.c] < rank[b.c] end)
     while #found > MAX_AILMENTS do found[#found] = nil end
+    return found
+end
+
+-- Every effect on us for the party frames, as icons: { { e = effect id, k = kind, t = seconds left (-1: lasts) } }.
+-- Kinds: 'p' poison, 'd' disease, 'b' damage over time (burning, freezing, shock, bleeding health), 'x' other harm,
+-- '+' good. Harm first (a healer looks there), then the good ones; the soonest to end first in each.
+local MAX_AURAS = 12
+local BLEEDS = { firedamage = true, frostdamage = true, shockdamage = true, damagehealth = true, absorbhealth = true,
+    sundamage = true }
+local AURA_RANK = { p = 1, d = 2, b = 3, x = 4, ['+'] = 5 }
+local function readAuras(p)
+    local found, at = {}, {}
+    pcall(function()
+        for _, spell in types.Actor.activeSpells(p) do
+            local rec = core.magic.spells.records[spell.id]
+            -- abilities (a race's or birthsign's) are not worth a slot: they are always there
+            local ability = rec and rec.type == core.magic.SPELL_TYPE.Ability
+            local disease = rec and (rec.type == core.magic.SPELL_TYPE.Disease or rec.type == core.magic.SPELL_TYPE.Blight)
+            if not ability then
+                for _, fx in ipairs(spell.effects) do
+                    local mgef = core.magic.effects.records[fx.id]
+                    if mgef then
+                        local k = fx.id == 'poison' and 'p' or disease and 'd' or BLEEDS[fx.id] and mgef.harmful and 'b'
+                            or mgef.harmful and 'x' or '+'
+                        local left = (fx.duration and fx.duration > 0 and fx.durationLeft) and math.floor(fx.durationLeft + 0.5) or -1
+                        local i = at[fx.id]
+                        if not i then
+                            found[#found + 1] = { e = fx.id, k = k, t = left }
+                            at[fx.id] = #found
+                        elseif left > found[i].t and found[i].t >= 0 then found[i].t = left end -- (the longest of the same)
+                    end
+                end
+            end
+        end
+    end)
+    table.sort(found, function(a, b)
+        if AURA_RANK[a.k] ~= AURA_RANK[b.k] then return AURA_RANK[a.k] < AURA_RANK[b.k] end
+        local ta, tb = a.t < 0 and math.huge or a.t, b.t < 0 and math.huge or b.t
+        if ta ~= tb then return ta < tb end
+        return a.e < b.e
+    end)
+    while #found > MAX_AURAS do found[#found] = nil end
     return found
 end
 
@@ -624,6 +731,7 @@ local function readVitals()
             m = r(m.current), mm = r(m.base + m.modifier),
             f = r(f.current), fm = r(f.base + f.modifier),
             bad = readAilments(p),
+            fx = readAuras(p),
         }
     end)
     return ok and v or nil
@@ -634,9 +742,14 @@ local function pushUi()
     for _, id in ipairs(party.members) do
         if id ~= myId then
             local v = vitals[id] or {}
+            local r = remotes[id]
+            local p = player()
+            local dist
+            if r and r.state and p and r.state.cell == cellKey(p.cell) and r.pos then dist = math.floor((r.pos - p.position):length() / 70 + 0.5) end -- (in metres, roughly)
             members[#members + 1] = {
-                id = id, name = nameOf(id), leader = party.leader == id,
-                h = v.h, hm = v.hm, m = v.m, mm = v.mm, f = v.f, fm = v.fm, bad = v.bad,
+                id = id, name = nameOf(id), leader = party.leader == id, dist = dist, lvl = r and r.profile and r.profile.level,
+                dead = r and r.state and r.state.dead and true or nil,
+                h = v.h, hm = v.hm, m = v.m, mm = v.mm, f = v.f, fm = v.fm, bad = v.bad, fx = v.fx,
             }
         end
     end
@@ -702,12 +815,12 @@ local function onCommand(d)
         net.send(net.encodeJson({ t = 'chat', scope = d.scope, text = d.text }))
         chatLine(d.scope, 'You', d.text, true)
     elseif cmd == 'toggle' then
-        -- /markers and /arrows: show or hide other players on the maps / as arrows over them
+        -- /markers and /arrows: show or hide other players on the maps / their nameplates
         local key = d.what == 'markers' and 'ShowMapMarkers' or 'ShowPlayerArrows'
         local want
         if d.state == 'on' then want = true elseif d.state == 'off' then want = false else want = settings:get(key) == false end
         settings:set(key, want)
-        notice((d.what == 'markers' and 'Other players on the map and minimap: ' or 'Arrows over other players: ')
+        notice((d.what == 'markers' and 'Other players on the map and minimap: ' or 'Nameplates over other players: ')
             .. (want and 'on' or 'off') .. '.')
     elseif cmd == 'ip' then
         if not hostInfo then
@@ -830,6 +943,7 @@ local function onMessage(msg)
             password = settings:get('Password') or '', token = resumeToken }))
         sendProfile()
         sendEquipment(true)
+        net.send(net.encodeJson({ t = 'look', fx = myLook.fx, spell = myLook.spell }))
         return
     end
     if t == 'join_result' then
@@ -861,7 +975,18 @@ local function onMessage(msg)
     if t == 'ping' then net.send(net.encodeJson({ t = 'pong', n = msg.n })) return end
     if t == 'players' then
         players = type(msg.list) == 'table' and msg.list or {}
-        toUi('MpPlayers', { list = players, me = myId })
+        -- where each of them is and whether they are with us, for the Players window
+        local p = player()
+        local here = p and cellKey(p.cell)
+        for _, pl in ipairs(players) do
+            local r = remotes[pl.id]
+            if r and r.state then
+                pl.where = r.state.cell == '' and 'Outside' or r.state.cell
+                pl.near = r.state.cell == here or nil
+            end
+            pl.party = isMember(pl.id) or nil
+        end
+        toUi('MpPlayers', { list = players, me = myId, partySize = #party.members })
         local parts = {}
         for _, pl in ipairs(players) do parts[#parts + 1] = tostring(pl.name) .. '#' .. tostring(pl.id) .. '=' .. tostring(pl.ping) .. 'ms' end
         dlog('players: ' .. table.concat(parts, ', '))
@@ -959,7 +1084,28 @@ local function onMessage(msg)
             end
         end
     elseif t == 'equip' then r.equip, r.gen, r.equipSent = msg.slots, msg.gen, false
-    elseif t == 'state' and type(msg.pos) == 'table' then r.state = msg; r.stateAt = core.getRealTime() end
+    elseif t == 'state' and type(msg.pos) == 'table' then
+        local now = core.getRealTime()
+        if r.state and r.state.cell ~= msg.cell and r.buf then r.buf:reset() end -- a door: nothing to blend from
+        r.buf = r.buf or interp.new()
+        r.buf:push(tonumber(msg.ts), now, msg.pos, type(msg.vel) == 'table' and msg.vel or nil, tonumber(msg.yaw) or 0)
+        r.state = msg
+        r.stateAt = now
+    elseif t == 'anim' and type(msg.g) == 'string' then
+        -- played when the position we show reaches the time they played it, so a swing lands where they stood
+        local now = core.getRealTime()
+        local due = now
+        if r.buf and r.buf.offset and tonumber(msg.ts) then
+            due = math.max(now, math.min(now + 0.4, msg.ts + r.buf.offset + r.buf:delay()))
+        end
+        r.anims = r.anims or {}
+        if #r.anims < 16 then r.anims[#r.anims + 1] = { due = due, msg = { g = msg.g, o = msg.o } } end
+    elseif t == 'look' then
+        r.look = { fx = type(msg.fx) == 'table' and msg.fx or {}, spell = type(msg.spell) == 'table' and msg.spell or nil }
+        r.lookDirty = true
+    elseif t == 'ev' then
+        onEv(r, msg)
+    end
 end
 
 -- True if every effect of the spell is beneficial (nothing that could be used to hurt a group member).
@@ -997,17 +1143,42 @@ onAid = function(msg)
 end
 
 -- Another player shot or cast something: show it if they are in our cell (cosmetic only).
--- k = 'bolt' / 'arrow' fly from msg.from to msg.to (shots.lua); every spell also shows its cast effect on their
--- avatar, and a spell on themselves (k = 'cast') its hit effect too.
+-- k = 'bolt' / 'arrow' fly from msg.from to msg.to (shots.lua); 'impact' is where one of their bolts really hit in their
+-- world (the explosion moves there); every spell also shows its cast effects on their avatar, and a spell on
+-- themselves (k = 'cast', range self) lands on them.
 onShot = function(msg)
     local r = remotes[msg.id]
     local p = player()
     if not r or not p or not r.state or r.state.cell ~= cellKey(p.cell) then return end
-    if msg.k == 'bolt' or msg.k == 'arrow' then shots.onShot(msg) end
+    if msg.k == 'impact' then shots.onImpact(msg) return end
+    if (msg.k == 'bolt' and msg.rec) or msg.k == 'arrow' then shots.onShot(msg) end
     if msg.k ~= 'arrow' and r.obj and r.obj:isValid() and r.obj.enabled then
-        r.obj:sendEvent('MpCastVfx', { cast = msg.cast, hit = msg.k == 'cast' and msg.hit or nil })
+        r.obj:sendEvent('MpCastVfx', { fx = msg.fx, range = msg.range })
     end
 end
+
+-- Something happened to another player (observe.lua): damage, healing, a skill rising. Shown over their head when we
+-- can see them; a level-up or skill of a party member also goes to chat (relay sends the party line).
+onEv = function(r, msg)
+    local p = player()
+    if not p or not r.state or r.state.cell ~= cellKey(p.cell) then return end
+    if msg.k ~= 'dmg' and msg.k ~= 'heal' and msg.k ~= 'skill' then return end
+    toUi('MpFloatText', { id = r.id, k = msg.k, n = tonumber(msg.n), s = type(msg.s) == 'string' and msg.s:sub(1, 40) or nil })
+end
+
+-- Our own bolts: where they really hit, so the others' explosion is in the right place (the aim was only a guess).
+local boltsInFlight = {} -- shot ids, oldest first
+local function onOwnBoltHit(projectile, hit)
+    local p = player()
+    local info = projectile and projectile.userData
+    if not p or not info or info.caster ~= p or #boltsInFlight == 0 then return end
+    local sid = table.remove(boltsInFlight, 1)
+    local pos = hit and hit.hitPos
+    if not pos or not net.isConnected() then return end
+    net.send(net.encodeJson({ t = 'shot', k = 'impact', sid = sid,
+        to = { math.floor(pos.x + 0.5), math.floor(pos.y + 0.5), math.floor(pos.z + 0.5) } }))
+end
+pcall(function() I.Projectiles.addOnProjectileHitHandler(I.Projectiles.TYPES.Magic, onOwnBoltHit) end)
 
 ------------------------------------------------------------------ network callbacks (see netlib.lua)
 
@@ -1095,7 +1266,8 @@ return {
                 worldTimer = worldTimer + dt
                 if worldTimer >= WORLD_INTERVAL then worldTimer = 0; sendWorld() end
             end
-            -- arrows over the other players: their real position, sent every frame so the overlay does not lag or jump
+            for _, r in pairs(remotes) do sampleRemote(r, realNow) end
+            -- nameplates over the other players: where they are shown, sent every frame so the overlay does not lag or jump
             do
                 local p = player()
                 local list = {}
@@ -1104,17 +1276,27 @@ return {
                     if settings:get('ShowPlayerArrows') ~= false then
                         for id, r in pairs(remotes) do
                             if r.state and r.profile and r.state.cell == here then
-                                list[#list + 1] = { pos = predictedPosition(r), name = nameOf(id), group = isMember(id) }
+                                -- hidden by magic (invisible, or mostly chameleon): no nameplate, unless they are with us
+                                local hide = false
+                                for _, f in ipairs(r.look and r.look.fx or {}) do
+                                    if f.e == 'invisibility' or (f.e == 'chameleon' and (tonumber(f.m) or 0) >= 75) then hide = true end
+                                end
+                                list[#list + 1] = { id = id, pos = predictedPosition(r), name = nameOf(id), group = isMember(id),
+                                    hp = tonumber(r.state.hp), lvl = r.profile.level, cls = r.profile.class, race = r.profile.race,
+                                    dead = r.state.dead and true or false, hide = hide and not isMember(id),
+                                    obj = r.obj and r.obj:isValid() and r.obj or nil }
                             end
                         end
                     end
                 end
                 toUi('MpAvatars', { list = list })
             end
-            proxies.onUpdate(gameDt)
-            loot.onUpdate(dt) -- (real time: looting happens in a window that pauses the game)
-            shots.onUpdate(gameDt)
-            for _, r in pairs(remotes) do updateRemote(r, gameDt) end
+            -- each part on its own: one failing (an object removed under it) must not stop the rest of the frame, least of
+            -- all sending our own position
+            guarded('proxies', proxies.onUpdate, gameDt)
+            guarded('loot', loot.onUpdate, dt) -- (real time: looting happens in a window that pauses the game)
+            guarded('shots', shots.onUpdate, gameDt)
+            for _, r in pairs(remotes) do guarded('avatar', updateRemote, r, gameDt) end
             if net.isConnected() and core.getRealTime() - lastServerMessage > SERVER_SILENCE then
                 -- the host stopped answering (crash, cable, router): do not stay "connected" to nothing
                 log('host went silent, reconnecting')
@@ -1127,7 +1309,7 @@ return {
                 sendTimer = sendTimer + dt
                 equipTimer = equipTimer + dt
                 vitalsTimer = vitalsTimer + dt
-                if sendTimer >= SEND_INTERVAL then sendTimer = 0; sendState() end
+                if sendTimer >= SEND_INTERVAL then sendTimer = 0; sendState(false) end
                 if equipTimer >= EQUIP_INTERVAL then
                     equipTimer = 0
                     sendEquipment(false)
@@ -1184,7 +1366,29 @@ return {
         onNetEvent = net.onEvent,
     },
     eventHandlers = {
-        MpInput = function(d) myInput = d end,
+        MpInput = function(d)
+            -- sneaking, a jump, opening a menu: the others see it at once, not with the next position
+            local now = d.sneak ~= myInput.sneak or d.jseq ~= myInput.jseq or d.reading ~= myInput.reading or d.fly ~= myInput.fly
+            myInput = d
+            if now and net.isConnected() then sendState(true) end
+        end,
+        -- An animation our character played (observe.lua): the others' copy of us plays it too
+        MpAnim = function(d)
+            if not net.isConnected() then return end
+            net.send(net.encodeJson({ t = 'anim', g = d.g, o = d.o, ts = math.floor((d.ts or core.getRealTime()) * 1000 + 0.5) / 1000 }))
+        end,
+        -- The spell we have ready and the magic on us that shows (observe.lua)
+        MpLook = function(d)
+            myLook = { fx = d.fx or {}, spell = d.spell }
+            if net.isConnected() then net.send(net.encodeJson({ t = 'look', fx = myLook.fx, spell = myLook.spell })) end
+        end,
+        -- Damage we took, healing, a skill that went up (observe.lua): numbers over our head in the others' game
+        MpEv = function(d)
+            if net.isConnected() then net.send(net.encodeJson({ t = 'ev', k = d.k, n = d.n, s = d.s })) end
+            if d.k == 'skill' and inParty() then -- (our own game already says it to us)
+                net.send(net.encodeJson({ t = 'chat', scope = 'party', text = string.format('[%s rose to %s]', tostring(d.s), tostring(d.n or '?')) }))
+            end
+        end,
         -- Our player shot an arrow or cast a spell (player.lua works out the details): tell the others
         MpShot = function(d)
             local p = player()
@@ -1201,6 +1405,10 @@ return {
             end
             d.aid, d.touch = nil, nil
             d.t = 'shot'
+            if d.k == 'bolt' and d.sid then
+                boltsInFlight[#boltsInFlight + 1] = d.sid
+                while #boltsInFlight > 8 do table.remove(boltsInFlight, 1) end
+            end
             net.send(net.encodeJson(d))
         end,
         MpSnap = function(d)

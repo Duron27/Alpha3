@@ -107,6 +107,42 @@ buildingJob:
       dotenv: job.env
 
 
+# The multiplayer server for Linux (x86_64), on its own: cpp/openmw-upstream/support/multiplayer/tree/apps/mpserver/standalone
+# needs only a C++20 compiler, CMake and LuaJIT. Built on Debian 12 so it runs on servers with a C library as old as
+# glibc 2.36; LuaJIT and the C++ runtime are linked in, so the zip needs nothing installed.
+serverLinuxJob:
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: always
+    - when: never
+  interruptible: true
+  stage: building
+  image: debian:12
+  variables:
+    MPSERVER_SRC: cpp/openmw-upstream/support/multiplayer/tree/apps/mpserver/standalone
+  before_script:
+    - apt-get update -qq
+    - apt-get install -y -qq build-essential cmake git zip ca-certificates
+    # LuaJIT as a static library (the server links it in)
+    - git clone --depth 1 --branch v2.1 https://github.com/LuaJIT/LuaJIT.git /tmp/luajit
+    - make -C /tmp/luajit -j"$(nproc)" BUILDMODE=static
+    - make -C /tmp/luajit install PREFIX=/opt/luajit
+  script:
+    - cmake -S "$MPSERVER_SRC" -B build-server -DLUAJIT_PREFIX=/opt/luajit -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc"
+    - cmake --build build-server --target mpserver-bundle -j"$(nproc)"
+    - cp build-server/openmw-mp-server-Linux-x86_64.zip openmw-mp-server-linux-x86_64-$CI_COMMIT_TAG.zip
+  # So the release job can link the zip:
+  after_script:
+    - echo "SERVER_JOB_ID=$CI_JOB_ID" >> server.env
+  artifacts:
+    when: always
+    paths:
+      - openmw-mp-server-linux-x86_64-$CI_COMMIT_TAG.zip
+    expire_in: never
+    reports:
+      dotenv: server.env
+
+
 # iOS: build for devices and upload to TestFlight. Needs a Mac with Xcode registered as a GitLab runner (shell executor) with
 # the tag in IOS_RUNNER_TAG, and the App Store Connect API key (Users and Access > Integrations, role Admin or App Manager):
 #   AuthKey_<id>.p8             in Settings > CI/CD > Secure files, as downloaded from App Store Connect (or instead, the
@@ -163,9 +199,11 @@ releaseJob:
   needs:
     - job: buildingJob
       artifacts: true
+    - job: serverLinuxJob
+      artifacts: true
   script:
     - echo "Create Release $CI_COMMIT_TAG"
-    - echo $JOB_ID  
+    - echo $JOB_ID $SERVER_JOB_ID
   release:
     name: 'Release $CI_COMMIT_TAG'
     tag_name: '$CI_COMMIT_TAG'
@@ -177,3 +215,5 @@ releaseJob:
           url: "https://gitlab.com/$CI_PROJECT_NAMESPACE/$CI_PROJECT_NAME/-/jobs/$JOB_ID/artifacts/file/openmw-android-alpha3-$CI_COMMIT_TAG.apk"
         - name: "openmw-android-alpha3-$CI_COMMIT_TAG-symbols.zip (debug symbols for crash reports)"
           url: "https://gitlab.com/$CI_PROJECT_NAMESPACE/$CI_PROJECT_NAME/-/jobs/$JOB_ID/artifacts/file/openmw-android-alpha3-$CI_COMMIT_TAG-symbols.zip"
+        - name: "openmw-mp-server-linux-x86_64-$CI_COMMIT_TAG.zip (multiplayer server for Linux)"
+          url: "https://gitlab.com/$CI_PROJECT_NAMESPACE/$CI_PROJECT_NAME/-/jobs/$SERVER_JOB_ID/artifacts/file/openmw-mp-server-linux-x86_64-$CI_COMMIT_TAG.zip"

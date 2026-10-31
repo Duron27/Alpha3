@@ -58,6 +58,9 @@ namespace MpServer
         // Handles network events and time. Returns false once the server was asked to stop.
         bool tick();
 
+        // Waits until a message arrives or the timeout passes, so the next tick() answers it at once.
+        void waitForEvents(int milliseconds);
+
         // One line of the server console; returns the answer (possibly several lines). quit/exit/stop ends tick().
         std::string console(const std::string& line);
 

@@ -6,8 +6,9 @@ Subject: [PATCH] Multiplayer: engine hooks for the support library's
 
 Edits to OpenMW's own files only: client mods and the built-in script lists at startup (main.cpp), the main menu's
 Multiplayer button, player markers on the map and minimap, the openmw.net and openmw.modstore packages and the Lua
-handlers they need, animation.setHeadPitch, and text edit additions. The new files (sockets, client mods, the bindings,
-the Lua mod, the server) and their build registration live in support/multiplayer, which copies them into the tree.
+handlers they need, animation.setHeadPitch, animation.setMovementOverride (avatars moved at the velocity they were
+sent), and text edit additions. The new files (sockets, client mods, the bindings, the Lua mod, the server) and their
+build registration live in support/multiplayer, which copies them into the tree.
 ---
  apps/openmw/main.cpp                    |  45 ++++++
  apps/openmw/mwbase/luamanager.hpp       |  11 ++
@@ -18,19 +19,19 @@ the Lua mod, the server) and their build registration live in support/multiplaye
  apps/openmw/mwgui/mapwindow.hpp         |  24 +++
  apps/openmw/mwgui/windowmanagerimp.cpp  |   7 +
  apps/openmw/mwgui/windowmanagerimp.hpp  |   1 +
- apps/openmw/mwlua/animationbindings.cpp |   9 ++
+ apps/openmw/mwlua/animationbindings.cpp |  16 ++
  apps/openmw/mwlua/globalscripts.hpp     |  13 +-
  apps/openmw/mwlua/luabindings.cpp       |   5 +
  apps/openmw/mwlua/luamanagerimp.cpp     |  37 +++++
  apps/openmw/mwlua/luamanagerimp.hpp     |   8 +
  apps/openmw/mwlua/menuscripts.hpp       |  10 +-
  apps/openmw/mwlua/uibindings.cpp        |  53 +++++++
- apps/openmw/mwmechanics/character.cpp   |   6 +
+ apps/openmw/mwmechanics/character.cpp   |  14 ++
  apps/openmw/mwrender/animation.cpp      |   5 +-
- apps/openmw/mwrender/animation.hpp      |   8 +
+ apps/openmw/mwrender/animation.hpp      |  13 ++
  components/lua_ui/textedit.cpp          |  22 ++-
  components/lua_ui/textedit.hpp          |   5 +
- 21 files changed, 496 insertions(+), 26 deletions(-)
+ 21 files changed, 516 insertions(+), 26 deletions(-)
 
 diff --git a/apps/openmw/main.cpp b/apps/openmw/main.cpp
 index 70e48e0cfc..034b705e69 100644
@@ -627,7 +628,7 @@ index aef8e34fb4..db3fa38d80 100644
          MyGUI::IntPoint mLastDragPos;
  
 diff --git a/apps/openmw/mwgui/windowmanagerimp.cpp b/apps/openmw/mwgui/windowmanagerimp.cpp
-index ab8950d14d..64e82eb53c 100644
+index e15b6f35e1..18b358edb2 100644
 --- a/apps/openmw/mwgui/windowmanagerimp.cpp
 +++ b/apps/openmw/mwgui/windowmanagerimp.cpp
 @@ -51,6 +51,7 @@
@@ -671,10 +672,10 @@ index afd00ca7e7..0ff0d45464 100644
          bool getFullHelp() const override;
  
 diff --git a/apps/openmw/mwlua/animationbindings.cpp b/apps/openmw/mwlua/animationbindings.cpp
-index 6740204aad..704cc7945f 100644
+index 6740204aad..26a6734717 100644
 --- a/apps/openmw/mwlua/animationbindings.cpp
 +++ b/apps/openmw/mwlua/animationbindings.cpp
-@@ -154,6 +154,15 @@ namespace MWLua
+@@ -154,6 +154,22 @@ namespace MWLua
          api["isLoopingAnimation"] = [](const LObject& object, std::string_view groupname) {
              return getConstAnimationOrThrow(object)->isLoopingAnimation(groupname);
          };
@@ -687,6 +688,13 @@ index 6740204aad..704cc7945f 100644
 +                  animation->setHeadPitchOverride(pitch ? std::optional<float>(*pitch) : std::nullopt);
 +                  animation->setSpinePitch(spinePitch.value_or(0.f));
 +              };
++        // Moves the actor at exactly this horizontal velocity (world space, units per second) instead of by its
++        // walk/run animation; collisions, gravity and jumps stay the physics'. The movement controls still choose and
++        // pace the animation. Pass nil to restore the default behaviour.
++        api["setMovementOverride"] = [](const SelfObject& object, sol::optional<osg::Vec3f> velocity) {
++            MWRender::Animation* animation = getMutableAnimationOrThrow(object);
++            animation->setMovementOverride(velocity ? std::optional<osg::Vec3f>(*velocity) : std::nullopt);
++        };
          api["cancel"] = [](const SelfObject& object, std::string_view groupname) {
              return getMutableAnimationOrThrow(object)->disable(groupname);
          };
@@ -970,10 +978,25 @@ index b9cac05dce..65cec6abe0 100644
              = [luaManager = context.mLuaManager](std::string_view message, const sol::optional<sol::table>& options) {
                    MWGui::ShowInDialogueMode mode = MWGui::ShowInDialogueMode_IfPossible;
 diff --git a/apps/openmw/mwmechanics/character.cpp b/apps/openmw/mwmechanics/character.cpp
-index f492284d0c..0b7de7eb90 100644
+index f492284d0c..1bd5177f4a 100644
 --- a/apps/openmw/mwmechanics/character.cpp
 +++ b/apps/openmw/mwmechanics/character.cpp
-@@ -3168,6 +3168,12 @@ namespace MWMechanics
+@@ -2506,6 +2506,14 @@ namespace MWMechanics
+ 
+             movement.x() *= scale;
+             movement.y() *= scale;
++            if (const std::optional<osg::Vec3f> forced = mAnimation->getMovementOverride())
++            {
++                // (physics turns movement by the actor's yaw; this is the world velocity in the actor's frame)
++                const osg::Vec3f local
++                    = osg::Quat(mPtr.getRefData().getPosition().rot[2], osg::Vec3f(0, 0, 1)) * *forced;
++                movement.x() = local.x();
++                movement.y() = local.y();
++            }
+             world->queueMovement(mPtr, movement);
+         }
+ 
+@@ -3168,6 +3176,12 @@ namespace MWMechanics
              xAngleRadians = std::asin(direction.z());
          }
  
@@ -1006,19 +1029,20 @@ index 4c522aaa1e..9e55753f3f 100644
              }
          }
 diff --git a/apps/openmw/mwrender/animation.hpp b/apps/openmw/mwrender/animation.hpp
-index 14c6b8f99e..78e1a44297 100644
+index 14c6b8f99e..ecc4134e15 100644
 --- a/apps/openmw/mwrender/animation.hpp
 +++ b/apps/openmw/mwrender/animation.hpp
-@@ -230,6 +230,8 @@ namespace MWRender
+@@ -230,6 +230,9 @@ namespace MWRender
          osg::ref_ptr<RotateController> mRootController;
          float mHeadYawRadians;
          float mHeadPitchRadians;
 +        std::optional<float> mHeadPitchOverride;
++        std::optional<osg::Vec3f> mMovementOverride;
 +        float mSpinePitchRadians = 0.f;
          float mUpperBodyYawRadians;
          float mLegsYawRadians;
          float mBodyPitchRadians;
-@@ -485,6 +487,12 @@ namespace MWRender
+@@ -485,6 +488,16 @@ namespace MWRender
          virtual void setHeadPitch(float pitchRadians);
          virtual void setHeadYaw(float yawRadians);
          virtual float getHeadPitch() const;
@@ -1028,6 +1052,10 @@ index 14c6b8f99e..78e1a44297 100644
 +        std::optional<float> getHeadPitchOverride() const { return mHeadPitchOverride; }
 +        // Tilts the upper body up/down (used so a scripted actor's attacks follow where it aims).
 +        void setSpinePitch(float pitchRadians) { mSpinePitchRadians = pitchRadians; }
++        // A script can move the actor at an exact velocity (world space, units per second) instead of by its walk
++        // animation (nullopt gives it back).
++        void setMovementOverride(std::optional<osg::Vec3f> velocity) { mMovementOverride = velocity; }
++        std::optional<osg::Vec3f> getMovementOverride() const { return mMovementOverride; }
          virtual float getHeadYaw() const;
  
          virtual void setUpperBodyYawRadians(float v) { mUpperBodyYawRadians = v; }

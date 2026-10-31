@@ -1,15 +1,16 @@
 -- Client mods kept on the server. A server (or a game hosting) hands out a folder of Lua mods; the relay tells every client
 -- which mods and files it has, with their SHA-256. This module compares that with what is installed here, asks the
 -- player, downloads what is missing or changed over the session connection, checks every file against its hash (the
--- engine refuses a file whose hash is wrong), removes what the server no longer has and offers to restart the game,
--- which loads the new scripts at startup.
+-- engine refuses a file whose hash is wrong) and removes what the server no longer has. If every changed file is one the
+-- game already loaded, the Lua scripts are reloaded on the spot (the session reconnects by itself); new files or mods
+-- are only seen by a game that starts again, so then it offers to restart.
 local markup = require('openmw.markup')
 local ok, modstore = pcall(require, 'openmw.modstore')
 if not ok then modstore = nil end
 
 local M = {}
 
-local ctx -- { send(table), toUi(event, data), notice(text), declined(), now() }
+local ctx -- { send(table), toUi(event, data), notice(text), declined(), reload(), now() }
 local state -- nil | 'asking' | 'downloading' | 'done'
 local need, drop -- files to fetch { mod, p, s, h }; things to delete { mod, p (nil: the whole mod) }
 local index, cur, lastChunk, installed
@@ -117,7 +118,16 @@ local function requestNext()
             if err ~= '' then return fail('could not remove ' .. d.mod .. (d.p and ('/' .. d.p) or '') .. ': ' .. err) end
         end
         local count = #need
+        local live = modstore.wasLoaded ~= nil and modstore.reloadScripts ~= nil and #drop == 0
+        for _, f in ipairs(need) do
+            if live and not modstore.wasLoaded(f.mod, f.p) then live = false end
+        end
         state, need, drop, cur = 'done', nil, nil, nil
+        if live then
+            ctx.notice('The server\'s mods are installed (' .. count .. ' files). Reloading scripts...')
+            ctx.reload()
+            return
+        end
         ctx.toUi('MpModsDone', { ok = true, files = count })
         return
     end
@@ -165,6 +175,9 @@ end
 function M.update()
     if state == 'downloading' and ctx.now() - lastChunk > 20 then fail('the server stopped answering') end
 end
+
+-- Reloads the Lua scripts (see reload in the context).
+function M.reloadScripts() if modstore and modstore.reloadScripts then modstore.reloadScripts() end end
 
 -- The player asked to restart (after the install).
 function M.restart()

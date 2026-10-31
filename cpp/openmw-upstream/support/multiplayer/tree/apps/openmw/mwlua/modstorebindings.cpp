@@ -8,6 +8,7 @@
 #include <components/misc/sha256.hpp>
 
 #include "../mwbase/environment.hpp"
+#include "../mwbase/luamanager.hpp"
 #include "../mwbase/statemanager.hpp"
 
 #include "context.hpp"
@@ -40,6 +41,12 @@ namespace MWLua
                 return std::move(*data);
             return sol::nullopt;
         };
+        // Whether the game loaded this file of this mod at startup: changes to such files need only a Lua reload
+        api["wasLoaded"]
+            = [](std::string_view id, std::string_view path) { return Misc::ClientMods::wasLoaded(id, path); };
+        // Reloads every Lua script (at the end of the frame), reading the installed mods' files again. Scripts keep
+        // their saved data, as when a game is saved and loaded.
+        api["reloadScripts"] = []() { MWBase::Environment::get().getLuaManager()->reloadAllScripts(); };
         // Quits and starts the game again, so the installed mods are loaded. Returns false (and does nothing) where the
         // game cannot start itself again.
         api["restart"] = []() {

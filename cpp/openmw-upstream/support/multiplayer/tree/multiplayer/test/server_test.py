@@ -58,12 +58,12 @@ try:
     time.sleep(1.0)
     a = Client(); a.pump(0.3)
     hello = a.last('hello')
-    check(hello and hello['proto'] == 2 and hello['needPassword'] and not hello['host'], 'hello: version, password needed, nobody is host')
-    a.send(t='join', proto=2, name='Alice', password='wrong'); a.pump(0.8)
+    check(hello and hello['proto'] == 3 and hello['needPassword'] and not hello['host'], 'hello: version, password needed, nobody is host')
+    a.send(t='join', proto=3, name='Alice', password='wrong'); a.pump(0.8)
     check(a.last('join_result') and a.last('join_result')['reason'] == 'password', 'wrong password refused')
 
     a = Client(); a.pump(0.3)
-    a.send(t='join', proto=2, name='Alice', password='pw'); a.pump(0.5)
+    a.send(t='join', proto=3, name='Alice', password='pw'); a.pump(0.5)
     jr = a.last('join_result')
     check(jr and jr['ok'] and jr['token'] and jr['motd'] == 'welcome', 'joined with the password, got a token and the motd')
     world = a.last('world')
@@ -71,7 +71,7 @@ try:
     check('date' not in (world or {}) and 'day' not in (world or {}), 'no date is synced')
 
     b = Client(); b.pump(0.3)
-    b.send(t='join', proto=2, name='Bob', password='pw'); b.pump(0.5)
+    b.send(t='join', proto=3, name='Bob', password='pw'); b.pump(0.5)
     a.send(t='chat', scope='global', text='hello bob'); b.pump(0.5)
     check(b.last('chat') and b.last('chat')['text'] == 'hello bob', 'chat between two players')
     a.send(t='state', cell='Balmora', pos=[100, 200, 300], yaw=0); a.pump(0.2)
@@ -115,7 +115,7 @@ try:
     b.pump(0.6)
     check(b.count('away') == 1 and b.count('leave') == 0, 'others see that Alice is away, not gone')
     a2 = Client(); a2.pump(0.3)
-    a2.send(t='join', proto=2, name='Alice', password='pw', token=token); a2.pump(0.6)
+    a2.send(t='join', proto=3, name='Alice', password='pw', token=token); a2.pump(0.6)
     r = a2.last('join_result')
     check(r and r['ok'] and r.get('resumed') and r['id'] == jr.get('id', r['id']), 'the token resumes the session')
     b.pump(0.4)
@@ -126,7 +126,7 @@ try:
     c.sock.sendall(b'not json\n{"t":\n[1,2,3]\n\xff\xfe\n')
     c.pump(0.3)
     d = Client(); d.pump(0.2)
-    d.send(t='join', proto=2, name='Dave', password='pw'); d.pump(0.5)
+    d.send(t='join', proto=3, name='Dave', password='pw'); d.pump(0.5)
     check(d.last('join_result') and d.last('join_result')['ok'], 'garbage from another client does not hurt the server')
 
     out = console('help')
@@ -182,7 +182,7 @@ def gui_test():
         c.sock = socket.create_connection(('127.0.0.1', port), timeout=5)
         c.buf, c.inbox = b'', []
         c.pump(0.2)
-        c.send(t='join', proto=2, name=name, password='pw'); c.pump(0.3)
+        c.send(t='join', proto=3, name=name, password='pw'); c.pump(0.3)
         c.send(t='state', cell='Balmora', pos=[1, 2, 3], yaw=0)
         clients[name] = c
     clients['Arin'].send(t='admin', cmd='login', password='adm')

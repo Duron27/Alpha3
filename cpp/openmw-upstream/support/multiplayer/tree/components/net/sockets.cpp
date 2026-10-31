@@ -1,6 +1,7 @@
 #include "sockets.hpp"
 
 #include <atomic>
+#include <condition_variable>
 #include <deque>
 #include <map>
 #include <mutex>
@@ -19,14 +20,18 @@ namespace Net
         struct Shared
         {
             std::mutex mMutex;
+            std::condition_variable mArrived; // an event was queued (for waitForEvents)
             std::vector<SocketEvent> mEvents;
             std::map<std::uint32_t, std::string> mLocalAddress;
             std::map<std::uint32_t, std::string> mRemoteAddress;
 
             void push(SocketEvent event)
             {
-                const std::lock_guard lock(mMutex);
-                mEvents.push_back(std::move(event));
+                {
+                    const std::lock_guard lock(mMutex);
+                    mEvents.push_back(std::move(event));
+                }
+                mArrived.notify_all();
             }
         };
 
@@ -322,6 +327,12 @@ namespace Net
             return it == mShared->mRemoteAddress.end() ? std::string() : it->second;
         }
 
+        bool waitForEvents(std::chrono::milliseconds timeout)
+        {
+            std::unique_lock lock(mShared->mMutex);
+            return mShared->mArrived.wait_for(lock, timeout, [this] { return !mShared->mEvents.empty(); });
+        }
+
         std::vector<SocketEvent> poll()
         {
             std::vector<SocketEvent> raw;
@@ -463,5 +474,10 @@ namespace Net
     std::vector<SocketEvent> Sockets::poll()
     {
         return mImpl->poll();
+    }
+
+    bool Sockets::waitForEvents(std::chrono::milliseconds timeout)
+    {
+        return mImpl->waitForEvents(timeout);
     }
 }

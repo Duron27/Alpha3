@@ -776,6 +776,11 @@ namespace MpServer
         return !mImpl->mStop;
     }
 
+    void ServerCore::waitForEvents(int milliseconds)
+    {
+        mImpl->mHost.mSockets.waitForEvents(std::chrono::milliseconds(milliseconds));
+    }
+
     std::string ServerCore::console(const std::string& line)
     {
         lua_State* l = mImpl->mState.get();

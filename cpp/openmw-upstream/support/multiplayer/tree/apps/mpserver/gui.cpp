@@ -472,8 +472,11 @@ MPSERVER_EXPORT int mpserverRunWindow(ServerCore& core, int argc, char** argv, s
     }
 
     QTimer tick;
-    tick.setInterval(20);
+    // Each round waits up to a few milliseconds for a message, so one is relayed the moment it arrives while the window
+    // still gets its turn in between.
+    tick.setInterval(0);
     QObject::connect(&tick, &QTimer::timeout, &app, [&] {
+        core.waitForEvents(4);
         if (!core.tick() || stopFlag)
             app.quit();
     });

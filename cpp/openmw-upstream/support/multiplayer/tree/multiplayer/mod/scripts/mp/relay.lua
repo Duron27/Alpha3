@@ -12,12 +12,13 @@ local MAX_PARTY = 3
 local MAX_PLAYERS = 128 -- the most a server takes, whatever it is told (a hosting game counts as one of them)
 local INVITE_TTL = 60
 local CHAT_MAX = 240
-local GLOBAL_TYPES = { profile = true, equip = true, state = true }
+local GLOBAL_TYPES = { profile = true, equip = true, look = true }
+local NEAR_TYPES = { anim = true, ev = true } -- only for those who can see the sender (interest below)
 local PUBLIC_TYPES = { pubactors = true } -- shown to the others in the sender's cell who are not in their party
-local SHOT_TYPES = { shot = true } -- shown to everyone, never cached (a late joiner must not see old shots)
+local SHOT_TYPES = { shot = true } -- shown to those near, never cached (a late joiner must not see old shots)
 local PARTY_TYPES = { actors = true, vitals = true, dmg = true, aid = true, loot = true }
-local CACHED = { profile = true, equip = true, state = true, actors = true, vitals = true }
-local GLOBAL_ORDER = { 'profile', 'equip', 'state' }
+local CACHED = { profile = true, equip = true, state = true, actors = true, vitals = true, look = true }
+local GLOBAL_ORDER = { 'profile', 'equip', 'look', 'state' }
 
 local clients = {} -- id -> { party = id|nil, last = { [type] = encoded json }, tokens, tokenTime }
 local parties = {} -- party id -> { members = {ids}, leader = id }
@@ -29,14 +30,21 @@ local hostId -- the first client after start() is the host's own loopback connec
 local generation = 0 -- bumped whenever the relay is reset, so the bot knows it is gone
 local pingTimer, pingSeq = 0, 0
 local PING_INTERVAL = 2
-local PROTO = 2 -- bumped whenever the messages change incompatibly; clients with another version are refused
+local PROTO = 3 -- bumped whenever the messages change incompatibly; clients with another version are refused
 local JOIN_TIMEOUT = 10
 local SILENCE_LIMIT = 25 -- a player that sends nothing (not even ping replies) for this long is gone
 local MESSAGE_LIMIT = 400 -- messages per second per player; more is dropped
 local KICK_DELAY = 0.5 -- lets the "you were refused" message reach the client before the socket closes
 local options = { password = '', maxPlayers = 8, motd = '', adminPassword = '' }
 local dedicated = false -- a standalone server: nobody is the host, one player is the clock, admins log in with a password
-local bans = {} -- lower-case character name -> true (for this session)
+local bans = {} -- lower-case character name -> true (a server keeps them in a file: options.onBansChanged, M.setBans)
+local function bansChanged()
+    if not options.onBansChanged then return end
+    local list = {}
+    for name in pairs(bans) do list[#list + 1] = name end
+    table.sort(list)
+    pcall(options.onBansChanged, list)
+end
 local pendingKicks = {} -- id -> clock to close at
 local dropReport = 0 -- when the dropped messages were last reported
 local DROP_REPORT_INTERVAL = 60
@@ -45,7 +53,7 @@ local trades = {} -- 'low:high' -> { from, to, state = 'requested' | 'active', e
 local GRACE = 90 -- seconds a player that lost their connection keeps their name, party and place
 local TRADE_REQUEST_TTL = 60
 -- messages per second and player, by type; more is dropped (the general limit above still applies)
-local RATE = { pubactors = 2, state = 30, vitals = 5, actors = 8, equip = 3, profile = 3, shot = 8, aid = 4, dmg = 30, world = 4, loot = 10,
+local RATE = { anim = 24, look = 6, ev = 10, pubactors = 2, state = 45, vitals = 5, actors = 8, equip = 3, profile = 3, shot = 12, aid = 4, dmg = 30, world = 4, loot = 10,
     trade = 30, modget = 100 }
 
 local M = {}
@@ -230,6 +238,43 @@ local function broadcastOthers(id, json)
     end
 end
 
+-- Interest: who can see whom. Same interior, or both outside within INTEREST_RANGE (a little past what is drawn).
+-- Those get every position, animation, shot and number; everybody else gets a position once in FAR_INTERVAL (enough for
+-- the map) and nothing else. This keeps a full server from sending everyone everything 30 times a second.
+local INTEREST_RANGE = 3 * 8192
+local FAR_INTERVAL = 1
+local function canSee(a, b)
+    if a.cell == nil or b.cell == nil or a.cell ~= b.cell then return false end
+    if a.cell ~= '' then return true end
+    if not a.pos or not b.pos then return true end
+    local dx, dy = a.pos[1] - b.pos[1], a.pos[2] - b.pos[2]
+    return dx * dx + dy * dy <= INTEREST_RANGE * INTEREST_RANGE
+end
+
+local function toNear(id, json)
+    local c = clients[id]
+    for o, oc in pairs(clients) do
+        if o ~= id and oc.authed and canSee(c, oc) then sendRaw(o, json) end
+    end
+end
+
+local function sendState(id, json)
+    local c = clients[id]
+    c.farSent = c.farSent or {}
+    for o, oc in pairs(clients) do
+        if o ~= id and oc.authed then
+            local partner = oc.party and oc.party == c.party -- (party members always follow each other: map, goto)
+            if partner or canSee(c, oc) then
+                sendRaw(o, json)
+                c.farSent[o] = clock
+            elseif clock - (c.farSent[o] or -100) >= FAR_INTERVAL then
+                sendRaw(o, json)
+                c.farSent[o] = clock
+            end
+        end
+    end
+end
+
 -- Dedicated server world: time of day and weather belong to the server, so everybody sees the same sky. The date is
 -- never synced (everybody is on their own day), only the hour.
 local WEATHER_POOL = { 'clear', 'clear', 'clear', 'cloudy', 'cloudy', 'overcast', 'foggy', 'rain', 'thunder' }
@@ -279,13 +324,16 @@ local VALID = {
         and optNum(m.yaw) and optNum(m.pitch) end,
     vitals = function(m)
         for _, k in ipairs({ 'h', 'hm', 'm', 'mm', 'f', 'fm' }) do if not optNum(m[k]) then return false end end
-        return m.bad == nil or (type(m.bad) == 'table' and #m.bad <= 8)
+        return (m.bad == nil or (type(m.bad) == 'table' and #m.bad <= 8)) and (m.fx == nil or (type(m.fx) == 'table' and #m.fx <= 16))
     end,
     pubactors = function(m) return type(m.list) == 'table' and #m.list <= 40 and isStr(m.cell or '', 200) end,
     actors = function(m) return type(m.list) == 'table' and #m.list <= 80
         and (m.dead == nil or (type(m.dead) == 'table' and #m.dead <= 200)) end,
     dmg = function(m) return isNum(m.to) and isStr(m.nid or '', 100) and (m.frac == nil or (isNum(m.frac) and m.frac >= 0 and m.frac <= 10)) end,
     aid = function(m) return isNum(m.to) and isStr(m.spell, 120) end,
+    anim = function(m) return isStr(m.g, 32) and type(m.o) == 'table' and optNum(m.ts) end,
+    look = function(m) return (m.fx == nil or (type(m.fx) == 'table' and #m.fx <= 12)) and (m.spell == nil or type(m.spell) == 'table') end,
+    ev = function(m) return isStr(m.k, 8) and optNum(m.n) and (m.s == nil or isStr(m.s, 40)) end,
     shot = function(m) return isStr(m.k, 8) and (m.rec == nil or isStr(m.rec, 120)) and (m.from == nil or isVec3(m.from))
         and (m.to == nil or isVec3(m.to)) and optNum(m.spd) end,
     equip = function(m) return type(m.slots) == 'table' end,
@@ -615,14 +663,14 @@ local function adminCommand(msg, reply, actor)
     end
     if cmd == 'unban' then
         local key = tostring(msg.name or ''):lower()
-        if bans[key] then bans[key] = nil reply(msg.name .. ' can join again.') else reply('Nobody by that name is banned.') end
+        if bans[key] then bans[key] = nil reply(msg.name .. ' can join again.') bansChanged() else reply('Nobody by that name is banned.') end
         return
     end
     local target, c = findByName(msg.name)
     if not target then return reply('No player named ' .. tostring(msg.name) .. ' is online.') end
     if target == hostId or target == actor then return reply('You cannot do that to yourself.') end
     if cmd == 'kick' or cmd == 'ban' then
-        if cmd == 'ban' then bans[c.name:lower()] = true end
+        if cmd == 'ban' then bans[c.name:lower()] = true bansChanged() end
         if not c.sock then -- (lost their connection: there is nobody to tell)
             removeClient(target)
             return reply(c.name .. (cmd == 'ban' and ' was banned.' or ' was kicked.'))
@@ -826,7 +874,7 @@ process = function(id, msg)
         if msg.scope == 'party' then toParty(id, json) else broadcastOthers(id, json) end
         return
     end
-    if t == 'state' then c.cell = msg.cell or '' end -- (where players are, for what is only for those who share a cell)
+    if t == 'state' then c.cell, c.pos = msg.cell or '', msg.pos end -- (where players are, for what is only for those who share a cell)
     if PUBLIC_TYPES[t] then
         local json = enc(msg)
         for o, oc in pairs(clients) do
@@ -834,12 +882,14 @@ process = function(id, msg)
         end
         return
     end
-    if SHOT_TYPES[t] then
-        if type(msg.k) == 'string' and #msg.k < 8 then broadcastOthers(id, enc(msg)) end
+    if SHOT_TYPES[t] or NEAR_TYPES[t] then
+        toNear(id, enc(msg))
         return
     end
     if CACHED[t] then c.last[t] = enc(msg) end
-    if GLOBAL_TYPES[t] then
+    if t == 'state' then
+        sendState(id, c.last[t])
+    elseif GLOBAL_TYPES[t] then
         broadcastOthers(id, c.last[t])
     elseif PARTY_TYPES[t] then
         local target = msg.to
@@ -861,7 +911,8 @@ end
 function M.start(port, opts)
     M.stop()
     options = { password = tostring(opts and opts.password or ''), maxPlayers = math.max(1, math.min(MAX_PLAYERS, tonumber(opts and opts.maxPlayers) or 64)),
-        motd = tostring(opts and opts.motd or ''), adminPassword = tostring(opts and opts.adminPassword or '') }
+        motd = tostring(opts and opts.motd or ''), adminPassword = tostring(opts and opts.adminPassword or ''),
+        onBansChanged = opts and opts.onBansChanged }
     dedicated = opts and opts.dedicated and true or false
     if dedicated then
         skyTime = (tonumber(opts.startHour) or 9) % 24 * 3600
@@ -889,6 +940,13 @@ function M.stop()
 end
 
 function M.isRunning() return running end
+
+-- Names banned before (a server reads them from its file at start): a list of names
+function M.setBans(list)
+    for _, name in ipairs(list or {}) do
+        if type(name) == 'string' and name ~= '' then bans[name:lower()] = true end
+    end
+end
 function M.isDedicated() return dedicated end
 
 -- Everything a server window needs, as plain data: the players (with latency, address and location), banned names, the
