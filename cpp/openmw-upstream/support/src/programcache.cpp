@@ -218,6 +218,7 @@ namespace Alpha3
         hash.add(cfg.gpu);
         hash.add(std::string(translatorStamp()));
         hash.add(std::string(converterStamp()));
+        hash.add(experimentalShaderStamp());
         hash.add(std::string(std::getenv("OPENMW_DISABLE_SPIRV") ? "nospirv" : "spirv"));
         hash.add(defines);
         for (unsigned i = 0; i < program.getNumShaders(); ++i)

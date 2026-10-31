@@ -1,0 +1,197 @@
+<!doctype html>
+<!-- Renders support/src/experimental/procedural.glsl the way the game uses it, for checking how the materials look:
+     index.html?tex=<texture name>  (textures/<name>.png and maps/<name>_nh.dds next to this page, made by render.sh)
+     Rows: a wall at an angle, a close look at it, a tree trunk, the ground to the horizon. Columns: the texture as the game
+     draws it now, with the generated normal map, with the procedural surface over it, the procedural surface in its place. -->
+<html>
+<head><meta charset="utf-8"><title>Procedural materials</title>
+<style>body { margin: 0; background: #181a20; color: #ddd; font: 13px sans-serif; } canvas { display: block; } html, body { overflow: hidden; }</style>
+</head>
+<body>
+<canvas id="c" width="1600" height="1000"></canvas>
+<script>
+const q = new URLSearchParams(location.search);
+const tex = q.get('tex');
+const strength = parseFloat(q.get('strength') || '1');
+
+const vertexSource = `#version 300 es
+in vec2 pos; out vec2 ndc;
+void main() { ndc = pos; gl_Position = vec4(pos, 0.0, 1.0); }`;
+
+const head = `#version 300 es
+precision highp float;
+#define texture2D texture
+`;
+const body = `
+in vec2 ndc;
+out vec4 fragColor;
+uniform sampler2D diffuseMap;
+uniform sampler2D normalMap;
+uniform int scene;    // 0 wall, 1 close, 2 trunk, 3 ground
+uniform int mode;     // 0 vanilla, 1 generated normals, 2 procedural over the texture, 3 procedural in its place
+uniform float aspect;
+uniform float strength;
+
+// camera at the origin looking down -z (view space, as the game's viewPos), a ray through the pixel
+bool hit(vec3 dir, out vec3 pos, out vec2 uv, out vec3 n, out vec3 t, out vec3 b)
+{
+    if (scene == 0 || scene == 1)
+    {
+        // a wall facing the camera, turned 35 degrees, 4 m away; the texture repeats every 1.8 m (256 texels at the
+        // game's usual 128 units per metre... close enough)
+        float turn = radians(35.0);
+        n = normalize(vec3(sin(turn), 0.0, cos(turn)));
+        t = normalize(vec3(cos(turn), 0.0, -sin(turn)));
+        b = vec3(0.0, -1.0, 0.0);
+        float dist = scene == 0 ? 400.0 : 60.0;
+        vec3 c = vec3(0.0, 0.0, -dist);
+        float d = dot(c, n) / dot(dir, n);
+        if (d <= 0.0) return false;
+        pos = dir * d;
+        vec3 rel = pos - c;
+        uv = vec2(dot(rel, t), dot(rel, b)) / 180.0 + 0.5;
+        return true;
+    }
+    if (scene == 2)
+    {
+        // a vertical trunk of radius 60, 260 away; the texture goes once around it and repeats every 300 up it
+        vec3 c = vec3(0.0, 0.0, -190.0);
+        float r = 75.0;
+        vec2 o = -c.xz;
+        vec2 d2 = dir.xz;
+        float A = dot(d2, d2), B = 2.0 * dot(o, d2), C = dot(o, o) - r * r;
+        float disc = B * B - 4.0 * A * C;
+        if (disc < 0.0) return false;
+        float d = (-B - sqrt(disc)) / (2.0 * A);
+        pos = dir * d;
+        vec3 rel = pos - c;
+        n = normalize(vec3(rel.x, 0.0, rel.z));
+        t = normalize(vec3(n.z, 0.0, -n.x));
+        b = vec3(0.0, -1.0, 0.0);
+        uv = vec2(atan(rel.x, rel.z) / 6.2831853 + 0.5, -rel.y / 300.0);
+        return true;
+    }
+    // ground 160 below the eye, the texture repeating every 256 units
+    n = vec3(0.0, 1.0, 0.0);
+    t = vec3(1.0, 0.0, 0.0);
+    b = vec3(0.0, 0.0, 1.0);
+    if (dir.y >= -0.001) return false;
+    float d = -160.0 / dir.y;
+    pos = dir * d;
+    uv = vec2(pos.x, pos.z) / 256.0;
+    return true;
+}
+
+void main()
+{
+    vec3 dir = normalize(vec3(ndc.x * aspect * 0.6, ndc.y * 0.6, -1.0));
+    if (scene == 3) dir = normalize(vec3(ndc.x * aspect * 0.6, ndc.y * 0.6 - 0.55, -1.0));
+    vec3 pos, n, t, b; vec2 uv;
+    if (!hit(dir, pos, uv, n, t, b)) { fragColor = vec4(0.42, 0.52, 0.66, 1.0); return; }
+
+    vec4 diffuse = texture(diffuseMap, uv);
+    vec3 colour = diffuse.rgb;
+    vec3 tn = vec3(0.0, 0.0, 1.0);
+    if (mode >= 1) tn = texture(normalMap, uv).xyz * 2.0 - 1.0;
+    if (mode >= 2) a3Procedural(diffuseMap, normalMap, uv, pos, strength, 3000.0, mode == 3, colour, tn);
+    vec3 N = normalize(mat3(t, b, n) * tn);
+
+    // a low sun from the upper left, the sky's ambient, and a faint highlight (OpenMW's look in daylight)
+    vec3 L = normalize(vec3(-0.45, 0.45, 0.75));
+    if (scene == 3) L = normalize(vec3(-0.5, 0.45, -0.5));
+    float diff = max(dot(N, L), 0.0);
+    vec3 V = normalize(-pos);
+    float spec = pow(max(dot(reflect(-L, N), V), 0.0), 16.0) * 0.08 * float(mode >= 1);
+    vec3 lit = colour * (vec3(0.33, 0.35, 0.4) + vec3(1.0, 0.95, 0.85) * diff) + spec;
+    fragColor = vec4(pow(lit, vec3(1.0)), 1.0);
+}`;
+
+async function loadImage(url) {
+    const im = new Image();
+    im.src = url;
+    await im.decode();
+    return im;
+}
+
+async function main() {
+    const canvas = document.getElementById('c');
+    const gl = canvas.getContext('webgl2', { preserveDrawingBuffer: true });
+    const s3tc = gl.getExtension('WEBGL_compressed_texture_s3tc');
+    const lib = await (await fetch('procedural.glsl')).text();
+    // the generated normal map: the DDS as the game reads it, every level; the last carries the material (in the game
+    // the drawable's A3_MATERIAL comes from the texture's name, here from that tag: red of the 1x1 level's DXT5 colour)
+    const dds = new DataView(await (await fetch('maps/' + tex + '_nh.dds')).arrayBuffer());
+    let lastLevel = 128;
+    for (let l = 0, lw = dds.getUint32(16, true), lh = dds.getUint32(12, true); l + 1 < dds.getUint32(28, true); ++l) {
+        lastLevel += Math.max(1, (lw + 3) >> 2) * Math.max(1, (lh + 3) >> 2) * 16;
+        lw = Math.max(1, lw >> 1);
+        lh = Math.max(1, lh >> 1);
+    }
+    const material = Math.round((dds.getUint16(lastLevel + 8, true) >> 11) / 31 * 15);
+
+    const compile = (type, src) => {
+        const s = gl.createShader(type);
+        gl.shaderSource(s, src);
+        gl.compileShader(s);
+        if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+        return s;
+    };
+    const prog = gl.createProgram();
+    gl.attachShader(prog, compile(gl.VERTEX_SHADER, vertexSource));
+    gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, head + '#define A3_MATERIAL ' + material + '\n' + lib + body));
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+    gl.useProgram(prog);
+
+    const buf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+    const loc = gl.getAttribLocation(prog, 'pos');
+    gl.enableVertexAttribArray(loc);
+    gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+
+    // the diffuse texture with mip levels made by the GPU, like the game's DDS levels
+    const diffuse = gl.createTexture();
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, diffuse);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, await loadImage('textures/' + tex + '.png'));
+    gl.generateMipmap(gl.TEXTURE_2D);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+    gl.texParameterf(gl.TEXTURE_2D, 0x84FE, 4); // anisotropy, if there is any
+
+    // the generated normal map's levels
+    const normal = gl.createTexture();
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, normal);
+    let w = dds.getUint32(16, true), h = dds.getUint32(12, true);
+    const levels = dds.getUint32(28, true);
+    let offset = 128;
+    for (let l = 0; l < levels; ++l) {
+        const size = Math.max(1, (w + 3) >> 2) * Math.max(1, (h + 3) >> 2) * 16;
+        gl.compressedTexImage2D(gl.TEXTURE_2D, l, s3tc.COMPRESSED_RGBA_S3TC_DXT5_EXT, w, h, 0,
+            new Uint8Array(dds.buffer, offset, size));
+        offset += size;
+        w = Math.max(1, w >> 1);
+        h = Math.max(1, h >> 1);
+    }
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+
+    gl.uniform1i(gl.getUniformLocation(prog, 'diffuseMap'), 0);
+    gl.uniform1i(gl.getUniformLocation(prog, 'normalMap'), 1);
+    gl.uniform1f(gl.getUniformLocation(prog, 'strength'), strength);
+
+    const cols = 4, rows = 4, cw = canvas.width / cols, ch = canvas.height / rows;
+    gl.uniform1f(gl.getUniformLocation(prog, 'aspect'), cw / ch);
+    for (let r = 0; r < rows; ++r)
+        for (let c = 0; c < cols; ++c) {
+            gl.viewport(c * cw, (rows - 1 - r) * ch, cw - 4, ch - 4);
+            gl.uniform1i(gl.getUniformLocation(prog, 'scene'), r);
+            gl.uniform1i(gl.getUniformLocation(prog, 'mode'), c);
+            gl.drawArrays(gl.TRIANGLES, 0, 3);
+        }
+    document.title = 'done';
+}
+main().catch((e) => { document.title = 'error'; document.body.insertAdjacentText('afterbegin', String(e)); console.error(e); });
+</script>
+</body>
+</html>

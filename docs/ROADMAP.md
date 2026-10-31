@@ -28,12 +28,26 @@ Everything still open, in rough order. The sections below have the details.
 **3. Texture streaming**
 
 - [ ] Memory budget: drop textures not drawn for a while back to their small levels.
+- [ ] Maybe: a texture upscaler (see "Texture upscaling" under section 3). First, judge the look with no code: upscale a few textures on a PC and load them as `.ktx`.
 
 **4. Occlusion culling**
 
 - [ ] Too costly as it is: on the phone (Seyda Neen, Bitter Coast) it culled 1–11% of what it tested, for 2–5 ms per frame, and the cost was out of line with the triangles drawn (3.3 ms with 1404). Log the drawing and the tests separately to find where the time goes. Keep it off until then.
 - [ ] Draw the depth buffer on a worker thread instead of at the start of the cull.
 - [ ] A smaller simplification error or an inward offset for the occluders, if the device test shows early culling.
+
+**5. Better looking vanilla (experimental, `[Experimental]` switches, all off by default)**
+
+- [x] Generated normal and specular maps. Tested on the device: works, about the same memory.
+- [x] Grass: 3D blades on grassy terrain, density, height, distance and wind sliders. Tested: about +0.3 GB.
+- [x] Trees swaying in the wind, trunks bending a little. Tested.
+- [x] Procedural materials (built, too slow: 8 fps against 20 without, in the Bitter Coast).
+- [x] Detail up close, terrain triplanar and height blending, ambient occlusion and look (`.omwfx`): built, not yet tested on the device one by one.
+- [ ] Procedural: bake the replace mode into generated textures (it only depends on the uv), so it costs nothing at runtime. Port the patterns to C++; run it in "Build Alpha3 cache".
+- [ ] Generate the maps in "Build Alpha3 cache": the first visit to an area converts about 100 new maps to ASTC at about 600 ms each.
+- [ ] Test the others one by one on the device (memory, frame rate, screenshots).
+- [ ] Clip planes without `GL_EXT_clip_cull_distance` (Mali, ANGLE): fragment discard fallback built, test on such a device.
+- [ ] Clustered lighting makes the Adreno GPU fault and the game get killed (near Vivec, also before this work).
 
 **Other**
 
@@ -105,6 +119,28 @@ OpenMW builds every paging chunk in game: it collects the references, loads the 
   - ~~Upgrade by screen size instead of on first upload~~: done. Tested in a cull with a 1024 px texture on a wall: it stays at 256 px from far away (about 40 px on screen), and goes full size up close.
   - **Device check:** load times of a cell with a 2K texture pack, with and without streaming.
 
+### Texture upscaling (possible option, not started)
+
+Make vanilla textures larger and sharper. Only an idea for now; nothing is built.
+
+- **Where it fits:** on GPUs without S3TC, every DDS already goes DXT → RGBA (`decodeLevel`) → ASTC/ETC2 in `transcodeDxt` (`support/src/textureconversion.cpp`), and the launcher's pre-pass (`texconv`) runs the same code. An upscaler is one more step on the RGBA, between decode and encode. Everything stays in `support`, with no OpenMW or OSG patch.
+- **What already helps:**
+  - **Cache:** each texture is upscaled once and then read from `astc_cache.bin`. The upscaler and its settings must go into the cache key (`s.tag`).
+  - **Streaming:** only textures drawn large on screen are made full size, so most of the memory cost lands on nearby objects. The background thread that prepares full images could run a cheap upscaler.
+  - **Pre-pass and "Build Alpha3 cache":** the place for a slow one.
+- **Options:**
+  1. **AI upscaling (Real-ESRGAN style) in the pre-pass and cache builder.** It runs with ncnn on Vulkan. A small model such as `realesr-animevideov3` is a few MB; x4plus is about 17 MB. The only option that adds detail. Expect under a second to a few seconds per texture: minutes to tens of minutes once, too slow while playing. New dependency: ncnn and the model file.
+  2. **Classic upscaling** (Lanczos plus sharpening, or an FSR1-style EASU and RCAS on the CPU). Cheap enough for the streaming thread, with no dependency and about 100–200 lines. It sharpens edges but adds no detail. A runtime fallback when no pre-pass was run.
+  3. **No code:** upscale on a PC and convert with kram to `.ktx`, which `ktxtextures.cpp` already loads in place of the `.dds`. Try this on about 10 textures first, to see if it's worth building 1.
+- **Problems to handle:**
+  - **Tiling textures:** wrap-pad before upscaling and crop after, or seams appear.
+  - **Normal maps (`_n.dds`):** skip them, or upscale simply and re-normalize. AI models break the vectors.
+  - **Alpha:** upscale alpha-tested leaves and fences separately and keep their edges crisp.
+  - **DXT artifacts:** many models amplify the 4×4 blocks; prefer one trained on compression artifacts.
+  - **Size:** a 2× upscale is 4× the texels, so the cache size and ASTC encode time grow 4×. Default to 2× within `maxSize`.
+  - **Exclusions:** GUI, fonts and menu art (the `FullQualityImages` list) probably shouldn't be upscaled, or need a different model.
+- **Effort:** option 2 is about a day; option 1 is a few days, mostly integrating ncnn, the padding and comparing models.
+
 ## 4. Occlusion culling
 
 Skip drawing things hidden behind other things, like buildings behind a wall in Vivec or Balmora.
@@ -136,3 +172,47 @@ Skip drawing things hidden behind other things, like buildings behind a wall in 
   - **Draw the buffer on a worker thread** while the previous frame is drawn, instead of at the start of the cull.
   - ~~Simplified occluders~~: done. An occluder over 1000 triangles (a building, an object paging chunk) is simplified once on a background thread (positions welded, 1% error, open edges locked) and drawn in its place. It's drawn whole (or skipped if over budget) until the simplified version is ready, and kept only if at least 20% smaller. A 64×64 grid wall goes from 8192 to 818 triangles and culls the same. This is what lets paging chunks fit in the budget.
   - **Conservative simplification:** the simplified surface can be up to 1% of the mesh's size in front of the real one, so something just behind a wall could be culled a little early. Check on the device; a smaller error or an inward offset would fix it.
+
+## 5. Better looking vanilla
+
+Make the 20 year old textures and meshes look better on the fly, without replacing the data files.
+
+- **Status: built as experimental switches** (`[Experimental]` in `settings.fallback.cfg`, each its own setting, all off by default). Code: `support/src/experimental.cpp` (settings, generated maps in the VFS), `experimentalshaders.cpp` (the parts added to OpenMW's shaders at anchors), `experimentalstate.cpp` (per drawable variants), `grass.cpp`, `generatedmaps.cpp`, shader parts in `support/src/experimental/`. The only OSG change is `experimental-hooks.patch`: state pushed for one drawable, defines a shader imports, and a state's defines put in the source before it is translated (glslang runs the preprocessor; OpenMW's `FORCE_OPAQUE` and `DISTORTION` were lost on the phone before). There is no OpenMW patch.
+  - **Generated maps:** `_n`, `_nh`, `_spec`, `_diffusespec` for `.dds` textures, made on first use and cached (`generatedmaps/generatedmaps.bin`), capped at 512 (1024 for terrain). Which textures get them, and their material, by name (`material rules`). The 1x1 mip level of a normal map carries the material and the grain's direction.
+  - **Procedural materials:** bark, wood, stone, masonry, plaster, dirt, grass, sand, metal. Each drawable (and terrain layer pass) gets a variant with only its material (`A3_MATERIAL`); one shader with all of them was 2.5 fps. Still about 70 ms a frame on the phone: to be baked into textures.
+  - **Grass:** blades built on a worker thread per 512 unit tile from the terrain chunk's vertices and blendmaps, drawn beside the chunk, swaying and parting around the player.
+  - **Tree sway:** leaves (by texture name) get `A3_TREE_SWAY 1`, trunks (bark) `2` with the world height of their foot; the swell is shared so leaves and trunk lean together.
+  - **Clip planes on GPUs without clip distances:** the vertex shaders pass the clip position, the fragment shaders discard behind the planes (`glesdialect.cpp`).
+- **Ideas as first written:** Seen in screenshots from the phone: walls are flat painted surfaces with no relief and a uniform dark smear on the shaded side; terrain is a big blurry stretched texture up close, with a soft smudge where grass meets dirt; nothing darkens where rocks, roots and walls meet the ground, so objects look pasted on. Water and shadows already look fine.
+
+- **What makes it possible, with no OpenMW patch:**
+  - **Shader hook:** every shader OpenMW compiles passes through `translateShaderSource` (`support/src/shaders.cpp`), so the object, terrain and water shaders can be rewritten as they compile.
+  - **Generated files:** the support library already makes files that aren't on disk (`_dist.nif` in `distantmeshes.cpp`, `.ktx` in `ktxtextures.cpp`), so it can make textures and meshes the same way.
+  - **Post-processing:** OpenMW's `.omwfx` post-processing is already shipped (`bloomlinear`, `adjustments`), so screen effects need no C++.
+- **Ideas, best value first:**
+  1. **Generated bump and specular maps.**
+     - When the engine asks for `foo_n.dds`, the support library makes it from `foo.dds`: brightness becomes height, a Sobel filter turns that into normals, and the height goes in alpha for parallax. `foo_spec.dds` is made the same way.
+     - Cached like the ASTC conversions; OpenMW already uses these maps (`auto use object normal maps`, `auto use terrain normal maps`). At runtime it's one more texture read per pixel.
+     - Stone, brick, plaster, wood and dirt gain relief. Painted textures (banners, faces, GUI) come out wrong as heights, so they need a skip list by name.
+  2. **Detail up close** (shader rewrite). Within a few metres of the camera, a fine tiling detail texture (or shader noise, which costs more) blended on top, so close surfaces stop looking blurry. For terrain also:
+     - triplanar mapping on steep slopes, so textures stop stretching;
+     - height-based blending, so grass gives way to dirt along the bumps instead of a smudge.
+  3. **Ambient occlusion**:
+     - **Baked into vertex colours:** computed once per mesh, served like the distant meshes, and free at runtime. Many Morrowind meshes already bake lighting into their vertex colours, so multiply into them, don't replace them.
+     - **SSAO:** an `.omwfx` pass at half resolution. Quicker to try, but about 1.5–3 ms a frame on a phone.
+  4. **Colour and atmosphere** (`.omwfx`, no code): colour grading, a little bloom, fog tinted by the sky.
+  5. **Procedural replacements for whole textures** (maybe). The texture is computed in the shader instead of sampled, with its colours taken from the original so it keeps the Morrowind look.
+     - **Bark mock-up** (`tx_bc_bark_02`, Bitter Coast trees; rendered in numpy as a stand-in for the shader):
+       - long ridges from cell noise stretched along the trunk, with the furrows where two cells meet;
+       - warped coordinates so ridges wander and split, and ragged furrow edges;
+       - fibres along the grain, flaky roughness, loose paler flakes;
+       - dark, mid and light colours picked from the original texture;
+       - moss in the furrows (patchy, more on one side) and lichen spots;
+       - the height gives bump lighting, darker cavities and a faint sheen.
+     - **Result:** it stays sharp up close where the 256 px original blurs, and needs no texture file.
+     - **Concerns:**
+       - It can clash with the hand-painted textures around it. Bark, water and lava are the safest; it's a per-texture opt-in.
+       - Cell noise is several texture reads' worth of maths per pixel on a phone, so fade to the original texture with distance.
+       - The coordinates need a sensible UV layout: tree trunk UVs usually wrap around once.
+- **Cost on phones:** each idea is its own setting, and fades out with distance where possible.
+- **GLES:** shader rewrites must survive the GLES translation: hook in after it, or write them for both.

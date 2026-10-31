@@ -41,6 +41,7 @@ namespace Alpha3
             bool textureSize2D = false; // omw_textureSize2D (EXT_gpu_shader4 name, returns a vec2)
             bool clipVertexSink = false;
             bool clipPlanes = false; // omw_applyClipPlanes in place of the gl_ClipVertex assignment
+            bool clipDiscard = false; // no clip distances: omw_ClipPos to the fragment shader, which discards
         };
 
         std::atomic<bool> sClipDistancesAvailable{ false };
@@ -72,6 +73,33 @@ namespace Alpha3
             if (replaced != source)
                 needs.clipPlanes = true;
             return replaced;
+        }
+
+        // Without GL_EXT_clip_cull_distance (Mali, ANGLE) the clip planes (the water's reflection and refraction) are
+        // done in the fragment shader: every vertex shader passes the eye position it clips with (gl_ClipVertex; nothing
+        // clipped, vec4(0), when it has none) and every fragment shader discards what is behind a plane. Both stages
+        // declare it first, so the SPIR-V conversion gives it the same location in each.
+        constexpr std::string_view sClipDiscardVertex = "out vec4 omw_ClipPos;";
+        constexpr std::string_view sClipDiscardFragment
+            = "in vec4 omw_ClipPos; uniform vec4 osg_ClipPlane0; uniform vec4 osg_ClipPlane1;";
+
+        // main() becomes omw_clipMain(), called by a new main() with the clip work before it
+        std::string wrapMainForClipDiscard(const std::string& source, GlslStage stage, Needs& needs)
+        {
+            static const std::regex mainFunction(R"(\bvoid\s+main\s*\(\s*(void)?\s*\))");
+            static const std::regex assignment(R"(\bgl_ClipVertex\s*=)");
+            std::smatch match;
+            if (!std::regex_search(source, match, mainFunction))
+                return source;
+            needs.clipDiscard = true;
+            std::string body = std::string(match.prefix()) + "void omw_clipMain()" + std::string(match.suffix());
+            if (stage == GlslStage::Vertex)
+                return std::regex_replace(body, assignment, "omw_ClipPos =")
+                    + "\nvoid main()\n{\n    omw_ClipPos = vec4(0.0);\n    omw_clipMain();\n}\n";
+            // a plane that is off reads (0,0,0,1), and a vertex shader that does not clip writes vec4(0): neither discards
+            return body
+                + "\nvoid main()\n{\n    if (dot(osg_ClipPlane0, omw_ClipPos) < 0.0 || dot(osg_ClipPlane1, omw_ClipPos) < 0.0)\n"
+                  "        discard;\n    omw_clipMain();\n}\n";
         }
 
         // GLSL 1.20 texture functions that became overloads of texture() and friends
@@ -513,6 +541,11 @@ namespace Alpha3
             if (gles)
                 out += "precision highp float; precision highp int; precision highp sampler2D; precision highp sampler3D;"
                        " precision highp samplerCube; precision highp sampler2DShadow; precision highp sampler2DArray;";
+            if (needs.clipDiscard)
+            {
+                out += ' ';
+                out += stage == GlslStage::Vertex ? sClipDiscardVertex : sClipDiscardFragment;
+            }
             if (needs.modelView)
                 out += " uniform mat4 osg_ModelViewMatrix;";
             if (needs.projection)
@@ -657,8 +690,12 @@ namespace Alpha3
         Needs needs;
         const bool clipDistances
             = target == GlslTarget::Gles && stage == GlslStage::Vertex && sClipDistancesAvailable;
-        std::string translated
-            = rewriteIdentifiers(clipDistances ? replaceClipVertex(source, needs) : source, stage, target, needs);
+        const bool clipDiscard = target == GlslTarget::Gles && !sClipDistancesAvailable
+            && (stage == GlslStage::Vertex || stage == GlslStage::Fragment);
+        std::string translated = rewriteIdentifiers(clipDistances ? replaceClipVertex(source, needs)
+                : clipDiscard                                     ? wrapMainForClipDiscard(source, stage, needs)
+                                                                  : source,
+            stage, target, needs);
         if (target == GlslTarget::Gles)
             translated = stripDesktopExtensions(stripUniformInitializers(translated));
         if (target == GlslTarget::Gles && stage == GlslStage::Vertex && depthClamp)

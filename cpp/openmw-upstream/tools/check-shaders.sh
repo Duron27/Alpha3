@@ -10,6 +10,10 @@
 # (shaderconverter.cpp makes the same substitutions) and SPIRV-Cross writes the ESSL. STRICT_GLES=1 checks it as
 # OpenGL ES 3.20 instead, which is what the driver gets with OPENMW_DISABLE_SPIRV (float/int literal mixes then fail).
 # Known false positive: max/bs_nolighting.frag "viewNormal redefinition" (a define combination the engine never makes).
+# EXPERIMENTAL=1: the experimental graphics' parts (support/src/experimentalshaders.cpp) are added first, all switched on
+# (A3_BLEND=1: procedural materials over the textures rather than in their place; A3_SWAY=1 or 2: the swaying variant of leaves or trunks;
+# A3_MATERIAL=1 to 9: a procedural material's variant).
+# NO_CLIP_DISTANCES=1: as on a GPU without GL_EXT_clip_cull_distance (Mali, ANGLE), the clip planes done in the fragment shaders.
 set -e
 here=$(cd "$(dirname "$0")" && pwd)
 src=$(cd "$1" && pwd)
@@ -17,7 +21,9 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
 support=$(cd "$here/../support/src" && pwd)
-g++ -std=c++20 -O1 -I"$support" "$here/translate_main.cpp" "$here/translate_stubs.cpp" "$support/glesdialect.cpp" -o "$work/translate"
+g++ -std=c++20 -O1 -I"$support" "$here/translate_main.cpp" "$here/translate_stubs.cpp" "$support/glesdialect.cpp" \
+    "$support/experimentalshaders.cpp" -o "$work/translate"
+[ -n "$EXPERIMENTAL" ] && export A3_EXPERIMENTAL="$support/experimental"
 python3 -I "$here/corpus.py" "$src/files/shaders" "$work/corpus"
 
 status=0
@@ -33,13 +39,13 @@ for target in gles compat; do
             ext=${f##*.}
             clamp=; case "$f" in */shadowcasting.vert) clamp=clamp;; esac
             python3 -I "$here/merge_linked.py" "$work/corpus/$f" "$work/corpus/$f".link*."$ext" \
-                | "$work/translate" $stage $target $clamp > "$work/out/$f"
+                | "$work/translate" $stage $target $clamp "$f" > "$work/out/$f"
             if [ -z "$STRICT_GLES" ]; then
                 sed -i -e 's/#version 320 es/#version 460/' -e '/#extension GL_EXT_clip_cull_distance/d' \
                     -e 's/defined(GL_ES)/1/g' "$work/out/$f"
             fi
         else
-            "$work/translate" $stage $target < "$work/corpus/$f" > "$work/out/$f"
+            "$work/translate" $stage $target "$f" < "$work/corpus/$f" > "$work/out/$f"
         fi
     done
     echo "== target $target"

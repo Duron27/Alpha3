@@ -64,12 +64,49 @@ endif()
 get_filename_component(ALPHA3_OSG_PLUGIN_DIR "${OSGDB_DDS_LIBRARY_RELEASE}" DIRECTORY)
 find_library(ALPHA3_OSGDB_KTX NAMES osgdb_ktx PATHS "${ALPHA3_OSG_PLUGIN_DIR}" NO_DEFAULT_PATH REQUIRED)
 
+# The experimental graphics' shader parts and post-processing passes (src/experimental/), compiled in as strings:
+# experimentalsources.cpp is written at configure time, and the files are configure dependencies, so a change to one
+# writes it again
+set(ALPHA3_EXPERIMENTAL_SOURCES
+    procedural procedural.glsl
+    detail detail.glsl
+    terrain terrain.glsl
+    grass grass.glsl
+    treeSway treesway.glsl
+    ambientOcclusion a3_ambientocclusion.omwfx
+    look a3_look.omwfx
+)
+set(ALPHA3_EXPERIMENTAL_CPP "// Written by support/CMakeLists.txt from src/experimental/\n#include \"experimentalsources.hpp\"\n\nnamespace Alpha3::ExperimentalSources\n{\n")
+set(ALPHA3_EXPERIMENTAL_HPP "// Written by support/CMakeLists.txt from src/experimental/\n#pragma once\n#include <string_view>\n\nnamespace Alpha3::ExperimentalSources\n{\n")
+list(LENGTH ALPHA3_EXPERIMENTAL_SOURCES ALPHA3_EXPERIMENTAL_COUNT)
+math(EXPR ALPHA3_EXPERIMENTAL_LAST "${ALPHA3_EXPERIMENTAL_COUNT} - 1")
+foreach(index RANGE 0 ${ALPHA3_EXPERIMENTAL_LAST} 2)
+    math(EXPR file_index "${index} + 1")
+    list(GET ALPHA3_EXPERIMENTAL_SOURCES ${index} variable)
+    list(GET ALPHA3_EXPERIMENTAL_SOURCES ${file_index} file)
+    set(path ${CMAKE_CURRENT_SOURCE_DIR}/src/experimental/${file})
+    file(READ ${path} text)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${path})
+    string(APPEND ALPHA3_EXPERIMENTAL_CPP "    extern const std::string_view ${variable} = R\"A3SOURCE(${text})A3SOURCE\";\n")
+    string(APPEND ALPHA3_EXPERIMENTAL_HPP "    extern const std::string_view ${variable};\n")
+endforeach()
+string(APPEND ALPHA3_EXPERIMENTAL_CPP "}\n")
+string(APPEND ALPHA3_EXPERIMENTAL_HPP "}\n")
+file(CONFIGURE OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/generated/experimentalsources.cpp CONTENT "${ALPHA3_EXPERIMENTAL_CPP}" @ONLY)
+file(CONFIGURE OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/generated/experimentalsources.hpp CONTENT "${ALPHA3_EXPERIMENTAL_HPP}" @ONLY)
+
 # What the engine and the hooks call; linked into whatever needs it
 set(ALPHA3_SUPPORT_SOURCES
     src/bcdecode.cpp
     src/blobstore.cpp
     src/glesdialect.cpp
     src/distantmeshes.cpp
+    src/experimental.cpp
+    src/experimentalshaders.cpp
+    ${CMAKE_CURRENT_BINARY_DIR}/generated/experimentalsources.cpp
+    src/generatedmaps.cpp
+    src/grass.cpp
+    src/experimentalstate.cpp
     src/ktxtextures.cpp
     src/programcache.cpp
     src/settings.cpp
@@ -91,7 +128,8 @@ else()
     set(ALPHA3_SUPPORT_SYSTEM_LIBS "")
 endif()
 add_library(alpha3_support STATIC ${ALPHA3_SUPPORT_SOURCES})
-target_include_directories(alpha3_support PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_include_directories(alpha3_support PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_BINARY_DIR}/generated)
 target_compile_options(alpha3_support PRIVATE -fPIC)
 target_link_libraries(alpha3_support
     components

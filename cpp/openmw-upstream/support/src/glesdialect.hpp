@@ -41,7 +41,8 @@ namespace Alpha3
     std::string translateGlsl(const std::string& source, GlslStage stage, GlslTarget target, bool depthClamp = false);
 
     // Whether the OpenGL ES context has GL_EXT_clip_cull_distance, read with its extensions. With it, the gl_ClipVertex
-    // written by vertex shaders becomes gl_ClipDistance against OSG's osg_ClipPlane<n> uniforms; without it, nothing clips.
+    // written by vertex shaders becomes gl_ClipDistance against OSG's osg_ClipPlane<n> uniforms; without it, it goes to
+    // the fragment shaders, which discard what is behind a plane.
     void setClipDistancesAvailable(bool available);
 
     // A uniform declared with an initializer ("uniform vec2 scaling = vec2(1.0, 1.0);"), which OpenGL ES does not have: the

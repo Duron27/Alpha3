@@ -1840,6 +1840,24 @@ namespace Alpha3
         return sBypassImageHooks;
     }
 
+    bool readTextureForCpu(std::istream& stream, std::string_view extension, int& width, int& height,
+        std::vector<unsigned char>& rgba)
+    {
+        osgDB::ReaderWriter* reader = osgDB::Registry::instance()->getReaderWriterForExtension(std::string(extension));
+        if (reader == nullptr)
+            return false;
+        static const osg::ref_ptr<osgDB::Options> options = new osgDB::Options("dds_dxt1_detect_rgba ignoreTga2Fields");
+        BypassImageHooks bypass;
+        osgDB::ReaderWriter::ReadResult result = reader->readImage(stream, options);
+        Texture texture;
+        if (!result.success() || !toRgba8(*result.getImage(), extension == "dds", texture))
+            return false;
+        width = texture.mWidth;
+        height = texture.mHeight;
+        rgba = std::move(texture.mRgba);
+        return true;
+    }
+
     void addDistantMeshes(VFS::Manager& vfs)
     {
         auto archive = std::make_unique<DistantMeshArchive>(vfs);

@@ -36,6 +36,9 @@ set(ALPHA3_GLES_PATCHES
     "android/lazy-matrix-uniforms.patch"
     # occlusion culling by the support library: the cull visitor asks it about each node and drawable in view
     "android/occlusion-hooks.patch"
+    # the experimental graphics of the support library: state for one drawable (trees swaying), defines it adds to
+    # shaders, and the state's defines in the source before it is translated (glslang runs the preprocessor)
+    "android/experimental-hooks.patch"
 )
 
 if(VCPKG_TARGET_IS_IOS)

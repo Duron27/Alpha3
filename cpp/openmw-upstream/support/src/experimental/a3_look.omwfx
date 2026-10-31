@@ -1,0 +1,92 @@
+uniform_float uA3Saturation {
+    default = 1.15;
+    min = 0.0;
+    max = 2.0;
+    step = 0.05;
+    description = "Colour";
+}
+
+uniform_float uA3Contrast {
+    default = 1.08;
+    min = 0.5;
+    max = 1.5;
+    step = 0.01;
+    description = "Contrast";
+}
+
+uniform_float uA3Grade {
+    default = 0.5;
+    min = 0.0;
+    max = 1.0;
+    step = 0.05;
+    description = "Warm lights and cool shadows";
+}
+
+uniform_float uA3Haze {
+    default = 0.35;
+    min = 0.0;
+    max = 1.0;
+    step = 0.05;
+    description = "Haze of the sky's colour with distance (outside)";
+}
+
+uniform_float uA3Vignette {
+    default = 0.25;
+    min = 0.0;
+    max = 1.0;
+    step = 0.05;
+    description = "Darker corners";
+}
+
+fragment look {
+    // (OpenMW's .omwfx parser reads comments only inside blocks of GLSL, so this file's notes are here)
+    // Colour and atmosphere of the experimental graphics ([Experimental] look): a filmic tone curve in place of the hard clip,
+    // a little more colour, warmer lights and cooler shadows, haze tinted by the sky with distance, and a soft vignette.
+    // Served in the VFS as shaders/a3_look.omwfx and put at the end of the post-processing chain by src/experimental.cpp.
+
+    omw_In vec2 omw_TexCoord;
+
+    // a soft shoulder above 0.6, so bright lights roll off instead of clipping; the same as the input below it
+    vec3 a3Shoulder(vec3 c)
+    {
+        vec3 over = max(c - 0.6, 0.0);
+        return min(c, 0.6) + over / (1.0 + over * 2.5);
+    }
+
+    void main()
+    {
+        vec2 uv = omw_TexCoord;
+        vec3 c = omw_GetLastShader(uv).rgb;
+
+        // haze: from 1500 units, toward the sky's colour, not in interiors
+        if (!omw.isInterior)
+        {
+            float depth = omw_GetLinearDepth(uv);
+            float haze = uA3Haze * (1.0 - exp(-max(depth - 1500.0, 0.0) / 20000.0));
+            haze *= 1.0 - omw_EstimateFogCoverageFromUV(uv); // the fog has it already
+            c = mix(c, omw.skyColor.rgb * 0.9 + omw.fogColor.rgb * 0.1, haze);
+        }
+
+        float luma = dot(c, vec3(0.2126, 0.7152, 0.0722));
+        // warm in the lights, cool in the shadows
+        vec3 warm = vec3(1.04, 1.0, 0.94);
+        vec3 cool = vec3(0.95, 0.99, 1.06);
+        c *= mix(vec3(1.0), mix(cool, warm, smoothstep(0.1, 0.6, luma)), uA3Grade);
+        // colour and contrast about the middle grey
+        c = mix(vec3(luma), c, uA3Saturation);
+        c = (c - 0.45) * uA3Contrast + 0.45;
+        c = a3Shoulder(max(c, 0.0));
+
+        vec2 centre = uv - 0.5;
+        c *= 1.0 - uA3Vignette * smoothstep(0.35, 0.85, length(centre * vec2(omw.resolution.x / omw.resolution.y, 1.0)));
+
+        omw_FragColor = vec4(c, 1.0);
+    }
+}
+
+technique {
+    description = "Alpha3 experimental: tone curve, colour grade, haze and vignette";
+    version = "1.0";
+    author = "Alpha3";
+    passes = look;
+}

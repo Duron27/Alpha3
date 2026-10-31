@@ -191,7 +191,8 @@ namespace Alpha3
                     && osg::isGLExtensionSupported(extensions.contextID, "GL_EXT_clip_cull_distance");
                 setClipDistancesAvailable(clipDistances);
                 if (extensions.isOpenGLES && !clipDistances)
-                    Log(Debug::Warning) << "No GL_EXT_clip_cull_distance: water reflections are not clipped";
+                    Log(Debug::Info) << "No GL_EXT_clip_cull_distance: the clip planes (water reflections) are done in the "
+                                        "fragment shaders";
 
                 // Stock OpenMW reads desktop versions: compute shader ripples need OpenGL and GLSL 4.4, clustered lighting
                 // GLSL 4.3, a post processing technique the GLSL version it asks for. OpenGL ES 3.2 has what they use and
@@ -314,6 +315,17 @@ namespace Alpha3
             {
                 occlusionDrawableAdded(cullVisitor, drawable, modelView);
                 textureStreamingDrawableAdded(cullVisitor, drawable, modelView);
+                grassDrawableAdded(cullVisitor, drawable, modelView);
+            }
+
+            const osg::StateSet* drawableState(osg::NodeVisitor& cullVisitor, osg::Drawable& drawable) override
+            {
+                return experimentalDrawableState(cullVisitor, drawable);
+            }
+
+            void shaderDefinesComputed(const osg::Shader& shader, osg::ShaderDefines& defines) override
+            {
+                experimentalImportDefines(shader, defines);
             }
 
             bool translateShaderSource(const osg::Shader& shader, std::string& source) override

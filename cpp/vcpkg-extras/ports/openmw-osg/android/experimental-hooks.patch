@@ -1,0 +1,114 @@
+diff --git a/include/osg/RuntimeHooks b/include/osg/RuntimeHooks
+index b40dcda..80fccb4 100644
+--- a/include/osg/RuntimeHooks
++++ b/include/osg/RuntimeHooks
+@@ -32,6 +32,7 @@ class GLExtensions;
+ class Node;
+ class NodeVisitor;
+ class State;
++class StateSet;
+ 
+ /** Points where an application can change how OSG drives the GL implementation, without changes to the application
+   * code that uses OSG (Alpha3's Android build of OpenMW: shader translation for OpenGL ES, a program binary cache, frame
+@@ -113,6 +114,14 @@ class OSG_EXPORT RuntimeHooks : public Referenced
+           * matrix; the visitor's current state graph is the drawable's. */
+         virtual void drawableAdded(NodeVisitor& /*cullVisitor*/, Drawable& /*drawable*/, const Matrix& /*modelView*/) {}
+ 
++        /** Right after drawableAdded(): state to push for this one drawable while it is added (its own variant of the
++          * program by a define, say), NULL for none. */
++        virtual const StateSet* drawableState(NodeVisitor& /*cullVisitor*/, Drawable& /*drawable*/) { return 0; }
++
++        /** A shader's source has been set and the defines it imports (#pragma import_defines) read from it: more can be
++          * added, which a state set's defines then switch (a program compiled for each set of them). */
++        virtual void shaderDefinesComputed(const Shader& /*shader*/, ShaderDefines& /*defines*/) {}
++
+     protected:
+ 
+         virtual ~RuntimeHooks() {}
+diff --git a/include/osgUtil/CullVisitor b/include/osgUtil/CullVisitor
+index 8609eb2..88d23e1 100644
+--- a/include/osgUtil/CullVisitor
++++ b/include/osgUtil/CullVisitor
+@@ -424,7 +424,13 @@ class OSGUTIL_EXPORT CullVisitor : public osg::NodeVisitor, public osg::CullStac
+ 
+ inline void CullVisitor::addDrawable(osg::Drawable* drawable,osg::RefMatrix* matrix)
+ {
+-    if (osg::RuntimeHooks* hooks = osg::RuntimeHooks::get()) hooks->drawableAdded(*this, *drawable, *matrix);
++    const osg::StateSet* hookState = 0;
++    if (osg::RuntimeHooks* hooks = osg::RuntimeHooks::get())
++    {
++        hooks->drawableAdded(*this, *drawable, *matrix);
++        hookState = hooks->drawableState(*this, *drawable);
++        if (hookState) pushStateSet(hookState);
++    }
+ 
+     if (_currentStateGraph->leaves_empty())
+     {
+@@ -435,12 +441,20 @@ inline void CullVisitor::addDrawable(osg::Drawable* drawable,osg::RefMatrix* mat
+     }
+     //_currentStateGraph->addLeaf(new RenderLeaf(drawable,matrix));
+     _currentStateGraph->addLeaf(createOrReuseRenderLeaf(drawable,_projectionStack.back().get(),matrix));
++
++    if (hookState) popStateSet();
+ }
+ 
+ /** Add a drawable and depth to current render graph.*/
+ inline void CullVisitor::addDrawableAndDepth(osg::Drawable* drawable,osg::RefMatrix* matrix,float depth)
+ {
+-    if (osg::RuntimeHooks* hooks = osg::RuntimeHooks::get()) hooks->drawableAdded(*this, *drawable, *matrix);
++    const osg::StateSet* hookState = 0;
++    if (osg::RuntimeHooks* hooks = osg::RuntimeHooks::get())
++    {
++        hooks->drawableAdded(*this, *drawable, *matrix);
++        hookState = hooks->drawableState(*this, *drawable);
++        if (hookState) pushStateSet(hookState);
++    }
+ 
+     if (_currentStateGraph->leaves_empty())
+     {
+@@ -451,6 +465,8 @@ inline void CullVisitor::addDrawableAndDepth(osg::Drawable* drawable,osg::RefMat
+     }
+     //_currentStateGraph->addLeaf(new RenderLeaf(drawable,matrix,depth));
+     _currentStateGraph->addLeaf(createOrReuseRenderLeaf(drawable,_projectionStack.back().get(),matrix,depth));
++
++    if (hookState) popStateSet();
+ }
+ 
+ /** Add an attribute which is positioned relative to the modelview matrix.*/
+diff --git a/src/osg/Shader.cpp b/src/osg/Shader.cpp
+index 7a67166..5454f16 100644
+--- a/src/osg/Shader.cpp
++++ b/src/osg/Shader.cpp
+@@ -636,7 +636,23 @@ void Shader::PerContextShader::compileShader(osg::State& state)
+ 
+     std::string source = _shader->getShaderSource();
+     // Alpha3: an application can change the source for the GL implementation it runs on (OpenMW's GLSL 1.20 for OpenGL ES)
+-    if (RuntimeHooks* hooks = RuntimeHooks::get()) hooks->translateShaderSource(*_shader, source);
++    if (RuntimeHooks* hooks = RuntimeHooks::get())
++    {
++        // Alpha3: a state's defines (#pragma import_defines) go in first, after the #version line, for a translation that
++        // runs the preprocessor (glslang); they are put in again below, which redefines them the same
++        if (!_defineStr.empty())
++        {
++            std::string::size_type at = source.find("#version");
++            if (at != std::string::npos)
++            {
++                at = source.find('\n', at);
++                at = at == std::string::npos ? source.size() : at + 1;
++            }
++            else at = 0;
++            source.insert(at, _defineStr);
++        }
++        hooks->translateShaderSource(*_shader, source);
++    }
+     // Alpha3: only vertex shaders get their gl_ built-ins renamed. For other stages the declarations OSG inserts can land
+     // after the first use, and OpenMW's fragment profile declares the matrices it needs itself. Every stage still gets the
+     // $OSG_ variables substituted (osgText's shaders start with one).
+@@ -891,5 +907,7 @@ void Shader::_computeShaderDefines()
+         pos = eol;
+     }
+ 
++    // Alpha3: defines the application imports for this shader beyond its own pragmas
++    if (RuntimeHooks* hooks = RuntimeHooks::get()) hooks->shaderDefinesComputed(*this, _shaderDefines);
+ }
+ 

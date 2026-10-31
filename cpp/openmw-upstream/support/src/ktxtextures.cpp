@@ -187,5 +187,6 @@ namespace Alpha3
         noteMainThread(); // the engine sets up its VFS on its main thread
         vfs.addArchive(std::make_unique<KtxArchive>());
         addDistantMeshes(vfs);
+        addExperimental(vfs);
     }
 }

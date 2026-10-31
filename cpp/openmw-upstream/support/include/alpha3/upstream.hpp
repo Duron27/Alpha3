@@ -45,7 +45,8 @@ namespace Alpha3
 
     // .ktx textures (made ahead of time, e.g. by kram) are read in place of the .dds of the same name: adds the archive that
     // lists them under that name. Call after the data directories and archives are added, before the index is built.
-    // Also adds the distant mesh archive after it (addDistantMeshes), so the engine's one call covers both.
+    // Also adds the distant mesh archive after it (addDistantMeshes) and the experimental graphics' (generated maps,
+    // post-processing passes; src/experimental.cpp), so the engine's one call covers them all.
     void addKtxTextures(VFS::Manager& vfs);
 
     // Distant versions (x_dist.nif) of meshes, made on first use (src/distantmeshes.cpp): trees as cards drawn from six

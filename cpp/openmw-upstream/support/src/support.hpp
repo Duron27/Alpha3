@@ -6,6 +6,7 @@
 #include <atomic>
 #include <filesystem>
 #include <functional>
+#include <istream>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -16,6 +17,13 @@
 #include <osg/Program>
 #include <osg/ref_ptr>
 
+#include "experimentalshaders.hpp"
+
+namespace VFS
+{
+    class Manager;
+}
+
 namespace osg
 {
     class CullStack;
@@ -24,6 +32,7 @@ namespace osg
     class Node;
     class NodeVisitor;
     class State;
+    class StateSet;
 }
 
 namespace Alpha3
@@ -93,6 +102,9 @@ namespace Alpha3
 
     // ---- distantmeshes.cpp: true while the distant meshes read a texture for the CPU; the image hooks leave it as it is
     bool imageHooksBypassed();
+    // A texture read for the CPU (the image hooks bypassed) as RGBA8, rows in the engine's order; extension picks the reader
+    bool readTextureForCpu(std::istream& stream, std::string_view extension, int& width, int& height,
+        std::vector<unsigned char>& rgba);
     // Every distant mesh the VFS lists made, or found in the cache, on that many threads, for
     // the launcher's cache builder (cachebuild.cpp). progress is called on the calling thread a few times a second; false
     // when cancelled or no distant mesh archive was added.
@@ -131,6 +143,25 @@ namespace Alpha3
     int thermalPressure();
     // threads for background work: all of them when cool, half when warm, one when hot
     unsigned thermalThreads(unsigned threads);
+
+    // ---- experimental.cpp ([Experimental]): the switches, read once
+    const ExperimentalSettings& experimentalSettings();
+    // The engine's shaders with the experimental parts added, before they are translated; false: left as they are
+    bool injectExperimentalShaders(const osg::Shader& shader, std::string& source);
+    // What the injection depends on, for the program binary cache's key
+    const std::string& experimentalShaderStamp();
+    // The generated maps and the post-processing passes in the VFS, and the OpenMW settings that use them (called from
+    // addKtxTextures, before the renderer reads its settings)
+    void addExperimental(VFS::Manager& vfs);
+
+    // ---- grass.cpp ([Experimental] grass): the terrain's chunks get blades as the scene camera culls them; the VFS for
+    // reading their textures' colours
+    void setGrassVfs(const VFS::Manager& vfs);
+    void grassDrawableAdded(osg::NodeVisitor& cullVisitor, osg::Drawable& drawable, const osg::Matrix& modelView);
+    // ---- experimentalstate.cpp: the state that gives a drawable its own variant of its program by its texture (tree
+    // sway, the procedural material), and the defines OpenMW's shaders import for them
+    const osg::StateSet* experimentalDrawableState(osg::NodeVisitor& cullVisitor, osg::Drawable& drawable);
+    void experimentalImportDefines(const osg::Shader& shader, osg::ShaderDefines& defines);
 
     // ---- allocator.cpp: [General] allocator, once the settings are loaded
     void applyAllocatorSetting();
