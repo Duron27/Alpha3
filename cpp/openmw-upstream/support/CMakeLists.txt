@@ -72,6 +72,7 @@ set(ALPHA3_EXPERIMENTAL_SOURCES
     detail detail.glsl
     terrain terrain.glsl
     grass grass.glsl
+    bugs bugs.glsl
     treeSway treesway.glsl
     ambientOcclusion a3_ambientocclusion.omwfx
     look a3_look.omwfx

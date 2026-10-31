@@ -5,8 +5,10 @@
 // Each blade is five vertices (root pair, middle pair, tip) that all carry the blade's root in gl_Vertex (the terrain
 // chunk's space: x, y across, z up, as the world but moved); the shader builds the blade from its parameters:
 //   gl_MultiTexCoord0: x side (-1, 0 or 1), y how far up the blade (0 root, 1 tip), z facing angle, w height
-//   gl_MultiTexCoord1: x lean angle, y lean, z tone (0..1; 2 more for a seed stalk; 4, 8 or 12 more for a clump that
-//                      is darker, lighter or yellow), w width at the root
+//   gl_MultiTexCoord1: x lean angle, y lean, z tone (0..1; 4, 8 or 12 more for a clump that is darker, lighter or
+//                      yellow; 16 times its kind more: 0 grass, 1 seed stalk, 2 broad blade, 3 sedge, 4 leaf lying
+//                      in a rosette, 5 moss or lichen, 6 mushroom), w width
+// A blade of grass is tapered here; a leaf's and a mushroom's outline comes in the side (x) as made.
 // They sway in the wind (OpenMW's windSpeed, faster in storms) and part around the player (playerPos), and shrink into
 // the ground toward A3_GRASS_DISTANCE, where they end. Settings of grass.cpp as defines:
 //   A3_GRASS_STORM      ten times how hard they lean with a storm (blizzards, ash and blight storms: windSpeed 0.8 and more)
@@ -76,17 +78,21 @@ void main()
         stomp = away / d * (1.0 - d / 70.0) * 1.4;
 
     // bent more toward the tip; a bent blade is lower
-    vec2 bend = (lean + sway + stomp) * t * t;
+    float kind = floor(extra.z / 16.0);
+    // the stiffer ones move less: sedge, leaves on the ground, moss, and mushrooms not at all
+    float stiff = kind > 5.5 ? 0.0 : kind > 4.5 ? 0.15 : kind > 3.5 ? 0.35 : kind > 2.5 ? 0.5 : 1.0;
+    vec2 bend = (lean + (sway + stomp) * stiff) * t * t;
 #if A3_GRASS_AA
     // no thinner than a pixel there (a blade narrower than that only sparkles), and the wider it had to be made the
     // more it takes the colour of its root, the ground's, so the field keeps its look
     float pixel = 2.0 * dist / (abs(projectionMatrix[1][1]) * float(A3_SCREEN_HEIGHT));
     float rootWidth = max(extra.w, pixel * 1.2);
     a3Coverage = clamp(extra.w / rootWidth, 0.2, 1.0);
-    float width = rootWidth * (1.0 - t * 0.85);
+    float width = rootWidth * (kind > 3.5 && kind < 4.5 || kind > 5.5 ? 1.0 : 1.0 - t * 0.85);
 #else
     a3Coverage = 1.0;
-    float width = extra.w * (1.0 - t * 0.85) * max(1.0, dist / 900.0); // wider far off, so blades do not flicker
+    float width = extra.w * (kind > 3.5 && kind < 4.5 || kind > 5.5 ? 1.0 : 1.0 - t * 0.85)
+        * max(1.0, dist / 900.0); // wider far off, so blades do not flicker
 #endif
     vec3 pos = root + vec3(facing * shape.x * width + bend * height, height * t * inversesqrt(1.0 + dot(bend, bend)));
 
@@ -97,9 +103,10 @@ void main()
     // lit mostly as the ground under it, tipped toward the blade's side and its bend
     a3ViewNormal = gl_NormalMatrix * normalize(vec3(vec2(-facing.y, facing.x) * shape.x * 0.35 + bend * 0.5, 1.0));
     a3Up = t;
-    float shade = floor(extra.z / 4.0);
-    float seed = step(1.5, extra.z - 4.0 * shade);
-    float tone = extra.z - 4.0 * shade - 2.0 * seed;
+    float rest = extra.z - 16.0 * kind;
+    float shade = floor(rest / 4.0);
+    float tone = rest - 4.0 * shade;
+    float seed = step(0.5, kind) * step(kind, 1.5);
     a3Colour = mix(a3GrassRoot, a3GrassTip, t * t) * (0.8 + 0.4 * tone)
         + vec3(0.04, 0.03, -0.02) * (tone - 0.5) * t; // some blades a little drier
 #if A3_GRASS_VARIETY
@@ -116,6 +123,20 @@ void main()
     else if (shade > 0.5)
         a3Colour *= vec3(0.62, 0.70, 0.66);
 #endif
+    // the other kinds' own colours
+    if (kind > 2.5 && kind < 3.5) // sedge: darker, bluer green
+        a3Colour *= vec3(0.72, 0.86, 0.84);
+    else if (kind > 3.5 && kind < 4.5) // leaves: a fuller green, lighter toward the middle of the rosette
+        a3Colour = mix(a3Colour, vec3(0.15, 0.30, 0.08) * (0.75 + 0.45 * tone), 0.55) * (1.05 - 0.25 * t);
+    else if (kind > 4.5 && kind < 5.5) // moss on green ground, pale grey-green lichen on ash
+    {
+        float green = a3GrassTip.g - max(a3GrassTip.r, a3GrassTip.b);
+        vec3 moss = mix(vec3(0.52, 0.55, 0.46), vec3(0.28, 0.36, 0.10), smoothstep(0.0, 0.12, green));
+        a3Colour = moss * (0.75 + 0.5 * tone) * (0.85 + 0.3 * t);
+    }
+    else if (kind > 5.5) // mushrooms: a pale stem, a brown cap or now and then a rusty red one
+        a3Colour = t < 0.63 ? vec3(0.78, 0.74, 0.62)
+                            : (tone > 0.8 ? vec3(0.62, 0.22, 0.12) : vec3(0.47, 0.32, 0.19) * (0.8 + 0.4 * tone));
 }
 
 #else

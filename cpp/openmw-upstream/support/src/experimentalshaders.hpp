@@ -37,7 +37,11 @@ namespace Alpha3
         bool mGrassClearance = true; // no blades through rocks, walls and what else stands on the ground
         float mGrassStorm = 1.f; // how hard it leans with the storm in blizzards and ash and blight storms, 0: not
         bool mGrassVariety = true; // seed stalks, short broad clumps and drier patches among the blades
-        bool mGrassAntialiasing = true; // no blade thinner than a pixel, the widened ones faded into the ground
+        bool mGrassSoil = true; // taller and denser on green ground, short and sparse on ash, in meadow patches
+        bool mGrassShapes = true; // leaf rosettes, sedge, moss and lichen, tiny mushrooms among the blades
+        bool mGrassAntialiasing = true;
+        bool mGrassBugs = true; // ants, beetles, grasshoppers, bees, butterflies, dragonflies, gnats, fireflies
+        float mGrassBugDensity = 1.f; // no blade thinner than a pixel, the widened ones faded into the ground
         bool mTreeSway = false;
         float mTreeSwayStrength = 2.5f;
         std::string mTreeSwayTextures; // what leafy textures' names contain, comma separated; empty: the defaults

@@ -85,6 +85,10 @@ namespace Alpha3
             s.mGrassStorm = std::clamp(settingFloat(sCategory, "grass storm", 1.f), 0.f, 3.f);
             s.mGrassVariety = settingBool(sCategory, "grass variety", true);
             s.mGrassAntialiasing = settingBool(sCategory, "grass antialiasing", true);
+            s.mGrassSoil = settingBool(sCategory, "grass soil", true);
+            s.mGrassShapes = settingBool(sCategory, "grass shapes", true);
+            s.mGrassBugs = settingBool(sCategory, "grass bugs", true);
+            s.mGrassBugDensity = std::clamp(settingFloat(sCategory, "grass bug density", 1.f), 0.f, 4.f);
             s.mTreeSway = settingBool(sCategory, "tree sway", false);
             s.mTreeSwayStrength = std::clamp(settingFloat(sCategory, "tree sway strength", 2.5f), 0.f, 4.f);
             s.mTreeSwayTextures = setting(sCategory, "tree sway textures", "");
