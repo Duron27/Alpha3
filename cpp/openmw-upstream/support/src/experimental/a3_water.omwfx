@@ -1,0 +1,454 @@
+uniform_bool uA3ReflectionsOn {
+    default = true;
+    description = "Reflections of what is on screen (OpenMW's own, kept to the sky, fills in the rest)";
+    display_name = "Reflections";
+}
+
+uniform_int uA3Steps {
+    default = 10;
+    min = 4;
+    max = 64;
+    step = 1;
+    description = "Steps of the reflections' march: more finds thinner things, costs more";
+    display_name = "Reflection steps";
+}
+
+uniform_bool uA3LiquidOn {
+    default = true;
+    description = "Realistic water: depth colour, ripples bending what is under it, the sun glittering";
+    display_name = "Realistic water";
+}
+
+uniform_bool uA3ShorelineOn {
+    default = true;
+    description = "Lighter shallows and foam along stretches of the shore";
+    display_name = "Shoreline";
+}
+
+uniform_bool uA3TideOn {
+    default = true;
+    description = "The tide creeping up the beach and back";
+    display_name = "Tide";
+}
+
+uniform_bool uA3MistOn {
+    default = true;
+    description = "Steam and mist low over the water";
+    display_name = "Mist";
+}
+
+uniform_float uA3Reflection {
+    default = 1.0;
+    min = 0.0;
+    max = 1.0;
+    step = 0.05;
+    description = "Reflections of what is on screen on the water";
+    display_name = "Reflection strength";
+}
+
+uniform_float uA3Waves {
+    default = 1.0;
+    min = 0.0;
+    max = 3.0;
+    step = 0.1;
+    description = "How much the waves break up the reflections";
+    display_name = "Waves";
+}
+
+uniform_float uA3Foam {
+    default = 1.0;
+    min = 0.0;
+    max = 2.0;
+    step = 0.05;
+    description = "Foam along the shore";
+    display_name = "Shoreline foam";
+}
+
+uniform_float uA3ShoreWidth {
+    default = 80.0;
+    min = 10.0;
+    max = 400.0;
+    step = 5.0;
+    description = "How far out the shallows reach (water depth, game units)";
+    display_name = "Shoreline width";
+}
+
+uniform_float uA3Mist {
+    default = 1.0;
+    min = 0.0;
+    max = 3.0;
+    step = 0.05;
+    description = "Steam and mist over the water (thickest at dawn and dusk, in fog and rain)";
+    display_name = "Mist strength";
+}
+
+uniform_float uA3Tide {
+    default = 12.0;
+    min = 0.0;
+    max = 60.0;
+    step = 1.0;
+    description = "How high up the beach the tide comes (game units)";
+    display_name = "Tide height";
+}
+
+uniform_float uA3TidePeriod {
+    default = 180.0;
+    min = 10.0;
+    max = 1200.0;
+    step = 10.0;
+    description = "Seconds from one high tide to the next";
+    display_name = "Tide period (seconds)";
+}
+
+uniform_float uA3Liquid {
+    default = 1.0;
+    min = 0.0;
+    max = 2.0;
+    step = 0.05;
+    description = "Realistic water: deeper water darker, ripples bending what is under it, the sun glittering";
+    display_name = "Realistic water strength";
+}
+
+render_target RT_A3Reflect {
+    width_ratio = 0.5;
+    height_ratio = 0.5;
+    internal_format = rgba16f;
+    source_type = half_float;
+    source_format = rgba;
+}
+
+fragment reflect(target=RT_A3Reflect) {
+    // The reflections at half resolution: the water's surface and waves found as in the pass below, the reflected ray
+    // marched through the depth where it would show (rgb: what it meets, a: how much shows)
+
+    omw_In vec2 omw_TexCoord;
+
+    // without sin: a phone's GPU works out sin slowly, and this runs a dozen times a pixel
+    float a3Hash(vec2 p)
+    {
+        vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+        p3 += dot(p3, p3.yzx + 33.33);
+        return fract((p3.x + p3.y) * p3.z);
+    }
+
+    float a3Noise(vec2 p)
+    {
+        vec2 i = floor(p);
+        vec2 f = fract(p);
+        f = f * f * (3.0 - 2.0 * f);
+        return mix(mix(a3Hash(i), a3Hash(i + vec2(1.0, 0.0)), f.x), mix(a3Hash(i + vec2(0.0, 1.0)), a3Hash(i + vec2(1.0, 1.0)), f.x), f.y);
+    }
+
+    // value noise with its slope (x: value, yz: d/dx, d/dy), one lookup instead of three
+    vec3 a3NoiseSlope(vec2 p)
+    {
+        vec2 i = floor(p);
+        vec2 f = fract(p);
+        vec2 u = f * f * (3.0 - 2.0 * f);
+        vec2 du = 6.0 * f * (1.0 - f);
+        float a = a3Hash(i), b = a3Hash(i + vec2(1.0, 0.0)), c = a3Hash(i + vec2(0.0, 1.0)), d = a3Hash(i + vec2(1.0, 1.0));
+        float k = a - b - c + d;
+        return vec3(a + (b - a) * u.x + (c - a) * u.y + k * u.x * u.y, du * (vec2(b - a, c - a) + k * u.yx));
+    }
+
+    // the slope of two sets of waves drifting different ways (over 6 units, as it was measured before)
+    vec2 a3WaveSlope(vec2 p, float time)
+    {
+        vec2 a = a3NoiseSlope(p / 140.0 + time * vec2(0.035, 0.02)).yz / 140.0;
+        vec2 b = a3NoiseSlope(p / 47.0 - time * vec2(0.05, -0.04)).yz / 47.0;
+        return (a + 0.5 * b) * 6.0;
+    }
+
+    // a dither that changes every pixel, to hide the steps of the march
+    float a3Dither(vec2 uv)
+    {
+        vec2 p = uv * omw.resolution;
+        return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
+    }
+
+    vec2 a3ToScreen(vec3 view)
+    {
+        vec4 clip = omw.projectionMatrix * vec4(view, 1.0);
+        return clip.xy / clip.w * 0.5 + 0.5;
+    }
+
+    // What the reflected ray meets on screen: its colour (rgb) and how sure (a; 0: nothing found)
+    vec4 a3Reflect(vec3 start, vec3 dir, float startDistance)
+    {
+        vec3 vs = (omw.viewMatrix * vec4(start, 1.0)).xyz;
+        vec3 rd = normalize((omw.viewMatrix * vec4(dir, 0.0)).xyz);
+        float range = clamp(startDistance * 1.5, 800.0, 6000.0);
+        float jitter = a3Dither(omw_TexCoord);
+        float prevS = 0.0;
+        for (int i = 1; i <= uA3Steps; ++i)
+        {
+            float s = (float(i) - jitter) / float(uA3Steps);
+            s *= s; // more steps near the surface
+            vec3 p = vs + rd * range * s;
+            if (p.z > -1.0)
+                break; // behind the camera
+            vec2 uv = a3ToScreen(p);
+            if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0)
+                break;
+            float scene = omw_GetLinearDepth(uv);
+            float ray = -p.z;
+            float thickness = max(60.0, range * (s - prevS) * 1.5);
+            if (ray > scene && ray - scene < thickness && scene < omw.far * 0.98)
+            {
+                // closer between the last two steps
+                float lo = prevS, hi = s;
+                for (int j = 0; j < 3; ++j)
+                {
+                    float mid = 0.5 * (lo + hi);
+                    vec3 q = vs + rd * range * mid;
+                    vec2 quv = a3ToScreen(q);
+                    if (-q.z > omw_GetLinearDepth(quv))
+                        hi = mid;
+                    else
+                        lo = mid;
+                }
+                uv = a3ToScreen(vs + rd * range * hi);
+                // fade toward the edges of the screen and the end of the range
+                vec2 edge = min(uv, 1.0 - uv);
+                float sure = smoothstep(0.0, 0.08, min(edge.x, edge.y)) * (1.0 - smoothstep(0.7, 1.0, hi));
+                return vec4(omw_GetLastShader(uv).rgb, sure);
+            }
+            prevS = s;
+        }
+        return vec4(0.0);
+    }
+
+    void main()
+    {
+        vec2 uv = omw_TexCoord;
+        omw_FragColor = vec4(0.0);
+        if (uA3ReflectionsOn) {
+        if (!omw.isWaterEnabled)
+            return;
+        vec3 eye = omw.eyePos.xyz;
+        vec3 world = omw_GetWorldPosFromUV(uv);
+        vec3 dir = normalize(world - eye);
+        float level = omw.waterHeight;
+        if (!(eye.z > level && world.z < level && dir.z < -0.0001))
+            return;
+        float t = (level - eye.z) / dir.z;
+        vec3 surface = eye + dir * t;
+        float strength = uA3Waves * 0.6 / (1.0 + t / 2500.0);
+        vec3 n = normalize(vec3(-a3WaveSlope(surface.xy, omw.simulationTime) * strength, 1.0));
+        vec3 r = reflect(dir, n);
+        r.z = max(r.z, 0.02);
+        float fresnel = 0.02 + 0.98 * pow(1.0 - max(dot(-dir, n), 0.0), 5.0);
+        // marched only where it would show: not looking down into the water, not in thick fog
+        float weight = clamp(fresnel * 1.4, 0.0, 1.0) * uA3Reflection * (1.0 - omw_EstimateFogCoverageFromUV(uv));
+        if (weight > 0.04)
+        {
+            vec4 seen = a3Reflect(surface, normalize(r), t);
+            omw_FragColor = vec4(seen.rgb, seen.a * weight);
+        }
+        }
+    }
+}
+
+fragment water(rt1=RT_A3Reflect) {
+    // (OpenMW's .omwfx parser reads comments only inside blocks of GLSL, so this file's notes are here)
+    // The water of the experimental graphics (F2 menu: water reflections, water shoreline, water mist), served as
+    // shaders/a3_water.omwfx every setting live in the F2 menu (shaders.yaml keeps them).
+    //
+    // OpenMW's water writes no depth, so the depth here is the ground under it: where the view ray crosses the water's
+    // height first, this pixel is water, and the depth below gives how deep it is there.
+    //  - reflections: marched through the screen's depth from the surface (screen space reflections). Where they find
+    //    nothing (off screen, the sky) OpenMW's own reflection shows, set to the sky only (cheap) while this is on.
+    //  - shoreline: lighter shallows and foam in bands rolling in, by the depth
+    //  - mist: a low layer of steam over the water level, in drifting wisps
+    //  - tide: a sheet of water creeping up the beach and back, a wet band left behind
+    //  - liquid: depth colour, ripples bending what is seen through the water, the sun glittering
+
+
+    omw_In vec2 omw_TexCoord;
+
+    // without sin: a phone's GPU works out sin slowly, and this runs a dozen times a pixel
+    float a3Hash(vec2 p)
+    {
+        vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+        p3 += dot(p3, p3.yzx + 33.33);
+        return fract((p3.x + p3.y) * p3.z);
+    }
+
+    float a3Noise(vec2 p)
+    {
+        vec2 i = floor(p);
+        vec2 f = fract(p);
+        f = f * f * (3.0 - 2.0 * f);
+        return mix(mix(a3Hash(i), a3Hash(i + vec2(1.0, 0.0)), f.x), mix(a3Hash(i + vec2(0.0, 1.0)), a3Hash(i + vec2(1.0, 1.0)), f.x), f.y);
+    }
+
+    // value noise with its slope (x: value, yz: d/dx, d/dy), one lookup instead of three
+    vec3 a3NoiseSlope(vec2 p)
+    {
+        vec2 i = floor(p);
+        vec2 f = fract(p);
+        vec2 u = f * f * (3.0 - 2.0 * f);
+        vec2 du = 6.0 * f * (1.0 - f);
+        float a = a3Hash(i), b = a3Hash(i + vec2(1.0, 0.0)), c = a3Hash(i + vec2(0.0, 1.0)), d = a3Hash(i + vec2(1.0, 1.0));
+        float k = a - b - c + d;
+        return vec3(a + (b - a) * u.x + (c - a) * u.y + k * u.x * u.y, du * (vec2(b - a, c - a) + k * u.yx));
+    }
+
+    // the slope of two sets of waves drifting different ways (over 6 units, as it was measured before)
+    vec2 a3WaveSlope(vec2 p, float time)
+    {
+        vec2 a = a3NoiseSlope(p / 140.0 + time * vec2(0.035, 0.02)).yz / 140.0;
+        vec2 b = a3NoiseSlope(p / 47.0 - time * vec2(0.05, -0.04)).yz / 47.0;
+        return (a + 0.5 * b) * 6.0;
+    }
+
+    // a dither that changes every pixel, to hide the steps of the march
+    float a3Dither(vec2 uv)
+    {
+        vec2 p = uv * omw.resolution;
+        return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
+    }
+
+    vec2 a3ToScreen(vec3 view)
+    {
+        vec4 clip = omw.projectionMatrix * vec4(view, 1.0);
+        return clip.xy / clip.w * 0.5 + 0.5;
+    }
+
+    void main()
+    {
+        vec2 uv = omw_TexCoord;
+        vec3 c = omw_GetLastShader(uv).rgb;
+        if (!omw.isWaterEnabled)
+        {
+            omw_FragColor = vec4(c, 1.0);
+            return;
+        }
+        vec3 eye = omw.eyePos.xyz;
+        vec3 world = omw_GetWorldPosFromUV(uv);
+        float sceneDistance = length(world - eye);
+        vec3 dir = (world - eye) / max(sceneDistance, 0.001);
+        float level = omw.waterHeight;
+        float time = omw.simulationTime;
+        float fog = 0.0; // worked out only where it is used
+
+        vec3 sunDir = normalize(omw.sunPos.xyz);
+        vec3 light = omw.ambientColor.rgb + omw.sunColor.rgb * max(sunDir.z, 0.0) * omw.sunVis;
+        vec3 foamColour = vec3(0.86, 0.89, 0.91) * light;
+        // stretches of the shore that get foam (about half), the same on the water and on the beach
+        float stretch = 0.0;
+
+        bool water = eye.z > level && world.z < level && dir.z < -0.0001;
+        if (water)
+        {
+            float t = (level - eye.z) / dir.z;
+            vec3 surface = eye + dir * t;
+            float depth = level - world.z;
+            fog = omw_EstimateFogCoverageFromUV(uv);
+            stretch = smoothstep(0.38, 0.58, a3Noise(surface.xy / 420.0 + vec2(time * 0.004, 0.0)));
+
+            // the waves' slope, gentler with distance (no shimmer far out)
+            float strength = uA3Waves * 0.6 / (1.0 + t / 2500.0);
+            vec2 slope = a3WaveSlope(surface.xy, time);
+            vec3 n = normalize(vec3(-slope * strength, 1.0));
+
+        if (uA3LiquidOn) {
+            // ripples: what is under and behind the water bent by the waves, more where it is deeper
+            vec2 bentUv = uv + slope * strength * clamp(depth / 60.0, 0.2, 1.0) * (250.0 / max(t, 200.0)) * 0.15;
+            if (omw_GetWorldPosFromUV(bentUv).z < level)
+                c = omw_GetLastShader(bentUv).rgb;
+            // light absorbed with depth: clear and tinted by the bottom in the shallows, dark blue-green deep down
+            vec3 deep = vec3(0.04, 0.11, 0.13) * (omw.ambientColor.rgb + omw.sunColor.rgb * 0.5) * 1.6;
+            c = mix(c, deep, (1.0 - exp(-depth / 220.0)) * 0.55 * uA3Liquid);
+            // the sun glittering on the waves
+            vec3 halfway = normalize(sunDir - dir);
+            float glint = pow(max(dot(n, halfway), 0.0), 900.0) * 2.5 * smoothstep(150.0, 900.0, t); // OpenMW's own highlight is up close
+            c += omw.sunColor.rgb * glint * omw.sunVis * max(sunDir.z, 0.0) * (1.0 - fog) * uA3Liquid;
+        }
+
+        if (uA3ReflectionsOn) {
+            // marched at half resolution by the pass before (what it found, and how much of it shows)
+            vec4 seen = omw_Texture2D(RT_A3Reflect, uv);
+            c = mix(c, seen.rgb, seen.a);
+        }
+
+        if (uA3ShorelineOn) {
+            float width = uA3ShoreWidth;
+            float shallow = 1.0 - smoothstep(0.0, width, depth);
+            // the shallows lighter, the sand showing through
+            c = mix(c, c * 1.12 + vec3(0.015, 0.03, 0.025) * light, shallow * 0.5);
+            // foam: a line at the edge and bands rolling in, broken up, on its stretches of the shore
+            float broken = a3Noise(surface.xy / 18.0 + time * 0.1) * 0.6 + a3Noise(surface.xy / 6.0 - time * 0.15) * 0.4;
+            float lap = smoothstep(0.1, 1.0, sin(time * 0.6 + a3Noise(surface.xy / 160.0) * 12.0));
+            float edge = 1.0 - smoothstep(0.0, width * 0.12, depth);
+            float band = sin(depth / width * 14.0 - time * 1.4 + broken * 3.0) * 0.5 + 0.5;
+            float foam = max(edge * smoothstep(0.25, 0.55, broken) * (0.6 + 0.4 * lap),
+                smoothstep(0.75, 0.95, band) * shallow * smoothstep(0.4, 0.7, broken));
+            foam *= stretch * uA3Foam * (1.0 - fog) * (1.0 - smoothstep(2000.0, 6000.0, t));
+            c = mix(c, foamColour, clamp(foam, 0.0, 1.0) * 0.85);
+        }
+        }
+        // the tide: a sheet of water over the beach just above the water's height, creeping up and back over a few
+        // minutes, waves washing up and down it, foam at its edge, the sand it left behind darker
+        else if (uA3TideOn && eye.z > level && world.z >= level && world.z < level + uA3Tide * 1.6 && !omw.isInterior)
+        {
+            fog = omw_EstimateFogCoverageFromUV(uv);
+            stretch = smoothstep(0.38, 0.58, a3Noise(world.xy / 420.0 + vec2(time * 0.004, 0.0)));
+            float above = world.z - level;
+            float swash = 0.3 * sin(time * 0.9 + a3Noise(world.xy / 120.0) * 6.28);
+            float reach = uA3Tide * (0.5 + 0.5 * sin(time * 6.2832 / max(uA3TidePeriod, 1.0)) + swash);
+            float covered = 1.0 - smoothstep(reach - 1.5, reach + 0.5, above);
+            float wet = 1.0 - smoothstep(reach, uA3Tide * 1.5, above);
+            c *= mix(1.0, 0.82, wet * (1.0 - covered));
+            vec3 sheet = mix(c * 0.85, omw.fogColor.rgb * 0.5 + omw.skyColor.rgb * 0.25, 0.3);
+            c = mix(c, sheet, covered * 0.45 * (1.0 - fog));
+        if (uA3ShorelineOn) {
+            float broken = a3Noise(world.xy / 18.0 + time * 0.1) * 0.6 + a3Noise(world.xy / 6.0 - time * 0.15) * 0.4;
+            // a soft, broken edge of foam where the wash reaches, not a line drawn round every shore
+            float line = (1.0 - smoothstep(0.0, 4.0, abs(above - reach))) * smoothstep(0.45, 0.75, broken);
+            c = mix(c, foamColour, clamp(line * stretch * uA3Foam * (1.0 - fog), 0.0, 1.0) * 0.5);
+        }
+        }
+
+        if (uA3MistOn) {
+        // a layer of steam 160 units over the water's height, outside; the part of the view ray inside it, in wisps
+        if (!omw.isInterior && uA3Mist > 0.0)
+        {
+            float top = level + 160.0;
+            float tA = abs(dir.z) > 0.0001 ? (level - eye.z) / dir.z : -1.0;
+            float tB = abs(dir.z) > 0.0001 ? (top - eye.z) / dir.z : -1.0;
+            float enter = eye.z >= level && eye.z <= top ? 0.0 : max(min(tA, tB), 0.0);
+            float leave = max(tA, tB);
+            if (abs(dir.z) <= 0.0001)
+                leave = eye.z >= level && eye.z <= top ? 1e9 : 0.0;
+            leave = min(leave, sceneDistance);
+            float inside = max(leave - enter, 0.0);
+            if (inside > 0.0)
+            {
+                // thickest at dawn and dusk, in fog and rain
+                float hour = omw.gameHour;
+                float morning = 1.0 - smoothstep(0.0, 2.5, abs(hour - 6.0));
+                float evening = 1.0 - smoothstep(0.0, 2.0, abs(hour - 19.5));
+                float weather = omw.weatherID == 2 || omw.weatherID == 4 || omw.weatherID == 5 ? 1.0 : 0.0;
+                float amount = uA3Mist * (0.12 + 0.6 * max(morning, evening) + 0.4 * weather);
+                fog = omw_EstimateFogCoverageFromUV(uv);
+                vec3 middle = eye + dir * (0.5 * (enter + leave));
+                float wisps = a3Noise(middle.xy / 180.0 + time * vec2(0.02, 0.012));
+                float mist = 1.0 - exp(-inside / 2600.0 * amount * (0.3 + 1.8 * wisps));
+                vec3 colour = mix(omw.fogColor.rgb, vec3(0.85), 0.3) * (0.6 + 0.4 * omw.sunVis);
+                c = mix(c, colour, clamp(mist, 0.0, 0.8) * (1.0 - fog));
+            }
+        }
+        }
+
+        omw_FragColor = vec4(c, 1.0);
+    }
+}
+
+technique {
+    description = "Alpha3 experimental: water reflections, shoreline and mist";
+    version = "1.0";
+    author = "Alpha3";
+    passes = reflect, water;
+    flags = disable_underwater;
+}

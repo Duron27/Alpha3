@@ -1,0 +1,291 @@
+uniform_int uA3Steps {
+    default = 12;
+    min = 6;
+    max = 64;
+    step = 1;
+    description = "Steps through the cloud layer: quality against cost";
+    display_name = "Quality (steps)";
+}
+
+uniform_int uA3LightSteps {
+    default = 2;
+    min = 0;
+    max = 8;
+    step = 1;
+    description = "Steps toward the sun from each: their shading";
+    display_name = "Light steps";
+}
+
+uniform_bool uA3FollowWeather {
+    default = true;
+    description = "More and darker clouds as the weather turns";
+    display_name = "Follow weather";
+}
+
+uniform_float uA3Coverage {
+    default = 1.0;
+    min = 0.0;
+    max = 2.0;
+    step = 0.05;
+    description = "How much of the sky the clouds cover (times what the weather gives)";
+    display_name = "Coverage";
+}
+
+uniform_float uA3Height {
+    default = 7000.0;
+    min = 2000.0;
+    max = 30000.0;
+    step = 250.0;
+    description = "Height of the cloud layer's base (game units)";
+    display_name = "Height";
+}
+
+uniform_float uA3Thickness {
+    default = 3000.0;
+    min = 500.0;
+    max = 15000.0;
+    step = 250.0;
+    description = "Thickness of the cloud layer";
+    display_name = "Thickness";
+}
+
+uniform_float uA3Speed {
+    default = 1.0;
+    min = 0.0;
+    max = 5.0;
+    step = 0.1;
+    description = "How fast they drift (with the wind)";
+    display_name = "Speed";
+}
+
+uniform_float uA3Density {
+    default = 1.0;
+    min = 0.1;
+    max = 4.0;
+    step = 0.1;
+    description = "How thick and dark they are inside";
+    display_name = "Density";
+}
+
+uniform_float uA3Scale {
+    default = 1.0;
+    min = 0.3;
+    max = 3.0;
+    step = 0.05;
+    description = "Size of the cloud shapes";
+    display_name = "Scale";
+}
+
+uniform_float uA3Detail {
+    default = 0.35;
+    min = 0.0;
+    max = 1.0;
+    step = 0.05;
+    description = "Wispy detail eaten out of their edges";
+    display_name = "Detail";
+}
+
+uniform_float uA3SilverLining {
+    default = 0.6;
+    min = 0.0;
+    max = 2.0;
+    step = 0.05;
+    description = "Bright edges toward the sun";
+    display_name = "Silver lining";
+}
+
+uniform_float uA3Opacity {
+    default = 1.0;
+    min = 0.0;
+    max = 1.0;
+    step = 0.05;
+    description = "How much they show over the sky";
+    display_name = "Opacity";
+}
+
+render_target RT_A3Clouds {
+    width_ratio = 0.35;
+    height_ratio = 0.35;
+    internal_format = rgba16f;
+    source_type = half_float;
+    source_format = rgba;
+}
+
+fragment march(target=RT_A3Clouds) {
+    // (OpenMW's .omwfx parser reads comments only inside blocks of GLSL, so this file's notes are here)
+    // Volumetric clouds of the experimental graphics (F2 menu: volumetric clouds), served as
+    // shaders/a3_clouds.omwfx every setting live in the F2 menu. A layer of clouds from
+    // noise, marched through where the sky shows, at part of the screen's resolution (F2 menu: cloud resolution),
+    // lit toward the sun; more, lower-looking and darker as the weather turns (clouds follow weather). Then laid over
+    // the sky at full resolution.
+
+
+    omw_In vec2 omw_TexCoord;
+
+    float a3Hash3(vec3 p)
+    {
+        p = mod(p, 289.0);
+        p = fract(p * 0.3183099 + 0.1);
+        p *= 17.0;
+        return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+    }
+
+    float a3Noise3(vec3 p)
+    {
+        vec3 i = floor(p);
+        vec3 f = fract(p);
+        f = f * f * (3.0 - 2.0 * f);
+        return mix(mix(mix(a3Hash3(i), a3Hash3(i + vec3(1.0, 0.0, 0.0)), f.x),
+                       mix(a3Hash3(i + vec3(0.0, 1.0, 0.0)), a3Hash3(i + vec3(1.0, 1.0, 0.0)), f.x), f.y),
+                   mix(mix(a3Hash3(i + vec3(0.0, 0.0, 1.0)), a3Hash3(i + vec3(1.0, 0.0, 1.0)), f.x),
+                       mix(a3Hash3(i + vec3(0.0, 1.0, 1.0)), a3Hash3(i + vec3(1.0, 1.0, 1.0)), f.x), f.y), f.z);
+    }
+
+    // how much of the sky each weather covers: clear, cloudy, foggy, overcast, rain, thunder, ash, blight, snow, blizzard
+    float a3WeatherCover(int id)
+    {
+        if (id == 0) return 0.3;
+        if (id == 1) return 0.55;
+        if (id == 2) return 0.6;
+        if (id == 3) return 0.8;
+        if (id == 4) return 0.85;
+        if (id == 5) return 0.92;
+        if (id == 6) return 0.6;
+        if (id == 7) return 0.65;
+        if (id == 8) return 0.8;
+        return 0.92;
+    }
+
+    float a3Dither(vec2 uv)
+    {
+        vec2 p = uv * omw.resolution;
+        return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
+    }
+
+    // the cloud's density at a point (world units): broad shapes, eaten into by detail (cheaper: no detail)
+    float a3Cloud(vec3 p, float cover, vec3 drift, bool detail)
+    {
+        float base = uA3Height;
+        float height = (p.z - base) / uA3Thickness;
+        if (height < 0.0 || height > 1.0)
+            return 0.0;
+        // rounded bottoms, thinning tops
+        float profile = smoothstep(0.0, 0.15, height) * (1.0 - smoothstep(0.45, 1.0, height));
+        vec3 q = (p + drift) / (9000.0 * uA3Scale);
+        float threshold = (1.0 - cover) * 0.75;
+        // the broad shape first: where even the finer octaves at their most could not make cloud, no more lookups
+        float shape = a3Noise3(q) * 0.6;
+        if ((shape + 0.4) * profile <= threshold)
+            return 0.0;
+        if (!detail)
+            return max(((shape + 0.2) * profile - threshold) * 4.0 * uA3Density, 0.0); // toward the sun: one octave
+        shape += a3Noise3(q * 2.3) * 0.3;
+        if ((shape + 0.1) * profile <= threshold)
+            return 0.0;
+        shape += a3Noise3(q * 5.1) * 0.1;
+        float d = shape * profile - threshold;
+        if (d <= 0.0)
+            return 0.0;
+        if (detail)
+            d -= uA3Detail * 0.12 * a3Noise3(q * 13.0 + drift / 4000.0);
+        return max(d, 0.0) * 4.0 * uA3Density;
+    }
+
+    void main()
+    {
+        vec2 uv = omw_TexCoord;
+        if (omw.isInterior || omw_GetLinearDepth(uv) < omw.far * 0.98)
+        {
+            omw_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+            return;
+        }
+        vec3 eye = omw.eyePos.xyz;
+        vec3 dir = normalize(omw_GetWorldPosFromUV(uv) - eye);
+        float base = uA3Height;
+        float top = base + uA3Thickness;
+        if (dir.z < 0.01 || eye.z > top)
+        {
+            omw_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+            return;
+        }
+        float t0 = max((base - eye.z) / dir.z, 0.0);
+        float t1 = (top - eye.z) / dir.z;
+        // the layer seen far toward the horizon is cut short and faded
+        t1 = min(t1, t0 + 30000.0);
+
+        float cover = 0.5;
+        if (uA3FollowWeather) {
+        cover = mix(a3WeatherCover(omw.weatherID), a3WeatherCover(omw.nextWeatherID), omw.weatherTransition);
+        }
+        cover = clamp(cover * uA3Coverage, 0.0, 1.0);
+        float storm = smoothstep(0.75, 0.95, cover);
+
+        // a steady drift: the time scaled by the wind as it is now would jump each time the wind changes
+        vec3 drift = vec3(-0.3, 1.0, 0.0) * omw.simulationTime * 90.0 * uA3Speed;
+        vec3 sunDir = normalize(omw.sunPos.xyz);
+        float cosAngle = dot(dir, sunDir);
+        // forward scattering (a silver lining toward the sun) over an even glow
+        float g = 0.6;
+        float phase = mix(1.0, (1.0 - g * g) / pow(1.0 + g * g - 2.0 * g * cosAngle, 1.5) * 0.25, 0.5 * uA3SilverLining);
+        vec3 sun = omw.sunColor.rgb * omw.sunVis * (1.0 - 0.6 * storm);
+        vec3 ambient = mix(omw.skyColor.rgb, omw.fogColor.rgb, 0.5) * (1.0 - 0.45 * storm) + vec3(0.04);
+
+        float stepLength = (t1 - t0) / float(uA3Steps);
+        float t = t0 + stepLength * a3Dither(uv);
+        float transmittance = 1.0;
+        vec3 colour = vec3(0.0);
+        for (int i = 0; i < uA3Steps; ++i)
+        {
+            vec3 p = eye + dir * t;
+            float d = a3Cloud(p, cover, drift, true);
+            if (d > 0.001)
+            {
+                float toSun = 0.0;
+        if (uA3LightSteps > 0) {
+                float lightStep = uA3Thickness * 0.5 / float(uA3LightSteps);
+                for (int j = 1; j <= uA3LightSteps; ++j)
+                    toSun += a3Cloud(p + sunDir * lightStep * float(j), cover, drift, false) * lightStep;
+        }
+                float lit = exp(-toSun / 600.0);
+                // darker underneath
+                float heightIn = clamp((p.z - base) / uA3Thickness, 0.0, 1.0);
+                vec3 light = sun * lit * phase * 1.4 + ambient * (0.55 + 0.45 * heightIn);
+                float absorbed = 1.0 - exp(-d * stepLength / 900.0);
+                colour += transmittance * absorbed * light;
+                transmittance *= 1.0 - absorbed;
+                if (transmittance < 0.02)
+                    break;
+            }
+            t += stepLength;
+        }
+        // into the haze toward the horizon
+        float far = smoothstep(8000.0, 60000.0, t0);
+        colour = mix(colour, omw.fogColor.rgb * (1.0 - transmittance), far);
+        float shown = uA3Opacity;
+        omw_FragColor = vec4(colour * shown, 1.0 - (1.0 - transmittance) * shown);
+    }
+}
+
+fragment apply(rt1=RT_A3Clouds) {
+    omw_In vec2 omw_TexCoord;
+
+    void main()
+    {
+        vec2 uv = omw_TexCoord;
+        vec3 c = omw_GetLastShader(uv).rgb;
+        if (!omw.isInterior && omw_GetLinearDepth(uv) >= omw.far * 0.98)
+        {
+            vec4 clouds = omw_Texture2D(RT_A3Clouds, uv);
+            c = c * clouds.a + clouds.rgb;
+        }
+        omw_FragColor = vec4(c, 1.0);
+    }
+}
+
+technique {
+    description = "Alpha3 experimental: volumetric clouds";
+    version = "1.0";
+    author = "Alpha3";
+    passes = march, apply;
+    flags = disable_interiors, disable_underwater;
+}

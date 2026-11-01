@@ -1,0 +1,6 @@
+# Words of Alpha3's own settings page (scripts/alpha3)
+Alpha3: "Alpha3"
+Alpha3Description: "Alpha3's tools"
+Tools: "Tools"
+VfsBrowser: "VFS browser"
+VfsBrowserDescription: "The game's files as the engine sees them: every data folder and archive merged, where each file comes from, previews of textures and text."

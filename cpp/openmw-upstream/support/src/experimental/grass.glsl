@@ -1,4 +1,4 @@
-// Grass blades of the experimental graphics ([Experimental] grass), drawn by src/grass.cpp over the terrain where its
+// Grass blades of the experimental graphics (F2 menu: grass), drawn by src/grass.cpp over the terrain where its
 // grassy textures are painted. One source for both stages: A3_VERTEX picks the vertex shader. Written in the GLSL 1.20
 // of OpenMW's own shaders, translated for OpenGL ES like them.
 //
@@ -11,7 +11,8 @@
 // A blade of grass is tapered here; a leaf's and a mushroom's outline comes in the side (x) as made.
 // They sway in the wind (OpenMW's windSpeed, faster in storms) and part around the player (playerPos), and shrink into
 // the ground toward A3_GRASS_DISTANCE, where they end. Settings of grass.cpp as defines:
-//   A3_GRASS_STORM      ten times how hard they lean with a storm (blizzards, ash and blight storms: windSpeed 0.8 and more)
+//   a3GrassWind, a3GrassStorm (uniforms, from the F2 menu while the game runs): how hard they sway, and lean with a
+//                       storm (blizzards, ash and blight storms: windSpeed 0.8 and more)
 //   A3_GRASS_VARIETY    1: seed stalks and drier patches
 //   A3_GRASS_AA         1: no blade thinner than a pixel (A3_SCREEN_HEIGHT pixels high), widened ones faded to the root
 
@@ -55,10 +56,9 @@ void main()
     float swell = sin(time * 1.1 + dot(world.xy, vec2(0.0021, 0.0013)));
     float flutter = sin(time * 3.7 + dot(world.xy, vec2(0.031, 0.027)) + shape.z * 3.0);
     vec2 sway = vec2(0.8, 0.6) * (swell * 0.7 + 0.3) * gust + vec2(-facing.y, facing.x) * flutter * gust * 0.25;
-#if A3_GRASS_STORM > 0
     // A storm lays it down the way it blows (the engine's storms all blow toward +y) in gusts that roll across the
     // field one after another, the blades whipping as each one passes
-    float storm = smoothstep(0.6, 0.85, windSpeed) * float(A3_GRASS_STORM) / 10.0;
+    float storm = smoothstep(0.6, 0.85, windSpeed) * a3GrassStorm;
     if (storm > 0.0)
     {
         float front = world.y * 0.0035 + sin(world.x * 0.0021) * 1.7 - osg_SimulationTime * 2.6;
@@ -68,7 +68,6 @@ void main()
         sway = mix(sway, vec2(0.0), min(storm, 1.0) * 0.6)
             + vec2(0.0, 1.0) * storm * (0.7 + 1.6 * wave) + vec2(-facing.y, facing.x) * whip * storm;
     }
-#endif
 
     // parted around the player's feet
     vec2 away = world.xy - playerPos.xy;

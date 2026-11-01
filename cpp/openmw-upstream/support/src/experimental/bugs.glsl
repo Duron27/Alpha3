@@ -1,4 +1,4 @@
-// Bugs among the grass of the experimental graphics ([Experimental] grass bugs), drawn by src/grass.cpp with the tiles'
+// Bugs among the grass of the experimental graphics (F2 menu: grass bugs), drawn by src/grass.cpp with the tiles'
 // blades. One source for both stages: A3_VERTEX picks the vertex shader. GLSL 1.20, as OpenMW's own shaders.
 //
 // Each bug is a quad (four vertices) carrying its home in gl_Vertex (the terrain chunk's space, on the ground); where it
@@ -31,6 +31,7 @@ uniform A3Sun sun;
 uniform float osg_SimulationTime;
 uniform mat4 projectionMatrix;
 uniform float windSpeed;
+uniform float a3Birds; // from the F2 menu while the game runs: 0 the birds hidden
 
 float hash(float n)
 {
@@ -60,15 +61,19 @@ void main()
     float shown = 1.0;
     if (kind > 2.5 && kind < 5.5)
         shown = step(0.35, daylight) * step(windSpeed, 0.55);
-    else if (kind > 6.5)
-        shown = step(daylight, 0.25) * step(windSpeed, 0.5);
-    else if (kind > 5.5)
+    else if (kind > 6.5 && kind < 7.5 || kind > 9.5)
+        shown = step(daylight, 0.25) * step(windSpeed, 0.5); // fireflies, moths
+    else if (kind > 5.5 && kind < 6.5)
         shown = step(windSpeed, 0.6);
+    else if (kind > 7.5 && kind < 8.5)
+        shown = step(0.2, daylight) * step(windSpeed, 0.8); // birds keep out of storms
+    else if (kind > 8.5 && kind < 9.5)
+        shown = step(windSpeed, 0.75); // frogs
 
     vec3 pos;
     vec2 heading = vec2(1.0, 0.0);
     float flap = 1.0;
-    bool ground = kind < 2.5;
+    bool ground = kind < 2.5 || kind > 8.5 && kind < 9.5;
     if (kind < 0.5 || (kind > 0.5 && kind < 1.5))
     {
         // ants follow a winding loop, one after another; beetles the same, slowly, stopping now and then
@@ -128,6 +133,37 @@ void main()
             height + 7.0 * sin(time * 2.3 + along * 7.0));
         heading = vec2(cos(time * 3.1 + along * 17.0), -sin(time * 2.7 + along * 11.0));
     }
+    else if (kind > 7.5 && kind < 8.5)
+    {
+        // birds: a flock wheeling in wide circles high up, each a little apart, flapping then gliding
+        float s = along + time * speed / roam;
+        float r = roam * (1.0 + 0.12 * sin(time * 0.05 + seed * 6.0));
+        pos = vec3(r * vec2(cos(s), sin(s) * 0.8) + (hash2(seed * 37.0) - 0.5) * 30.0,
+            height + 40.0 * sin(time * 0.11 + seed * 5.0));
+        heading = vec2(-sin(s), cos(s) * 0.8);
+        float beat = fract(time * 0.12 + seed);
+        flap = beat < 0.45 ? sin(time * 9.0 + seed * 20.0) : 0.35; // a glide with the wings held out
+    }
+    else if (kind > 8.5 && kind < 9.5)
+    {
+        // frogs: sitting still, now and then a long leap
+        float n = floor(time / 6.0 + seed);
+        float f = fract(time / 6.0 + seed);
+        float u = clamp(f / 0.12, 0.0, 1.0);
+        vec2 from = hash2(n + seed * 71.0) * roam, to = hash2(n + 1.0 + seed * 71.0) * roam;
+        pos = vec3(mix(from, to, smoothstep(0.0, 1.0, u)), 4.0 * 10.0 * u * (1.0 - u));
+        heading = to - from;
+    }
+    else if (kind > 9.5)
+    {
+        // moths: fluttering about in loose loops at night
+        float s = along + time * speed / roam;
+        pos = vec3(roam * vec2(sin(s) + 0.6 * sin(3.1 * s), cos(1.3 * s) + 0.3 * sin(2.1 * s))
+                + vec2(sin(time * 11.0 + seed * 9.0), cos(time * 9.0)) * 3.0,
+            height + 10.0 * sin(time * 1.7 + seed * 9.0));
+        heading = vec2(cos(s) + 1.86 * cos(3.1 * s), -1.3 * sin(1.3 * s) + 0.63 * cos(2.1 * s));
+        flap = sin(time * 22.0 + seed * 20.0);
+    }
     else
     {
         // fireflies: drifting slowly, glowing on and off
@@ -144,11 +180,15 @@ void main()
 
     vec4 viewCentre = gl_ModelViewMatrix * vec4(centre, 1.0);
     float dist = length(viewCentre.xyz);
-    float far = kind < 0.5 || kind > 5.5 && kind < 6.5 ? A3_BUG_DISTANCE * 0.45 : A3_BUG_DISTANCE;
+    float far = kind < 0.5 || kind > 5.5 && kind < 6.5 ? A3_BUG_DISTANCE * 0.45
+        : kind > 7.5 && kind < 8.5 ? A3_BUG_DISTANCE * 3.0 : A3_BUG_DISTANCE;
     size *= shown * step(dist, far);
+    if (kind > 7.5 && kind < 8.5)
+        size *= a3Birds;
 
     // its outline is a quad along the way it heads: lying on the ground for walkers, facing the camera for fliers
-    float wide = kind > 2.5 && kind < 4.5 ? 1.0 : kind > 4.5 && kind < 5.5 ? 0.85 : kind > 0.5 && kind < 1.5 ? 0.7 : 0.5;
+    float wide = kind > 2.5 && kind < 4.5 || kind > 7.5 && kind < 8.5 || kind > 9.5 ? 1.0
+        : kind > 8.5 && kind < 9.5 ? 0.8 : kind > 4.5 && kind < 5.5 ? 0.85 : kind > 0.5 && kind < 1.5 ? 0.7 : 0.5;
     vec4 viewPos;
     if (ground)
     {
@@ -266,6 +306,41 @@ void main()
     {
         inside = blob(p, vec2(0.0), vec2(0.6)) < 1.0;
         colour = vec3(0.05, 0.05, 0.04);
+    }
+    else if (kind > 7.5 && kind < 8.5)
+    {
+        // bird: a body and swept wings, raised and lowered as it flaps; a crow, a gull or a hawk
+        float open = 0.35 + 0.65 * abs(a3Flap);
+        vec2 q = vec2(p.x - abs(p.y) * 0.45, p.y / open);
+        bool body = blob(p, vec2(0.05, 0.0), vec2(0.75, 0.16)) < 1.0;
+        bool wings = blob(vec2(q.x, abs(q.y)), vec2(0.0, 0.5), vec2(0.22, 0.52)) < 1.0;
+        bool tail = blob(p, vec2(0.78, 0.0), vec2(0.2, 0.14)) < 1.0;
+        inside = body || wings || tail;
+        vec3 tint = seed < 0.4 ? vec3(0.05, 0.05, 0.06) : seed < 0.7 ? vec3(0.82, 0.82, 0.8) : vec3(0.35, 0.24, 0.13);
+        colour = wings && !body ? tint * (abs(q.y) > 0.8 ? 0.6 : 1.0) : tint * 0.85;
+    }
+    else if (kind > 8.5 && kind < 9.5)
+    {
+        // frog: a squat body, the legs folded at its sides, mottled green or brown
+        bool body = blob(p, vec2(0.0, 0.0), vec2(0.7, 0.55)) < 1.0;
+        bool head = blob(p, vec2(-0.6, 0.0), vec2(0.3, 0.42)) < 1.0;
+        bool legs = blob(vec2(p.x, abs(p.y)), vec2(0.45, 0.6), vec2(0.4, 0.2)) < 1.0
+            || blob(vec2(p.x, abs(p.y)), vec2(-0.3, 0.6), vec2(0.18, 0.14)) < 1.0;
+        inside = body || head || legs;
+        vec3 tint = seed < 0.6 ? vec3(0.18, 0.32, 0.1) : vec3(0.33, 0.25, 0.12);
+        float spots = step(0.75, fract(sin(dot(floor(p * 4.0), vec2(12.9, 78.2))) * 43758.5));
+        colour = tint * (1.0 - 0.45 * spots);
+    }
+    else if (kind > 9.5)
+    {
+        // moth: broad dusty wings about a furry body, pale grey-brown
+        float open = max(abs(a3Flap), 0.25);
+        vec2 q = vec2(p.x, p.y / open);
+        float w = min(blob(vec2(q.x, abs(q.y)), vec2(-0.1, 0.5), vec2(0.5, 0.55)),
+            blob(vec2(q.x, abs(q.y)), vec2(0.4, 0.35), vec2(0.3, 0.32)));
+        bool body = blob(p, vec2(0.0, 0.0), vec2(0.65, 0.14)) < 1.0;
+        inside = body || w < 1.0;
+        colour = body ? vec3(0.3, 0.25, 0.2) : vec3(0.62, 0.57, 0.48) * (w > 0.6 ? 0.75 : 1.0);
     }
     else
     {

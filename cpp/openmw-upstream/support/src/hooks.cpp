@@ -316,6 +316,7 @@ namespace Alpha3
                 occlusionDrawableAdded(cullVisitor, drawable, modelView);
                 textureStreamingDrawableAdded(cullVisitor, drawable, modelView);
                 grassDrawableAdded(cullVisitor, drawable, modelView);
+                wetGroundDrawableAdded(cullVisitor, drawable);
             }
 
             const osg::StateSet* drawableState(osg::NodeVisitor& cullVisitor, osg::Drawable& drawable) override

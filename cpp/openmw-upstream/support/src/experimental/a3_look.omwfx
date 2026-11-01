@@ -4,6 +4,7 @@ uniform_float uA3Saturation {
     max = 2.0;
     step = 0.05;
     description = "Colour";
+    display_name = "Saturation";
 }
 
 uniform_float uA3Contrast {
@@ -12,6 +13,7 @@ uniform_float uA3Contrast {
     max = 1.5;
     step = 0.01;
     description = "Contrast";
+    display_name = "Contrast";
 }
 
 uniform_float uA3Grade {
@@ -20,6 +22,7 @@ uniform_float uA3Grade {
     max = 1.0;
     step = 0.05;
     description = "Warm lights and cool shadows";
+    display_name = "Grade";
 }
 
 uniform_float uA3Haze {
@@ -28,6 +31,7 @@ uniform_float uA3Haze {
     max = 1.0;
     step = 0.05;
     description = "Haze of the sky's colour with distance (outside)";
+    display_name = "Haze";
 }
 
 uniform_float uA3Vignette {
@@ -36,11 +40,12 @@ uniform_float uA3Vignette {
     max = 1.0;
     step = 0.05;
     description = "Darker corners";
+    display_name = "Vignette";
 }
 
 fragment look {
     // (OpenMW's .omwfx parser reads comments only inside blocks of GLSL, so this file's notes are here)
-    // Colour and atmosphere of the experimental graphics ([Experimental] look): a filmic tone curve in place of the hard clip,
+    // Colour and atmosphere of the experimental graphics (F2 menu: look): a filmic tone curve in place of the hard clip,
     // a little more colour, warmer lights and cooler shadows, haze tinted by the sky with distance, and a soft vignette.
     // Served in the VFS as shaders/a3_look.omwfx and put at the end of the post-processing chain by src/experimental.cpp.
 

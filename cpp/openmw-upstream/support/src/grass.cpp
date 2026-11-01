@@ -1,4 +1,4 @@
-// Grass of the experimental graphics ([Experimental] grass, grass density, grass height, grass distance, grass wind):
+// Grass of the experimental graphics (F2 menu, a3_grass: grass, grass density, grass height, grass distance, grass wind):
 // blades growing out of the terrain where a grassy texture is painted (the material rules' grass), in clumps, swaying
 // in the wind (experimental/grass.glsl).
 //
@@ -529,6 +529,9 @@ namespace Alpha3
             Dragonfly = 5,
             Gnat = 6,
             Firefly = 7,
+            Bird = 8,
+            Frog = 9,
+            Moth = 10,
         };
 
         // A tile's bugs: each a quad the shader moves (experimental/bugs.glsl), in groups by where they live
@@ -569,6 +572,8 @@ namespace Alpha3
             const float depth = std::max(std::abs(corner1.y() - corner0.y()), 1.f);
             const float uPerUnit = (tile.mU1 - tile.mU0) / width, vPerUnit = (tile.mV1 - tile.mV0) / depth;
             const int tries = static_cast<int>(width * depth / (512.f * 512.f) * 14.f * s.mGrassBugDensity + 0.5f);
+            // about one tile in four has a flock of birds wheeling over it, at its first good spot
+            bool birds = random.next() < 0.25f; // shown or not by a3Birds
             for (int attempt = 0; attempt < tries && homes->size() < 60000; ++attempt)
             {
                 const float u = tile.mU0 + (tile.mU1 - tile.mU0) * random.next();
@@ -590,16 +595,27 @@ namespace Alpha3
                 const float lush = layer.mLush;
                 const float nearWater = std::clamp(1.f - (home.z() - 2.f) / 150.f, 0.f, 1.f);
 
+                if (birds)
+                {
+                    birds = false;
+                    const float roam = between(250.f, 600.f), height = between(350.f, 900.f);
+                    const float speed = between(110.f, 170.f), start = between(0.f, 6.28f);
+                    for (int i = 0, n = 3 + static_cast<int>(random.next() * 5.f); i < n; ++i)
+                        add(home, BugKind::Bird, start + between(-0.25f, 0.25f), roam, height + between(-40.f, 40.f),
+                            between(16.f, 24.f), osg::Vec2f(), speed);
+                    continue;
+                }
+
                 // which group lives here: chances by the ground (more beetles on ash, fliers over green ground)
-                const float chances[8] = { 0.25f, layer.mBarren ? 0.35f : 0.08f, lush > 0.4f ? 0.12f : 0.f,
+                const float chances[11] = { 0.25f, layer.mBarren ? 0.35f : 0.08f, lush > 0.4f ? 0.12f : 0.f,
                     lush > 0.5f ? 0.15f : 0.f, lush > 0.5f ? 0.1f : 0.f, 0.25f * nearWater, 0.08f,
-                    lush > 0.35f ? 0.12f : 0.f };
+                    lush > 0.35f ? 0.12f : 0.f, 0.f, 0.3f * nearWater, lush > 0.3f ? 0.08f : 0.f };
                 float total = 0.f;
                 for (float c : chances)
                     total += c;
                 float pick = groupRoll * total;
                 int group = 0;
-                while (group < 7 && pick >= chances[group])
+                while (group < 10 && pick >= chances[group])
                     pick -= chances[group++];
 
                 switch (static_cast<BugKind>(group))
@@ -640,6 +656,16 @@ namespace Alpha3
                             add(home, BugKind::Gnat, between(0.f, 6.28f), 9.f, height, 0.5f, slope, 0.f);
                         break;
                     }
+                    case BugKind::Bird: // placed above, one flock a tile at most
+                        break;
+                    case BugKind::Frog:
+                        add(home, BugKind::Frog, 0.f, 40.f, 0.f, between(3.f, 4.5f), slope, 0.f);
+                        break;
+                    case BugKind::Moth:
+                        for (int i = 0, n = 2 + static_cast<int>(random.next() * 3.f); i < n; ++i)
+                            add(home, BugKind::Moth, between(0.f, 6.28f), between(25.f, 60.f), between(30.f, 90.f),
+                                between(2.5f, 3.5f), slope, between(30.f, 50.f));
+                        break;
                     case BugKind::Firefly:
                         for (int i = 0, n = 4 + static_cast<int>(random.next() * 3.f); i < n; ++i)
                             add(home, BugKind::Firefly, between(0.f, 6.28f), 80.f, between(15.f, 70.f), between(1.f, 1.3f),
@@ -820,7 +846,7 @@ namespace Alpha3
             }
             // (a random sequence of their own: the blades stay where they are whatever the bugs' settings)
             Random bugRandom(hashPosition(corner0.x() + 0.5f, corner0.y() + 0.5f) ^ 0x5bd1e995u);
-            tile.mMadeBugs = s.mGrassBugs && s.mGrassBugDensity > 0.f
+            tile.mMadeBugs = grassBugsOn() && s.mGrassBugDensity > 0.f
                 ? makeBugs(ground, tile, grassy, blocked, bugRandom)
                 : nullptr;
             if (roots->empty())
@@ -941,7 +967,7 @@ namespace Alpha3
                     cv.addDrawableAndDepth(tile->mGeometry.get(), cv.getModelViewMatrix(), depth);
                     cv.popStateSet();
                     // its bugs, only close by
-                    if (tile->mBugs && (nearest - eye).length() < sBugDistance
+                    if (tile->mBugs && grassBugsOn() && (nearest - eye).length() < sBugDistance
                         && !cv.isCulled(tile->mBugs->getInitialBound()))
                     {
                         cv.pushStateSet(bugState());
@@ -1084,16 +1110,18 @@ namespace Alpha3
                 {
                     const ExperimentalSettings& s = experimentalSettings();
                     const std::string defines = "#version 120\n#define A3_GRASS_DISTANCE "
-                        + std::to_string(s.mGrassDistance) + "\n#define A3_GRASS_WIND " + std::to_string(s.mGrassWind)
-                        + "\n#define A3_GRASS_STORM " + std::to_string(static_cast<int>(std::lround(s.mGrassStorm * 10.f)))
-                        + "\n#define A3_GRASS_VARIETY " + (s.mGrassVariety ? "1" : "0")
+                        + std::to_string(s.mGrassDistance) + "\n#define A3_GRASS_VARIETY " + (s.mGrassVariety ? "1" : "0")
                         + "\n#define A3_GRASS_AA " + (s.mGrassAntialiasing ? "1" : "0")
                         + "\n#define A3_SCREEN_HEIGHT " + std::to_string(std::max(screenHeight, 1)) + "\n";
                     const std::string source(ExperimentalSources::grass);
                     mProgram = new osg::Program;
                     mProgram->setName("Alpha3 grass");
                     osg::ref_ptr<osg::Shader> vertex
-                        = new osg::Shader(osg::Shader::VERTEX, defines + "#define A3_VERTEX\n" + source);
+                        = new osg::Shader(osg::Shader::VERTEX, defines
+                            + "#define A3_VERTEX\n"
+                              // from the F2 menu while the game runs (experimentalLiveUniforms)
+                              "uniform float a3GrassWind;\n#define A3_GRASS_WIND a3GrassWind\nuniform float a3GrassStorm;\n"
+                            + source);
                     vertex->setName("a3_grass.vert");
                     osg::ref_ptr<osg::Shader> fragment = new osg::Shader(osg::Shader::FRAGMENT, defines + source);
                     fragment->setName("a3_grass.frag");
@@ -1221,7 +1249,7 @@ namespace Alpha3
 
     void grassDrawableAdded(osg::NodeVisitor& cullVisitor, osg::Drawable& drawable, const osg::Matrix& modelView)
     {
-        if (!experimentalSettings().mGrass)
+        if (!grassOn())
             return;
         auto& cv = static_cast<osgUtil::CullVisitor&>(cullVisitor);
         const osg::Camera* camera = cv.getCurrentCamera();
@@ -1233,7 +1261,7 @@ namespace Alpha3
         {
             // solid things only: not the sky, water, what is see-through or the first person view (other bins), not
             // actors (skinned: no osg::Geometry), not the blades themselves
-            if (!experimentalSettings().mGrassClearance)
+            if (!grassClearanceOn())
                 return;
             const osg::Geometry* geometry = drawable.asGeometry();
             if (geometry == nullptr || cv.getCurrentRenderBin() == nullptr || cv.getCurrentRenderBin()->getBinNum() != 0

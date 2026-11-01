@@ -1,0 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Sun, 1 Nov 2026 13:00:00 -0400
+Subject: [PATCH 21/21] Weather: a weather can be forced from the F2 menu
+
+To test what the weather changes (the wet ground in the rain, the dust in storms, the clouds), the experimental
+graphics' settings in the F2 menu (a3_testing test weather) can hold the weather: changed to it at once and kept
+there, whatever the region would choose, until it is set back to -1.
+---
+ apps/openmw/mwworld/weather.cpp | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/apps/openmw/mwworld/weather.cpp b/apps/openmw/mwworld/weather.cpp
+index f12f1fa4d1..f762a99e4c 100644
+--- a/apps/openmw/mwworld/weather.cpp
++++ b/apps/openmw/mwworld/weather.cpp
+@@ -27,6 +27,8 @@
+ #include "esmstore.hpp"
+ #include "player.hpp"
+ 
++#include <alpha3/upstream.hpp>
++
+ #include <algorithm>
+ #include <cmath>
+ #include <limits>
+@@ -887,6 +889,14 @@ namespace MWWorld
+                 }
+             }
+ 
++            // Alpha3: the weather the F2 menu asks for, to test with (a3_testing test weather), at once and kept
++            if (const int forced = Alpha3::forcedWeather(); forced >= 0 && forced <= 9)
++            {
++                const ESM::RefId weather = ESM::Weather::indexToRefId(forced);
++                if (mCurrentWeather != weather || inTransition())
++                    forceWeather(weather);
++            }
++
+             updateWeatherTransitions(duration);
+         }
+ 
+-- 
+2.47.0
+

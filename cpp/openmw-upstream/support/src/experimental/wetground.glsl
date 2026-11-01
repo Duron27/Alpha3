@@ -1,4 +1,4 @@
-// Wet ground of the experimental graphics ([Experimental] wet ground), added to OpenMW's terrain fragment shader by
+// Wet ground of the experimental graphics (F2 menu: wet ground), added to OpenMW's terrain fragment shader by
 // src/experimentalshaders.cpp. src/wetground.cpp sets:
 //   a3Wetness   how wet the ground is: rises while it rains, dries slowly after (0..1)
 //   a3Rain      how hard it rains now (0..1): drops ringing on the puddles
@@ -9,6 +9,7 @@
 // where the drops fall. The world position comes from the view position (osg_ViewMatrixInverse, declared by fog.glsl).
 
 uniform float a3Wetness;
+uniform float a3Puddles; // from the F2 menu while the game runs (compiled in only if on at start)
 uniform float a3Rain;
 uniform float osg_SimulationTime;
 uniform sampler2D a3RainMap;
@@ -62,7 +63,7 @@ vec2 a3WetAmount(vec3 world, vec3 groundNormal)
     // more of them the longer it rains
     float level = 0.78 - 0.16 * smoothstep(0.3, 1.0, a3Wetness);
     puddle = smoothstep(level, level + 0.04, hollows) * smoothstep(0.96, 0.99, groundNormal.z) * wet
-        * smoothstep(0.25, 0.6, a3Wetness);
+        * smoothstep(0.25, 0.6, a3Wetness) * a3Puddles;
 #endif
     return vec2(wet, puddle);
 }

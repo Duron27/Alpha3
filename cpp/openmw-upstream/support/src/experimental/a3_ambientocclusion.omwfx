@@ -14,6 +14,7 @@ uniform_float uA3Radius {
     max = 300.0;
     step = 5.0;
     description = "How far around a point (game units) the scene darkens it";
+    display_name = "Radius";
 }
 
 uniform_float uA3Strength {
@@ -22,11 +23,12 @@ uniform_float uA3Strength {
     max = 3.0;
     step = 0.05;
     description = "How dark the occlusion is";
+    display_name = "Strength";
 }
 
 fragment occlusion(target=RT_A3Occlusion) {
     // (OpenMW's .omwfx parser reads comments only inside blocks of GLSL, so this file's notes are here)
-    // Ambient occlusion of the experimental graphics ([Experimental] ambient occlusion): corners, the ground under things
+    // Ambient occlusion of the experimental graphics (F2 menu: ambient occlusion): corners, the ground under things
     // and the gaps between rocks darkened by how much of the scene around a point faces it. Served in the VFS as
     // shaders/a3_ambientocclusion.omwfx and put in the post-processing chain by src/experimental.cpp.
     //

@@ -270,9 +270,10 @@ namespace Alpha3
             if (diffuse.mRgba[i * 4 + 3] < 128)
                 lum[i] = static_cast<float>(mean);
 
-        // band pass: fine noise softened a little, the painted light and shade across the texture taken away
+        // band pass: fine noise softened a little (sharp: hardly at all), the painted light and shade across the texture
+        // taken away
         std::vector<float> fine = lum, broad = lum;
-        blur(fine, w, h, 0.7f * scale);
+        blur(fine, w, h, (settings.mSharp ? 0.25f : 0.7f) * scale);
         blur(broad, w, h, 20.f * scale);
         std::vector<float> height(count);
         double variance = 0;
@@ -293,7 +294,7 @@ namespace Alpha3
         result.mRgba.resize(count * 4);
         // the slope of the height in units of a 256 texture's texel, times the strength: 0.5 of height over 6 texels is
         // about 45 degrees at strength 1
-        const float slope = settings.mNormalStrength * 3.f * scale;
+        const float slope = settings.mNormalStrength * (settings.mSharp ? 4.f : 3.f) * scale;
         for (int y = 0; y < h; ++y)
             for (int x = 0; x < w; ++x)
             {
@@ -323,8 +324,9 @@ namespace Alpha3
         std::vector<float> height(count);
         for (std::size_t i = 0; i < count; ++i)
             height[i] = normalHeight.mRgba[i * 4 + 3] / 255.f;
-        blur(height, w, h, 1.5f * std::max(w, h) / 256.f);
-        const float depth = std::clamp(0.35f * settings.mNormalStrength, 0.f, 1.f);
+        // sharp: only the finest noise taken out, and more of the range kept
+        blur(height, w, h, (settings.mSharp ? 0.5f : 1.5f) * std::max(w, h) / 256.f);
+        const float depth = std::clamp((settings.mSharp ? 0.55f : 0.35f) * settings.mNormalStrength, 0.f, 1.f);
         RgbaImage result = normalHeight;
         for (std::size_t i = 0; i < count; ++i)
             result.mRgba[i * 4 + 3] = toByte(0.5f + (height[i] - 0.5f) * depth);

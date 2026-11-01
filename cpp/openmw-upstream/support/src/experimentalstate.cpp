@@ -1,7 +1,7 @@
 // The experimental graphics' state for single drawables, by the texture they are drawn with: their own variants of
 // OpenMW's object and terrain shaders, switched by OSG state defines.
 //
-//  - Tree sway ([Experimental] tree sway, tree sway strength, tree sway textures, tree trunk sway, tree trunk textures):
+//  - Tree sway (F2 menu, a3_trees: tree sway, tree sway strength, tree sway textures, tree trunk sway, tree trunk textures):
 //    A3_TREE_SWAY in objects.vert (experimental/treesway.glsl), 1 for leaves (leaves, branches, fronds, hanging moss;
 //    not hair, not bark), 2 for a trunk, with the world height of its foot (from its bounds) so it bends from there.
 //  - Procedural materials: A3_MATERIAL in objects.frag and terrain.frag (experimental/procedural.glsl), the material of
@@ -181,5 +181,9 @@ namespace Alpha3
         if (shader.getType() == osg::Shader::FRAGMENT && proceduralShader(shader.getShaderSource())
             && experimentalSettings().mProcedural)
             defines.insert(std::string(sMaterialDefine));
+        // the leaves' own variant of objects.frag too, for their fuller look
+        if (shader.getType() == osg::Shader::FRAGMENT && proceduralShader(shader.getShaderSource())
+            && experimentalSettings().mTreeSway && experimentalSettings().mTreeFull)
+            defines.insert(std::string(sTreeSwayDefine));
     }
 }

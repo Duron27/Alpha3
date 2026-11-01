@@ -1,4 +1,4 @@
-// Detail up close of the experimental graphics ([Experimental] detail up close): where a texture is magnified (one texel
+// Detail up close of the experimental graphics (F2 menu: detail up close): where a texture is magnified (one texel
 // over several pixels, a wall at arm's length) its own fine detail is laid over it again, smaller and turned, so the
 // surface does not go soft. Works on any texture, procedural material or not. Added to OpenMW's object and terrain
 // fragment shaders by src/experimental.cpp.

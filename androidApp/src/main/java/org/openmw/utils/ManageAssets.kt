@@ -41,14 +41,13 @@ class ManageAssets(private val context: Context) {
                 return
             }
 
-            // Smart check: Compare sizes
+            // Skipped only when the contents are the same: an edited file is often the same size (a number changed),
+            // and comparing sizes alone left it stale
             try {
-                context.assets.open(src).use { input ->
-                    val assetSize = input.available().toLong()
-                    if (destinationFile.length() == assetSize) {
-                        Log.d("ManageAssets", "File $dst is identical (size match), skipping.")
-                        return
-                    }
+                val asset = context.assets.open(src).use { it.readBytes() }
+                if (destinationFile.length() == asset.size.toLong() && destinationFile.readBytes().contentEquals(asset)) {
+                    Log.d("ManageAssets", "File $dst is identical, skipping.")
+                    return
                 }
             } catch (_: IOException) {
                 // Fallback to copy if size check fails

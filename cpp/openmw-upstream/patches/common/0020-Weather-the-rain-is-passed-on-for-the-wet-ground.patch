@@ -1,0 +1,34 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Sun, 1 Nov 2026 12:00:00 -0400
+Subject: [PATCH 20/20] Weather: the rain is passed on for the wet ground
+
+The experimental graphics' wet ground ([Experimental] wet ground) darkens and shines while it rains and dries after;
+it is told how hard it rains each frame, the same amount the water's rain ripples are given.
+---
+ apps/openmw/mwrender/renderingmanager.cpp | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/apps/openmw/mwrender/renderingmanager.cpp b/apps/openmw/mwrender/renderingmanager.cpp
+index ae46671..6975605 100644
+--- a/apps/openmw/mwrender/renderingmanager.cpp
++++ b/apps/openmw/mwrender/renderingmanager.cpp
+@@ -89,6 +89,8 @@
+ #include "vismask.hpp"
+ #include "water.hpp"
+ 
++#include <alpha3/upstream.hpp>
++
+ namespace
+ {
+     class LightManagerUpdateVisitor : public osg::NodeVisitor
+@@ -730,6 +732,7 @@ namespace MWRender
+         mResourceSystem->getSceneManager()->getShaderManager().update(*mViewer);
+ 
+         mWater->setRainIntensity(mSky->getRainRipplesEnabled() ? mSky->getPrecipitationAlpha() : 0.f);
++        Alpha3::setRain(mSky->getRainRipplesEnabled() ? mSky->getPrecipitationAlpha() : 0.f, paused ? 0.f : dt);
+ 
+         mWater->update(dt, paused);
+         if (!paused)
+-- 
+2.47.0

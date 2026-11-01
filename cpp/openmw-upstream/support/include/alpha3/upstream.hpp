@@ -58,6 +58,14 @@ namespace Alpha3
     // pictures shown flat on the screen (menu art, splash screens, the GUI) at full size, by their path.
     void readingImage(std::string_view path);
 
+    // How hard it rains now (0..1, the water's rain ripples' amount) and the frame's time step (0 while paused), from
+    // the rendering manager's update: the wet ground ([Experimental] wet ground) gets wet and dries by it
+    void setRain(float precipitation, float dt);
+
+    // The weather the F2 menu holds, to test with (0 clear ... 4 rain, 5 thunderstorm, 6 ash storm, 7 blight, 8 snow,
+    // 9 blizzard), or -1: the region's own (OpenMW patch 0021)
+    int forcedWeather();
+
     // Frame generation (OPENMW_FRAMEGEN) builds the frame between two rendered ones from the camera's motion and the
     // scene's depth when the engine hands them over: each frame, from the main thread before it is rendered.
     struct FrameGenView

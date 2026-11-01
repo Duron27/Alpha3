@@ -101,38 +101,43 @@ namespace Alpha3
             const MissingAnchor& mMissing;
         };
 
-        std::string fixed(float value)
+        // The values the F2 menu changes while the game runs are uniforms (set on the scene camera by experimental.cpp,
+        // experimentalLiveUniform), under the names the shader parts use; declared only in the stage that uses them (a
+        // uniform in both stages of a program would have to agree in precision, which GLSL ES compilers check)
+        std::string liveUniform(std::string_view define, std::string_view uniform)
         {
-            std::ostringstream out;
-            out.imbue(std::locale::classic());
-            out.setf(std::ios::fixed);
-            out.precision(4);
-            out << value;
-            return out.str();
+            return "uniform float " + std::string(uniform) + ";\n#define " + std::string(define) + " "
+                + std::string(uniform) + "\n";
         }
 
-        std::string defines(const ExperimentalSettings& s)
+        std::string defines(const ExperimentalSettings& s, bool vertex)
         {
             std::string out = "\n// ---- Alpha3 experimental graphics\n";
-            out += "#define A3_PROCEDURAL_STRENGTH " + fixed(s.mProceduralStrength) + "\n";
-            out += "#define A3_PROCEDURAL_DISTANCE " + fixed(s.mProceduralDistance) + "\n";
-            out += std::string("#define A3_REPLACE ") + (s.mReplace ? "true" : "false") + "\n";
-            out += "#define A3_DETAIL_STRENGTH " + fixed(s.mDetailStrength) + "\n";
-            out += "#define A3_DETAIL_DISTANCE " + fixed(s.mDetailDistance) + "\n";
-            out += "#define A3_HEIGHT_SHARPNESS " + fixed(s.mHeightBlendSharpness) + "\n";
+            if (vertex)
+            {
+                out += liveUniform("A3_TREE_SWAY_STRENGTH", "a3TreeSwayStrength");
+                out += liveUniform("A3_TRUNK_SWAY", "a3TrunkSway");
+                return out;
+            }
+            out += liveUniform("A3_PROCEDURAL_STRENGTH", "a3ProceduralStrength");
+            out += liveUniform("A3_PROCEDURAL_DISTANCE", "a3ProceduralDistance");
+            out += "uniform float a3ProceduralReplace;\n#define A3_REPLACE (a3ProceduralReplace > 0.5)\n";
+            out += liveUniform("A3_DETAIL_STRENGTH", "a3DetailStrength");
+            out += liveUniform("A3_DETAIL_DISTANCE", "a3DetailDistance");
+            out += liveUniform("A3_HEIGHT_SHARPNESS", "a3HeightSharpness");
             out += "#define A3_TERRAIN_REPEAT 512.0\n";
-            out += "#define A3_TREE_SWAY_STRENGTH " + fixed(s.mTreeSwayStrength) + "\n";
-            out += "#define A3_TRUNK_SWAY " + fixed(s.mTrunkSway) + "\n";
             return out;
         }
 
         bool injectObjects(std::string& source, const std::string& name, const ExperimentalSettings& s,
             const ExperimentalShaderParts& parts, const MissingAnchor& missingAnchor)
         {
-            if (!s.mProcedural && !s.mDetail)
+            // fuller leaves only where tree sway marks them
+            const bool leaves = s.mTreeFull && s.mTreeSway;
+            if (!s.mProcedural && !s.mDetail && !leaves)
                 return false;
             Injection injection(source, name, missingAnchor);
-            std::string library = defines(s);
+            std::string library = defines(s, false);
             library += std::string("#define A3_DIFFUSE ") + (declared(source, "uniform sampler2D diffuseMap;") ? "1" : "0")
                 + "\n";
             // only in a drawable's variant for its material (OSG's A3_MATERIAL state define)
@@ -140,8 +145,28 @@ namespace Alpha3
                 library += "#ifdef A3_MATERIAL\n" + std::string(parts.mProcedural) + "\n#endif\n";
             if (s.mDetail)
                 library += std::string(parts.mDetail) + "\n";
+            // only in the leaves' variant (OSG's A3_TREE_SWAY state define, 1: leaves)
+            if (leaves)
+                library += "#if defined(A3_TREE_SWAY) && A3_TREE_SWAY == 1 && A3_DIFFUSE\n#define A3_LEAVES 1\n"
+                    + liveUniform("A3_LEAF_TRANSLUCENCY", "a3LeafTranslucency")
+                    + liveUniform("A3_LEAF_VARIATION", "a3LeafVariation") + std::string(parts.mTreeLeaves) + "\n#else\n#define A3_LEAVES 0\n#endif\n";
             if (!injection.insert("void main()", library, false))
                 return false;
+            if (leaves)
+            {
+                injection.insert("    gl_FragData[0].a = alphaTest(gl_FragData[0].a, alphaRef);",
+                    "#if A3_LEAVES\n"
+                    "    gl_FragData[0].a = a3LeafAlpha(gl_FragData[0].a);\n"
+                    "    a3LeafColour(gl_FragData[0].xyz, passViewPos);\n"
+                    "    vec3 a3LeafAlbedo = gl_FragData[0].xyz;\n"
+                    "#endif",
+                    false);
+                injection.insert("    gl_FragData[0].xyz = gl_FragData[0].xyz * lighting + specular;",
+                    "#if A3_LEAVES\n"
+                    "    a3LeafLight(gl_FragData[0].xyz, a3LeafAlbedo, passViewPos, viewNormal);\n"
+                    "#endif",
+                    true);
+            }
             if (s.mDetail)
                 injection.insert("    gl_FragData[0] = texture2D(diffuseMap, diffuseMapUV + offset);",
                     "    a3Detail(diffuseMap, diffuseMapUV + offset, passViewPos, A3_DETAIL_STRENGTH, "
@@ -164,7 +189,7 @@ namespace Alpha3
             if (!s.mTreeSway)
                 return false;
             Injection injection(source, name, missingAnchor);
-            std::string library = defines(s);
+            std::string library = defines(s, true);
             // objects.vert declares it itself for the particles' occlusion
             library += std::string("#define A3_HAS_VIEW_INVERSE ")
                 + (declared(source, "uniform mat4 osg_ViewMatrixInverse;") ? "1" : "0") + "\n";
@@ -197,12 +222,15 @@ namespace Alpha3
         bool injectTerrainFragment(std::string& source, const std::string& name, const ExperimentalSettings& s,
             const ExperimentalShaderParts& parts, const MissingAnchor& missingAnchor)
         {
-            if (!s.mProcedural && !s.mDetail && !s.mTriplanar && !s.mHeightBlending)
+            if (!s.mProcedural && !s.mDetail && !s.mTriplanar && !s.mHeightBlending && !s.mWetGround)
                 return false;
             Injection injection(source, name, missingAnchor);
-            std::string library = defines(s);
+            std::string library = defines(s, false);
             if (s.mTriplanar)
                 library += "varying vec3 a3TerrainPos;\n";
+            if (s.mWetGround)
+                library += std::string("#define A3_RAIN_MAP_SIZE 512.0\n#define A3_PUDDLES ") + (s.mWetPuddles ? "1" : "0")
+                    + "\n" + std::string(parts.mWetGround) + "\n";
             // only in a drawable's variant for its material (OSG's A3_MATERIAL state define)
             if (s.mProcedural)
                 library += "#ifdef A3_MATERIAL\n" + std::string(parts.mProcedural) + "\n#endif\n";
@@ -240,6 +268,21 @@ namespace Alpha3
                         + ", A3_PROCEDURAL_DISTANCE, A3_REPLACE, gl_FragData[0].xyz, normal);\n"
                     "#endif",
                     false);
+            }
+            if (s.mWetGround)
+            {
+                // darker where wet, darker still in a puddle; the puddles lie flat, rippling; the sky and sun shine on it
+                injection.insert("    vec4 diffuseColor = getDiffuseColor(material, passColor);",
+                    "    vec3 a3World = (osg_ViewMatrixInverse * vec4(passViewPos, 1.0)).xyz;\n"
+                    "    vec2 a3Wet = a3WetAmount(a3World, normalize(passNormal));\n"
+                    "    gl_FragData[0].xyz *= (1.0 - 0.4 * a3Wet.x) * (1.0 - 0.45 * a3Wet.y);",
+                    false);
+                injection.insert("    float shadowing = unshadowedLightRatio(linearDepth);",
+                    "    viewNormal = a3WetNormal(viewNormal, a3Wet, a3World);", false);
+                injection.insert("    gl_FragData[0].xyz = gl_FragData[0].xyz * lighting + specular;",
+                    "    a3WetShine(gl_FragData[0].xyz, a3Wet, passViewPos, viewNormal, fog.color.xyz, sun.position.xyz, "
+                    "sun.diffuse.xyz);",
+                    true);
             }
             if (s.mTriplanar)
                 injection.replace("    vec3 viewNormal = normalToView(normal);",
@@ -330,7 +373,7 @@ namespace Alpha3
 
     std::string experimentalShaderDefines(const ExperimentalSettings& settings)
     {
-        return defines(settings);
+        return defines(settings, true) + defines(settings, false);
     }
 
     bool injectExperimentalSource(const std::string& name, bool vertex, const ExperimentalSettings& settings,

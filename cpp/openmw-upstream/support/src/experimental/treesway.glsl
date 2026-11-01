@@ -1,5 +1,5 @@
-// Trees swaying in the wind ([Experimental] tree sway): leaves, branches, fronds and hanging moss move, and the trunks
-// bend a little ([Experimental] tree trunk sway). Added to OpenMW's objects.vert (src/experimentalshaders.cpp); the sway
+// Trees swaying in the wind (F2 menu: tree sway): leaves, branches, fronds and hanging moss move, and the trunks
+// bend a little (F2 menu: tree trunk sway). Added to OpenMW's objects.vert (src/experimentalshaders.cpp); the sway
 // is only compiled in where A3_TREE_SWAY is defined, which src/experimentalstate.cpp switches on for drawables with a
 // leafy (1) or a trunk's (2) texture (OSG's state defines), so everything else keeps the shader it had.
 //

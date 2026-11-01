@@ -1,4 +1,4 @@
-// Procedural surfaces of the experimental graphics ([Experimental] procedural materials). Added to OpenMW's object and
+// Procedural surfaces of the experimental graphics (F2 menu: procedural materials). Added to OpenMW's object and
 // terrain fragment shaders by src/experimental.cpp, and rendered by tools/procedural/ for checking how they look.
 //
 // The large shapes stay the texture's own: the generated normal map (made from its colours, src/generatedmaps.cpp) keeps

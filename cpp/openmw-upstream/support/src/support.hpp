@@ -144,7 +144,7 @@ namespace Alpha3
     // threads for background work: all of them when cool, half when warm, one when hot
     unsigned thermalThreads(unsigned threads);
 
-    // ---- experimental.cpp ([Experimental]): the switches, read once
+    // ---- experimental.cpp (the F2 menu): the switches, read once
     const ExperimentalSettings& experimentalSettings();
     // The engine's shaders with the experimental parts added, before they are translated; false: left as they are
     bool injectExperimentalShaders(const osg::Shader& shader, std::string& source);
@@ -154,10 +154,24 @@ namespace Alpha3
     // addKtxTextures, before the renderer reads its settings)
     void addExperimental(VFS::Manager& vfs);
 
-    // ---- grass.cpp ([Experimental] grass): the terrain's chunks get blades as the scene camera culls them; the VFS for
+    // ---- grass.cpp (grass): the terrain's chunks get blades as the scene camera culls them; the VFS for
     // reading their textures' colours
     void setGrassVfs(const VFS::Manager& vfs);
     void grassDrawableAdded(osg::NodeVisitor& cullVisitor, osg::Drawable& drawable, const osg::Matrix& modelView);
+    // ---- wetground.cpp (wet ground): notes the scene camera, which gets the wet ground's uniforms and the
+    // map of what stands over the ground
+    // The F2 menu's values the shaders read while the game runs (experimental.cpp): uniforms put on the scene camera,
+    // updated while the menu is open
+    void experimentalLiveInstall(osg::StateSet& state);
+    void experimentalLiveUpdate();
+    bool experimentalOptionOn(std::string_view name);
+    // grass on or off as the menu has it now (grass.cpp)
+    bool grassOn();
+    bool grassClearanceOn();
+    bool grassBugsOn();
+    bool wetDryUnderOn();
+
+    void wetGroundDrawableAdded(osg::NodeVisitor& cullVisitor, osg::Drawable& drawable);
     // ---- experimentalstate.cpp: the state that gives a drawable its own variant of its program by its texture (tree
     // sway, the procedural material), and the defines OpenMW's shaders import for them
     const osg::StateSet* experimentalDrawableState(osg::NodeVisitor& cullVisitor, osg::Drawable& drawable);

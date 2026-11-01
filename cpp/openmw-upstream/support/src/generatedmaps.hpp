@@ -52,6 +52,7 @@ namespace Alpha3
     struct MapSettings
     {
         float mNormalStrength = 1.f;
+        bool mSharp = true; // crisp fine relief and parallax, as from an upscaled texture (false: soft, closer to vanilla)
     };
 
     // Height from the colours (band-passed luminance, 0.5 on average) and its normals, as the engine reads a normal map:

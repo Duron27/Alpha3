@@ -73,7 +73,13 @@ set(ALPHA3_EXPERIMENTAL_SOURCES
     terrain terrain.glsl
     grass grass.glsl
     bugs bugs.glsl
+    wetground wetground.glsl
+    water a3_water.omwfx
+    clouds a3_clouds.omwfx
+    air a3_air.omwfx
+    sharpen a3_sharpen.omwfx
     treeSway treesway.glsl
+    treeLeaves treeleaves.glsl
     ambientOcclusion a3_ambientocclusion.omwfx
     look a3_look.omwfx
 )
@@ -107,6 +113,7 @@ set(ALPHA3_SUPPORT_SOURCES
     ${CMAKE_CURRENT_BINARY_DIR}/generated/experimentalsources.cpp
     src/generatedmaps.cpp
     src/grass.cpp
+    src/wetground.cpp
     src/experimentalstate.cpp
     src/ktxtextures.cpp
     src/programcache.cpp
@@ -182,6 +189,14 @@ endfunction()
 cmake_language(DEFER DIRECTORY ${CMAKE_SOURCE_DIR} CALL alpha3_link_navmeshtool)
 target_compile_options(alpha3_support_init PRIVATE -fPIC)
 target_link_libraries(alpha3_support_init alpha3_support components)
+
+# Alpha3's own Lua (lua/): a built-in script list of its own (resources/vfs/alpha3.omwscripts, loaded after
+# builtin.omwscripts like the multiplayer mod's) with the tools: the VFS browser (Options, Scripts, Alpha3)
+set(ALPHA3_LUA ${CMAKE_CURRENT_SOURCE_DIR}/lua)
+file(GLOB_RECURSE ALPHA3_LUA_FILES CONFIGURE_DEPENDS RELATIVE ${ALPHA3_LUA} ${ALPHA3_LUA}/*)
+foreach (f ${ALPHA3_LUA_FILES})
+    copy_resource_file(${ALPHA3_LUA}/${f} ${OPENMW_RESOURCES_ROOT} resources/vfs/${f})
+endforeach ()
 
 if (NOT ANDROID)
     target_link_libraries(openmw alpha3_support_init alpha3_support)

@@ -1,8 +1,8 @@
 // Terrain of the experimental graphics, added to OpenMW's terrain fragment shader by src/experimental.cpp:
-//  - triplanar ([Experimental] terrain triplanar): on steep slopes the texture is also projected from the sides, so
+//  - triplanar (F2 menu: terrain triplanar): on steep slopes the texture is also projected from the sides, so
 //    cliffs show rock instead of a texture smeared down them. a3TerrainPos is the vertex position in the chunk's space
 //    (x, y across, z up), passed from terrain.vert; the texture repeats every A3_TERRAIN_REPEAT units (512 in Morrowind).
-//  - height blending ([Experimental] terrain height blending): where two textures meet, the one whose texels stand
+//  - height blending (F2 menu: terrain height blending): where two textures meet, the one whose texels stand
 //    higher (stones over the dirt between them) shows first, in a crisp edge instead of a long smear.
 
 // The side projections' weights for the normal n (model space), the top's in z
@@ -54,8 +54,10 @@ float a3TerrainHeight(sampler2D diffuseMap, vec2 uv)
 
 // The layer's blend weight, pushed by its height and made crisper. The layers' weights add up to one, and the curve is
 // symmetric about one half, so two layers meeting still add up to one but for the small height term.
+uniform float a3HeightBlendOn; // from the F2 menu while the game runs
+
 float a3HeightBlend(float alpha, float height, float sharpness)
 {
     float a = clamp(alpha + (height - 0.5) * 2.4 * alpha * (1.0 - alpha), 0.0, 1.0);
-    return clamp((a - 0.5) * sharpness + 0.5, 0.0, 1.0);
+    return mix(alpha, clamp((a - 0.5) * sharpness + 0.5, 0.0, 1.0), a3HeightBlendOn);
 }

@@ -1,0 +1,42 @@
+uniform_float uA3Sharpen {
+    default = 0.6;
+    min = 0.0;
+    max = 2.0;
+    step = 0.05;
+    description = "How much sharper";
+    display_name = "Strength";
+}
+
+fragment sharpen {
+    // (OpenMW's .omwfx parser reads comments only inside blocks of GLSL, so this file's notes are here)
+    // Sharpening of the experimental graphics (F2 menu: sharpen), served as shaders/a3_sharpen.omwfx: contrast
+    // adaptive, like AMD's CAS, so flat areas and hard edges are left as they are and fine detail stands out, as in an
+    // upscaled texture. Five reads a pixel.
+
+    omw_In vec2 omw_TexCoord;
+
+    void main()
+    {
+        vec2 uv = omw_TexCoord;
+        vec2 px = omw.rcpResolution;
+        vec3 c = omw_GetLastShader(uv).rgb;
+        vec3 n = omw_GetLastShader(uv + vec2(0.0, px.y)).rgb;
+        vec3 s = omw_GetLastShader(uv - vec2(0.0, px.y)).rgb;
+        vec3 e = omw_GetLastShader(uv + vec2(px.x, 0.0)).rgb;
+        vec3 w = omw_GetLastShader(uv - vec2(px.x, 0.0)).rgb;
+        vec3 low = min(c, min(min(n, s), min(e, w)));
+        vec3 high = max(c, max(max(n, s), max(e, w)));
+        // less where the contrast is already high
+        vec3 amount = sqrt(clamp(min(low, 1.0 - high) / max(high, 0.0001), 0.0, 1.0));
+        vec3 weight = -amount / mix(8.0, 4.0, clamp(uA3Sharpen * 0.5, 0.0, 1.0));
+        vec3 sharp = (c + (n + s + e + w) * weight) / (1.0 + 4.0 * weight);
+        omw_FragColor = vec4(clamp(sharp, 0.0, 1.0), 1.0);
+    }
+}
+
+technique {
+    description = "Alpha3 experimental: contrast adaptive sharpening";
+    version = "1.0";
+    author = "Alpha3";
+    passes = sharpen;
+}
