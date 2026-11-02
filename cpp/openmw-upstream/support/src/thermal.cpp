@@ -1,12 +1,14 @@
 // [General] thermal mode: how close the phone is to throttling, for the parts that can do their work more slowly while it
 // heats up. Throttled, Android clamps every core and the GPU at once, so everything is slower than if a little had been
-// given up before. full (the default) never backs off; auto follows Android's forecast (AThermal_getThermalHeadroom,
-// Android 11+: 1 is where it starts to clamp).
+// given up before. auto (the default) follows Android's forecast (AThermal_getThermalHeadroom, Android 11+: 1 is where
+// it starts to clamp); saver is always at least warm, so the phone stays cooler from the start; full never backs off.
 //
 // Warm (forecast 0.85 or more): background texture conversion on half its threads, Zink one display period more per
-// frame. Hot (0.95 or more): conversion on one thread, frames held to two display periods at least (Swappy, or the swap
-// interval of plain swaps), occlusion culling without its helper threads. Each level is left once the forecast is 0.1
-// below where it starts.
+// frame, the view distance (and object paging and distant terrain with it) and the grass to 80%, shadows to 60% of
+// their distance. Hot (0.95 or more): conversion on one thread, frames held to two display periods at least (Swappy, or
+// the swap interval of plain swaps), occlusion culling without its helper threads, view distance and grass to 60%,
+// shadows to 35%, no bugs in the grass, the wet ground's map of what shelters drawn less often. Each level is left once
+// the forecast is 0.1 below where it starts.
 #include "support.hpp"
 
 #include <algorithm>
@@ -53,7 +55,7 @@ namespace Alpha3
         public:
             int pressure()
             {
-                if (!mAuto)
+                if (mMode == Mode::Full)
                     return 0;
                 // asked more often than every second or so, Android answers NaN; whoever asks first after two seconds checks
                 const int64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -74,7 +76,7 @@ namespace Alpha3
                 const int level = mPressure.load(std::memory_order_relaxed);
                 const int up = headroom >= 0.95f ? 2 : headroom >= 0.85f ? 1 : 0;
                 const int keep = headroom >= 0.85f ? 2 : headroom >= 0.75f ? 1 : 0;
-                const int wanted = std::max(up, std::min(level, keep));
+                const int wanted = std::max({ up, std::min(level, keep), mMode == Mode::Saver ? 1 : 0 });
                 if (wanted == level)
                     return;
                 mPressure.store(wanted, std::memory_order_relaxed);
@@ -83,15 +85,24 @@ namespace Alpha3
                                  << (wanted > level ? ", backing off" : "");
             }
 
-            const bool mAuto = [] {
-                std::string mode = setting("General", "thermal mode", "full");
+            enum class Mode
+            {
+                Full,
+                Auto,
+                Saver,
+            };
+
+            const Mode mMode = [] {
+                std::string mode = setting("General", "thermal mode", "auto");
                 for (char& c : mode)
                     c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-                Log(Debug::Info) << "Thermal mode: " << (mode == "auto" ? "auto" : "full");
-                return mode == "auto";
+                const Mode m = mode == "full" ? Mode::Full : mode == "saver" ? Mode::Saver : Mode::Auto;
+                Log(Debug::Info) << "Thermal mode: " << (m == Mode::Full ? "full" : m == Mode::Saver ? "saver" : "auto");
+                return m;
             }();
             std::atomic<int64_t> mNextCheck{ 0 };
-            std::atomic<int> mPressure{ 0 };
+            // saver starts warm, before Android's first answer
+            std::atomic<int> mPressure{ mMode == Mode::Saver ? 1 : 0 };
         };
     }
 
@@ -112,5 +123,17 @@ namespace Alpha3
             default:
                 return 1;
         }
+    }
+
+    float thermalDistanceScale()
+    {
+        static constexpr float scales[] = { 1.f, 0.8f, 0.6f };
+        return scales[std::clamp(thermalPressure(), 0, 2)];
+    }
+
+    float thermalShadowScale()
+    {
+        static constexpr float scales[] = { 1.f, 0.6f, 0.35f };
+        return scales[std::clamp(thermalPressure(), 0, 2)];
     }
 }

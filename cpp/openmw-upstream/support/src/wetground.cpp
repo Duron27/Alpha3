@@ -133,7 +133,9 @@ void main()
                 const osg::Vec3f eye = cv.getEyePoint();
                 const float texel = sMapArea / sMapSize;
                 const osg::Vec2f centre(std::floor(eye.x() / texel) * texel, std::floor(eye.y() / texel) * texel);
-                if (mDrawn && (centre - mCentre).length() < 128.f && mTime - mDrawnAt < 2.f)
+                // every two seconds, or eight while the phone is hot (thermal.cpp)
+                const float every = thermalPressure() >= 2 ? 8.f : 2.f;
+                if (mDrawn && (centre - mCentre).length() < 128.f && mTime - mDrawnAt < every)
                     return;
                 mDrawn = true;
                 mDrawnAt = mTime;

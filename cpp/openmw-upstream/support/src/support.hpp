@@ -143,6 +143,7 @@ namespace Alpha3
     int thermalPressure();
     // threads for background work: all of them when cool, half when warm, one when hot
     unsigned thermalThreads(unsigned threads);
+    // (thermalDistanceScale and thermalShadowScale, which the engine asks too, are in alpha3/upstream.hpp)
 
     // ---- experimental.cpp (the F2 menu): the switches, read once
     const ExperimentalSettings& experimentalSettings();

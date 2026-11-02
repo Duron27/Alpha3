@@ -14,6 +14,8 @@
 // is made again (drawn as it was until then).
 #include "support.hpp"
 
+#include <alpha3/upstream.hpp>
+
 #include "experimentalsources.hpp"
 #include "generatedmaps.hpp"
 
@@ -928,12 +930,20 @@ namespace Alpha3
 
                 const ExperimentalSettings& s = experimentalSettings();
                 const osg::Vec3f eye = cv.getEyeLocal();
+                // nearer while the phone is warm (thermal.cpp); the blades shrink into the ground toward it the same
+                const float reach = s.mGrassDistance * thermalDistanceScale();
+                if (reach != mReachValue)
+                {
+                    mReachValue = reach;
+                    mReach->set(reach);
+                }
+                const bool bugs = thermalPressure() < 2; // none while hot
                 for (const std::unique_ptr<Tile>& tile : chunk->mTiles)
                 {
                     const osg::BoundingBox& box = tile->mBox;
                     const osg::Vec3f nearest(std::clamp(eye.x(), box.xMin(), box.xMax()),
                         std::clamp(eye.y(), box.yMin(), box.yMax()), std::clamp(eye.z(), box.zMin(), box.zMax()));
-                    if ((nearest - eye).length() > s.mGrassDistance)
+                    if ((nearest - eye).length() > reach)
                         continue;
                     TileState state = tile->mState;
                     if (state == TileState::None)
@@ -967,7 +977,7 @@ namespace Alpha3
                     cv.addDrawableAndDepth(tile->mGeometry.get(), cv.getModelViewMatrix(), depth);
                     cv.popStateSet();
                     // its bugs, only close by
-                    if (tile->mBugs && grassBugsOn() && (nearest - eye).length() < sBugDistance
+                    if (tile->mBugs && bugs && grassBugsOn() && (nearest - eye).length() < sBugDistance
                         && !cv.isCulled(tile->mBugs->getInitialBound()))
                     {
                         cv.pushStateSet(bugState());
@@ -1100,6 +1110,7 @@ namespace Alpha3
                 stateset->setRenderBinDetails(0, "RenderBin");
                 stateset->addUniform(new osg::Uniform("a3GrassRoot", tile.mRoot));
                 stateset->addUniform(new osg::Uniform("a3GrassTip", tile.mTip));
+                stateset->addUniform(mReach);
                 tile.mGeometry->setStateSet(stateset);
             }
 
@@ -1230,6 +1241,13 @@ namespace Alpha3
             unsigned mFrame = 0;
             osg::ref_ptr<osg::Program> mProgram;
             osg::ref_ptr<osg::StateSet> mBugState;
+            // how far the grass reaches now (a3GrassReach): the setting's distance, nearer while the phone is warm
+            osg::ref_ptr<osg::Uniform> mReach = [] {
+                osg::ref_ptr<osg::Uniform> u = new osg::Uniform("a3GrassReach", experimentalSettings().mGrassDistance);
+                u->setDataVariance(osg::Object::DYNAMIC);
+                return u;
+            }();
+            float mReachValue = experimentalSettings().mGrassDistance;
 
             std::mutex mJobsMutex;
             std::condition_variable mJobsReady;

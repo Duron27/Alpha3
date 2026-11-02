@@ -33,6 +33,7 @@ uniform float windSpeed;
 uniform vec3 playerPos;
 uniform vec3 a3GrassRoot; // the colours of the blades at the root and at the tip, from the grass texture
 uniform vec3 a3GrassTip;
+uniform float a3GrassReach; // where it ends now: A3_GRASS_DISTANCE, nearer while the phone is warm (grass.cpp)
 
 void main()
 {
@@ -43,7 +44,8 @@ void main()
 
     vec4 viewRoot = gl_ModelViewMatrix * vec4(root, 1.0);
     float dist = length(viewRoot.xyz);
-    float fade = 1.0 - smoothstep(A3_GRASS_DISTANCE * 0.65, A3_GRASS_DISTANCE, dist);
+    float reach = min(a3GrassReach, A3_GRASS_DISTANCE);
+    float fade = 1.0 - smoothstep(reach * 0.65, reach, dist);
     float height = shape.w * fade;
 
     vec2 facing = vec2(cos(shape.z), sin(shape.z));

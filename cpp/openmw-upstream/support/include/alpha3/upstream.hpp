@@ -62,6 +62,11 @@ namespace Alpha3
     // the rendering manager's update: the wet ground ([Experimental] wet ground) gets wet and dries by it
     void setRain(float precipitation, float dt);
 
+    // How far to draw while the phone heats up ([General] thermal mode, thermal.cpp): the share of the view distance (and
+    // the grass's), and of the shadows' distance; 1 while it is cool or the mode is full
+    float thermalDistanceScale();
+    float thermalShadowScale();
+
     // The weather the F2 menu holds, to test with (0 clear ... 4 rain, 5 thunderstorm, 6 ash storm, 7 blight, 8 snow,
     // 9 blizzard), or -1: the region's own (OpenMW patch 0021)
     int forcedWeather();

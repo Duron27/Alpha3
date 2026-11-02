@@ -1,0 +1,84 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Mon, 2 Nov 2026 03:30:10 -0500
+Subject: [PATCH 23/23] Thermal: view and shadow distances follow the phone's
+ temperature
+
+While Android forecasts the phone is about to throttle ([General] thermal mode, Alpha3's thermal.cpp), the view
+distance (and with it the fog, terrain and object paging) and the shadows' distance are drawn shorter: view to 80% and
+shadows to 60% when warm, 60% and 35% when hot. Set again when the scale or the viewing distance setting changes.
+---
+ apps/openmw/mwrender/renderingmanager.cpp | 21 +++++++++++++++++++++
+ components/sceneutil/shadow.cpp           |  9 +++++++++
+ components/sceneutil/shadow.hpp           |  3 +++
+ 3 files changed, 33 insertions(+)
+
+diff --git a/apps/openmw/mwrender/renderingmanager.cpp b/apps/openmw/mwrender/renderingmanager.cpp
+index 6975605..0868695 100644
+--- a/apps/openmw/mwrender/renderingmanager.cpp
++++ b/apps/openmw/mwrender/renderingmanager.cpp
+@@ -734,6 +734,27 @@ namespace MWRender
+         mWater->setRainIntensity(mSky->getRainRipplesEnabled() ? mSky->getPrecipitationAlpha() : 0.f);
+         Alpha3::setRain(mSky->getRainRipplesEnabled() ? mSky->getPrecipitationAlpha() : 0.f, paused ? 0.f : dt);
+ 
++        // Alpha3: drawn less far while the phone heats up ([General] thermal mode), again whenever the scale or the
++        // setting changes (so a view distance set otherwise, as by Lua, is left alone until then)
++        {
++            static float appliedScale = 1.f;
++            static float appliedSetting = Settings::camera().mViewingDistance;
++            static float appliedShadowScale = 1.f;
++            const float scale = Alpha3::thermalDistanceScale();
++            const float setting = Settings::camera().mViewingDistance;
++            if (scale != appliedScale || setting != appliedSetting)
++            {
++                appliedScale = scale;
++                appliedSetting = setting;
++                setViewDistance(setting * scale, true);
++            }
++            if (const float shadowScale = Alpha3::thermalShadowScale(); shadowScale != appliedShadowScale)
++            {
++                appliedShadowScale = shadowScale;
++                mShadowManager->setShadowDistanceScale(Settings::shadows(), shadowScale);
++            }
++        }
++
+         mWater->update(dt, paused);
+         if (!paused)
+         {
+diff --git a/components/sceneutil/shadow.cpp b/components/sceneutil/shadow.cpp
+index ab2fe39..df18138 100644
+--- a/components/sceneutil/shadow.cpp
++++ b/components/sceneutil/shadow.cpp
+@@ -218,6 +218,15 @@ namespace SceneUtil
+             mShadowTechnique->disableShadows(true);
+     }
+ 
++    void ShadowManager::setShadowDistanceScale(const Settings::ShadowsCategory& settings, float scale)
++    {
++        const float maximumShadowMapDistance = settings.mMaximumShadowMapDistance;
++        if (maximumShadowMapDistance <= 0)
++            return;
++        mShadowTechnique->setMaximumShadowMapDistance(maximumShadowMapDistance * scale);
++        mShadowTechnique->setShadowFadeStart(maximumShadowMapDistance * scale * settings.mShadowFadeStart);
++    }
++
+     void ShadowManager::enableOutdoorMode()
+     {
+         if (mEnableShadows)
+diff --git a/components/sceneutil/shadow.hpp b/components/sceneutil/shadow.hpp
+index 96f0985..a9601a8 100644
+--- a/components/sceneutil/shadow.hpp
++++ b/components/sceneutil/shadow.hpp
+@@ -49,6 +49,9 @@ namespace SceneUtil
+ 
+         void enableOutdoorMode();
+ 
++        /// The shadows drawn to \a scale of the settings' distance (Alpha3: less far while the phone heats up)
++        void setShadowDistanceScale(const Settings::ShadowsCategory& settings, float scale);
++
+     protected:
+         static ShadowManager* sInstance;
+ 
+-- 
+2.55.0
+
