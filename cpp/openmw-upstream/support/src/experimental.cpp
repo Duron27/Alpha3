@@ -68,6 +68,7 @@ namespace Alpha3
         constexpr std::string_view sWaterTechnique = "a3_water";
         constexpr std::string_view sCloudsTechnique = "a3_clouds";
         constexpr std::string_view sAirTechnique = "a3_air";
+        constexpr std::string_view sMistTechnique = "a3_mist";
         constexpr std::string_view sSharpenTechnique = "a3_sharpen";
 
         std::string fixed(float value)
@@ -89,12 +90,12 @@ namespace Alpha3
 
         // ---- the settings, in the F2 post-processing menu
         //
-        // Every setting is a uniform of a technique in the F2 menu, kept by OpenMW in shaders.yaml: the passes' own in
-        // their techniques (a3_water and the others, which are on while they are in the chain), the rest in
-        // pages of settings only (a3_grass, a3_trees and the others, sPages) (made here, never drawn). The values the shaders read while the
-        // game runs ("live") change as they are moved; the others are read at start. Before, they were in settings.cfg
-        // [Experimental]: what is still there is moved over once. (Its texts, material rules and the tree sway
-        // textures, which the menu cannot hold, are still read from there.)
+        // The settings that change while the game runs ("live") are uniforms of techniques in the F2 menu, kept by
+        // OpenMW in shaders.yaml: the passes' own in their techniques (a3_water and the others, which are on while they
+        // are in the chain), the rest in pages of settings only (a3_grass, a3_trees and the others, sPages) (made here,
+        // never drawn). Those read only at start are in settings.cfg [Experimental], with the texts the menu cannot
+        // hold (material rules, tree sway textures); a value of theirs set in the menu before is still taken if
+        // settings.cfg has none. The live ones an older settings.cfg has in [Experimental] are moved to the menu once.
         constexpr std::string_view sSettingsTechnique = "a3_experimental"; // the one page there was first: what was moved there is still read, and its notes
 
         enum class Kind
@@ -283,13 +284,38 @@ namespace Alpha3
             return manager.getValue<float>(t, u);
         }
 
+        bool inChain(std::string_view technique)
+        {
+            const auto& chain = Settings::postProcessing().mChain.get();
+            return std::find(chain.begin(), chain.end(), technique) != chain.end();
+        }
+
         float optionValue(const Option& o)
         {
             const char kind = o.mKind == Kind::Bool ? 'b' : 'f';
+            // what only takes effect at a restart is in settings.cfg [Experimental], not the F2 menu (which has only
+            // what changes live); a value set in the menu before is still taken if settings.cfg has none
+            if (!o.mLive)
+            {
+                const std::string text = setting(sCategory, o.mName, "");
+                if (!text.empty())
+                {
+                    const float value = o.mKind == Kind::Bool ? (settingBool(sCategory, o.mName, o.mDefault > 0.5f) ? 1.f : 0.f)
+                                                              : settingFloat(sCategory, o.mName, o.mDefault);
+                    return std::clamp(value, o.mMin, o.mMax);
+                }
+            }
             // (moved over first into the one page there was)
-            const float value = shaderValue(pageOf(o), uniformName(o.mName), kind)
-                                    .value_or(shaderValue(sSettingsTechnique, uniformName(o.mName), kind).value_or(o.mDefault));
-            return std::clamp(value, o.mMin, o.mMax);
+            // a page of the menu counts only while it is enabled (in the chain, the right-hand list): otherwise its
+            // switches are off and its values as they come (not those read at start from settings.cfg, which are
+            // not on the page)
+            if (o.mLive && !inChain(pageOf(o)))
+                return o.mKind == Kind::Bool ? 0.f : std::clamp(o.mDefault, o.mMin, o.mMax);
+            const std::string uniform = uniformName(o.mName);
+            std::optional<float> value = shaderValue(pageOf(o), uniform, kind);
+            if (!value)
+                value = shaderValue(sSettingsTechnique, uniform, kind);
+            return std::clamp(value.value_or(o.mDefault), o.mMin, o.mMax);
         }
 
         bool optionBool(std::string_view name)
@@ -300,12 +326,6 @@ namespace Alpha3
         float optionFloat(std::string_view name)
         {
             return optionValue(option(name));
-        }
-
-        bool inChain(std::string_view technique)
-        {
-            const auto& chain = Settings::postProcessing().mChain.get();
-            return std::find(chain.begin(), chain.end(), technique) != chain.end();
         }
 
         // a pass's switch: on while the pass is in the chain and its own toggle (true unless set otherwise) is
@@ -325,7 +345,7 @@ namespace Alpha3
             unsigned moved = 0;
             for (const Option& o : sOptions)
             {
-                if (setting(sCategory, o.mName, "").empty())
+                if (!o.mLive || setting(sCategory, o.mName, "").empty())
                     continue;
                 if (o.mKind == Kind::Bool)
                     manager.setValue(std::string(pageOf(o)), uniformName(o.mName), settingBool(sCategory, o.mName, o.mDefault > 0.5f));
@@ -384,14 +404,25 @@ namespace Alpha3
                              << " settings moved from settings.cfg [Experimental] to the F2 menu (shaders.yaml)";
         }
 
-        // A settings-only technique: a uniform for each option on its page, in groups
+        bool pageHasLive(const Page& page)
+        {
+            for (const Option& o : sOptions)
+                if (o.mLive && pageOf(o) == page.mTechnique)
+                    return true;
+            return false;
+        }
+
+        // A settings-only technique: a uniform for each option on its page that changes live, in groups
         std::string settingsTechnique(const Page& page)
         {
             std::ostringstream out;
             out.imbue(std::locale::classic());
+            std::string_view header;
             for (const Option& o : sOptions)
             {
-                if (pageOf(o) != page.mTechnique)
+                if (!o.mHeader.empty())
+                    header = o.mHeader;
+                if (!o.mLive || pageOf(o) != page.mTechnique)
                     continue;
                 const bool isBool = o.mKind == Kind::Bool;
                 out << (isBool ? "uniform_bool " : "uniform_float ") << uniformName(o.mName) << " {\n";
@@ -400,12 +431,13 @@ namespace Alpha3
                 else
                     out << "    default = " << fixed(o.mDefault) << ";\n    min = " << fixed(o.mMin)
                         << ";\n    max = " << fixed(o.mMax) << ";\n    step = " << fixed(o.mStep) << ";\n";
-                if (!o.mHeader.empty())
-                    out << "    header = \"" << o.mHeader << "\";\n";
+                if (!header.empty())
+                    out << "    header = \"" << header << "\";\n";
+                header = {};
                 std::string label(o.mName);
                 label[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(label[0])));
                 out << "    display_name = \"" << label << "\";\n";
-                out << "    description = \"" << o.mDescription << (o.mLive ? "" : " (after a restart)") << "\";\n}\n\n";
+                out << "    description = \"" << o.mDescription << "\";\n}\n\n";
             }
             out << "fragment settings {\n"
                    "    // Not drawn: only the settings of Alpha3's experimental graphics (src/experimental.cpp)\n"
@@ -537,6 +569,7 @@ namespace Alpha3
             s.mWaterTide = passOn(sWaterTechnique, "uA3TideOn");
             s.mWaterLiquid = passOn(sWaterTechnique, "uA3LiquidOn");
             s.mVolumetricClouds = passOn(sCloudsTechnique);
+            s.mGroundMist = passOn(sMistTechnique);
             s.mWindDust = passOn(sAirTechnique, "uA3DustOn");
             s.mLightShafts = passOn(sAirTechnique, "uA3ShaftsOn");
             return s;
@@ -636,7 +669,7 @@ namespace Alpha3
 
         bool postProcessingWanted(const ExperimentalSettings& s)
         {
-            return s.mAmbientOcclusion || s.mLook || waterPassWanted(s) || s.mVolumetricClouds || s.mWindDust
+            return s.mAmbientOcclusion || s.mLook || waterPassWanted(s) || s.mVolumetricClouds || s.mGroundMist || s.mWindDust
                 || s.mLightShafts || s.mSharpen;
         }
 
@@ -674,8 +707,29 @@ namespace Alpha3
                 out << key << '=' << value << '\n';
         }
 
+        // A pass in the chain is drawn, a full screen's work, even with every one of its own switches off (the water's
+        // and the air's): those are taken out of the chain at the start, so that they cost nothing (added again in
+        // the F2 menu, they are drawn again)
+        void dropIdlePasses(const ExperimentalSettings& s)
+        {
+            const std::vector<std::pair<std::string_view, bool>> idle
+                = { { sWaterTechnique, !waterPassWanted(s) }, { sAirTechnique, !s.mWindDust && !s.mLightShafts } };
+            auto& post = Settings::postProcessing();
+            std::vector<std::string> chain = post.mChain.get();
+            const std::size_t before = chain.size();
+            for (const auto& [technique, off] : idle)
+                if (off)
+                    chain.erase(std::remove(chain.begin(), chain.end(), technique), chain.end());
+            if (chain.size() == before)
+                return;
+            post.mChain.set(chain);
+            Log(Debug::Info) << "Experimental: " << before - chain.size()
+                             << " pass(es) with every switch off taken out of the post-processing chain";
+        }
+
         void applyOwnedSettings(const ExperimentalSettings& s)
         {
+            dropIdlePasses(s);
             auto& shaders = Settings::shaders();
             auto& post = Settings::postProcessing();
             const bool normalMaps = normalMapsWanted(s);
@@ -1009,13 +1063,15 @@ namespace Alpha3
                     { sAmbientOcclusionTechnique, ExperimentalSources::ambientOcclusion },
                     { sLookTechnique, ExperimentalSources::look }, { sWaterTechnique, ExperimentalSources::water },
                     { sCloudsTechnique, ExperimentalSources::clouds }, { sAirTechnique, ExperimentalSources::air },
+                    { sMistTechnique, ExperimentalSources::mist },
                     { sSharpenTechnique, ExperimentalSources::sharpen } };
                 for (const auto& [stem, source] : passes)
                     add(out, "shaders/" + std::string(stem) + ".omwfx",
                         std::make_unique<EmbeddedFile>(std::string(source), std::string(stem)));
                 add(out, "alpha3/vfs-sources.txt", std::make_unique<SourceIndexFile>());
                 for (const Page& page : sPages)
-                    add(out, "shaders/" + std::string(page.mTechnique) + ".omwfx",
+                    if (pageHasLive(page))
+                        add(out, "shaders/" + std::string(page.mTechnique) + ".omwfx",
                         std::make_unique<EmbeddedFile>(settingsTechnique(page), std::string(page.mTechnique)));
                 if (!normalMapsWanted(s) && !s.mSpecular)
                     return;
@@ -1215,10 +1271,17 @@ namespace Alpha3
     {
         if (sForcedWeather == -2)
             sForcedWeather = static_cast<int>(std::lround(optionFloat("test weather")));
-        sGrassOn.store(optionBool("grass") ? 1 : 0, std::memory_order_relaxed);
-        sLive.mClearance.store(optionBool("grass clearance"), std::memory_order_relaxed);
-        sLive.mBugs.store(optionBool("grass bugs"), std::memory_order_relaxed);
-        sLive.mDryUnder.store(optionBool("wet ground dry under objects"), std::memory_order_relaxed);
+        // called every frame: the menu's values are looked up (in shaders.yaml, slowly) only while it is open (its
+        // debug mode), the only time they can change; otherwise the values from the start stand
+        if (Settings::ShaderManager::get().getMode() == Settings::ShaderManager::Mode::Debug)
+        {
+            sForcedWeather = static_cast<int>(std::lround(optionFloat("test weather")));
+            liveFlags();
+            sGrassOn.store(optionBool("grass") ? 1 : 0, std::memory_order_relaxed);
+            sLive.mClearance.store(optionBool("grass clearance"), std::memory_order_relaxed);
+            sLive.mBugs.store(optionBool("grass bugs"), std::memory_order_relaxed);
+            sLive.mDryUnder.store(optionBool("wet ground dry under objects"), std::memory_order_relaxed);
+        }
         // the menu writes settings.cfg as it closes: the chain kept for it is no longer needed (and must not undo what
         // is changed there)
         static bool chainDone = false;

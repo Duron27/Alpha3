@@ -77,6 +77,7 @@ set(ALPHA3_EXPERIMENTAL_SOURCES
     water a3_water.omwfx
     clouds a3_clouds.omwfx
     air a3_air.omwfx
+    mist a3_mist.omwfx
     sharpen a3_sharpen.omwfx
     treeSway treesway.glsl
     treeLeaves treeleaves.glsl

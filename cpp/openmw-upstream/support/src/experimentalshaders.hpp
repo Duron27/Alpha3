@@ -62,6 +62,7 @@ namespace Alpha3
         bool mWaterTide = false; // a sheet of water creeping up the beach and back
         bool mWaterLiquid = false; // depth colour, ripples bending what is under the water, the sun glittering
         bool mVolumetricClouds = false; // (post-processing, a3_clouds)
+        bool mGroundMist = false; // mist lying low in valleys and towns (post-processing, a3_mist)
         bool mWindDust = false; // dust and ash blown along, motes in the air (post-processing, a3_air)
         bool mLightShafts = false;
     };

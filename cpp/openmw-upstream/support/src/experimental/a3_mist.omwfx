@@ -1,0 +1,281 @@
+uniform_float uA3MistTop {
+    default = 700.0;
+    min = 0.0;
+    max = 8000.0;
+    step = 50.0;
+    description = "How high the mist reaches, above the sea (game units): it fills what lies lower, valleys and towns in them";
+    display_name = "Height";
+}
+
+uniform_float uA3MistFade {
+    default = 450.0;
+    min = 50.0;
+    max = 3000.0;
+    step = 25.0;
+    description = "How softly it thins out toward its top, in billows";
+    display_name = "Softness of its top";
+}
+
+uniform_float uA3MistDensity {
+    default = 1.0;
+    min = 0.0;
+    max = 4.0;
+    step = 0.05;
+    description = "How thick it is";
+    display_name = "Density";
+}
+
+uniform_float uA3MistPatches {
+    default = 0.7;
+    min = 0.0;
+    max = 1.0;
+    step = 0.05;
+    description = "In banks and wisps with clear air between (0: an even layer)";
+    display_name = "Patchiness";
+}
+
+uniform_float uA3MistScale {
+    default = 1.0;
+    min = 0.2;
+    max = 4.0;
+    step = 0.05;
+    description = "Size of the banks";
+    display_name = "Bank size";
+}
+
+uniform_float uA3MistSpeed {
+    default = 1.0;
+    min = 0.0;
+    max = 5.0;
+    step = 0.1;
+    description = "How fast it drifts (with the wind)";
+    display_name = "Drift";
+}
+
+uniform_float uA3MistReach {
+    default = 12000.0;
+    min = 2000.0;
+    max = 40000.0;
+    step = 500.0;
+    description = "How far off it is drawn";
+    display_name = "Reach";
+}
+
+uniform_float uA3MistBrightness {
+    default = 1.0;
+    min = 0.2;
+    max = 2.0;
+    step = 0.05;
+    description = "How bright it is lit";
+    display_name = "Brightness";
+}
+
+uniform_bool uA3MistWeather {
+    default = true;
+    description = "Thicker in fog and rain, thinner when clear, little in ash storms";
+    display_name = "Follow weather";
+}
+
+uniform_bool uA3MistMornings {
+    default = true;
+    description = "Thickest at dawn and at night, thinning out by midday";
+    display_name = "Mornings";
+}
+
+uniform_int uA3MistSteps {
+    default = 6;
+    min = 3;
+    max = 12;
+    step = 1;
+    description = "Samples through it: quality against cost";
+    display_name = "Quality (steps)";
+}
+
+render_target RT_A3Mist {
+    width_ratio = 0.5;
+    height_ratio = 0.5;
+    internal_format = rgba16f;
+    source_type = half_float;
+    source_format = rgba;
+}
+
+fragment march(target=RT_A3Mist) {
+    // (OpenMW's .omwfx parser reads comments only inside blocks of GLSL, so this file's notes are here)
+    // Ground mist of the experimental graphics (F2 menu: a3_mist): a layer of mist in banks lying in what is lower than
+    // its height above the sea (valleys, towns in them, over the water), drifting with the wind, thickest at dawn and in
+    // fog. Marched at half resolution from the eye to what each pixel shows (a few samples), then laid over the scene at
+    // full resolution, taking from the half resolution pixels at the same depth only, so no mist bleeds round walls.
+
+    omw_In vec2 omw_TexCoord;
+
+    float a3Hash3(vec3 p)
+    {
+        p = mod(p, 289.0);
+        p = fract(p * 0.3183099 + 0.1);
+        p *= 17.0;
+        return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+    }
+
+    float a3Noise3(vec3 p)
+    {
+        vec3 i = floor(p);
+        vec3 f = fract(p);
+        f = f * f * (3.0 - 2.0 * f);
+        return mix(mix(mix(a3Hash3(i), a3Hash3(i + vec3(1.0, 0.0, 0.0)), f.x),
+                       mix(a3Hash3(i + vec3(0.0, 1.0, 0.0)), a3Hash3(i + vec3(1.0, 1.0, 0.0)), f.x), f.y),
+                   mix(mix(a3Hash3(i + vec3(0.0, 0.0, 1.0)), a3Hash3(i + vec3(1.0, 0.0, 1.0)), f.x),
+                       mix(a3Hash3(i + vec3(0.0, 1.0, 1.0)), a3Hash3(i + vec3(1.0, 1.0, 1.0)), f.x), f.y), f.z);
+    }
+
+    float a3Dither(vec2 uv)
+    {
+        vec2 p = uv * omw.resolution;
+        return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
+    }
+
+    // how much mist each weather brings: clear, cloudy, foggy, overcast, rain, thunder, ash, blight, snow, blizzard
+    float a3WeatherMist(int id)
+    {
+        if (id == 0) return 0.45;
+        if (id == 1) return 0.7;
+        if (id == 2) return 1.8;
+        if (id == 3) return 1.0;
+        if (id == 4) return 1.3;
+        if (id == 5) return 1.1;
+        if (id == 6) return 0.25;
+        if (id == 7) return 0.3;
+        if (id == 8) return 0.9;
+        return 0.6;
+    }
+
+    // thickest about dawn, some at night, thin at midday
+    float a3HourMist(float hour)
+    {
+        float x = (hour - 6.5) / 2.2;
+        float dawn = exp(-x * x);
+        float night = smoothstep(19.0, 23.0, hour) + 1.0 - smoothstep(3.0, 6.0, hour);
+        return 0.35 + 1.1 * dawn + 0.45 * clamp(night, 0.0, 1.0);
+    }
+
+    // the mist's density at a point: under its top, which billows, in banks
+    float a3Mist(vec3 p, float sea, vec3 drift)
+    {
+        vec3 q = (p + drift) / (2600.0 * uA3MistScale);
+        float broad = a3Noise3(q);
+        float fine = a3Noise3(q * 3.1 + vec3(0.0, 0.0, omw.simulationTime * 0.02));
+        float n = broad * 0.7 + fine * 0.3;
+        float top = sea + uA3MistTop + (n - 0.5) * uA3MistFade;
+        float h = p.z;
+        float layer = 1.0 - smoothstep(top - uA3MistFade, top, h);
+        float banks = mix(1.0, smoothstep(0.35, 0.7, n), uA3MistPatches);
+        return layer * banks;
+    }
+
+    void main()
+    {
+        vec2 uv = omw_TexCoord;
+        vec3 eye = omw.eyePos.xyz;
+        vec3 scene = omw_GetWorldPosFromUV(uv);
+        vec3 ray = scene - eye;
+        float sceneDistance = length(ray);
+        vec3 dir = ray / max(sceneDistance, 0.001);
+        float far = min(sceneDistance, uA3MistReach);
+
+        float sea = omw.waterHeight;
+        float highest = sea + uA3MistTop + uA3MistFade * 0.5;
+        // the part of the ray under the mist's top
+        float t0 = 0.0;
+        float t1 = far;
+        if (abs(dir.z) > 0.0001)
+        {
+            float tTop = (highest - eye.z) / dir.z;
+            if (eye.z > highest)
+            {
+                if (dir.z >= 0.0)
+                    t1 = -1.0;
+                else
+                    t0 = tTop;
+            }
+            else if (dir.z > 0.0)
+                t1 = min(t1, tTop);
+        }
+        else if (eye.z > highest)
+            t1 = -1.0;
+        if (t1 <= t0)
+        {
+            omw_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+            return;
+        }
+
+        float amount = uA3MistDensity;
+        if (uA3MistWeather)
+            amount *= mix(a3WeatherMist(omw.weatherID), a3WeatherMist(omw.nextWeatherID), omw.weatherTransition);
+        if (uA3MistMornings)
+            amount *= a3HourMist(omw.gameHour);
+        if (amount <= 0.001)
+        {
+            omw_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+            return;
+        }
+
+        vec3 drift = vec3(-0.3, 1.0, 0.0) * omw.simulationTime * 40.0 * uA3MistSpeed * (0.5 + omw.windSpeed * 0.1);
+        int steps = int(clamp(float(uA3MistSteps), 3.0, 12.0));
+        float stepLength = (t1 - t0) / float(steps);
+        float t = t0 + stepLength * a3Dither(uv);
+        float optical = 0.0;
+        for (int i = 0; i < 12; ++i)
+        {
+            if (i >= steps)
+                break;
+            optical += a3Mist(eye + dir * t, sea, drift) * stepLength;
+            t += stepLength;
+        }
+        // about two thirds hidden through 1500 units of it
+        float transmittance = exp(-optical * amount / 1500.0);
+
+        // lit as the fog is, with some of the sun on it toward the sun
+        vec3 sunDir = normalize(omw.sunPos.xyz);
+        float toSun = max(dot(dir, sunDir), 0.0);
+        vec3 light = (omw.fogColor.rgb * 0.85 + omw.skyColor.rgb * 0.15) * uA3MistBrightness
+            + omw.sunColor.rgb * omw.sunVis * (0.12 + 0.35 * toSun * toSun);
+        omw_FragColor = vec4(light * (1.0 - transmittance), transmittance);
+    }
+}
+
+fragment apply(rt1=RT_A3Mist) {
+    omw_In vec2 omw_TexCoord;
+
+    void main()
+    {
+        vec2 uv = omw_TexCoord;
+        vec3 c = omw_GetLastShader(uv).rgb;
+        // the four half resolution pixels about this one, each weighed by how near and how close in depth it is
+        vec2 low = omw.resolution * 0.5;
+        vec2 at = uv * low - 0.5;
+        vec2 base = floor(at);
+        vec2 f = at - base;
+        float depth = omw_GetLinearDepth(uv);
+        vec4 sum = vec4(0.0);
+        float weights = 0.0;
+        for (int i = 0; i < 4; ++i)
+        {
+            vec2 o = vec2(float(i - (i / 2) * 2), float(i / 2));
+            vec2 suv = (base + o + 0.5) / low;
+            float bilinear = (o.x > 0.5 ? f.x : 1.0 - f.x) * (o.y > 0.5 ? f.y : 1.0 - f.y);
+            float d = omw_GetLinearDepth(suv);
+            float w = bilinear / (0.001 + abs(d - depth) / max(depth, 1.0)) + 0.0001;
+            sum += omw_Texture2D(RT_A3Mist, suv) * w;
+            weights += w;
+        }
+        vec4 mist = sum / weights;
+        omw_FragColor = vec4(c * mist.a + mist.rgb, 1.0);
+    }
+}
+
+technique {
+    description = "Alpha3 experimental: ground mist lying in valleys, towns and over the water, in drifting banks";
+    version = "1.0";
+    author = "Alpha3";
+    passes = march, apply;
+    flags = disable_interiors, disable_underwater;
+}
