@@ -148,6 +148,11 @@ namespace Alpha3
                 "Taller and thicker on green ground, sparse on ash, in meadow patches" },
             { "grass shapes", "", Kind::Bool, 1, 0, 1, 1, false, "Leaf rosettes, sedge, moss, lichen and mushrooms among it" },
             { "grass antialiasing", "", Kind::Bool, 1, 0, 1, 1, false, "No blade thinner than a pixel, far off" },
+            { "grass fire", "", Kind::Bool, 1, 0, 1, 1, false,
+                "Fire and lightning striking it set it alight: a ring of flame going out, the ground burnt black, "
+                "smoke, then it grows back" },
+            { "grass fire size", "", Kind::Float, 1, 0.25f, 3, 0.05f, false, "How far a fire spreads" },
+            { "grass fire regrow", "", Kind::Float, 30, 10, 600, 5, false, "Seconds until the grass has grown back" },
             { "grass bugs", "Critters", Kind::Bool, 1, 0, 1, 1, true,
                 "Ants, beetles, butterflies, bees, dragonflies, gnats, fireflies, frogs and moths in the grass" },
             { "grass bug density", "", Kind::Float, 1, 0, 4, 0.05f, false, "How many" },
@@ -546,6 +551,9 @@ namespace Alpha3
             s.mGrassSoil = optionBool("grass soil");
             s.mGrassShapes = optionBool("grass shapes");
             s.mGrassBugs = optionBool("grass bugs");
+            s.mGrassFire = optionBool("grass fire");
+            s.mGrassFireSize = optionFloat("grass fire size");
+            s.mGrassFireRegrow = optionFloat("grass fire regrow");
             s.mGrassBirds = optionBool("grass birds");
             s.mGrassBugDensity = optionFloat("grass bug density");
             s.mTreeSway = optionBool("tree sway");
@@ -1169,7 +1177,7 @@ namespace Alpha3
             return false;
         static const ExperimentalShaderParts parts{ ExperimentalSources::procedural, ExperimentalSources::detail,
             ExperimentalSources::terrain, ExperimentalSources::treeSway, ExperimentalSources::treeLeaves,
-            ExperimentalSources::wetground };
+            ExperimentalSources::wetground, ExperimentalSources::grassFire };
         static const MissingAnchor missing = [](std::string_view name, std::string_view anchor) {
             static std::mutex mutex;
             static std::set<std::string> logged;
@@ -1194,6 +1202,8 @@ namespace Alpha3
             text += s.mTreeSway ? "w" : "-";
             text += s.mTreeFull ? "f" : "-";
             text += s.mWetGround ? "r" + std::string(s.mWetPuddles ? "p" : "") : "-";
+            text += s.mGrass && s.mGrassFire ? "b" : "-";
+            text += "2"; // 2: rain dripping off things and footprints in the wet ground
             std::uint64_t hash = fnv1a(text, 0xcbf29ce484222325ull);
             for (std::string_view part :
                 { ExperimentalSources::procedural, ExperimentalSources::detail, ExperimentalSources::terrain,

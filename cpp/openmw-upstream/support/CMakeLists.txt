@@ -74,6 +74,8 @@ set(ALPHA3_EXPERIMENTAL_SOURCES
     grass grass.glsl
     bugs bugs.glsl
     wetground wetground.glsl
+    grassFire grassfire.glsl
+    fireParticles fireparticles.glsl
     water a3_water.omwfx
     clouds a3_clouds.omwfx
     air a3_air.omwfx
@@ -114,6 +116,7 @@ set(ALPHA3_SUPPORT_SOURCES
     ${CMAKE_CURRENT_BINARY_DIR}/generated/experimentalsources.cpp
     src/generatedmaps.cpp
     src/grass.cpp
+    src/grassfire.cpp
     src/wetground.cpp
     src/experimentalstate.cpp
     src/ktxtextures.cpp

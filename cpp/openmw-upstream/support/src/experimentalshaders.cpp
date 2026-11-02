@@ -222,7 +222,8 @@ namespace Alpha3
         bool injectTerrainFragment(std::string& source, const std::string& name, const ExperimentalSettings& s,
             const ExperimentalShaderParts& parts, const MissingAnchor& missingAnchor)
         {
-            if (!s.mProcedural && !s.mDetail && !s.mTriplanar && !s.mHeightBlending && !s.mWetGround)
+            const bool fire = s.mGrass && s.mGrassFire;
+            if (!s.mProcedural && !s.mDetail && !s.mTriplanar && !s.mHeightBlending && !s.mWetGround && !fire)
                 return false;
             Injection injection(source, name, missingAnchor);
             std::string library = defines(s, false);
@@ -231,6 +232,8 @@ namespace Alpha3
             if (s.mWetGround)
                 library += std::string("#define A3_RAIN_MAP_SIZE 512.0\n#define A3_PUDDLES ") + (s.mWetPuddles ? "1" : "0")
                     + "\n" + std::string(parts.mWetGround) + "\n";
+            if (fire)
+                library += "#define A3_FIRE_TERRAIN 1\n" + std::string(parts.mGrassFire) + "\n";
             // only in a drawable's variant for its material (OSG's A3_MATERIAL state define)
             if (s.mProcedural)
                 library += "#ifdef A3_MATERIAL\n" + std::string(parts.mProcedural) + "\n#endif\n";
@@ -282,6 +285,20 @@ namespace Alpha3
                 injection.insert("    gl_FragData[0].xyz = gl_FragData[0].xyz * lighting + specular;",
                     "    a3WetShine(gl_FragData[0].xyz, a3Wet, passViewPos, viewNormal, fog.color.xyz, sun.position.xyz, "
                     "sun.diffuse.xyz);",
+                    true);
+            }
+            if (fire)
+            {
+                // the grass fire: the ground charred where it burnt, embers glowing, lit by the flames
+                injection.insert("    vec4 diffuseColor = getDiffuseColor(material, passColor);",
+                    "    vec3 a3FireColour;\n"
+                    "    vec3 a3Fire = a3FireGround((osg_ViewMatrixInverse * vec4(passViewPos, 1.0)).xyz, a3FireColour);\n"
+                    "    gl_FragData[0].xyz = mix(gl_FragData[0].xyz, a3FireColour, a3Fire.x);\n"
+                    "    vec3 a3FireAlbedo = gl_FragData[0].xyz;",
+                    false);
+                injection.insert("    gl_FragData[0].xyz = gl_FragData[0].xyz * lighting + specular;",
+                    "    gl_FragData[0].xyz += a3FireAlbedo * vec3(1.0, 0.5, 0.2) * a3Fire.z * 1.5 "
+                    "+ vec3(1.0, 0.35, 0.07) * a3Fire.y * 2.5;",
                     true);
             }
             if (s.mTriplanar)

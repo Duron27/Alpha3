@@ -100,6 +100,7 @@ void main()
                     mInstalled = true;
                 }
                 experimentalLiveUpdate();
+                grassFireUpdate(precipitation, dt);
                 if (!s.mWetGround)
                     return;
                 // turned off in the menu: dry at once
@@ -158,6 +159,7 @@ void main()
                 mScene = &camera;
                 osg::StateSet* state = camera.getOrCreateStateSet();
                 experimentalLiveInstall(*state);
+                grassFireInstall(*state);
                 if (!s.mWetGround)
                     return;
                 for (osg::Uniform* u : { mWetness.get(), mRain.get(), mArea.get(), mHeight.get(), mSampler.get() })

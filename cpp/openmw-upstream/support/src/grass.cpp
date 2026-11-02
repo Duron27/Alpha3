@@ -252,7 +252,8 @@ namespace Alpha3
             osg::observer_ptr<Terrain::TerrainDrawable> mDrawable;
             std::shared_ptr<const ChunkGround> mGround;
             std::vector<std::unique_ptr<Tile>> mTiles;
-            osg::Matrix mToWorld;
+            osg::Matrix mToWorld, mFromWorld;
+            osg::Vec2f mWorldMin, mWorldMax; // its ground's corners in the world
             unsigned mLastSeen = 0;
         };
 
@@ -907,6 +908,9 @@ namespace Alpha3
             void drawableAdded(osgUtil::CullVisitor& cv, Terrain::TerrainDrawable& drawable, const osg::Matrix& modelView)
             {
                 const unsigned frame = cv.getTraversalNumber();
+                // the grass fire's flames and smoke, once a frame (grassfire.cpp; not under the lock, which it may want)
+                if (frame != mFireFrame.exchange(frame))
+                    grassFireCull(cv);
                 std::lock_guard lock(mChunksMutex);
                 if (frame != mFrame)
                 {
@@ -1013,6 +1017,50 @@ namespace Alpha3
                             tile->mStale = true;
             }
 
+            // The ground's height and how grassy it is (the grassy layers' blend weights) at places in the world, from the
+            // most detailed chunk culled lately that has each; z NaN where there is none
+            void ground(const osg::Vec2f* places, std::size_t count, osg::Vec2f* found)
+            {
+                std::lock_guard lock(mChunksMutex);
+                std::map<const ChunkGround*, Grassy> grassyOf;
+                for (std::size_t i = 0; i < count; ++i)
+                {
+                    const osg::Vec2f& at = places[i];
+                    const Chunk* best = nullptr;
+                    float bestSize = std::numeric_limits<float>::max();
+                    for (const auto& [key, chunk] : mChunks)
+                    {
+                        if (!chunk->mGround || at.x() < chunk->mWorldMin.x() || at.y() < chunk->mWorldMin.y()
+                            || at.x() > chunk->mWorldMax.x() || at.y() > chunk->mWorldMax.y())
+                            continue;
+                        const float size = chunk->mWorldMax.x() - chunk->mWorldMin.x();
+                        if (size < bestSize)
+                        {
+                            bestSize = size;
+                            best = chunk.get();
+                        }
+                    }
+                    if (best == nullptr)
+                    {
+                        found[i] = osg::Vec2f(std::numeric_limits<float>::quiet_NaN(), 0.f);
+                        continue;
+                    }
+                    const ChunkGround& ground = *best->mGround;
+                    const osg::Vec3f local = osg::Vec3f(at.x(), at.y(), 0.f) * best->mFromWorld;
+                    const osg::Vec3f c0 = ground.position(0.f, 0.f), c1 = ground.position(1.f, 1.f);
+                    const float u = (local.x() - c0.x()) / std::max(c1.x() - c0.x(), 1.f);
+                    const float v = (local.y() - c0.y()) / std::max(c1.y() - c0.y(), 1.f);
+                    auto [entry, added] = grassyOf.try_emplace(&ground);
+                    if (added)
+                        for (const ChunkGround::Pass& pass : ground.mPasses)
+                            if (const Layer layer = layerOf(pass.mTexture); layer.mGrass)
+                                entry->second.emplace_back(layer, &pass);
+                    std::size_t which = 0;
+                    const float grassy = entry->second.empty() ? 0.f : grassyAt(entry->second, u, v, which);
+                    found[i] = osg::Vec2f((ground.position(u, v) * best->mToWorld).z(), std::min(grassy, 1.f));
+                }
+            }
+
         private:
             // what stands on a tile, for its job (with mChunksMutex held)
             std::vector<Obstacle> obstaclesOn(const Chunk& chunk, const Tile& tile)
@@ -1041,6 +1089,7 @@ namespace Alpha3
                 auto chunk = std::make_shared<Chunk>();
                 chunk->mDrawable = &drawable;
                 chunk->mToWorld = toWorld;
+                chunk->mFromWorld = osg::Matrix::inverse(toWorld);
                 const auto* vertices = dynamic_cast<const osg::Vec3Array*>(drawable.getVertexArray());
                 if (vertices == nullptr || vertices->size() < 4)
                     return chunk;
@@ -1076,6 +1125,9 @@ namespace Alpha3
 
                 // tiles of about sTileSize units
                 const osg::Vec3f corner0 = ground->position(0.f, 0.f), corner1 = ground->position(1.f, 1.f);
+                const osg::Vec3f world0 = corner0 * toWorld, world1 = corner1 * toWorld;
+                chunk->mWorldMin = osg::Vec2f(std::min(world0.x(), world1.x()), std::min(world0.y(), world1.y()));
+                chunk->mWorldMax = osg::Vec2f(std::max(world0.x(), world1.x()), std::max(world0.y(), world1.y()));
                 const int across = std::max(1, static_cast<int>(std::lround(std::abs(corner1.x() - corner0.x()) / sTileSize)));
                 const int along = std::max(1, static_cast<int>(std::lround(std::abs(corner1.y() - corner0.y()) / sTileSize)));
                 const osg::BoundingBox& chunkBox = drawable.getBoundingBox();
@@ -1123,6 +1175,7 @@ namespace Alpha3
                     const std::string defines = "#version 120\n#define A3_GRASS_DISTANCE "
                         + std::to_string(s.mGrassDistance) + "\n#define A3_GRASS_VARIETY " + (s.mGrassVariety ? "1" : "0")
                         + "\n#define A3_GRASS_AA " + (s.mGrassAntialiasing ? "1" : "0")
+                        + "\n#define A3_GRASS_FIRE " + (s.mGrassFire ? "1" : "0")
                         + "\n#define A3_SCREEN_HEIGHT " + std::to_string(std::max(screenHeight, 1)) + "\n";
                     const std::string source(ExperimentalSources::grass);
                     mProgram = new osg::Program;
@@ -1132,7 +1185,7 @@ namespace Alpha3
                             + "#define A3_VERTEX\n"
                               // from the F2 menu while the game runs (experimentalLiveUniforms)
                               "uniform float a3GrassWind;\n#define A3_GRASS_WIND a3GrassWind\nuniform float a3GrassStorm;\n"
-                            + source);
+                            + (s.mGrassFire ? std::string(ExperimentalSources::grassFire) + "\n" : std::string()) + source);
                     vertex->setName("a3_grass.vert");
                     osg::ref_ptr<osg::Shader> fragment = new osg::Shader(osg::Shader::FRAGMENT, defines + source);
                     fragment->setName("a3_grass.frag");
@@ -1239,6 +1292,7 @@ namespace Alpha3
             std::unordered_map<const Terrain::TerrainDrawable*, std::shared_ptr<Chunk>> mChunks;
             std::unordered_map<const osg::Drawable*, ObstacleEntry> mObstacles;
             unsigned mFrame = 0;
+            std::atomic<unsigned> mFireFrame{ 0 };
             osg::ref_ptr<osg::Program> mProgram;
             osg::ref_ptr<osg::StateSet> mBugState;
             // how far the grass reaches now (a3GrassReach): the setting's distance, nearer while the phone is warm
@@ -1263,6 +1317,11 @@ namespace Alpha3
     void setGrassVfs(const VFS::Manager& vfs)
     {
         sVfs = &vfs;
+    }
+
+    void grassGround(const osg::Vec2f* places, std::size_t count, osg::Vec2f* found)
+    {
+        Grass::get().ground(places, count, found);
     }
 
     void grassDrawableAdded(osg::NodeVisitor& cullVisitor, osg::Drawable& drawable, const osg::Matrix& modelView)

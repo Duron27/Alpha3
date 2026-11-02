@@ -12,6 +12,7 @@
 #include <osg/Camera>
 #include <osg/Matrixd>
 #include <osg/Texture>
+#include <osg/Vec3f>
 #include <osg/ref_ptr>
 
 struct SDL_Window;
@@ -61,6 +62,10 @@ namespace Alpha3
     // How hard it rains now (0..1, the water's rain ripples' amount) and the frame's time step (0 while paused), from
     // the rendering manager's update: the wet ground ([Experimental] wet ground) gets wet and dries by it
     void setRain(float precipitation, float dt);
+
+    // A fire (lightning: false) or shock damage spell exploded at a place (OpenMW patch 0024), with its area (game units)
+    // and magnitude: grass there catches fire ([Experimental] grass fire, src/grassfire.cpp)
+    void groundStruck(const osg::Vec3f& at, bool lightning, float area, float magnitude);
 
     // How far to draw while the phone heats up ([General] thermal mode, thermal.cpp): the share of the view distance (and
     // the grass's), and of the shadows' distance; 1 while it is cool or the mode is full

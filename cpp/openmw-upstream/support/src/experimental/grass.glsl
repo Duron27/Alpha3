@@ -15,12 +15,18 @@
 //                       storm (blizzards, ash and blight storms: windSpeed 0.8 and more)
 //   A3_GRASS_VARIETY    1: seed stalks and drier patches
 //   A3_GRASS_AA         1: no blade thinner than a pixel (A3_SCREEN_HEIGHT pixels high), widened ones faded to the root
+//   A3_GRASS_FIRE       1: burnt by the grass fire (experimental/grassfire.glsl, put before this in the vertex shader):
+//                       scorched ahead of a front, burning down to a black stubble in it, growing back after
 
 varying vec3 a3Colour;
 varying float a3Coverage;
 varying vec3 a3ViewPos;
 varying vec3 a3ViewNormal;
 varying float a3Up;
+#if A3_GRASS_FIRE
+varying float a3Ember; // glowing where it burns
+varying float a3FireLight; // the flames' light on it
+#endif
 
 #ifdef A3_VERTEX
 
@@ -77,6 +83,20 @@ void main()
     vec2 stomp = vec2(0.0);
     if (d > 0.01 && d < 70.0 && abs(world.z - playerPos.z) < 80.0)
         stomp = away / d * (1.0 - d / 70.0) * 1.4;
+
+#if A3_GRASS_FIRE
+    // the grass fire: burnt down to a stubble, writhing in the heat ahead of the front, growing back each blade in its
+    // own time
+    float fireJitter = fract(sin(dot(floor(world.xy * 2.0), vec2(12.9898, 78.233))) * 43758.5453);
+    vec4 burn;
+    float heat;
+    a3FireAt(world, fireJitter - 0.5, burn, heat);
+    float grown = smoothstep(fireJitter * 0.6, fireJitter * 0.6 + 0.4, burn.w);
+    float gone = burn.x * (1.0 - grown);
+    height *= mix(1.0, 0.07, gone);
+    sway += vec2(sin(osg_SimulationTime * 13.0 + fireJitter * 40.0), cos(osg_SimulationTime * 11.0 + fireJitter * 30.0))
+        * heat * 0.4;
+#endif
 
     // bent more toward the tip; a bent blade is lower
     float kind = floor(extra.z / 16.0);
@@ -138,6 +158,15 @@ void main()
     else if (kind > 5.5) // mushrooms: a pale stem, a brown cap or now and then a rusty red one
         a3Colour = t < 0.63 ? vec3(0.78, 0.74, 0.62)
                             : (tone > 0.8 ? vec3(0.62, 0.22, 0.12) : vec3(0.47, 0.32, 0.19) * (0.8 + 0.4 * tone));
+#if A3_GRASS_FIRE
+    // scorched brown ahead of the flames, charred black behind (some tips grey with ash), the new shoots a fresh green
+    a3Colour = mix(a3Colour, a3Colour * vec3(0.85, 0.68, 0.38), heat * 0.6);
+    vec3 charred = mix(vec3(0.035, 0.03, 0.027), vec3(0.3, 0.29, 0.27), step(0.7, fireJitter) * t);
+    a3Colour = mix(a3Colour, charred, gone);
+    a3Colour = mix(a3Colour, a3Colour * vec3(0.92, 1.15, 0.8), burn.x * grown * (1.0 - burn.w));
+    a3Ember = burn.y * (1.0 - grown) * smoothstep(0.2, 1.0, t);
+    a3FireLight = burn.z;
+#endif
 }
 
 #else
@@ -178,6 +207,9 @@ void main()
     colour += sun.diffuse.xyz * a3Colour * pow(max(dot(-v, l), 0.0), 8.0) * 0.5 * a3Up;
     // a blade drawn wider than it is (antialiasing) is mostly the ground showing between blades
     colour = mix(a3GrassRoot * (sun.ambient.xyz + sun.diffuse.xyz * 0.6) * 0.55, colour, a3Coverage);
+#if A3_GRASS_FIRE
+    colour += a3Colour * vec3(1.0, 0.5, 0.2) * a3FireLight * 1.5 + vec3(1.0, 0.36, 0.06) * a3Ember * 2.5;
+#endif
 
     float f = clamp((length(a3ViewPos) - fog.start) / max(fog.end - fog.start, 1.0), 0.0, 1.0);
     gl_FragData[0] = vec4(mix(colour, fog.color.xyz, f), 1.0);

@@ -14,6 +14,7 @@
 #include <osg/BoundingBox>
 #include <osg/Image>
 #include <osg/Matrix>
+#include <osg/Vec2f>
 #include <osg/Program>
 #include <osg/ref_ptr>
 
@@ -159,6 +160,15 @@ namespace Alpha3
     // reading their textures' colours
     void setGrassVfs(const VFS::Manager& vfs);
     void grassDrawableAdded(osg::NodeVisitor& cullVisitor, osg::Drawable& drawable, const osg::Matrix& modelView);
+    // The ground's height (x, NaN where no chunk culled lately has it) and how grassy it is (y, 0..1) at places in the
+    // world (any thread)
+    void grassGround(const osg::Vec2f* places, std::size_t count, osg::Vec2f* found);
+    // ---- grassfire.cpp (grass fire): fire and lightning set the grass alight (groundStruck in upstream.hpp). The
+    // scene camera's uniforms (grassFireInstall, from wetground.cpp's install), its flames and smoke added once a frame
+    // as the grass is culled, and the fires burning on with the frame's time step and the rain (from setRain)
+    void grassFireInstall(osg::StateSet& state);
+    void grassFireCull(osg::NodeVisitor& cullVisitor);
+    void grassFireUpdate(float precipitation, float dt);
     // ---- wetground.cpp (wet ground): notes the scene camera, which gets the wet ground's uniforms and the
     // map of what stands over the ground
     // The F2 menu's values the shaders read while the game runs (experimental.cpp): uniforms put on the scene camera,

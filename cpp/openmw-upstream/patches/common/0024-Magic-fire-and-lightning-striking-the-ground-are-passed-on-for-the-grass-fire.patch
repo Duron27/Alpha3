@@ -1,0 +1,76 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Mon, 2 Nov 2026 04:07:58 -0500
+Subject: [PATCH 24/24] Magic: fire and lightning striking the ground are passed on
+ for the grass fire
+
+Where a fire or shock damage spell's bolt strikes (not an actor, unless it has an area; not the water), and where one
+explodes in the engine (a touch, the ExplodeSpell script command), the experimental graphics' grass fire is told the
+place, which of the two it was, its area and its magnitude: the grass there catches fire (Alpha3's grassfire.cpp).
+Bolts' hits are handled by Lua, so they are passed on as the projectile manager hands them over.
+---
+ apps/openmw/mwmechanics/spellcasting.cpp  |  9 +++++++++
+ apps/openmw/mwworld/projectilemanager.cpp | 13 +++++++++++++
+ 2 files changed, 22 insertions(+)
+
+diff --git a/apps/openmw/mwmechanics/spellcasting.cpp b/apps/openmw/mwmechanics/spellcasting.cpp
+index 903011c..b4e3ab3 100644
+--- a/apps/openmw/mwmechanics/spellcasting.cpp
++++ b/apps/openmw/mwmechanics/spellcasting.cpp
+@@ -27,6 +27,8 @@
+ #include "spellutil.hpp"
+ #include "weapontype.hpp"
+ 
++#include <alpha3/upstream.hpp>
++
+ namespace MWMechanics
+ {
+     CastSpell::CastSpell(
+@@ -51,6 +53,13 @@ namespace MWMechanics
+                 || (effectInfo.mData.mArea <= 0 && !ignore.isEmpty() && ignore.getClass().isActor()))
+                 continue; // Not right range type, or not area effect and hit an actor
+ 
++            // Alpha3: fire and lightning set the grass alight where they strike (the experimental graphics' grass fire)
++            if (effectInfo.mData.mEffectID == ESM::MagicEffect::FireDamage
++                || effectInfo.mData.mEffectID == ESM::MagicEffect::ShockDamage)
++                Alpha3::groundStruck(mHitPosition, effectInfo.mData.mEffectID == ESM::MagicEffect::ShockDamage,
++                    static_cast<float>(effectInfo.mData.mArea) * Constants::UnitsPerFoot,
++                    static_cast<float>(effectInfo.mData.mMagnMin + effectInfo.mData.mMagnMax) * 0.5f);
++
+             if (mFromProjectile && effectInfo.mData.mArea <= 0)
+                 continue; // Don't play explosion for projectiles with 0-area effects
+ 
+diff --git a/apps/openmw/mwworld/projectilemanager.cpp b/apps/openmw/mwworld/projectilemanager.cpp
+index f653184..9b2f7ec 100644
+--- a/apps/openmw/mwworld/projectilemanager.cpp
++++ b/apps/openmw/mwworld/projectilemanager.cpp
+@@ -62,6 +62,8 @@
+ #include "../mwphysics/physicssystem.hpp"
+ #include "../mwphysics/projectile.hpp"
+ 
++#include <alpha3/upstream.hpp>
++
+ namespace
+ {
+     float getMagicBoltSpeed(float effectSpeed, const MWWorld::Ptr& caster, bool normaliseRaceSpeed)
+@@ -665,6 +667,17 @@ namespace MWWorld
+                 hitNormal = projectile->velocity();
+                 hitNormal.normalize();
+             }
++            // Alpha3: fire and lightning set the grass alight where a bolt strikes (the experimental graphics' grass
++            // fire); not where it hits an actor without an area, or the water
++            if (!projectile->getHitWater())
++                for (const ESM::IndexedENAMstruct& effect : magicBoltState.mEffects.mList)
++                    if ((effect.mData.mEffectID == ESM::MagicEffect::FireDamage
++                            || effect.mData.mEffectID == ESM::MagicEffect::ShockDamage)
++                        && (effect.mData.mArea > 0 || target.isEmpty() || !target.getClass().isActor()))
++                        Alpha3::groundStruck(hitPos, effect.mData.mEffectID == ESM::MagicEffect::ShockDamage,
++                            static_cast<float>(effect.mData.mArea) * Constants::UnitsPerFoot,
++                            static_cast<float>(effect.mData.mMagnMin + effect.mData.mMagnMax) * 0.5f);
++
+             MWBase::Environment::get().getLuaManager()->magicProjectileHit(
+                 magicBoltState.mSpellId, caster, magicBoltState.mItem, target, hitPos, hitNormal);
+ 
+-- 
+2.55.0
+

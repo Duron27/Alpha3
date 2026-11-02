@@ -44,6 +44,9 @@ namespace Alpha3
         bool mGrassAntialiasing = true;
         bool mGrassBugs = true; // ants, beetles, grasshoppers, bees, butterflies, dragonflies, gnats, fireflies
         float mGrassBugDensity = 1.f;
+        bool mGrassFire = true; // fire and lightning set it alight: a ring of flame going out, burnt ground, regrowth
+        float mGrassFireSize = 1.f;
+        float mGrassFireRegrow = 30.f; // seconds until it has all grown back
         bool mGrassBirds = true; // flocks of birds wheeling overhead, with the bugs; frogs and moths too // no blade thinner than a pixel, the widened ones faded into the ground
         bool mTreeSway = false;
         float mTreeSwayStrength = 2.5f;
@@ -86,7 +89,7 @@ namespace Alpha3
     // The GLSL libraries that are added (src/experimental/*.glsl)
     struct ExperimentalShaderParts
     {
-        std::string_view mProcedural, mDetail, mTerrain, mTreeSway, mTreeLeaves, mWetGround;
+        std::string_view mProcedural, mDetail, mTerrain, mTreeSway, mTreeLeaves, mWetGround, mGrassFire;
     };
 
     // Called with the shader's name and an anchor that was not found (that part is left out)
