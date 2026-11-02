@@ -40,6 +40,27 @@ Remaining:
    - Redraw only when the camera has moved more than 128 units or about every 2 s, and only while wetness > 0.
 6. Build, install, and test on the phone in rain: in the console, `ChangeWeather "Ascadian Isles Region" 4`.
 
+## Streamed cell loading (asked 2026-11-02, not started)
+
+Crossing an exterior cell border freezes the game while the new cells are inserted: about 0.3 s for a town cell (Suran),
+0.7 s for a corner crossing (5 cells). Preloading already loads meshes, textures and collision shapes in the background;
+`Scene::loadCell` / `insertCell` (`apps/openmw/mwworld/scene.cpp`) still creates every object in one frame. Plan:
+
+1. Measure first: log the time of each part of `loadCell` per cell (heightfield + navmesh, local scripts, `insertCell`,
+   `mRendering.addCell`, water) to confirm object insertion is most of it.
+2. Stream the objects as texture streaming streams textures: the cell itself (heightfield, navmesh, scripts, water) still
+   in the frame it loads; its objects queued and added a few per frame within a time budget (~2 ms), nearest to the
+   player first. New cells are on the outer ring of the grid (half a cell or more away), so there is time.
+   - An object the player comes near before it is added, a teleport, or a save: the queue is finished at once.
+   - Objects are in the cell's lists at once (scripts, Lua, AI find them); only their scene nodes, collision and actor
+     setup wait.
+   - Unloading spread the same way.
+   - Interiors, load doors and fast travel keep loading everything at once behind the loading screen.
+3. In the support library beside texture streaming, with a small OpenMW patch at `insertCell` that hands the objects
+   to the queue.
+
+Meanwhile: `[Cells] preload num threads = 3`, `preload distance = 2500` so preloading finishes before the border.
+
 ## Point light shadows (asked, not started)
 
 Recommended starting with screen-space contact shadows for point lights, which are cheap. Real cube-map shadows are
