@@ -5,8 +5,12 @@
 //   a3RainMap   from straight above, how high the things standing around the camera reach (red, a3RainHeight.x plus
 //               a3RainHeight.y times it); the ground under them stays dry. a3RainArea: its corner (xy) and size (z) in
 //               the world, w 1 once it is drawn
+//   a3PrintMap  footprints (red: when each texel was last trodden on, in a3PrintNow's seconds; 0 never), around the
+//               player: a3PrintArea its corner (xy) and size (z), w 1 once it is drawn. Everything that walks leaves them
 // The ground darkens and shines; in hollows on flat ground puddles gather (A3_PUDDLES), mirror-like, rings spreading
-// where the drops fall. The world position comes from the view position (osg_ViewMatrixInverse, declared by fog.glsl).
+// where the drops fall. Under the edges of roofs, rocks and trees it drips (a line wetter, rippling, where the drops
+// land), and footprints sink into it and fill with water, fading as the rain washes them out.
+// The world position comes from the view position (osg_ViewMatrixInverse, declared by fog.glsl).
 
 uniform float a3Wetness;
 uniform float a3Puddles; // from the F2 menu while the game runs (compiled in only if on at start)
@@ -15,6 +19,13 @@ uniform float osg_SimulationTime;
 uniform sampler2D a3RainMap;
 uniform vec4 a3RainArea;
 uniform vec2 a3RainHeight;
+uniform sampler2D a3PrintMap;
+uniform vec4 a3PrintArea;
+uniform float a3PrintNow;
+
+// here: the footprint (x how deep, yz how it slopes) and the drip line (how much)
+vec3 a3PrintHere = vec3(0.0);
+float a3DripHere = 0.0;
 
 float a3WetHash(vec2 p)
 {
@@ -50,13 +61,56 @@ float a3Sheltered(vec3 world)
     return covered * 0.25;
 }
 
+// Just outside the outline of something standing over the ground (under its edge): where it drips
+float a3DripLine(vec3 world, float sheltered)
+{
+    if (a3RainArea.w < 0.5 || sheltered > 0.5)
+        return 0.0;
+    vec2 uv = (world.xy - a3RainArea.xy) / a3RainArea.z;
+    float near = 0.0;
+    for (int i = 0; i < 4; ++i)
+    {
+        vec2 offset = vec2(i == 0 ? 1.0 : i == 1 ? -1.0 : 0.0, i == 2 ? 1.0 : i == 3 ? -1.0 : 0.0) * (9.0 / a3RainArea.z);
+        float top = texture2D(a3RainMap, uv + offset).r;
+        float height = a3RainHeight.x + a3RainHeight.y * top;
+        near = max(near, top > 0.002 ? smoothstep(world.z + 40.0, world.z + 80.0, height) : 0.0);
+    }
+    return near * (1.0 - sheltered) * clamp(a3Rain * 1.5 + a3Wetness * 0.3, 0.0, 1.0);
+}
+
+float a3PrintAt(vec2 uv)
+{
+    float stamped = texture2D(a3PrintMap, uv).r;
+    return stamped > 0.5 ? exp(-max(a3PrintNow - stamped, 0.0) / 150.0) : 0.0;
+}
+
+// The footprints here: x how deep, yz how it slopes (toward x and y)
+vec3 a3Footprint(vec3 world)
+{
+    if (a3PrintArea.w < 0.5)
+        return vec3(0.0);
+    vec2 uv = (world.xy - a3PrintArea.xy) / a3PrintArea.z;
+    if (uv.x <= 0.0 || uv.y <= 0.0 || uv.x >= 1.0 || uv.y >= 1.0)
+        return vec3(0.0);
+    float texel = 1.0 / A3_PRINT_MAP_SIZE;
+    float here = a3PrintAt(uv);
+    float x = a3PrintAt(uv + vec2(texel, 0.0));
+    float y = a3PrintAt(uv + vec2(0.0, texel));
+    return vec3(here, x - here, y - here);
+}
+
 // How wet here (x) and how much puddle (y): wetter on flat ground, puddles in the hollows of a slow noise
 vec2 a3WetAmount(vec3 world, vec3 groundNormal)
 {
     if (a3Wetness < 0.003)
         return vec2(0.0);
     float flatness = smoothstep(0.55, 0.9, groundNormal.z);
-    float wet = a3Wetness * flatness * (1.0 - a3Sheltered(world));
+    float sheltered = a3Sheltered(world);
+    float wet = a3Wetness * flatness * (1.0 - sheltered);
+    a3DripHere = a3DripLine(world, sheltered);
+    a3PrintHere = a3Footprint(world) * smoothstep(0.08, 0.3, a3Wetness);
+    // soaked along the drip line and in the prints
+    wet = max(wet, max(a3DripHere, a3PrintHere.x * a3Wetness));
     float puddle = 0.0;
 #if A3_PUDDLES
     float hollows = a3WetNoise(world.xy / 230.0) * 0.65 + a3WetNoise(world.xy / 70.0) * 0.35;
@@ -65,6 +119,8 @@ vec2 a3WetAmount(vec3 world, vec3 groundNormal)
     puddle = smoothstep(level, level + 0.04, hollows) * smoothstep(0.96, 0.99, groundNormal.z) * wet
         * smoothstep(0.25, 0.6, a3Wetness) * a3Puddles;
 #endif
+    // the prints fill with water, the drip line runs with it
+    puddle = max(puddle, max(a3PrintHere.x * 0.85, a3DripHere * 0.45) * smoothstep(0.2, 0.6, a3Wetness));
     return vec2(wet, puddle);
 }
 
@@ -99,13 +155,19 @@ vec2 a3Ripples(vec2 p, float rain)
 // The surface's view normal made wet: puddles lie flat, with the drops' rings on them
 vec3 a3WetNormal(vec3 viewNormal, vec2 amount, vec3 world)
 {
-    if (amount.y <= 0.0)
-        return viewNormal;
+    vec3 n = viewNormal;
+    // a footprint's rim, where its water does not cover it
+    if (a3PrintHere.x > 0.001)
+        n = normalize(n + gl_NormalMatrix * vec3(a3PrintHere.yz * 1.8, 0.0) * (1.0 - amount.y));
+    if (amount.y <= 0.0 && a3DripHere <= 0.0)
+        return n;
     vec3 up = normalize(gl_NormalMatrix * vec3(0.0, 0.0, 1.0));
-    vec3 n = normalize(mix(viewNormal, up, amount.y * 0.85));
-    if (a3Rain > 0.02)
+    n = normalize(mix(n, up, amount.y * 0.85));
+    // the drops falling off the edges ring the drip line, after the rain too
+    float rain = max(a3Rain, a3DripHere);
+    if (rain > 0.02)
     {
-        vec2 tilt = a3Ripples(world.xy, a3Rain) * amount.y;
+        vec2 tilt = a3Ripples(world.xy, rain) * max(amount.y, a3DripHere * 0.7);
         n = normalize(n + (gl_NormalMatrix * vec3(tilt, 0.0)));
     }
     return n;

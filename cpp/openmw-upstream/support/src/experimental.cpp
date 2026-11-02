@@ -169,7 +169,8 @@ namespace Alpha3
                 "Hold the weather, to test with: -1 the region's own, 0 clear, 1 cloudy, 2 foggy, 3 overcast, 4 rain, "
                 "5 thunderstorm, 6 ash storm, 7 blight storm, 8 snow, 9 blizzard. Set it back to -1 after" },
             { "wet ground", "Wet ground", Kind::Bool, 0, 0, 1, 1, false,
-                "The ground darkening and shining in the rain, drying after (turned off while the game runs: dry)" },
+                "The ground darkening and shining in the rain, drying after, footprints filling with water, rain dripping "
+                "off things (turned off while the game runs: dry)" },
             { "wet ground puddles", "", Kind::Bool, 1, 0, 1, 1, true, "Puddles in hollows, rippling (turned on while the game runs only if it was on at start)" },
             { "wet ground dry under objects", "", Kind::Bool, 1, 0, 1, 1, true, "Dry under roofs, trees and rocks (turned on while the game runs only if it was on at start)" },
         };

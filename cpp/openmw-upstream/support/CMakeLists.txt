@@ -76,6 +76,7 @@ set(ALPHA3_EXPERIMENTAL_SOURCES
     wetground wetground.glsl
     grassFire grassfire.glsl
     fireParticles fireparticles.glsl
+    drips drips.glsl
     water a3_water.omwfx
     clouds a3_clouds.omwfx
     air a3_air.omwfx

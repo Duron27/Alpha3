@@ -230,7 +230,7 @@ namespace Alpha3
             if (s.mTriplanar)
                 library += "varying vec3 a3TerrainPos;\n";
             if (s.mWetGround)
-                library += std::string("#define A3_RAIN_MAP_SIZE 512.0\n#define A3_PUDDLES ") + (s.mWetPuddles ? "1" : "0")
+                library += std::string("#define A3_RAIN_MAP_SIZE 512.0\n#define A3_PRINT_MAP_SIZE 1024.0\n#define A3_PUDDLES ") + (s.mWetPuddles ? "1" : "0")
                     + "\n" + std::string(parts.mWetGround) + "\n";
             if (fire)
                 library += "#define A3_FIRE_TERRAIN 1\n" + std::string(parts.mGrassFire) + "\n";
