@@ -28,6 +28,9 @@ namespace osg
     class Geometry;
     class GraphicsContext;
     class Node;
+    class FrameBufferObject;
+    class State;
+    class Viewport;
 }
 
 namespace osgUtil
@@ -82,6 +85,19 @@ namespace Alpha3
     // influence (in view space) is hidden behind the occlusion buffer's occluders, in the scene camera's cull. Always
     // false when off, and for other cameras (shadows, reflections).
     bool occlusionLightOccluded(osgUtil::CullVisitor& cullVisitor, const osg::BoundingSphere& viewSphere);
+
+    // Render scale ([Experimental] render scale, src/renderscale.cpp): the 3D scene drawn at this much of the window's
+    // size (1: off, and then the calls below are not made), upscaled and sharpened onto the screen.
+    float renderScale();
+    // a window size scaled
+    int renderScaled(int windowSize);
+    // Where the post-processing chain's last pass draws when scaled (at the scene's size), instead of on the screen
+    osg::FrameBufferObject& renderScaleChainOutput(int width, int height);
+    osg::Texture* renderScaleChainOutputTexture();
+    // Draws [source] (the scene's size) into what is bound for drawing, in [screen]: upscaled, then sharpened. [draw]
+    // draws the fullscreen triangle.
+    void renderScaleResolve(
+        osg::State& state, osg::Texture& source, const osg::Viewport& screen, const std::function<void()>& draw);
 
     // Frame generation (OPENMW_FRAMEGEN) builds the frame between two rendered ones from the camera's motion and the
     // scene's depth when the engine hands them over: each frame, from the main thread before it is rendered.

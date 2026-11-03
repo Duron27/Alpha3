@@ -76,6 +76,7 @@ set(ALPHA3_EXPERIMENTAL_SOURCES
     treeSway treesway.glsl
     ambientOcclusion a3_ambientocclusion.omwfx
     look a3_look.omwfx
+    upscale upscale.glsl
 )
 set(ALPHA3_EXPERIMENTAL_CPP "// Written by support/CMakeLists.txt from src/experimental/\n#include \"experimentalsources.hpp\"\n\nnamespace Alpha3::ExperimentalSources\n{\n")
 set(ALPHA3_EXPERIMENTAL_HPP "// Written by support/CMakeLists.txt from src/experimental/\n#pragma once\n#include <string_view>\n\nnamespace Alpha3::ExperimentalSources\n{\n")
@@ -118,6 +119,7 @@ set(ALPHA3_SUPPORT_SOURCES
     src/texturepreload.cpp
     src/texturerelease.cpp
     src/meshsplitting.cpp
+    src/renderscale.cpp
     src/occlusionculling.cpp
     src/texturestreaming.cpp
     src/thermal.cpp

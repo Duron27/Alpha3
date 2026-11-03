@@ -1,0 +1,132 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Tue, 3 Nov 2026 03:00:00 -0500
+Subject: [PATCH 22/22] Render scale: the scene drawn smaller and upscaled
+
+With [Experimental] render scale below 1 the post-processor's render size is that much of the window (as it is the
+eye's size in VR): the scene's buffers are made that size and the scene camera's cull sets that viewport, as for VR.
+The canvas then puts the scene (or the post-processing chain's output, drawn into a texture of the scene's size instead
+of on the screen) onto the window through the support library's renderScaleResolve, which upscales and sharpens it. At
+1, renderScaled returns the window's size and none of it changes anything.
+---
+diff --git a/apps/openmw/mwrender/pingpongcanvas.cpp b/apps/openmw/mwrender/pingpongcanvas.cpp
+--- a/apps/openmw/mwrender/pingpongcanvas.cpp
++++ b/apps/openmw/mwrender/pingpongcanvas.cpp
+@@ -2,6 +2,7 @@
+ 
+ #include <cassert>
+ 
++#include <alpha3/upstream.hpp>
+ #include <components/shader/shadermanager.hpp>
+ #include <components/stereo/multiview.hpp>
+ #include <components/stereo/stereomanager.hpp>
+@@ -116,6 +117,15 @@
+         }
+ 
+         auto* resolveViewport = state.getCurrentViewport();
++        // render scale: the scene is smaller than the window, and upscaled onto it
++        const bool scaled = Alpha3::renderScale() < 1.f && !Stereo::getStereo() && !mDestinationFBO;
++
++        if ((filtered.empty() || !mPostprocessing) && scaled)
++        {
++            Alpha3::renderScaleResolve(state, *mTextureScene, *resolveViewport, [&] { drawGeometry(renderInfo); });
++            cacheEmptyUniformStacks(uniformMap, emptyUniformStacks);
++            return;
++        }
+ 
+         if (filtered.empty() || !mPostprocessing)
+         {
+@@ -172,7 +182,7 @@
+ 
+             mLuminanceCalculator->dirty(mTextureScene->getTextureWidth(), mTextureScene->getTextureHeight());
+ 
+-            if (Stereo::getStereo())
++            if (Stereo::getStereo() || scaled)
+                 mRenderViewport
+                     = new osg::Viewport(0, 0, mTextureScene->getTextureWidth(), mTextureScene->getTextureHeight());
+             else
+@@ -198,6 +208,7 @@
+         int lastShader = 0;
+ 
+         unsigned int lastApplied = handle;
++        bool drawnScaled = false;
+ 
+         const unsigned int cid = state.getContextID();
+ 
+@@ -307,6 +318,14 @@
+ 
+                     lastApplied = pass.mRenderTarget->getHandle(state.getContextID());
+                 }
++                else if (pass.mResolve && index == filtered.back() && scaled)
++                {
++                    // into a texture at the scene's size, upscaled after the chain
++                    Alpha3::renderScaleChainOutput(mTextureScene->getTextureWidth(), mTextureScene->getTextureHeight())
++                        .apply(state, osg::FrameBufferObject::DRAW_FRAMEBUFFER);
++                    lastApplied = ~0u;
++                    drawnScaled = true;
++                }
+                 else if (pass.mResolve && index == filtered.back())
+                 {
+                     bindDestinationFbo();
+@@ -357,6 +376,13 @@
+             state.popStateSet();
+         }
+ 
++        if (drawnScaled)
++        {
++            bindDestinationFbo();
++            Alpha3::renderScaleResolve(state, *Alpha3::renderScaleChainOutputTexture(), *resolveViewport,
++                [&] { drawGeometry(renderInfo); });
++        }
++
+         if (Stereo::getMultiview())
+         {
+             ext->glBindFramebuffer(GL_DRAW_FRAMEBUFFER_EXT, 0);
+diff --git a/apps/openmw/mwrender/pingpongcull.cpp b/apps/openmw/mwrender/pingpongcull.cpp
+--- a/apps/openmw/mwrender/pingpongcull.cpp
++++ b/apps/openmw/mwrender/pingpongcull.cpp
+@@ -6,6 +6,7 @@
+ #include <osg/Texture>
+ #include <osgUtil/CullVisitor>
+ 
++#include <alpha3/upstream.hpp>
+ #include <components/stereo/multiview.hpp>
+ #include <components/stereo/stereomanager.hpp>
+ 
+@@ -18,7 +19,7 @@
+         : mViewportStateset(nullptr)
+         , mPostProcessor(pp)
+     {
+-        if (Stereo::getStereo())
++        if (Stereo::getStereo() || Alpha3::renderScale() < 1.f)
+         {
+             mViewportStateset = new osg::StateSet();
+             mViewport = new osg::Viewport;
+diff --git a/apps/openmw/mwrender/postprocessor.cpp b/apps/openmw/mwrender/postprocessor.cpp
+--- a/apps/openmw/mwrender/postprocessor.cpp
++++ b/apps/openmw/mwrender/postprocessor.cpp
+@@ -11,6 +11,7 @@
+ #include <osg/Texture2DMultisample>
+ #include <osg/Texture3D>
+ 
++#include <alpha3/upstream.hpp>
+ #include <components/files/conversion.hpp>
+ #include <components/misc/pathhelpers.hpp>
+ #include <components/misc/strings/algorithm.hpp>
+@@ -884,14 +885,14 @@
+     {
+         if (Stereo::getStereo())
+             return Stereo::Manager::instance().eyeResolution().x();
+-        return mWidth;
++        return Alpha3::renderScaled(mWidth);
+     }
+ 
+     int PostProcessor::renderHeight() const
+     {
+         if (Stereo::getStereo())
+             return Stereo::Manager::instance().eyeResolution().y();
+-        return mHeight;
++        return Alpha3::renderScaled(mHeight);
+     }
+ 
+     void PostProcessor::triggerShaderReload()
