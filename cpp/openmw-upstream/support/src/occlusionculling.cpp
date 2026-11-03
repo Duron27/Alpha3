@@ -846,6 +846,24 @@ namespace Alpha3
                 return test(corners);
             }
 
+            // A point light's sphere of influence in view space: hidden everywhere, it lights no pixel that is drawn
+            bool lightOccluded(osgUtil::CullVisitor& cv, const osg::BoundingSphere& viewSphere)
+            {
+                if (sceneCull(cv) == nullptr || !ready(cv))
+                    return false;
+                const osg::Vec3f center = viewSphere.center();
+                const float radius = viewSphere.radius();
+                osg::Vec3f corners[8];
+                for (int i = 0; i < 8; ++i)
+                    corners[i] = center
+                        + osg::Vec3f(i & 1 ? radius : -radius, i & 2 ? radius : -radius, i & 4 ? radius : -radius);
+                ++mLightsTested;
+                if (!mBuffer.hidden(corners, 8))
+                    return false;
+                ++mLightsCulled;
+                return true;
+            }
+
             void drawableAdded(osgUtil::CullVisitor& cv, osg::Drawable& drawable, const osg::Matrix& modelView)
             {
                 if (sceneCull(cv) == nullptr || (mRestFrames > 1))
@@ -1235,6 +1253,10 @@ namespace Alpha3
                                     << mSumTested / 600 << " tested culled, drawing " << mDrawTime / 600 * 1000
                                     << " ms, tests " << mTestTime / 600 * 1000 << " ms; rested "
                                     << std::min(mRestedFrames, 600u) * 100 / 600 << "% of frames";
+                if (mLightsTested > 0)
+                    Log(Debug::Verbose) << "Occlusion light culling: per frame " << mLightsCulled / 600.0 << " of "
+                                        << mLightsTested / 600.0 << " point lights hidden";
+                mLightsTested = mLightsCulled = 0;
                 mSumTested = mSumCulled = 0;
                 mDrawTime = mTestTime = 0;
                 mRestedFrames = 0;
@@ -1267,6 +1289,7 @@ namespace Alpha3
             unsigned mRejects[RejectCount] = {}, mLastRejects[RejectCount] = {};
             std::vector<std::string> mDumpLines;
             std::size_t mSumTested = 0, mSumCulled = 0;
+            std::size_t mLightsTested = 0, mLightsCulled = 0; // over the last 600 frames
             double mDrawTime = 0, mTestTime = 0;
             double mFrameDrawTime = 0; // this frame's, seconds
             osg::observer_ptr<osg::Camera> mStatsCamera;
@@ -1346,6 +1369,22 @@ namespace Alpha3
     bool occlusionBoxOccluded(osg::CullStack& cullStack, const osg::BoundingBox& box)
     {
         return occlusionActive() && occlusion().boxOccluded(cullStack, box);
+    }
+
+    bool occlusionLightCullingOn()
+    {
+        static const bool on = [] {
+            const bool value = occlusionEnabled() && settingBool("Camera", "occlusion light culling", false);
+            if (value)
+                Log(Debug::Info) << "Occlusion light culling on: point lights hidden behind occluders are left out";
+            return value;
+        }();
+        return on;
+    }
+
+    bool occlusionLightOccluded(osgUtil::CullVisitor& cullVisitor, const osg::BoundingSphere& viewSphere)
+    {
+        return occlusionLightCullingOn() && occlusionActive() && occlusion().lightOccluded(cullVisitor, viewSphere);
     }
 
     void occlusionDrawableAdded(osg::NodeVisitor& cullVisitor, osg::Drawable& drawable, const osg::Matrix& modelView)

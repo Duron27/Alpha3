@@ -1,0 +1,36 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Tue, 3 Nov 2026 02:00:00 -0500
+Subject: [PATCH 21/21] Occlusion culling: point lights hidden behind walls left out
+
+With [Camera] occlusion light culling on, the scene camera's lights in view space leave out the point lights whose
+sphere of influence is hidden everywhere behind the occlusion buffer's occluders (the support library's
+occlusionLightOccluded): they light no pixel that is drawn, and each object's light list, and so its shader's light
+loop, is shorter. Off, or for other cameras, the call returns false.
+---
+ components/sceneutil/lightmanager.cpp | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/components/sceneutil/lightmanager.cpp b/components/sceneutil/lightmanager.cpp
+index a675d575a2..986de7abf3 100644
+--- a/components/sceneutil/lightmanager.cpp
++++ b/components/sceneutil/lightmanager.cpp
+@@ -5,6 +5,7 @@
+ 
+ #include <osgUtil/CullVisitor>
+ 
++#include <alpha3/upstream.hpp>
+ #include <components/debug/debuglog.hpp>
+ #include <components/misc/constants.hpp>
+ #include <components/resource/scenemanager.hpp>
+@@ -599,6 +600,10 @@ namespace SceneUtil
+                     transform.mLightSource->setLastAppliedFrame(frameNum);
+                 }
+ 
++                // hidden behind walls, it lights nothing that is drawn
++                if (Alpha3::occlusionLightOccluded(*cv, viewBound))
++                    continue;
++
+                 LightSourceViewBound l;
+                 l.mLightSource = transform.mLightSource;
+                 l.mViewBound = viewBound;

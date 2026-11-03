@@ -10,6 +10,7 @@
 #include <string_view>
 #include <vector>
 
+#include <osg/BoundingSphere>
 #include <osg/Camera>
 #include <osg/Matrixd>
 #include <osg/Texture>
@@ -27,6 +28,11 @@ namespace osg
     class Geometry;
     class GraphicsContext;
     class Node;
+}
+
+namespace osgUtil
+{
+    class CullVisitor;
 }
 
 namespace VFS
@@ -71,6 +77,11 @@ namespace Alpha3
     using SplitPieceCallback
         = std::function<void(const osg::Geometry& original, osg::Geometry& piece, const std::vector<unsigned>& kept)>;
     void splitChunkForCulling(osg::Node& node, const SplitPieceCallback& callback);
+
+    // Occlusion light culling ([Camera] occlusion light culling, src/occlusionculling.cpp): a point light whose sphere of
+    // influence (in view space) is hidden behind the occlusion buffer's occluders, in the scene camera's cull. Always
+    // false when off, and for other cameras (shadows, reflections).
+    bool occlusionLightOccluded(osgUtil::CullVisitor& cullVisitor, const osg::BoundingSphere& viewSphere);
 
     // Frame generation (OPENMW_FRAMEGEN) builds the frame between two rendered ones from the camera's motion and the
     // scene's depth when the engine hands them over: each frame, from the main thread before it is rendered.
