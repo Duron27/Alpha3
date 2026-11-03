@@ -28,6 +28,7 @@ namespace osg
 {
     class CullStack;
     class Drawable;
+    class GLExtensions;
     class GraphicsContext;
     class Node;
     class NodeVisitor;
@@ -135,6 +136,9 @@ namespace Alpha3
     // ---- occlusionculling.cpp ([Camera] occlusion culling): the OSG cull visitor's occlusion hooks. Each is a no-op
     // returning false for any traversal but the scene camera's.
     bool occlusionNodeOccluded(osg::CullStack& cullStack, const osg::Node& node);
+    // on in the settings; paused (the benchmark): it culls nothing and draws no occluders
+    bool occlusionOn();
+    void occlusionPause(bool paused);
     bool occlusionBoxOccluded(osg::CullStack& cullStack, const osg::BoundingBox& box);
     void occlusionDrawableAdded(osg::NodeVisitor& cullVisitor, osg::Drawable& drawable, const osg::Matrix& modelView);
 
@@ -158,6 +162,17 @@ namespace Alpha3
     // reading their textures' colours
     void setGrassVfs(const VFS::Manager& vfs);
     void grassDrawableAdded(osg::NodeVisitor& cullVisitor, osg::Drawable& drawable, const osg::Matrix& modelView);
+    // grass on in the settings and not paused by the benchmark
+    bool grassOn();
+    void setGrassOn(bool on);
+
+    // ---- benchmark.cpp (the launcher's in-game gear menu, "Benchmark"): the frame measured with each part of the
+    // scene taken away in turn, written to Alpha3/benchmarks/. The GPU's names (with the context current), the scene
+    // camera (from the cull), the request (any thread; JNI), and each frame (the main thread, before it is drawn).
+    void benchmarkGlInfo(const osg::GLExtensions& extensions, const char* vendor, const char* renderer, const char* version);
+    void benchmarkDrawableAdded(osg::NodeVisitor& cullVisitor);
+    void benchmarkRequest();
+    void benchmarkFrame();
     // ---- experimentalstate.cpp: the state that gives a drawable its own variant of its program by its texture (tree
     // sway, the procedural material), and the defines OpenMW's shaders import for them
     const osg::StateSet* experimentalDrawableState(osg::NodeVisitor& cullVisitor, osg::Drawable& drawable);

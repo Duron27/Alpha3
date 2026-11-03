@@ -107,6 +107,7 @@ set(ALPHA3_SUPPORT_SOURCES
     ${CMAKE_CURRENT_BINARY_DIR}/generated/experimentalsources.cpp
     src/generatedmaps.cpp
     src/grass.cpp
+    src/benchmark.cpp
     src/experimentalstate.cpp
     src/ktxtextures.cpp
     src/programcache.cpp
@@ -129,6 +130,13 @@ else()
     set(ALPHA3_SUPPORT_SYSTEM_LIBS "")
 endif()
 add_library(alpha3_support STATIC ${ALPHA3_SUPPORT_SOURCES})
+# The commit the library is built from (with -dirty for uncommitted changes) and when, for the benchmark's file
+# (src/benchmark.cpp): written on every build, the header touched only when it changes
+add_custom_target(alpha3_build_id
+    COMMAND ${CMAKE_COMMAND} -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR} -DOUT=${CMAKE_CURRENT_BINARY_DIR}/generated/buildid.hpp
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/buildid.cmake
+    BYPRODUCTS ${CMAKE_CURRENT_BINARY_DIR}/generated/buildid.hpp)
+add_dependencies(alpha3_support alpha3_build_id)
 target_include_directories(alpha3_support PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_BINARY_DIR}/generated)
 target_compile_options(alpha3_support PRIVATE -fPIC)

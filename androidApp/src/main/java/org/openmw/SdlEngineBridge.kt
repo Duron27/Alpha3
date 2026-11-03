@@ -34,6 +34,12 @@ class SdlEngineBridge(private val context: Context) : EngineBridge {
     override fun keyCodeForChar(char: String): Int? =
         keyCharacterMap.getEvents(char.toCharArray())?.firstOrNull()?.keyCode
 
+    // in libopenmw_upstream (support/src/benchmark.cpp), there once the game has started
+    private external fun omwBenchmarkStart()
+
+    override fun startBenchmark(): Boolean =
+        runCatching { omwBenchmarkStart() }.isSuccess
+
     override fun isControllerConnected(): Boolean {
         if (UIStateManager.ignoreController) return false
         val inputManager = context.getSystemService(Context.INPUT_SERVICE) as InputManager

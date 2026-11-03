@@ -1219,9 +1219,24 @@ namespace Alpha3
         sVfs = &vfs;
     }
 
+    namespace
+    {
+        std::atomic<bool> sGrassPaused{ false }; // the benchmark's
+    }
+
+    bool grassOn()
+    {
+        return experimentalSettings().mGrass && !sGrassPaused.load(std::memory_order_relaxed);
+    }
+
+    void setGrassOn(bool on)
+    {
+        sGrassPaused.store(!on, std::memory_order_relaxed);
+    }
+
     void grassDrawableAdded(osg::NodeVisitor& cullVisitor, osg::Drawable& drawable, const osg::Matrix& modelView)
     {
-        if (!experimentalSettings().mGrass)
+        if (!grassOn())
             return;
         auto& cv = static_cast<osgUtil::CullVisitor&>(cullVisitor);
         const osg::Camera* camera = cv.getCurrentCamera();

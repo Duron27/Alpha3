@@ -908,6 +908,21 @@ fun InGameSettings() {
         }
 
         // System & Debug Info
+        var benchmarkNote by remember { mutableStateOf<String?>(null) }
+        SettingRow(
+            title = "Benchmark",
+            subtitle = benchmarkNote
+                ?: "About 2 minutes: the frame measured with each part of the scene taken away in turn, saved to Alpha3/benchmarks/"
+        ) {
+            TextButton(onClick = {
+                benchmarkNote = if (Engine.startBenchmark())
+                    "Close this window: it starts in 5 s. Stand still and do not touch the screen"
+                else
+                    "Not available here"
+            }) {
+                Text("Run", color = Color.Green)
+            }
+        }
         SettingRow(title = "Performance HUD") {
             Switch(checked = UIStateManager.isPerformanceHudEnabled, onCheckedChange = { UIStateManager.isPerformanceHudEnabled = it })
         }

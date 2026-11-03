@@ -28,6 +28,12 @@ interface EngineBridge {
 
     /** True while the engine wants a visible mouse cursor (menus open). Polled every frame. */
     fun isMouseShown(): Boolean = false
+
+    /**
+     * Asks the running game for the benchmark (support/src/benchmark.cpp): it starts a few seconds later and takes
+     * about two minutes. False where there is none.
+     */
+    fun startBenchmark(): Boolean = false
 }
 
 private object NoEngine : EngineBridge {
@@ -79,4 +85,5 @@ object Engine : EngineBridge {
     override fun onNativeJoy(deviceId: Int, axis: Int, value: Float) = bridge.onNativeJoy(deviceId, axis, value)
     override fun keyCodeForChar(char: String): Int? = bridge.keyCodeForChar(char)
     override fun isMouseShown() = bridge.isMouseShown()
+    override fun startBenchmark() = bridge.startBenchmark()
 }
