@@ -278,6 +278,8 @@ android {
     sourceSets {
         getByName("main") {
             jniLibs.directories.add("src/main/jniLibs")
+            // The mod downloader's native tools (cpp/modtools: LOOT, Wabbajack), built by buildModTools below
+            jniLibs.directories.add(layout.buildDirectory.dir("modtools/jniLibs").get().asFile.path)
         }
     }
     dependenciesInfo {
@@ -374,3 +376,48 @@ dependencies {
     debugImplementation(platform(libs.androidx.compose.bom))
     debugImplementation(libs.androidx.ui.test.manifest)
 }
+
+// The mod downloader's native tools: cpp/modtools is a small Rust library with LOOT's load order sorting (libloot,
+// GPL-3.0) and the reading of Wabbajack lists, built with cargo for arm64 and packaged with the other native libraries
+// as libalpha3_modtools.so. Needs Rust with the aarch64-linux-android target (rustup target add aarch64-linux-android);
+// -PALPHA3_MODTOOLS=OFF leaves it out: the organizer then only sorts by masters, and Wabbajack lists cannot install.
+val modToolsEnabled = project.findProperty("ALPHA3_MODTOOLS") != "OFF"
+val buildModTools = tasks.register("buildModTools") {
+    group = "build"
+    description = "Builds cpp/modtools (libloot, Wabbajack plans) for arm64 Android"
+    val crate = rootProject.file("cpp/modtools")
+    val target = layout.buildDirectory.dir("modtools/target").get().asFile
+    val out = layout.buildDirectory.dir("modtools/jniLibs/arm64-v8a").get().asFile
+    val ndk = androidComponents.sdkComponents.ndkDirectory
+    val minSdk = android.defaultConfig.minSdk ?: 26
+    inputs.dir(File(crate, "src"))
+    inputs.files(File(crate, "Cargo.toml"), File(crate, "Cargo.lock"))
+    outputs.dir(out)
+    onlyIf { modToolsEnabled }
+    doLast {
+        val host = System.getProperty("os.name").lowercase().let {
+            when { "mac" in it -> "darwin-x86_64"; "win" in it -> "windows-x86_64"; else -> "linux-x86_64" }
+        }
+        val bin = File(ndk.get().asFile, "toolchains/llvm/prebuilt/$host/bin")
+        val clang = File(bin, "aarch64-linux-android$minSdk-clang").path
+        val cargo = listOf(File(System.getProperty("user.home"), ".cargo/bin/cargo")).firstOrNull { it.isFile }?.path ?: "cargo"
+        val process = ProcessBuilder(cargo, "build", "--release", "--locked", "--target", "aarch64-linux-android",
+            "--target-dir", target.path)
+            .directory(crate)
+            .redirectErrorStream(true)
+            .apply {
+                environment()["CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER"] = clang
+                environment()["CC_aarch64_linux_android"] = clang
+                environment()["AR_aarch64_linux_android"] = File(bin, "llvm-ar").path
+                // 16 KB pages (Android 15 devices), like the CMake libraries
+                environment()["CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS"] = "-C link-arg=-Wl,-z,max-page-size=16384"
+            }
+            .start()
+        val log = process.inputStream.bufferedReader().readText()
+        if (process.waitFor() != 0) throw GradleException("cargo build of cpp/modtools failed:\n$log")
+        out.mkdirs()
+        File(target, "aarch64-linux-android/release/libalpha3_modtools.so").copyTo(File(out, "libalpha3_modtools.so"), overwrite = true)
+    }
+}
+tasks.named("preBuild") { dependsOn(buildModTools) }
+

@@ -1,0 +1,25 @@
+[package]
+name = "alpha3-modtools"
+description = "Alpha3's native mod tools: LOOT's load order sorting (libloot) and Wabbajack list plans, one JSON call each, for Android (JNI) and iOS (C)."
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+publish = false
+
+[lib]
+name = "alpha3_modtools"
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+libloot = "=0.29.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = { version = "0.21", default-features = false }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"
+panic = "unwind"

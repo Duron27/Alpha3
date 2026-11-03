@@ -90,3 +90,6 @@
 # The texture pre-pass (libalpha3_texconv.so) calls TexturePrepass$Listener.onProgress by name
 -keep interface org.openmw.utils.TexturePrepass$Listener { *; }
 -keep class * implements org.openmw.utils.TexturePrepass$Listener { void onProgress(int, int, int, int, int, int); }
+
+# The mod tools (cpp/modtools): the JNI functions are named after this class and its methods
+-keep class org.alpha3.launcher.mods.downloader.ModToolsNative { *; }
