@@ -127,7 +127,9 @@ if(ALPHA3_IS_ANDROID)
         COMMAND ${CMAKE_COMMAND} -E copy defaults.bin gamecontrollerdb.txt ${assets_dir}/libopenmw/openmw/
         COMMAND ${CMAKE_COMMAND} -E copy libopenmw.so ${jni_libs_dir}/
         COMMAND ${CMAKE_COMMAND} -E copy libopenmw-navmeshtool.so ${jni_libs_dir}/
-        COMMAND ${CMAKE_COMMAND} -E copy ${PROJECT_ROOT}/settings.fallback.cfg ${assets_dir}/libopenmw/openmw/
+        # the template for the user's settings.cfg: the engine's own defaults with ours on top (cpp/settings)
+        COMMAND ${CMAKE_COMMAND} -DDEFAULTS=<SOURCE_DIR>/files/settings-default.cfg "-DOVERLAYS=${ALPHA3_REPO_DIR}/cpp/settings/alpha3.cfg|${ALPHA3_REPO_DIR}/cpp/settings/fork.cfg"
+                -DOUT=${assets_dir}/libopenmw/openmw/settings.fallback.cfg -P ${ALPHA3_REPO_DIR}/cpp/settings/merge.cmake
         COMMAND ${CMAKE_COMMAND} -E copy ${PROJECT_ROOT}/openmw.cfg ${assets_dir}/libopenmw/openmw/
         COMMAND ${CMAKE_COMMAND} -E copy_directory ${ALPHA3_COMPOSEAPP_DIR}/UI ${assets_dir}/libopenmw/ui
         COMMAND ${CMAKE_COMMAND} -E copy ${ALPHA3_REPO_DIR}/3rdparty-licenses.txt ${assets_dir}/libopenmw/
@@ -190,7 +192,9 @@ file(WRITE "${CFG}" "${content}")
         # Lua libs (util.lua, content.lua) are generated into the app bundle's Resources on Apple, not ./resources
         COMMAND ${CMAKE_COMMAND} -E copy_directory OpenMW.app/Contents/Resources/resources/lua_libs ${ios_assets_dir}/resources/lua_libs
         COMMAND ${CMAKE_COMMAND} -E copy defaults.bin gamecontrollerdb.txt openmw.cfg ${ios_assets_dir}/
-        COMMAND ${CMAKE_COMMAND} -E copy ${ALPHA3_COMPOSEAPP_DIR}/settings.cfg ${ios_assets_dir}/
+        # the template for the user's settings.cfg: the engine's own defaults with ours on top (cpp/settings)
+        COMMAND ${CMAKE_COMMAND} -DDEFAULTS=<SOURCE_DIR>/files/settings-default.cfg "-DOVERLAYS=${ALPHA3_REPO_DIR}/cpp/settings/alpha3.cfg|${ALPHA3_REPO_DIR}/cpp/settings/fork.cfg|${ALPHA3_REPO_DIR}/cpp/settings/ios.cfg"
+                -DOUT=${ios_assets_dir}/settings.cfg -P ${ALPHA3_REPO_DIR}/cpp/settings/merge.cmake
         # GPL text and third-party notices travel with the app
         COMMAND ${CMAKE_COMMAND} -E copy ${ALPHA3_REPO_DIR}/LICENSE ${ALPHA3_REPO_DIR}/THIRD_PARTY_NOTICES.md ${ALPHA3_REPO_DIR}/3rdparty-licenses.txt ${ios_assets_dir}/
         COMMAND ${CMAKE_COMMAND} -DCFG=${ios_assets_dir}/openmw.cfg -P ${ios_cfg_fixup}

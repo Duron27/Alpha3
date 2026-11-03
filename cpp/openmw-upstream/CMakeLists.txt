@@ -292,7 +292,9 @@ if(ALPHA3_IS_ANDROID)
         COMMAND ${CMAKE_COMMAND} -E copy_directory resources ${assets_upstream_dir}/resources
         COMMAND ${CMAKE_COMMAND} -E copy defaults.bin gamecontrollerdb.txt ${assets_upstream_dir}/openmw/
         COMMAND ${CMAKE_COMMAND} -E copy libopenmw_upstream.so libalpha3_texconv.so ${jni_libs_dir}/
-        COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/settings.fallback.cfg ${assets_upstream_dir}/openmw/
+        # the template for the user's settings.cfg: the engine's own defaults with ours on top (cpp/settings)
+        COMMAND ${CMAKE_COMMAND} -DDEFAULTS=<SOURCE_DIR>/files/settings-default.cfg -DOVERLAYS=${ALPHA3_REPO_DIR}/cpp/settings/alpha3.cfg
+                -DOUT=${assets_upstream_dir}/openmw/settings.fallback.cfg -P ${ALPHA3_REPO_DIR}/cpp/settings/merge.cmake
         # upstream's own global config: it carries the fallback= values (FontColor_*, ...) that stock OpenMW reads from
         # openmw.cfg and aborts without; the fork's copy has none. Paths in it are fixed up at install time in the app.
         COMMAND ${CMAKE_COMMAND} -E copy openmw.cfg ${assets_upstream_dir}/openmw/
@@ -319,8 +321,10 @@ file(WRITE "${CFG}" "${content}")
         COMMAND ${CMAKE_COMMAND} -E remove_directory ${ios_assets_dir}/resources
         COMMAND ${CMAKE_COMMAND} -E copy_directory resources ${ios_assets_dir}/resources
         COMMAND ${CMAKE_COMMAND} -E copy defaults.bin gamecontrollerdb.txt openmw.cfg ${ios_assets_dir}/
-        COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/settings.fallback.cfg ${ios_assets_dir}/
-        COMMAND ${CMAKE_COMMAND} -E copy ${ALPHA3_COMPOSEAPP_DIR}/settings.cfg ${ios_assets_dir}/
+        # the template for the user's settings.cfg: the engine's own defaults with ours on top (cpp/settings)
+        COMMAND ${CMAKE_COMMAND} -DDEFAULTS=<SOURCE_DIR>/files/settings-default.cfg "-DOVERLAYS=${ALPHA3_REPO_DIR}/cpp/settings/alpha3.cfg|${ALPHA3_REPO_DIR}/cpp/settings/ios.cfg"
+                -DOUT=${ios_assets_dir}/settings.cfg -P ${ALPHA3_REPO_DIR}/cpp/settings/merge.cmake
+        COMMAND ${CMAKE_COMMAND} -E rm -f ${ios_assets_dir}/settings.fallback.cfg
         # GPL text and third-party notices travel with the app
         COMMAND ${CMAKE_COMMAND} -E copy ${ALPHA3_REPO_DIR}/LICENSE ${ALPHA3_REPO_DIR}/THIRD_PARTY_NOTICES.md
                 ${ALPHA3_REPO_DIR}/3rdparty-licenses.txt ${ios_assets_dir}/
