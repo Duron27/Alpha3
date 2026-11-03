@@ -485,6 +485,12 @@ class EngineActivity : SDLActivity() {
                     else -> setEnv("OPENMW_GLES_VERSION", "32")
                 }
             }
+            // ANGLE on Vulkan (the renderer chosen above, or OSG_USE_ANGLE already set): no VkEvents for barriers. The
+            // Note10+'s Adreno driver (512.502) crashed in vkCmdWaitEvents during a swap; with these off ANGLE uses
+            // plain pipeline barriers. A value set by hand in the environment is kept.
+            if (Os.getenv("OSG_USE_ANGLE") != null && Os.getenv("ANGLE_FEATURE_OVERRIDES_DISABLED") == null) {
+                setEnv("ANGLE_FEATURE_OVERRIDES_DISABLED", "useVkEventForImageBarrier:useVkEventForBufferBarrier")
+            }
         } catch (e: ErrnoException) {
             Log.e("Alpha3", "Failed setting environment variables.")
             e.printStackTrace()
