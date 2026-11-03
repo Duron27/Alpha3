@@ -151,7 +151,25 @@ fun DownloadActivity() {
     val failed = rows.filter { it.state == FileState.FAILED }
     val totalSpeed = downloading.sumOf { it.speedKb }
 
-    if (processing) {
+    if (processing && ModListManager.onlySync) {
+        // A sync only asks for links and file IDs: one step per mod, no files
+        val total = ModListManager.runTotal.coerceAtLeast(1)
+        val synced = (total - ModListManager.remainingMods).coerceIn(0, total)
+        Text(
+            "Syncing ${ModListManager.modList}",
+            color = gold, fontWeight = FontWeight.Bold, fontSize = 14.sp,
+            modifier = Modifier.padding(top = 6.dp)
+        )
+        LinearProgressIndicator(
+            progress = { synced / total.toFloat() },
+            modifier = Modifier.fillMaxWidth().padding(top = 6.dp).height(6.dp)
+        )
+        Text("$synced of $total mods synced", color = White, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp))
+        ModListManager.rateLimitWait?.let {
+            Text(it, color = Color.Yellow, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp))
+        }
+        if (rows.isEmpty()) return
+    } else if (processing) {
         val total = ModListManager.runTotal.coerceAtLeast(1)
         val finished = (done.size + failed.size).coerceIn(0, total)
         Text(

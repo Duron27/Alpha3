@@ -118,8 +118,9 @@ fun processModList(isPremium: Boolean): Flow<List<ModDesc>> = flow {
         ModListManager.fileSizeKb[progressKey(mod, info)] = info.fileSize?.toLongOrNull() ?: 0L
     }
 
-    // What an earlier run already finished is shown as finished right away, so the counts are true from the start
-    for (mod in mods) for (info in mod.downloadInfo.filter { it.sourceLists.contains(modList) }) {
+    // What an earlier run already finished is shown as finished right away, so the counts are true from the start.
+    // A sync touches no files, so it shows none.
+    if (!onlySync) for (mod in mods) for (info in mod.downloadInfo.filter { it.sourceLists.contains(modList) }) {
         if (info.fileName.isNullOrEmpty()) continue
         if (!File(modCache, "${info.fileName}").isFile) continue
         val key = progressKey(mod, info)

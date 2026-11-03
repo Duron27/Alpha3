@@ -25,6 +25,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.layout.wrapContentSize
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -635,13 +637,16 @@ fun ModDownloaderScreen() {
         ) {
             Row(
                 modifier = Modifier
-                    .height(48.dp)
+                    .height(48.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
                 Icon(
                     imageVector = Icons.Rounded.Settings,
                     contentDescription = "Settings",
+                    tint = gold,
                     modifier = Modifier
-                        .size(48.dp)
+                        .size(44.dp)
+                        .padding(6.dp)
                         .clickable {
                             settings = !settings
                         }
@@ -665,8 +670,8 @@ fun ModDownloaderScreen() {
                         .clickable { showMyLists = true }
                 )
                 Spacer(modifier = Modifier.width(8.dp))
-                AvailableModLists(modDao = modDao)
-                Spacer(modifier = Modifier.weight(1f))
+                // The list's name takes what room is left, so a long name cannot push the progress circle over
+                AvailableModLists(modDao = modDao, modifier = Modifier.weight(1f))
                 if (StatusInfo.processing) {
                     IconButton(onClick = { confirmCancel = true }, modifier = Modifier.size(46.dp)) {
                         Icon(
@@ -772,7 +777,7 @@ fun ModDownloaderScreen() {
 }
 
 @Composable
-fun AvailableModLists(modDao: ModDao) {
+fun AvailableModLists(modDao: ModDao, modifier: Modifier = Modifier) {
     var expanded by remember { mutableStateOf(false) }
 
     // Get all available lists (hardcoded + JSON)
@@ -795,19 +800,11 @@ fun AvailableModLists(modDao: ModDao) {
         counts
     }
 
-    Box(
-        modifier = Modifier
-            .wrapContentSize()
-    ) {
-        Row(
-            modifier = Modifier
-                .wrapContentSize(),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
+    Box(modifier = modifier, contentAlignment = Alignment.CenterStart) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
             Button(
                 onClick = { expanded = true },
-                modifier = Modifier
-                    .wrapContentSize(),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
                 colors = ButtonDefaults.buttonColors(
                     containerColor = customColor,
                     contentColor = White,
@@ -817,7 +814,7 @@ fun AvailableModLists(modDao: ModDao) {
                 shape = RoundedCornerShape(12.dp),
                 border = BorderStroke(1.dp, gold)
             ) {
-                Text(modList)
+                Text(modList, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
 
