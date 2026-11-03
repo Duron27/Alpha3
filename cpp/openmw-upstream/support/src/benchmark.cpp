@@ -444,7 +444,7 @@ namespace Alpha3
             {
                 const Clock::time_point now = Clock::now();
                 if (mResultsShown
-                    && (now > mResultsUntil
+                    && (now > mResultsUntil || viewMoved()
                         || Settings::ShaderManager::get().getMode() == Settings::ShaderManager::Mode::Debug))
                     hideResults();
                 // asked for: a few seconds first, to close the launcher's menu and let go of the screen
@@ -491,6 +491,10 @@ namespace Alpha3
                     finish("the scene camera went away");
                     return;
                 }
+                // OpenMW's F3 profiler sets "engine" back to whether its overlay is shown on every event traversal,
+                // which comes before this hook: turned on again each frame, the engine's own timings (Lua,
+                // mechanics, physics, mwscript) are recorded for the frames measured
+                viewer->getViewerStats()->collectStats("engine", true);
                 const float t = std::chrono::duration<float>(now - mPhaseStart).count();
                 if (mPhase < 0)
                 {
@@ -565,10 +569,13 @@ namespace Alpha3
                 mOcclusionOn = occlusionOn();
                 mHeader = header(*scene, *viewer);
 
-                // OSG's stats, as OpenMW's profiler turns them on (F3), kept as they were for after
+                // OSG's stats, as OpenMW's profiler turns them on (F3), kept as they were for after. OpenMW's own CPU
+                // work is timed only while its category is collected: lua (the Lua worker's update, which overlaps
+                // the draw), luasyncupdate (the part the frame waits for), mechanics, physics and mwscript.
                 mCollect.clear();
                 osg::Stats* stats = viewer->getViewerStats();
-                for (const char* c : { "frame_rate", "event", "update", "engine", "resource", "scene" })
+                for (const char* c : { "frame_rate", "event", "update", "engine", "resource", "scene", "lua",
+                         "luasyncupdate", "mechanics", "physics", "physicsworker", "script" })
                 {
                     mCollect.push_back({ stats, c, stats->collectStats(c) });
                     stats->collectStats(c, true);
@@ -947,7 +954,35 @@ namespace Alpha3
                 return out;
             }
 
-            // the results over the game, for two minutes or until the F2 window opens
+            // The scene camera's eye and the way it looks, false when there is no camera
+            bool sceneView(osg::Vec3d& eye, osg::Vec3d& look)
+            {
+                osg::ref_ptr<osg::Camera> scene;
+                {
+                    std::lock_guard lock(mCameraMutex);
+                    mScene.lock(scene);
+                }
+                if (!scene)
+                    return false;
+                const osg::Matrixd inverse = scene->getInverseViewMatrix();
+                eye = inverse.getTrans();
+                look = osg::Vec3d(0, 0, -1) * inverse - eye;
+                look.normalize();
+                return true;
+            }
+
+            // Whether the player moved or turned since the results were shown (a touch on Android goes to the
+            // launcher's controls, not to MyGUI, so moving is how the results are put away)
+            bool viewMoved()
+            {
+                osg::Vec3d eye, look;
+                if (!mResultsViewKnown || !sceneView(eye, look))
+                    return false;
+                return (eye - mResultsEye).length() > 32.0 || look * mResultsLook < 0.996; // about 5 degrees
+            }
+
+            // the results over the game until the player moves or turns, for two minutes at most, or until the F2
+            // window opens
             void showResults(const std::string& table)
             {
                 MyGUI::Gui* gui = MyGUI::Gui::getInstancePtr();
@@ -964,9 +999,10 @@ namespace Alpha3
                 text->setFontName("MonoFont");
                 text->setTextAlign(MyGUI::Align::Left | MyGUI::Align::Top);
                 text->setNeedMouseFocus(false);
-                text->setCaption(MyGUI::UString("Benchmark results (close in 2 minutes, or open F2)\n\n" + table));
+                text->setCaption(MyGUI::UString("Benchmark results (move or turn to close)\n\n" + table));
                 mResultsShown = true;
                 mResultsUntil = Clock::now() + std::chrono::minutes(2);
+                mResultsViewKnown = sceneView(mResultsEye, mResultsLook);
             }
 
             void hideResults()
@@ -1075,6 +1111,8 @@ namespace Alpha3
             MyGUI::TextBox* mLabel = nullptr;
             MyGUI::Widget* mPanel = nullptr;
             bool mResultsShown = false;
+            bool mResultsViewKnown = false;
+            osg::Vec3d mResultsEye, mResultsLook;
         };
     }
 

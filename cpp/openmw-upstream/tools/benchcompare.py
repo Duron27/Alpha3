@@ -58,6 +58,12 @@ ROWS = [
     ('draw ms', 'Draw traversal time taken'),
     ('update ms', 'Update traversal time taken'),
     ('event ms', 'Event traversal time taken'),
+    # OpenMW's own CPU work (benchmarks from before these were collected show nan)
+    ('Lua ms', 'lua_time_taken'),
+    ('Lua sync ms', 'luasyncupdate_time_taken'),
+    ('mechanics ms', 'mechanics_time_taken'),
+    ('physics ms', 'physics_time_taken'),
+    ('mwscript ms', 'script_time_taken'),
 ]
 
 

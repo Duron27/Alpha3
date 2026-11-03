@@ -893,6 +893,7 @@ fun FeaturesSwitches() {
 @Composable
 fun InGameSettings() {
     val context = LocalPlatformContext.current
+    val developerOptions by GameFilesPreferences.getPreference(GameFilesPreferences.NEW_FEATURE_ENABLED_KEY, false).collectAsState(initial = false)
     val scope = rememberCoroutineScope()
     
     val isUIHiddenFlow = remember { GameFilesPreferences.getPreference(GameFilesPreferences.UI_HIDDEN_STATE_KEY, "false").map { it.toBoolean() } }
@@ -932,7 +933,8 @@ fun InGameSettings() {
 
         // System & Debug Info
         var benchmarkNote by remember { mutableStateOf<String?>(null) }
-        SettingRow(
+        // a developer's tool: only with Developer options on
+        if (developerOptions) SettingRow(
             title = "Benchmark",
             subtitle = benchmarkNote
                 ?: "About 2 minutes: the frame measured with each part of the scene taken away in turn, saved to Alpha3/benchmarks/"
