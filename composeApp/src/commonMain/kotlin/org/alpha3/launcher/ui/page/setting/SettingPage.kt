@@ -514,6 +514,9 @@ fun GraphicsSettingsSection() {
             TexturePrepassRow()
         }
 
+        ShaderPackRow()
+        RafaelShaderPackRow()
+
         // Frame pacing (Swappy) only exists on Android's OpenGL ES renderer
         if (Platform.features.gpuDrivers != null) {
             SettingRow(

@@ -7,6 +7,7 @@ import androidx.compose.runtime.setValue
 import io.ktor.http.decodeURLQueryComponent
 import io.ktor.http.encodeURLParameter
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -15,6 +16,7 @@ import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
@@ -22,6 +24,8 @@ import kotlinx.serialization.json.jsonPrimitive
 import org.alpha3.launcher.mods.downloader.ModListManager.json
 import org.alpha3.launcher.utils.Log
 import org.alpha3.launcher.utils.MToast
+import okio.IOException
+import kotlin.time.Duration
 import kotlin.time.Duration.Companion.minutes
 
 private const val TAG = "NxmDownload"
@@ -74,6 +78,10 @@ object NxmDownloads {
     private var current: Pending? = null
     private val lock = SpinLock()
 
+    // Links someone outside the mod list waits for (a settings button installing one Nexus file), by mod id: such a
+    // link goes to its waiter instead of the mod list's download
+    private val claims = HashMap<String, CompletableDeferred<NxmLink>>()
+
     // Downloads started from nxm links that are still running. A page only opens while there are fewer than the
     // download thread setting, as for premium downloads: without it every page opens as soon as the last one handed
     // over its link, and hundreds of downloads share the connection and none of them finishes.
@@ -123,8 +131,29 @@ object NxmDownloads {
         }
     }
 
+    /**
+     * Opens a file's page with [open] and waits for the nxm:// link that Slow download on it sends, for one file
+     * outside the mod list. Throws when no link comes within [timeout] or the page is closed without one.
+     */
+    suspend fun awaitLink(modId: String, timeout: Duration, open: () -> Unit): NxmLink {
+        val claim = CompletableDeferred<NxmLink>()
+        lock.withLock { claims[modId]?.completeExceptionally(IOException("Replaced by a newer request")); claims[modId] = claim }
+        try {
+            withContext(Dispatchers.Main) { open() }
+            return withTimeoutOrNull(timeout) { claim.await() }
+                ?: throw IOException("No download started on the Nexus page within ${timeout.inWholeMinutes} minutes")
+        } finally {
+            lock.withLock { if (claims[modId] === claim) claims.remove(modId) }
+        }
+    }
+
     /** Gives up on the file whose page is open (for example it was closed) and moves on to the next one. */
     fun skipCurrent() {
+        // A page opened by awaitLink closed without a link (the mod list had none open)
+        if (lock.withLock { current == null }) {
+            val waiting = lock.withLock { claims.values.toList().also { claims.clear() } }
+            waiting.forEach { it.completeExceptionally(IOException("The Nexus page was closed before a download started")) }
+        }
         val skipped = lock.withLock { current.also { current = null; currentTitle = null } }
         if (skipped != null) ModListManager.finishMod()
         openNextIfIdle()
@@ -166,6 +195,7 @@ object NxmDownloads {
     /** Handles an nxm:// link: resolves the mod and file from the database, fetches the link and downloads. */
     fun handle(uri: String?) {
         val link = NxmLink.parse(uri) ?: return
+        lock.withLock { claims.remove(link.modId) }?.let { it.complete(link); return }
         // A link sent by a page that was open when the run was cancelled
         if (ModListManager.cancelled) return
         ModListManager.transferScope.launch {
