@@ -463,7 +463,7 @@ object ModListManager {
     }
 
     // Starts with the defaults and is replaced when the real lists arrive; loading never blocks the caller.
-    val availableLists = mutableStateListOf("i-heart-vanilla", "total-overhaul")
+    val availableLists = mutableStateListOf("i-heart-vanilla", "total-overhaul", *Wabbajack.sources.map { it.list }.toTypedArray())
 
     suspend fun fetchAvailableLists(): MutableList<String> = withContext(Dispatchers.IO) {
         try {
@@ -495,6 +495,7 @@ object ModListManager {
             withContext(Dispatchers.Main) {
                 availableLists.clear()
                 availableLists.addAll(fetched)
+                availableLists.addAll(Wabbajack.sources.map { it.list }.filter { it !in fetched })
             }
         }
     }
@@ -552,11 +553,11 @@ object ModListManager {
         }
 
         // Fetch and parse the online lists a few at a time, then write them to the DB in order.
-        // "poti" comes from a local import, it doesn't exist on the server.
+        // The Wabbajack lists are not on the server: their mods come from their own plan (Wabbajack.savedMods)
         val fetchPermits = Semaphore(4)
         var fetchFailed = false
         val fetchedLists = if (listsAreFresh) emptyList() else coroutineScope {
-            availableLists.toList().filter { it != "poti" }.map { listName ->
+            availableLists.toList().filter { !Wabbajack.isWabbajack(it) }.map { listName ->
                 async(Dispatchers.IO) {
                     fetchPermits.withPermit {
                         try {
@@ -608,6 +609,11 @@ object ModListManager {
         } else {
             Log.w("ModListManager", "Directory does not exist or is not a directory: ${directory.absolutePath}")
         }
+
+        // The Wabbajack lists that were prepared before (their archives, from the list's plan)
+        pendingLists += Wabbajack.savedMods()
+        // The old POTI.modlist import's entries; Path of the Incarnate is a Wabbajack list now
+        modDao.getModsByModList("poti").forEach { modDao.deleteMod(it) }
 
         // The lists made in the app and the mods added to the site's lists by hand
         CustomLists.refresh()

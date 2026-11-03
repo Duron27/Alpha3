@@ -213,9 +213,14 @@ object NxmDownloads {
     }
 
     private suspend fun download(link: NxmLink) {
-        val mod = ModDatabase.getDatabase().modDao().getModById(link.modId)
-        val info = mod?.downloadInfo?.firstOrNull { it.nexusFileId == link.fileId }
-            ?: mod?.downloadInfo?.firstOrNull { d -> d.versions.any { it.fileId == link.fileId } }
+        // Several entries can share a Nexus mod (a site's list and a Wabbajack list): the one that has the file, on the
+        // list that is running, wins
+        val candidates = ModDatabase.getDatabase().modDao().getModsByModId(link.modId)
+            .sortedByDescending { it.onLists.contains(ModListManager.modList) }
+        val match = candidates.firstNotNullOfOrNull { m -> m.downloadInfo.firstOrNull { it.nexusFileId == link.fileId }?.let { m to it } }
+            ?: candidates.firstNotNullOfOrNull { m -> m.downloadInfo.firstOrNull { d -> d.versions.any { it.fileId == link.fileId } }?.let { m to it } }
+        val mod = match?.first
+        val info = match?.second
         if (mod == null || info == null) {
             Log.w(TAG, "No mod ${link.modId} / file ${link.fileId} in the database")
             MToast("Nexus sent a download for a mod this list does not contain", true)

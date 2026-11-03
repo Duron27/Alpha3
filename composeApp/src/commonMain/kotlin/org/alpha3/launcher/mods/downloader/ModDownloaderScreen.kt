@@ -88,6 +88,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.datastore.preferences.core.edit
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
 import kotlinx.coroutines.delay
@@ -307,21 +308,6 @@ fun ModDownloaderScreen() {
         launch(Dispatchers.Default) {
             // The lists land in the database, which the screens observe; the returned list isn't needed
             ModListManager.downloadAndParseModList()
-
-            val potiFile = File("${OpenMWPaths.USER_FILE_STORAGE}/OpenMW/POTI.modlist")
-            if (potiFile.exists()) {
-                val count = importPotiModlistStructured(potiFile.path)
-                Log.d("MAIN", "Imported $count POTI mods")
-                addCustomLog("SSOHome: Imported $count POTI mods", textSize = 10, textColor = Color.Cyan)
-
-                // Append to the list
-                if (!availableLists.contains("poti")) {
-                    availableLists.add("poti")
-                }
-            } else {
-                Log.w("MAIN", "POTI.modlist file not found at ${potiFile.path}")
-                addCustomLog("SSOHome: POTI.modlist file not found at ${potiFile.path}", textSize = 10, textColor = Color.Cyan)
-            }
         }
 
         println("Entry nexusAPI: $fetchNexusAPI")
@@ -701,7 +687,21 @@ fun ModDownloaderScreen() {
                                 settings = false
                                 isNexusExpanded = true
                                 StatusInfo.processing = true
+                                val wabbajack = Wabbajack.isWabbajack(modList)
                                 ModListManager.runJob = scope.launch(Dispatchers.Default) {
+                                    // A Wabbajack list fetches and plans its newest version first, which puts its
+                                    // archives on the list; its openmw.cfg comes from the list itself
+                                    if (wabbajack) {
+                                        try {
+                                            Wabbajack.prepare(modList)
+                                        } catch (e: CancellationException) {
+                                            throw e
+                                        } catch (e: Exception) {
+                                            Log.e("Wabbajack", "Could not prepare $modList", e)
+                                            StatusInfo.processing = false
+                                            return@launch
+                                        }
+                                    }
                                     processModList(isPremium!!).collect { processedMods ->
                                         // Optional: Log or handle processed mods
                                         Log.d(
@@ -710,7 +710,7 @@ fun ModDownloaderScreen() {
                                         )
                                     }
                                 }
-                                scope.launch(Dispatchers.IO) {
+                                if (!wabbajack) scope.launch(Dispatchers.IO) {
                                     try {
                                         val jsonString =
                                             fetchJsonFromUrl("https://modding-openmw.com/api/cfg-generator/$modList")
@@ -761,6 +761,7 @@ fun ModDownloaderScreen() {
                 }
             }
             RateLimitDisplay()
+            Wabbajack.status?.let { Text(it, color = gold, fontSize = 13.sp, modifier = Modifier.padding(vertical = 4.dp)) }
             ModListScreen()
             if (showBrowse) NexusBrowseDialog(onDismiss = { showBrowse = false }, onOpenLists = { showBrowse = false; showMyLists = true })
             if (showMyLists) MyListsDialog(onDismiss = { showMyLists = false }, onBrowse = { showMyLists = false; showBrowse = true })

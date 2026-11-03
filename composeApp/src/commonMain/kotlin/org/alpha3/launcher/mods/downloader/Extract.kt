@@ -98,6 +98,29 @@ private suspend fun unpackModFile(mod: ModDesc, info: DownloadInfo) {
             val archive = File(modCache, "${info.fileName}")
             Log.i("ArchiveDetect", "Detected format: ${Archives.formatName(archive.path)}")
 
+            // A Wabbajack list's archive: only the files the list uses, to the places its plan gives them
+            if (Wabbajack.owns(mod)) {
+                extractionProgressMap[key] = "Extracting ${mod.name}"
+                extractionProgressPercentMap[key] = 0f
+                val problem = Wabbajack.unpack(modList, info, archive.path) { name, done, total ->
+                    extractionProgressMap[key] = "Extracting ${mod.name}: $name"
+                    extractionProgressPercentMap[key] = if (total > 0) done * 100f / total else 0f
+                }
+                counted = true
+                if (problem == null) {
+                    extractionProgressMap[key] = "${mod.name} Extracted"
+                    extractionProgressPercentMap[key] = 100f
+                    ExtractMarker.write(info)
+                    ExtractMarker.deleteArchiveIfWanted(info)
+                } else {
+                    extractionProgressMap[key] = "Extraction error for ${mod.name}: $problem"
+                    appendToExtractLog("Failed: ${info.fileName}: $problem")
+                    ModListManager.fileFailed()
+                }
+                ModListManager.finishMod()
+                return@withContext
+            }
+
             var totalFiles = 0
             var processedFiles = 0
             var extracted = false
