@@ -1,0 +1,18 @@
+diff --git a/src/osg/Texture2D.cpp b/src/osg/Texture2D.cpp
+--- a/src/osg/Texture2D.cpp
++++ b/src/osg/Texture2D.cpp
+@@ -244,6 +244,14 @@
+         }
+     }
+ 
++    // Alpha3: a texture object to make for an image that let its pixels go after an earlier upload (the support
++    // library's texture release): the hook gives them back first, as OSG makes the texture object only for an image
++    // with data and would otherwise make it empty (black)
++    if (!textureObject && !_subloadCallback.valid() && _image.valid() && !_image->data())
++    {
++        if (RuntimeHooks* hooks = RuntimeHooks::get()) hooks->textureImageLoading(*_image, state);
++    }
++
+     if (textureObject)
+     {
+         textureObject->bind();
