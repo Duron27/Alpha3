@@ -171,8 +171,20 @@ fun processModList(isPremium: Boolean): Flow<List<ModDesc>> = flow {
     addCustomLog("Processing complete. Total updated: ${mods.size}", textSize = 10, textColor = Color.Green)
     // Free Nexus members download after this flow ends (they confirm each file in the browser), and extraction
     // runs on after the downloads, so the run is only complete once every file has been counted off.
+    val runList = modList
+    val gameDataFiles = CustomLists.gameDataFiles()
     ModListManager.whenAllFinished {
-        StatusInfo.installResult = if (!onlySync) installModListProfile(modList, StatusInfo.pendingConfigPath) else null
+        // A list made in the app writes its openmw.cfg from its own load order; a site's list gets the mods added
+        // to it by hand added to the site's config
+        val cfg = if (!onlySync) {
+            try {
+                CustomLists.finishConfig(runList, StatusInfo.pendingConfigPath, gameDataFiles)
+            } catch (e: Exception) {
+                Log.e("ProcessModList", "Could not finish the config of $runList", e)
+                StatusInfo.pendingConfigPath
+            }
+        } else null
+        StatusInfo.installResult = if (!onlySync) installModListProfile(runList, cfg) else null
         StatusInfo.pendingConfigPath = null
         processing = false
         StatusInfo.showProcessCompleteDialog = true
@@ -595,6 +607,14 @@ object ModListManager {
             }
         } else {
             Log.w("ModListManager", "Directory does not exist or is not a directory: ${directory.absolutePath}")
+        }
+
+        // The lists made in the app and the mods added to the site's lists by hand
+        CustomLists.refresh()
+        for ((listName, listMods) in CustomLists.allForDatabase()) {
+            val prepared = prepareList(listName, listMods) { it.modId.ifBlank { (100000..999999).random().toString() } }
+            pendingLists += listName to prepared
+            allFilteredMods.addAll(prepared)
         }
 
         modDao.mergeLists(pendingLists) { listName, count, error ->

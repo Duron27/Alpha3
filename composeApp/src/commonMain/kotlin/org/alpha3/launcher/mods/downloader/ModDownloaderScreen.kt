@@ -36,6 +36,8 @@ import androidx.compose.material.icons.filled.Cancel
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
@@ -232,6 +234,8 @@ fun ModDownloaderScreen() {
         )
     }
     val logMessages = remember { mutableStateListOf<String>() }
+    var showBrowse by remember { mutableStateOf(false) }
+    var showMyLists by remember { mutableStateOf(false) }
     val isPremium by GameFilesPreferences.getNullablePreference(IS_NEXUS_PREMIUM).collectAsState(initial = null)
     val isValidated by remember {
         derivedStateOf { isPremium != null }
@@ -656,6 +660,24 @@ fun ModDownloaderScreen() {
                             settings = !settings
                         }
                 )
+                Icon(
+                    imageVector = Icons.Default.Search,
+                    contentDescription = "Browse Nexus",
+                    tint = gold,
+                    modifier = Modifier
+                        .size(44.dp)
+                        .padding(6.dp)
+                        .clickable { showBrowse = true }
+                )
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.List,
+                    contentDescription = "My lists",
+                    tint = gold,
+                    modifier = Modifier
+                        .size(44.dp)
+                        .padding(6.dp)
+                        .clickable { showMyLists = true }
+                )
                 Spacer(modifier = Modifier.width(8.dp))
                 AvailableModLists(modDao = modDao)
                 Spacer(modifier = Modifier.weight(1f))
@@ -740,6 +762,8 @@ fun ModDownloaderScreen() {
             }
             RateLimitDisplay()
             ModListScreen()
+            if (showBrowse) NexusBrowseDialog(onDismiss = { showBrowse = false }, onOpenLists = { showBrowse = false; showMyLists = true })
+            if (showMyLists) MyListsDialog(onDismiss = { showMyLists = false }, onBrowse = { showMyLists = false; showBrowse = true })
         }
     } else {
         OnboardingScreen()
@@ -860,8 +884,8 @@ fun getAllAvailableLists(modDao: ModDao): List<String> {
     }
 
     // Combine and remove duplicates
-    return remember(mods) {
-        (availableLists + jsonLists).distinct().sorted()
+    return remember(mods, CustomLists.revision) {
+        (availableLists + jsonLists + CustomLists.created).distinct().sorted()
     }
 }
 
