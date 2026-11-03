@@ -141,6 +141,11 @@ fun InitialDirectorySelection(
                 Button(onClick = { onSelect(File(OpenMWPaths.USER_FILE_STORAGE)) }) {
                     Text(text = "External Storage")
                 }
+                Spacer(modifier = Modifier.height(8.dp))
+                // The game's merged view of the profile's data folders and archives, not a folder on disk
+                Button(onClick = { onSelect(File(org.alpha3.launcher.files.VFS_BROWSER_PATH)) }) {
+                    Text(text = "Profile VFS (${org.alpha3.launcher.paths.Profiles.active.ifEmpty { "Default" }})")
+                }
                 if (newFeatureEnabledChecked) {
                     Spacer(modifier = Modifier.height(8.dp))
                     Button(onClick = { onSelect(context.filesDir.parentFile) }) {

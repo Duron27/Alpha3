@@ -167,6 +167,8 @@ import org.alpha3.launcher.ui.view.MyTopBar
 import org.alpha3.launcher.ui.view.NoneBackground
 import org.alpha3.launcher.ui.view.RotatingImageBackground
 import org.alpha3.launcher.utils.FileBrowserPopup
+import org.alpha3.launcher.files.VFS_BROWSER_PATH
+import org.alpha3.launcher.files.VfsBrowserPopup
 import org.alpha3.launcher.utils.DriverDebugEnvs
 import org.alpha3.launcher.utils.GameFilesPreferences
 import org.alpha3.launcher.utils.GpuFamily
@@ -734,6 +736,7 @@ fun DevInsert() {
     var showPopup by remember { mutableStateOf(false) }
     var showFileBrowser by remember { mutableStateOf(false) }
     var selectedInitialDirectory by remember { mutableStateOf<File?>(null) }
+    var showVfsBrowser by remember { mutableStateOf(false) }
 
     Column {
         // Saves Android's logcat when the game starts; iOS has no such buffer to save
@@ -820,6 +823,18 @@ fun DevInsert() {
         ) {
             Text(stringResource(Res.string.open_file_browser), color = White)
         }
+
+        Button(
+            onClick = { showVfsBrowser = true },
+            modifier = Modifier.fillMaxWidth(),
+            colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent)
+        ) {
+            Text("Browse the profile's VFS", color = White)
+        }
+    }
+
+    if (showVfsBrowser) {
+        VfsBrowserPopup(onDismiss = { showVfsBrowser = false })
     }
 
     if (showPopup) {
@@ -829,8 +844,13 @@ fun DevInsert() {
     if (showFileBrowser && selectedInitialDirectory == null) {
         InitialDirectorySelection(
             onSelect = { directory ->
-                selectedInitialDirectory = directory
-                showFileBrowser = true
+                if (directory.path == VFS_BROWSER_PATH) {
+                    showFileBrowser = false
+                    showVfsBrowser = true
+                } else {
+                    selectedInitialDirectory = directory
+                    showFileBrowser = true
+                }
             },
             onDismiss = { showFileBrowser = false }
         )
