@@ -1,7 +1,7 @@
 {
   "name": "openmw-osg",
   "version-date": "2026-01-30",
-  "port-version": 2,
+  "port-version": 3,
   "description": "Fork of OpenSceneGraph for OpenMW-specific performance improvements.",
   "homepage": "https://github.com/openmw/osg",
   "license": null,

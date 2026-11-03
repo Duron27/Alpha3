@@ -45,6 +45,12 @@ namespace Alpha3
                 mSource = source;
             }
 
+            Resource::ImageManager* imageManager()
+            {
+                std::lock_guard lock(mStateMutex);
+                return mSource != nullptr ? mSource() : nullptr;
+            }
+
             // On the first DDS image the engine reads: its image manager exists by then
             void imageRead()
             {
@@ -243,6 +249,11 @@ namespace Alpha3
     {
         noteMainThread(); // the engine's setup calls this on its main thread
         preload().setSource(source);
+    }
+
+    Resource::ImageManager* engineImageManager()
+    {
+        return preload().imageManager();
     }
 
     void texturePreloadImageRead()

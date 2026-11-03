@@ -222,7 +222,9 @@ namespace Alpha3
 
             void swapBuffers(osg::GraphicsContext& gc) override
             {
-                // the frame is drawn: no texture of this context is being uploaded
+                // the frame is drawn: no texture of this context is being uploaded. What went to the GPU is let go
+                // first, then streaming swaps in new pixels (uploaded, and let go, after the next frame)
+                textureReleaseFrame();
                 textureStreamingFrame();
                 Alpha3::swapBuffers(gc);
             }
@@ -290,6 +292,8 @@ namespace Alpha3
 
             void textureImageLoading(const osg::Image& image, osg::State&) override
             {
+                // first: a released image gets its pixels back before anything looks at it
+                textureReleaseLoading(image);
                 texturePreloadTextureLoading(image);
                 textureStreamingTextureLoading(image);
             }

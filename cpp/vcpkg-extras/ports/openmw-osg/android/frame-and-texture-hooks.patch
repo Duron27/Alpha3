@@ -44,11 +44,16 @@ index 6174372..5385b7f 100644
  #include <osg/GLU>
  #include <osg/Timer>
  #include <osg/ApplicationUsage>
-@@ -2355,6 +2356,8 @@ void Texture::applyTexImage2D_load(State& state, GLenum target, const Image* ima
-     if (!image || !image->data())
+@@ -2355,6 +2356,12 @@ void Texture::applyTexImage2D_load(State& state, GLenum target, const Image* ima
+-    if (!image || !image->data())
++    if (!image)
          return;
  
++    // before the data test: a hook can give back the data of an image that let it go after an earlier upload
 +    if (RuntimeHooks* hooks = RuntimeHooks::get()) hooks->textureImageLoading(*image, state);
++
++    if (!image->data())
++        return;
 +
  #ifdef DO_TIMING
      osg::Timer_t start_tick = osg::Timer::instance()->tick();

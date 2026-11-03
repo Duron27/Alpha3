@@ -24,6 +24,11 @@ namespace VFS
     class Manager;
 }
 
+namespace Resource
+{
+    class ImageManager;
+}
+
 namespace osg
 {
     class CullStack;
@@ -100,6 +105,8 @@ namespace Alpha3
     void texturePreloadImageRead();
     void texturePreloadTextureLoading(const osg::Image& image);
     void texturePreloadStop();
+    // The engine's image manager (null before it exists), from the source androidmain set
+    Resource::ImageManager* engineImageManager();
 
     // ---- distantmeshes.cpp: true while the distant meshes read a texture for the CPU; the image hooks leave it as it is
     bool imageHooksBypassed();
@@ -132,6 +139,16 @@ namespace Alpha3
     void textureStreamingDrawableAdded(osg::NodeVisitor& cullVisitor, osg::Drawable& drawable, const osg::Matrix& modelView);
     void textureStreamingFrame(); // on the draw thread, after the frame is drawn
     void textureStreamingStop(); // before the context closes
+    // Reads on this thread made at full size, not streamed (texturerelease.cpp reading an image back)
+    void textureStreamingBypass(bool bypass);
+
+    // ---- texturerelease.cpp ([Textures] release uploaded images): a texture file's pixels are let go once they are on
+    // the GPU, and read back from the file if a texture needs them again
+    void textureReleaseLoading(const osg::Image& image); // a texture about to upload it (the OSG hook)
+    void textureReleaseFrame(); // on the draw thread after the frame, before texture streaming's swaps
+    bool textureReleaseOn();
+    // A texture file as the engine's image manager reads it (DDS, or KTX in its place), at full size; null if it can't
+    osg::ref_ptr<osg::Image> readTextureFile(const std::string& path);
 
     // ---- occlusionculling.cpp ([Camera] occlusion culling): the OSG cull visitor's occlusion hooks. Each is a no-op
     // returning false for any traversal but the scene camera's.

@@ -61,6 +61,7 @@ namespace Alpha3
 
         std::atomic<std::thread::id> sMainThread{};
         thread_local std::string tlPath; // the image being read, as the image manager names it
+        thread_local bool tlBypass = false; // read at full size (texture release reading an image back)
 
         bool onMainThread()
         {
@@ -177,7 +178,7 @@ namespace Alpha3
             osg::ref_ptr<osg::Image> read(osg::Image& image, Prepare prepare)
             {
                 // by name; an image read without one (not through the image manager) is kept whole on the main thread
-                if (tlPath.empty() ? onMainThread() : fullQualityImages().contains(tlPath))
+                if (tlBypass || (tlPath.empty() ? onMainThread() : fullQualityImages().contains(tlPath)))
                     return nullptr;
                 osg::ref_ptr<osg::Image> small = withoutTopLevels(image, streamingSettings().mStartSize);
                 if (!small)
@@ -190,7 +191,11 @@ namespace Alpha3
                     return nullptr;
                 Pending& pending = mPending[small.get()];
                 pending.mSmall = small;
-                pending.mFull = &image;
+                // with texture release on, the full image is read again when it is wanted rather than kept meanwhile
+                if (textureReleaseOn() && !tlPath.empty())
+                    pending.mPath = tlPath;
+                else
+                    pending.mFull = &image;
                 pending.mPrepare = prepare;
                 mPendingCount.store(mPending.size(), std::memory_order_relaxed);
                 ++mStreamed;
@@ -305,6 +310,7 @@ namespace Alpha3
             {
                 osg::observer_ptr<osg::Image> mSmall; // what the engine has; gone when it let the texture go
                 osg::ref_ptr<osg::Image> mFull; // as read
+                std::string mPath; // or, without mFull, the file to read it from again (texture release)
                 Prepare mPrepare = nullptr;
                 bool mUploaded = false;
                 unsigned mUploadFrame = 0;
@@ -351,8 +357,18 @@ namespace Alpha3
                     if (!job.mSmall.valid())
                         continue;
                     osg::ref_ptr<osg::Image> full = job.mFull;
-                    if (osg::ref_ptr<osg::Image> prepared = job.mPrepare(*full))
-                        full = prepared;
+                    if (full)
+                    {
+                        if (osg::ref_ptr<osg::Image> prepared = job.mPrepare(*full))
+                            full = prepared;
+                    }
+                    else
+                    {
+                        // read again at full size; the image hooks prepare it for the GPU as they read it
+                        full = readTextureFile(job.mPath);
+                        if (!full)
+                            continue;
+                    }
                     std::lock_guard lock(mMutex);
                     if (mStopped)
                         return;
@@ -493,6 +509,11 @@ namespace Alpha3
     {
         if (streamingSettings().mEnabled)
             streaming().frame();
+    }
+
+    void textureStreamingBypass(bool bypass)
+    {
+        tlBypass = bypass;
     }
 
     void textureStreamingStop()
