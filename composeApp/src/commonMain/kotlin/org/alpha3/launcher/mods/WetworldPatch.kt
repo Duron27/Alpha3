@@ -1,50 +1,66 @@
-// Post-processing shaders made cheaper as OpenMW loads them (patch 0023 calls rewriteTechnique with each .omwfx file's
-// text before it is parsed). The files on disk stay as they are; every rewrite is its own setting, off by default, and
-// is skipped (the shader loaded as it is, the reason in the log) when the text it looks for is not there, as after an
-// update of the shader.
-//
-// [Experimental] wetworld fast reflections: Rafael's Shader Pack's wetworld traces a reflection ray for every wet pixel
-// of the screen in its full size "wet" pass. Rewritten, a "reflect" pass a quarter of the size (half the width and
-// height) traces them, with wetworld's own code for the surface and the ray, into a render target of its own (RT_SSR,
-// colour premultiplied by the reflection's strength); the wet pass reads that instead of tracing, and everything else in
-// it (puddles, ripples, the wet ground's colour, the rain) stays at full size.
-#include "support.hpp"
+package org.alpha3.launcher.mods
 
-#include <string>
-#include <string_view>
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.IO
+import kotlinx.coroutines.withContext
+import okio.IOException
+import org.alpha3.launcher.io.File
 
-#include <alpha3/upstream.hpp>
-#include <components/debug/debuglog.hpp>
+/**
+ * An optional patch to Rafael's Shader Pack's wetworld.omwfx, made in the file itself (the settings page's button):
+ * wetworld traces a reflection ray for every wet pixel of the screen in its full size "wet" pass, which on a phone
+ * costs about as much as the whole scene (in the rain in Balmora: 65 ms a frame with it as it is, 48 ms patched, 20 ms
+ * without wetworld). Patched, a new "a3reflect" pass half the width and height traces them, with wetworld's own code
+ * for the surface and the ray, into a render target of its own (RT_SSR, the colour premultiplied by the reflection's
+ * strength); the wet pass reads that instead of tracing, and everything else in it (puddles, ripples, the wet ground's
+ * colour, the rain) stays at full size.
+ *
+ * The original is kept next to it as wetworld.omwfx.original (not .omwfx, so OpenMW does not load it as a shader) and
+ * restored by the same button. A version of wetworld whose text the patch does not find is left as it is. Updating
+ * the pack replaces the folder, and the patch with it.
+ */
+object WetworldPatch {
+    private const val MARKER = "// Alpha3: patched by the launcher (reflections at half size)"
 
-namespace Alpha3
-{
-    namespace
-    {
-        bool wetworldFastReflections()
-        {
-            static const bool on = settingBool("Experimental", "wetworld fast reflections", false);
-            return on;
-        }
+    /** wetworld.omwfx in an installed pack's shaders folder, or null. */
+    fun find(pack: ShaderPack): File? {
+        val shaders = File(pack.folder).listFiles()
+            ?.firstOrNull { it.path.substringAfterLast('/').equals("shaders", ignoreCase = true) } ?: return null
+        return shaders.listFiles()?.firstOrNull { it.path.substringAfterLast('/').equals("wetworld.omwfx", ignoreCase = true) }
+    }
 
-        // Replaces the one occurrence of [from]; false when it is not there exactly once
-        bool replaceOnce(std::string& text, std::string_view from, std::string_view to)
-        {
-            const std::size_t at = text.find(from);
-            if (at == std::string::npos || text.find(from, at + from.size()) != std::string::npos)
-                return false;
-            text.replace(at, from.size(), to);
-            return true;
-        }
+    private fun original(file: File) = File(file.path + ".original")
 
-        constexpr std::string_view sWetHeader = "fragment wet(rt1=RT_H, rt2=RT_P)";
-        constexpr std::string_view sWetMain = "\n    // Wetworld\n    void main()";
-        constexpr std::string_view sTraceCall
-            = "ssrResult = ComputeSSR(ssrNormal, viewPos, float4(color.rgb, 1.0f - uWorldSpecularSmoothness), "
-              "worldDistance, pixelIsWater, fresnel * ssrIntensity, mss, ramn);";
-        constexpr std::string_view sPasses = "passes = ds, particles, wet;";
-        constexpr std::string_view sParticlesTarget = "render_target RT_P\n{";
+    fun isPatched(file: File): Boolean = runCatching { file.readText().startsWith(MARKER) }.getOrDefault(false)
 
-        constexpr std::string_view sSsrTarget = R"(render_target RT_SSR
+    /** Patches the file, keeping the original. Throws when this version of wetworld is not one it knows. */
+    suspend fun patch(file: File) = withContext(Dispatchers.IO) {
+        if (isPatched(file)) return@withContext
+        val source = file.readText()
+        val patched = rewrite(source.replace("\r\n", "\n"))
+            ?: throw IOException("This version of wetworld is not one the patch knows; it was left as it is")
+        val backup = original(file)
+        backup.delete()
+        file.copyTo(backup)
+        file.writeText(patched)
+    }
+
+    /** Puts the original back. */
+    suspend fun restore(file: File) = withContext(Dispatchers.IO) {
+        val backup = original(file)
+        if (!backup.exists()) throw IOException("The original (${backup.path}) is not there")
+        file.delete()
+        if (!backup.renameTo(file)) throw IOException("Could not put the original back")
+    }
+
+    private const val WET_HEADER = "fragment wet(rt1=RT_H, rt2=RT_P)"
+    private const val WET_MAIN = "\n    // Wetworld\n    void main()"
+    private const val TRACE_CALL = "ssrResult = ComputeSSR(ssrNormal, viewPos, float4(color.rgb, 1.0f - uWorldSpecularSmoothness), " +
+        "worldDistance, pixelIsWater, fresnel * ssrIntensity, mss, ramn);"
+    private const val PASSES = "passes = ds, particles, wet;"
+    private const val PARTICLES_TARGET = "render_target RT_P\n{"
+
+    private const val SSR_TARGET = """render_target RT_SSR
 {
     width_ratio  = 0.5;
     height_ratio = 0.5;
@@ -53,11 +69,15 @@ namespace Alpha3
     source_format = rgba;
 }
 
-)";
+"""
 
-        // The reflect pass's main: the wet pass's main up to its ComputeSSR call, without what only colours the pixel
-        constexpr std::string_view sReflectMain = R"(
-    // Alpha3: the reflections at half size (src/techniquerewrite.cpp)
+    // The wet pass reads it: the colour back from premultiplied
+    private const val READ_REFLECTION = "ssrResult = omw_Texture2D(RT_SSR, omw_TexCoord); " +
+        "ssrResult.rgb /= max(ssrResult.a, 0.0001f); // Alpha3: traced at half size by the a3reflect pass"
+
+    // The a3reflect pass's main: the wet pass's main up to its ComputeSSR call, without what only colours the pixel
+    private const val REFLECT_MAIN = """
+    // Alpha3: the reflections at half size (the launcher's wetworld patch)
     void main()
     {
         omw_FragColor = float4(0.0f);
@@ -205,49 +225,28 @@ namespace Alpha3
     }
 }
 
-)";
+"""
 
-        // The wet pass reads it: the colour back from premultiplied
-        constexpr std::string_view sReadReflection
-            = "ssrResult = omw_Texture2D(RT_SSR, omw_TexCoord); "
-              "ssrResult.rgb /= max(ssrResult.a, 0.0001f); // Alpha3: traced at half size by the reflect pass";
-
-        bool rewriteWetworld(std::string& source)
-        {
-            // (OpenMW does the same when it parses)
-            for (std::size_t at = source.find("\r\n"); at != std::string::npos; at = source.find("\r\n", at))
-                source.erase(at, 1);
-            const std::size_t header = source.find(sWetHeader);
-            const std::size_t open = header == std::string::npos ? header : source.find('{', header);
-            const std::size_t main = open == std::string::npos ? open : source.find(sWetMain, open);
-            if (main == std::string::npos)
-                return false;
-            // the wet pass's own functions (MarchRay, ComputeSSR, the normals, ...), for the reflect pass too
-            const std::string helpers = source.substr(open + 1, main - open - 1);
-
-            std::string text = source;
-            if (!replaceOnce(text, sTraceCall, sReadReflection) || !replaceOnce(text, sPasses, "passes = ds, particles, a3reflect, wet;")
-                || !replaceOnce(text, sWetHeader, "fragment wet(rt1=RT_H, rt2=RT_P, rt3=RT_SSR)")
-                || !replaceOnce(text, sParticlesTarget, std::string(sSsrTarget) + std::string(sParticlesTarget)))
-                return false;
-            const std::string reflectPass
-                = "fragment a3reflect(target=RT_SSR, rt1=RT_H)\n{" + helpers + std::string(sReflectMain);
-            const std::size_t wet = text.find("fragment wet(");
-            text.insert(wet, reflectPass);
-            source = std::move(text);
-            return true;
-        }
+    // Replaces the one occurrence of [from]; null when it is not there exactly once
+    private fun String.replaceOnce(from: String, to: String): String? {
+        val at = indexOf(from)
+        if (at < 0 || indexOf(from, at + from.length) >= 0) return null
+        return substring(0, at) + to + substring(at + from.length)
     }
 
-    void rewriteTechnique(std::string_view name, std::string& source)
-    {
-        if (name == "wetworld" && wetworldFastReflections())
-        {
-            if (rewriteWetworld(source))
-                Log(Debug::Info) << "wetworld: reflections traced at half size ([Experimental] wetworld fast reflections)";
-            else
-                Log(Debug::Warning) << "wetworld: not the version [Experimental] wetworld fast reflections knows, "
-                                       "loaded as it is";
-        }
+    private fun rewrite(source: String): String? {
+        val header = source.indexOf(WET_HEADER).takeIf { it >= 0 } ?: return null
+        val open = source.indexOf('{', header).takeIf { it >= 0 } ?: return null
+        val main = source.indexOf(WET_MAIN, open).takeIf { it >= 0 } ?: return null
+        // the wet pass's own functions (MarchRay, ComputeSSR, the normals, ...), for the a3reflect pass too
+        val helpers = source.substring(open + 1, main)
+        var text = source.replaceOnce(TRACE_CALL, READ_REFLECTION) ?: return null
+        text = text.replaceOnce(PASSES, "passes = ds, particles, a3reflect, wet;") ?: return null
+        text = text.replaceOnce(WET_HEADER, "fragment wet(rt1=RT_H, rt2=RT_P, rt3=RT_SSR)") ?: return null
+        text = text.replaceOnce(PARTICLES_TARGET, SSR_TARGET + PARTICLES_TARGET) ?: return null
+        val wet = text.indexOf("fragment wet(")
+        text = text.substring(0, wet) + "fragment a3reflect(target=RT_SSR, rt1=RT_H)\n{" + helpers + REFLECT_MAIN +
+            text.substring(wet)
+        return "$MARKER; the original is wetworld.omwfx.original\n" + text
     }
 }

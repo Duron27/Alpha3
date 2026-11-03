@@ -518,6 +518,7 @@ fun GraphicsSettingsSection() {
 
         ShaderPackRow()
         RafaelShaderPackRow()
+        WetworldPatchRow()
 
         // Frame pacing (Swappy) only exists on Android's OpenGL ES renderer
         if (Platform.features.gpuDrivers != null) {

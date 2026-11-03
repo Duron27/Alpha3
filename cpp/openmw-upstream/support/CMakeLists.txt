@@ -120,7 +120,6 @@ set(ALPHA3_SUPPORT_SOURCES
     src/texturerelease.cpp
     src/meshsplitting.cpp
     src/renderscale.cpp
-    src/techniquerewrite.cpp
     src/occlusionculling.cpp
     src/texturestreaming.cpp
     src/thermal.cpp
