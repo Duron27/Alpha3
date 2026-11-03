@@ -1,0 +1,92 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Tue, 3 Nov 2026 01:00:00 -0500
+Subject: [PATCH 20/20] Occlusion culling: large static meshes split into pieces
+
+With [Camera] occlusion mesh splitting on, the support library cuts large static shapes into pieces on a grid
+(src/meshsplitting.cpp), so occlusion culling can hide the parts behind a wall: once per mesh when the scene manager
+loads it (after the optimizer, which would merge them again), and on object paging's active grid chunks after they are
+merged, carrying the refnum markers over to the pieces. Off, both calls do nothing.
+---
+ apps/openmw/mwrender/objectpaging.cpp | 37 +++++++++++++++++++++++++++++++++++
+ components/resource/scenemanager.cpp  |  5 +++++
+ 2 files changed, 42 insertions(+)
+
+diff --git a/apps/openmw/mwrender/objectpaging.cpp b/apps/openmw/mwrender/objectpaging.cpp
+index 09809b19ae..f5e6f2e4c1 100644
+--- a/apps/openmw/mwrender/objectpaging.cpp
++++ b/apps/openmw/mwrender/objectpaging.cpp
+@@ -52,6 +52,8 @@
+ 
+ #include "vismask.hpp"
+ 
++#include <alpha3/upstream.hpp>
++
+ namespace MWRender
+ {
+ 
+@@ -894,6 +896,41 @@ namespace MWRender
+ 
+             optimizer.optimize(mergeGroup, options);
+ 
++            if (activeGrid && Alpha3::meshSplittingOn())
++            {
++                // the merged statics in pieces, for occlusion culling; each piece keeps the refnum markers of the
++                // vertices it took, so ray casts still find the object hit
++                Alpha3::splitChunkForCulling(*mergeGroup,
++                    [](const osg::Geometry& original, osg::Geometry& piece, const std::vector<unsigned>& kept) {
++                        std::vector<RefnumMarker> markers;
++                        SceneUtil::forEachUserData<RefnumMarker>(const_cast<osg::Geometry&>(original),
++                            [&](const RefnumMarker& marker) { markers.push_back(marker); });
++                        if (markers.empty())
++                            return;
++                        osg::UserDataContainer* container = piece.getUserDataContainer();
++                        for (unsigned i = container->getNumUserObjects(); i-- > 0;)
++                            if (dynamic_cast<SceneUtil::UserData<RefnumMarker>*>(container->getUserObject(i)))
++                                container->removeUserObject(i);
++                        std::size_t next = 0;
++                        unsigned start = 0;
++                        for (const RefnumMarker& marker : markers)
++                        {
++                            if (marker.mNumVertices == 0)
++                            {
++                                SceneUtil::addUserData(piece, marker);
++                                continue;
++                            }
++                            const unsigned end = start + marker.mNumVertices;
++                            unsigned count = 0;
++                            for (; next < kept.size() && kept[next] < end; ++next)
++                                ++count;
++                            if (count > 0)
++                                SceneUtil::addUserData(piece, RefnumMarker{ marker.mRefnum, count });
++                            start = end;
++                        }
++                    });
++            }
++
+             group->addChild(mergeGroup);
+ 
+             if (mDebugBatches)
+diff --git a/components/resource/scenemanager.cpp b/components/resource/scenemanager.cpp
+index 055f4dc587..dea4754874 100644
+--- a/components/resource/scenemanager.cpp
++++ b/components/resource/scenemanager.cpp
+@@ -64,6 +64,8 @@
+ #include "niffilemanager.hpp"
+ #include "objectcache.hpp"
+ 
++#include <alpha3/upstream.hpp>
++
+ namespace
+ {
+     class InitWorldSpaceParticlesCallback
+@@ -1039,6 +1041,9 @@ namespace Resource
+             else
+                 shareState(loaded);
+ 
++            // after the optimizer, which would merge the pieces again
++            Alpha3::splitMeshForCulling(*loaded, path.value());
++
+             if (compile && mIncrementalCompileOperation)
+                 mIncrementalCompileOperation->add(loaded);
+             else

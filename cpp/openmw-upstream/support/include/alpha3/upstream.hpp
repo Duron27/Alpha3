@@ -8,6 +8,7 @@
 #include <functional>
 #include <memory>
 #include <string_view>
+#include <vector>
 
 #include <osg/Camera>
 #include <osg/Matrixd>
@@ -23,7 +24,9 @@ namespace Resource
 
 namespace osg
 {
+    class Geometry;
     class GraphicsContext;
+    class Node;
 }
 
 namespace VFS
@@ -57,6 +60,17 @@ namespace Alpha3
     // The image manager names the file it is about to read on this thread (empty after it): texture streaming keeps
     // pictures shown flat on the screen (menu art, splash screens, the GUI) at full size, by their path.
     void readingImage(std::string_view path);
+
+    // Occlusion mesh splitting ([Camera] occlusion mesh splitting, src/meshsplitting.cpp): large static shapes cut into
+    // pieces on a grid, so occlusion culling can hide the parts behind a wall. Does nothing when off.
+    bool meshSplittingOn();
+    // A mesh the scene manager loaded, before it is cached; path is for the log
+    void splitMeshForCulling(osg::Node& node, std::string_view path);
+    // An object paging active grid chunk after merging. The callback is given each piece made, with the original vertex
+    // index of each of the piece's vertices (ascending), to carry over what refers to vertex ranges (refnum markers).
+    using SplitPieceCallback
+        = std::function<void(const osg::Geometry& original, osg::Geometry& piece, const std::vector<unsigned>& kept)>;
+    void splitChunkForCulling(osg::Node& node, const SplitPieceCallback& callback);
 
     // Frame generation (OPENMW_FRAMEGEN) builds the frame between two rendered ones from the camera's motion and the
     // scene's depth when the engine hands them over: each frame, from the main thread before it is rendered.

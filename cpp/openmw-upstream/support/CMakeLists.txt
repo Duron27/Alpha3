@@ -116,6 +116,7 @@ set(ALPHA3_SUPPORT_SOURCES
     src/shaders.cpp
     src/textureconversion.cpp
     src/texturepreload.cpp
+    src/meshsplitting.cpp
     src/occlusionculling.cpp
     src/texturestreaming.cpp
     src/thermal.cpp
