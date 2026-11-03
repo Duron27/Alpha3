@@ -183,6 +183,12 @@ namespace Alpha3
 
             void extensionsRead(osg::GLExtensions& extensions) override
             {
+                // the driver's names, for the benchmark's file (through the context's own loader: Zink's or the phone's)
+                using GetString = const GLubyte* (*)(GLenum);
+                if (auto getString = reinterpret_cast<GetString>(osg::getGLExtensionFuncPtr("glGetString")))
+                    benchmarkGlInfo(extensions, reinterpret_cast<const char*>(getString(GL_VENDOR)),
+                        reinterpret_cast<const char*>(getString(GL_RENDERER)),
+                        reinterpret_cast<const char*>(getString(GL_VERSION)));
                 Log(Debug::Info) << "Storage buffer blocks per stage: vertex " << extensions.maxVertexShaderStorageBlocks
                                  << ", fragment " << extensions.maxFragmentShaderStorageBlocks << ", compute "
                                  << extensions.maxComputeShaderStorageBlocks << "; compute work group invocations "
@@ -299,6 +305,7 @@ namespace Alpha3
             {
                 noteMainThread();
                 omw_frame_update();
+                benchmarkFrame();
             }
 
             bool nodeOccluded(osg::CullStack& cullStack, const osg::Node& node) override
@@ -317,6 +324,7 @@ namespace Alpha3
                 textureStreamingDrawableAdded(cullVisitor, drawable, modelView);
                 grassDrawableAdded(cullVisitor, drawable, modelView);
                 wetGroundDrawableAdded(cullVisitor, drawable);
+                benchmarkDrawableAdded(cullVisitor);
             }
 
             const osg::StateSet* drawableState(osg::NodeVisitor& cullVisitor, osg::Drawable& drawable) override

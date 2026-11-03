@@ -1161,19 +1161,39 @@ namespace Alpha3
         }
     }
 
+    namespace
+    {
+        std::atomic<bool> sPaused{ false }; // the benchmark's
+
+        bool occlusionActive()
+        {
+            return occlusionEnabled() && !sPaused.load(std::memory_order_relaxed);
+        }
+    }
+
+    bool occlusionOn()
+    {
+        return occlusionEnabled();
+    }
+
+    void occlusionPause(bool paused)
+    {
+        sPaused.store(paused, std::memory_order_relaxed);
+    }
+
     bool occlusionNodeOccluded(osg::CullStack& cullStack, const osg::Node& node)
     {
-        return occlusionEnabled() && occlusion().nodeOccluded(cullStack, node);
+        return occlusionActive() && occlusion().nodeOccluded(cullStack, node);
     }
 
     bool occlusionBoxOccluded(osg::CullStack& cullStack, const osg::BoundingBox& box)
     {
-        return occlusionEnabled() && occlusion().boxOccluded(cullStack, box);
+        return occlusionActive() && occlusion().boxOccluded(cullStack, box);
     }
 
     void occlusionDrawableAdded(osg::NodeVisitor& cullVisitor, osg::Drawable& drawable, const osg::Matrix& modelView)
     {
-        if (occlusionEnabled())
+        if (occlusionActive())
             occlusion().drawableAdded(static_cast<osgUtil::CullVisitor&>(cullVisitor), drawable, modelView);
     }
 }

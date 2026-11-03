@@ -168,6 +168,10 @@ namespace Alpha3
             { "test weather", "Testing", Kind::Float, -1, -1, 9, 1, true,
                 "Hold the weather, to test with: -1 the region's own, 0 clear, 1 cloudy, 2 foggy, 3 overcast, 4 rain, "
                 "5 thunderstorm, 6 ash storm, 7 blight storm, 8 snow, 9 blizzard. Set it back to -1 after" },
+            { "benchmark", "", Kind::Bool, 0, 0, 1, 1, true,
+                "Turn on and close the menu, then hold still for two minutes: the frame measured with each part of "
+                "the scene taken away in turn, saved to Alpha3/benchmarks/ (compare two with tools/benchcompare.py). "
+                "It turns itself off" },
             { "wet ground", "Wet ground", Kind::Bool, 0, 0, 1, 1, false,
                 "The ground darkening and shining in the rain, drying after, footprints filling with water, rain dripping "
                 "off things (turned off while the game runs: dry)" },
@@ -237,7 +241,7 @@ namespace Alpha3
             { "a3_terrain", "Terrain", "Cliffs without stretched textures, ground textures meeting by their height" },
             { "a3_grass", "Grass", "Grass growing out of grassy ground, bugs, frogs, moths and birds" },
             { "a3_trees", "Trees", "Trees swaying in the wind, fuller leaves" },
-            { "a3_testing", "Testing", "Hold the weather, to test with" },
+            { "a3_testing", "Testing", "Hold the weather, measure the frame (benchmark), to test with" },
             { "a3_wetground", "Wet ground", "The ground wet and shining in the rain, puddles, drying after" },
         };
 
@@ -1267,6 +1271,11 @@ namespace Alpha3
         return liveFlags().mDryUnder.load(std::memory_order_relaxed);
     }
 
+    void setGrassOn(bool on)
+    {
+        sGrassOn.store(on ? 1 : 0, std::memory_order_relaxed);
+    }
+
     bool grassOn()
     {
         int on = sGrassOn.load(std::memory_order_relaxed);
@@ -1310,6 +1319,7 @@ namespace Alpha3
         if (Settings::ShaderManager::get().getMode() != Settings::ShaderManager::Mode::Debug)
             return;
         sForcedWeather = static_cast<int>(std::lround(optionFloat("test weather")));
+        benchmarkMenu(optionBool("benchmark"));
         // the menu writes settings.cfg as it closes: the chain kept for it is no longer needed (and must not undo what
         // is changed there)
         static bool chainDone = false;

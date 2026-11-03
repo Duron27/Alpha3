@@ -29,6 +29,7 @@ namespace osg
 {
     class CullStack;
     class Drawable;
+    class GLExtensions;
     class GraphicsContext;
     class Node;
     class NodeVisitor;
@@ -136,6 +137,9 @@ namespace Alpha3
     // ---- occlusionculling.cpp ([Camera] occlusion culling): the OSG cull visitor's occlusion hooks. Each is a no-op
     // returning false for any traversal but the scene camera's.
     bool occlusionNodeOccluded(osg::CullStack& cullStack, const osg::Node& node);
+    // on in the settings; paused (the benchmark): it culls nothing and draws no occluders
+    bool occlusionOn();
+    void occlusionPause(bool paused);
     bool occlusionBoxOccluded(osg::CullStack& cullStack, const osg::BoundingBox& box);
     void occlusionDrawableAdded(osg::NodeVisitor& cullVisitor, osg::Drawable& drawable, const osg::Matrix& modelView);
 
@@ -178,11 +182,23 @@ namespace Alpha3
     bool experimentalOptionOn(std::string_view name);
     // grass on or off as the menu has it now (grass.cpp)
     bool grassOn();
+    void setGrassOn(bool on); // the benchmark's
     bool grassClearanceOn();
     bool grassBugsOn();
     bool wetDryUnderOn();
 
     void wetGroundDrawableAdded(osg::NodeVisitor& cullVisitor, osg::Drawable& drawable);
+    // the benchmark's: no maps, footprints or drips while paused; how hard it rained last (from setRain)
+    void wetGroundPause(bool paused);
+    float lastRain();
+
+    // ---- benchmark.cpp (the F2 menu's Testing page, "benchmark"): the frame measured with each part of the scene taken
+    // away in turn, written to Alpha3/benchmarks/. The GPU's names (with the context current), the scene camera (from
+    // the cull), the menu's switch (while it is open), and each frame (the main thread, before it is drawn).
+    void benchmarkGlInfo(const osg::GLExtensions& extensions, const char* vendor, const char* renderer, const char* version);
+    void benchmarkDrawableAdded(osg::NodeVisitor& cullVisitor);
+    void benchmarkMenu(bool on);
+    void benchmarkFrame();
     // ---- experimentalstate.cpp: the state that gives a drawable its own variant of its program by its texture (tree
     // sway, the procedural material), and the defines OpenMW's shaders import for them
     const osg::StateSet* experimentalDrawableState(osg::NodeVisitor& cullVisitor, osg::Drawable& drawable);

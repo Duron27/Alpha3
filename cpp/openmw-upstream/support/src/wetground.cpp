@@ -277,7 +277,7 @@ void main()
             // the scene camera's cull, after the scene: the maps that are due, the drips
             void cull(osgUtil::CullVisitor& cv)
             {
-                if (mWet <= 0.003f || !mGroundCamera)
+                if (mWet <= 0.003f || !mGroundCamera || mPaused.load(std::memory_order_relaxed))
                     return;
                 const osg::Vec3f eye = cv.getEyePoint();
                 const bool mapReady = cullMap(cv, eye);
@@ -711,6 +711,10 @@ void main()
             bool mOn = true;
             bool mLeft = false;
             std::atomic<bool> mInstalled = false;
+        public:
+            std::atomic<bool> mPaused = false; // the benchmark's: no maps, footprints or drips
+            float mLastRain = 0.f;
+        private:
             osg::Vec2f mCentre, mGroundCentre, mPrintCentre, mLastStep;
             osg::Vec3f mLastPlayer;
         };
@@ -718,7 +722,18 @@ void main()
 
     void setRain(float precipitation, float dt)
     {
+        WetGround::get().mLastRain = precipitation;
         WetGround::get().setRain(precipitation, dt);
+    }
+
+    float lastRain()
+    {
+        return WetGround::get().mLastRain;
+    }
+
+    void wetGroundPause(bool paused)
+    {
+        WetGround::get().mPaused.store(paused, std::memory_order_relaxed);
     }
 
     void wetGroundDrawableAdded(osg::NodeVisitor& cullVisitor, osg::Drawable&)
