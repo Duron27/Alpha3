@@ -48,7 +48,13 @@ android {
 
         //noinspection OldTargetApi
         targetSdk = 36
-        versionCode = 5
+        // Android refuses an update whose versionCode is lower than the installed one: the number of commits only goes up
+        // (minutes since 2024 where there is no git history)
+        versionCode = runCatching {
+            providers.exec {
+                commandLine("git", "rev-list", "--count", "HEAD")
+            }.standardOutput.asText.get().trim().toInt()
+        }.getOrElse { ((System.currentTimeMillis() / 60000L) - 28_401_120L).toInt() }
         versionName = runCatching {
             providers.exec {
                 commandLine("git", "rev-parse", "--short", "HEAD")
