@@ -1,0 +1,15 @@
+diff --git a/src/osg/Program.cpp b/src/osg/Program.cpp
+--- a/src/osg/Program.cpp
++++ b/src/osg/Program.cpp
+@@ -788,6 +788,11 @@
+         _loadedBinary = _isLinked = (linked == GL_TRUE);
+     }
+ 
++    // Alpha3: a saved binary (linkFromSavedBinary()) the driver did not take: nothing more here. Its shaders are not
++    // compiled yet, so linking them now fails ("Vertex shader is not compiled"); linkFromSavedBinary() asks for the
++    // link again, made after the shaders are compiled.
++    if (!_loadedBinary && _savedBinary.valid()) return;
++
+     if (!_loadedBinary && _extensions->isGeometryShader4Supported)
+     {
+         _extensions->glProgramParameteri( _glProgramHandle, GL_GEOMETRY_VERTICES_OUT_EXT, _program->_geometryVerticesOut );

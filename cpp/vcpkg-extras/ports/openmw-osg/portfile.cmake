@@ -41,6 +41,12 @@ set(ALPHA3_GLES_PATCHES
     "android/experimental-hooks.patch"
     # a program linked again goes to a new GL program object (Adreno crashed after relinks: lighting settings toggled)
     "android/relink-new-program.patch"
+    # texture release (the support library): a new texture object for an image that let its pixels go asks for them
+    # back first, where OSG would make it empty
+    "android/texture-release-new-objects.patch"
+    # a saved program binary the driver turns down is not followed by a link of the shaders not yet compiled (a
+    # failed link logged for nothing, as the program is compiled and linked right after)
+    "android/rejected-binary-no-link.patch"
 )
 
 if(VCPKG_TARGET_IS_IOS)
