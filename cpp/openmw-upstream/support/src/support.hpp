@@ -139,6 +139,10 @@ namespace Alpha3
     // on in the settings; paused (the benchmark): it culls nothing and draws no occluders
     bool occlusionOn();
     void occlusionPause(bool paused);
+    // the benchmark's: on every frame (no rests or trials of its own), and another buffer width or triangle budget
+    // (0: the setting's)
+    void occlusionForce(bool forced);
+    void occlusionTune(int width, int triangleBudget);
     bool occlusionBoxOccluded(osg::CullStack& cullStack, const osg::BoundingBox& box);
     void occlusionDrawableAdded(osg::NodeVisitor& cullVisitor, osg::Drawable& drawable, const osg::Matrix& modelView);
 

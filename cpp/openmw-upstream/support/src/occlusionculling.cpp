@@ -31,7 +31,10 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <cstdio>
 #include <deque>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <limits>
 #include <memory>
@@ -42,11 +45,14 @@
 #include <vector>
 
 #include <osg/AlphaFunc>
+#include <osg/Camera>
 #include <osg/CullFace>
 #include <osg/CullStack>
 #include <osg/Depth>
 #include <osg/Geometry>
+#include <osg/Stats>
 #include <osg/TriangleIndexFunctor>
+#include <osg/observer_ptr>
 #include <osgUtil/CullVisitor>
 #include <osgUtil/RenderBin>
 #include <osgUtil/StateGraph>
@@ -76,10 +82,27 @@ namespace Alpha3
         const OcclusionSettings& occlusionSettings()
         {
             static const OcclusionSettings settings{ settingBool("Camera", "occlusion culling", false),
-                std::clamp(settingInt("Camera", "occlusion buffer width", 2048), 64, 4096) & ~7,
+                std::clamp(settingInt("Camera", "occlusion buffer width", 256), 64, 4096) & ~7,
                 std::max(0.f, settingFloat("Camera", "occluder min size", 300.f)),
                 std::clamp(settingInt("Camera", "occluder triangle budget", 80000), 1000, 2000000) };
             return settings;
+        }
+
+        // Set by the benchmark (occlusionTune, occlusionForce): its phases try other buffer widths and budgets, and it
+        // measures with the culling on throughout (no rests, no trials of its own). 0: the setting
+        std::atomic<int> sWidthOverride{ 0 }, sBudgetOverride{ 0 };
+        std::atomic<bool> sForced{ false };
+
+        int bufferWidth()
+        {
+            const int width = sWidthOverride.load(std::memory_order_relaxed);
+            return width > 0 ? std::clamp(width, 64, 4096) & ~7 : occlusionSettings().mWidth;
+        }
+
+        int triangleBudget()
+        {
+            const int budget = sBudgetOverride.load(std::memory_order_relaxed);
+            return budget > 0 ? std::clamp(budget, 1000, 2000000) : occlusionSettings().mTriangleBudget;
         }
 
         constexpr unsigned sSimplifyAbove = 1000; // triangles: an occluder with more is simplified
@@ -779,7 +802,10 @@ namespace Alpha3
                 if (!lastIsScene)
                     return nullptr;
                 if (frame != mFrame)
+                {
                     newFrame(frame, stamp->getReferenceTime());
+                    mStatsCamera = const_cast<osg::Camera*>(camera);
+                }
                 if (!mViewKnown)
                 {
                     const osg::RefMatrix* view = cv.getCurrentRenderStage()->getInitialViewMatrix();
@@ -832,9 +858,15 @@ namespace Alpha3
                     return;
                 const float radius = box.radius() * maxScale(modelView);
                 if (radius < occlusionSettings().mOccluderMinSize)
+                {
+                    ++mRejects[RejectSmall];
                     return;
+                }
                 if (cv.getCurrentRenderBin() == nullptr || cv.getCurrentRenderBin()->getBinNum() != 0)
+                {
+                    ++mRejects[RejectBin];
                     return; // sorted (transparent), first person, water, ...
+                }
                 if (!mRecordedDrawables.insert(&drawable).second)
                     return; // the terrain adds a drawable once per layer
                 const osgUtil::StateGraph* graph = cv.getCurrentStateGraph();
@@ -843,10 +875,14 @@ namespace Alpha3
                     found = mVerdicts.emplace(graph, judgeState(graph)).first;
                 const StateVerdict& verdict = found->second;
                 if (!verdict.mOccluder || (verdict.mCullBack && verdict.mCullFront))
+                {
+                    ++mRejects[RejectState];
                     return;
+                }
                 unsigned triangles = triangleCount(*geometry);
                 if (triangles == 0)
                     return;
+                ++mRejects[Accepted];
                 std::shared_ptr<const SimplifiedOccluder> simplified;
                 if (triangles > sSimplifyAbove)
                 {
@@ -860,15 +896,80 @@ namespace Alpha3
             }
 
             unsigned drawnTriangles() const { return mDrawnTriangles; }
+
+            // Debug: with a file Alpha3/occlusion-dump present, the next drawn buffer is written to Alpha3/benchmarks/
+            // (occlusion-<frame>.pgm, nearer brighter, black where no occluder covers; and .txt, the occluders by
+            // priority and why drawables were not taken as occluders), and the file is removed.
+            static std::filesystem::path dumpTrigger() { return cacheDirectory().parent_path() / "occlusion-dump"; }
+
+            bool dumpRequested() const
+            {
+                std::error_code error;
+                return (mFrame & 31) == 0 && std::filesystem::exists(dumpTrigger(), error);
+            }
+
+            void noteOccluder(const Occluder& occluder, const char* what)
+            {
+                if (mDumpLines.size() >= 200)
+                    return;
+                const osg::Vec3f center = occluder.mBox.center() * occluder.mWorld * mView;
+                const float radius = occluder.mBox.radius() * maxScale(occluder.mWorld);
+                const std::string name = occluder.mGeometry ? occluder.mGeometry->getName() : std::string();
+                char line[256];
+                snprintf(line, sizeof(line), "%-12s priority %6.3f  radius %7.0f  depth %7.0f  x %7.0f y %7.0f  %6u tris%s  %s",
+                    what, occluder.mPriority, radius, -center.z(), center.x(), center.y(), occluder.mTriangles,
+                    occluder.mSimplified ? " (simplified)" : "", name.c_str());
+                mDumpLines.emplace_back(line);
+            }
+
+            void writeDump()
+            {
+                std::error_code error;
+                std::filesystem::remove(dumpTrigger(), error);
+                const std::filesystem::path dir = cacheDirectory().parent_path() / "benchmarks";
+                std::filesystem::create_directories(dir, error);
+                const std::string base = "occlusion-" + std::to_string(mFrame);
+                const int w = mBuffer.width(), h = mBuffer.height();
+                std::ofstream image(dir / (base + ".pgm"), std::ios::binary);
+                image << "P5\n" << w << " " << h << "\n255\n";
+                std::size_t covered = 0;
+                for (int y = h - 1; y >= 0; --y) // the buffer's y is up
+                    for (int x = 0; x < w; ++x)
+                    {
+                        const float depth = mBuffer.depth(x, y);
+                        unsigned char value = 0;
+                        if (std::isfinite(depth))
+                        {
+                            ++covered;
+                            value = static_cast<unsigned char>(std::clamp(255.f - depth / 8192.f * 215.f, 40.f, 255.f));
+                        }
+                        image.put(static_cast<char>(value));
+                    }
+                std::ofstream text(dir / (base + ".txt"));
+                text << "frame " << mFrame << ", buffer " << w << "x" << h << ", covered " << covered * 100 / (w * h)
+                     << "% of pixels\n";
+                text << "last frame's drawables: " << mLastRejects[Accepted] << " occluders, " << mLastRejects[RejectSmall]
+                     << " under the min size (" << occlusionSettings().mOccluderMinSize << "), " << mLastRejects[RejectBin]
+                     << " not in the opaque bin, " << mLastRejects[RejectState]
+                     << " blended, alpha tested, not writing depth or culling both faces\n";
+                text << "drawn " << mDrawnOccluders << " occluders, " << mDrawnTriangles << " triangles (budget "
+                     << triangleBudget() << ")\n\n";
+                for (const std::string& line : mDumpLines)
+                    text << line << "\n";
+                Log(Debug::Info) << "Occlusion culling: buffer written to " << (dir / (base + ".pgm")).string();
+            }
             unsigned restFrames() const { return mRestFrames; }
             unsigned trials() const { return mTrials; }
 
         private:
             void newFrame(unsigned frame, double time)
             {
+                std::copy(std::begin(mRejects), std::end(mRejects), std::begin(mLastRejects));
+                std::fill(std::begin(mRejects), std::end(mRejects), 0u);
                 // how long the frame that just ended took (a loading screen's is cut short)
                 const double frameTime = mLastTime >= 0 ? std::clamp(time - mLastTime, 0.0, 0.25) : 0.0;
                 mLastTime = time;
+                publishFrame();
                 logStatistics();
                 mFrame = frame;
                 mOccluders.swap(mRecording);
@@ -877,8 +978,35 @@ namespace Alpha3
                 mVerdicts.clear(); // the state graphs are rebuilt (and may be freed) every frame
                 mDrawn = false;
                 mViewKnown = false;
-                adapt(frameTime);
+                if (sForced.load(std::memory_order_relaxed))
+                {
+                    // the benchmark's: on every frame, so a phase measures it and not its resting
+                    mRestFrames = 0;
+                    mTrialFrame = -1;
+                    mTrialOff = false;
+                    mProbing = false;
+                }
+                else
+                    adapt(frameTime);
                 mTested = mCulled = 0;
+                mFrameDrawTime = 0;
+            }
+
+            // The frame that just ended, into the scene camera's stats (read by the benchmark like OSG's own): what was
+            // tested and culled, the occluders drawn and the time drawing them took on the cull thread
+            void publishFrame()
+            {
+                osg::ref_ptr<osg::Camera> camera;
+                if (mFrame == ~0u || !mStatsCamera.lock(camera) || camera->getStats() == nullptr)
+                    return;
+                osg::Stats& stats = *camera->getStats();
+                const bool used = mDrawn && mUsable;
+                stats.setAttribute(mFrame, "Occlusion active", used ? 1.0 : 0.0);
+                stats.setAttribute(mFrame, "Occlusion tested", static_cast<double>(mTested));
+                stats.setAttribute(mFrame, "Occlusion culled", static_cast<double>(mCulled));
+                stats.setAttribute(mFrame, "Occlusion occluders", used ? static_cast<double>(mDrawnOccluders) : 0.0);
+                stats.setAttribute(mFrame, "Occlusion triangles", used ? static_cast<double>(mDrawnTriangles) : 0.0);
+                stats.setAttribute(mFrame, "Occlusion draw time taken", mFrameDrawTime); // seconds, as OSG's
             }
 
             // Rests while it culls next to nothing. Where it culls something it still costs CPU time on the cull
@@ -998,8 +1126,10 @@ namespace Alpha3
             void draw(const osg::Matrix& projection)
             {
                 const auto start = std::chrono::steady_clock::now();
-                const OcclusionSettings& settings = occlusionSettings();
-                mBuffer.reset(settings.mWidth, settings.mWidth / 2);
+                const bool dump = dumpRequested();
+                mDumpLines.clear();
+                const int width = bufferWidth();
+                mBuffer.reset(width, width / 2);
                 mBuffer.setCamera(projection);
                 std::sort(mOccluders.begin(), mOccluders.end(),
                     [](const Occluder& a, const Occluder& b) { return a.mPriority > b.mPriority; });
@@ -1007,7 +1137,7 @@ namespace Alpha3
                 // The nearest and largest first, on this thread, so the rest can be skipped when hidden behind them
                 // (facing a wall, the wall is drawn and the terrain and buildings behind it are not); then the others
                 // shared with the helpers, each taking the next one left
-                int budget = settings.mTriangleBudget;
+                int budget = triangleBudget();
                 const int alone = budget / 4;
                 mDrawnOccluders = 0;
                 mDrawnTriangles = 0;
@@ -1015,7 +1145,11 @@ namespace Alpha3
                 for (const Occluder& occluder : mOccluders)
                 {
                     if (static_cast<int>(occluder.mTriangles) > budget)
+                    {
+                        if (dump)
+                            noteOccluder(occluder, "over budget");
                         continue;
+                    }
                     // in float: the vertices are float, and the buffer is a few hundred pixels wide
                     const osg::Matrixf toView(occluder.mWorld * mView);
                     if (mDrawnOccluders > 0)
@@ -1026,9 +1160,13 @@ namespace Alpha3
                         if (mBuffer.hidden(corners, 8, false))
                         {
                             ++mHiddenOccluders;
+                            if (dump)
+                                noteOccluder(occluder, "hidden");
                             continue;
                         }
                     }
+                    if (dump)
+                        noteOccluder(occluder, "drawn");
                     budget -= occluder.mTriangles;
                     ++mDrawnOccluders;
                     mDrawnTriangles += occluder.mTriangles;
@@ -1062,8 +1200,11 @@ namespace Alpha3
                     }
                 }
                 mBuffer.finish();
+                if (dump)
+                    writeDump();
                 mOccluders.clear(); // let go of the geometry; next frame's are being recorded
-                mDrawTime += std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+                mFrameDrawTime = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+                mDrawTime += mFrameDrawTime;
             }
 
             bool test(const osg::Vec3f* corners)
@@ -1122,8 +1263,13 @@ namespace Alpha3
             OccluderSimplifier mSimplifier;
             unsigned mTested = 0, mCulled = 0, mDrawnOccluders = 0, mDrawnTriangles = 0, mFrames = 0;
             unsigned mHiddenOccluders = 0;
+            enum Reject { RejectSmall, RejectBin, RejectState, Accepted, RejectCount };
+            unsigned mRejects[RejectCount] = {}, mLastRejects[RejectCount] = {};
+            std::vector<std::string> mDumpLines;
             std::size_t mSumTested = 0, mSumCulled = 0;
             double mDrawTime = 0, mTestTime = 0;
+            double mFrameDrawTime = 0; // this frame's, seconds
+            osg::observer_ptr<osg::Camera> mStatsCamera;
 
             static constexpr unsigned sWindow = 30, sFirstRest = 30, sLongestRest = 480;
             unsigned mRestFrames = 0, mRest = sFirstRest, mRestedFrames = 0;
@@ -1179,6 +1325,17 @@ namespace Alpha3
     void occlusionPause(bool paused)
     {
         sPaused.store(paused, std::memory_order_relaxed);
+    }
+
+    void occlusionForce(bool forced)
+    {
+        sForced.store(forced, std::memory_order_relaxed);
+    }
+
+    void occlusionTune(int width, int triangleBudget)
+    {
+        sWidthOverride.store(width, std::memory_order_relaxed);
+        sBudgetOverride.store(triangleBudget, std::memory_order_relaxed);
     }
 
     bool occlusionNodeOccluded(osg::CullStack& cullStack, const osg::Node& node)

@@ -10,7 +10,7 @@ Everything still open, in rough order. The sections below have the details.
 
 - [ ] Distant meshes: check lighting on the tree cards, leaf edges after ASTC conversion (try `astc block size = 4x4` if blotchy), the pop at the active grid edge, and FPS with paging in Vivec and the Ascadian Isles.
 - [ ] Texture streaming: compare cell load times with a 2K texture pack, with and without streaming.
-- [ ] Occlusion culling: check how much is culled and the CPU cost (the verbose log, every 600 frames) in Vivec, Balmora and on open ground. Then tune `occlusion buffer width` and `occluder triangle budget`. First device run (before the faster rasterizer and the rests): 1–11% culled for 2–5 ms a frame, and lower FPS facing a wall. Recheck with the new build.
+- [ ] Occlusion culling: check how much is culled and the CPU cost (the verbose log, every 600 frames) in Vivec, Balmora and on open ground. Then tune `occlusion buffer width` and `occluder triangle budget`. First device run (before the faster rasterizer and the rests): 1–11% culled for 2–5 ms a frame, and lower FPS facing a wall. 2026-11-03, the benchmark's occlusion phases in Vivec (Snapdragon 855): the 2048 px buffer took 19 ms a frame to draw (42 ms frames, 29 ms without culling); 256 px took 1.3 ms and culled the same 35% (25 ms frames), so 256 is the default now. About 16000 of the 80000 budget triangles were drawn. Still to run: open ground and Balmora.
 - [ ] Occlusion culling: watch for objects just behind walls disappearing early (the simplified occluders can sit up to 1% of a mesh's size in front of the real surface).
 - [ ] Profile the paging thread on a phone (silt strider ride), before deciding on 2b.
 

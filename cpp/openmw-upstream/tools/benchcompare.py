@@ -48,6 +48,22 @@ def timing(phase, key):
     return float('nan')
 
 
+def value(phase, key):
+    """a value as recorded (counts, not times), from the scene camera's stats or the viewer's"""
+    if phase is None or 'skipped' in phase:
+        return float('nan')
+    for source in (scene_camera(phase), phase.get('viewer', {})):
+        if key in source:
+            return source[key]
+    return float('nan')
+
+
+def culled_percent(phase):
+    """the share of what the occlusion culling tested that it culled"""
+    tested = value(phase, 'Occlusion tested')
+    return 100.0 * value(phase, 'Occlusion culled') / tested if tested > 0 else float('nan')
+
+
 # what each row of the table is: (label, key in the phase)
 ROWS = [
     ('frame ms', 'mean'),
@@ -64,6 +80,8 @@ ROWS = [
     ('mechanics ms', 'mechanics_time_taken'),
     ('physics ms', 'physics_time_taken'),
     ('mwscript ms', 'script_time_taken'),
+    # the CPU occlusion culling: drawing its buffer (on the cull thread), per frame
+    ('occlusion ms', 'Occlusion draw time taken'),
 ]
 
 
@@ -93,7 +111,8 @@ def header(run, label):
 def summary(run):
     ps = run['phases']
     base = ps[0]
-    print(f'\n{"phase":26}{"fps":>8}{"ms":>8}{"GPU":>8}{"cull":>8}{"draw":>8}{"cost ms":>9}  limit   temp/clock')
+    print(f'\n{"phase":26}{"fps":>8}{"ms":>8}{"GPU":>8}{"cull":>8}{"draw":>8}{"occl":>8}{"culled":>8}{"cost ms":>9}'
+          f'  limit   temp/clock')
     for p in ps:
         if 'skipped' in p:
             print(f'{p["name"]:26}  skipped: {p["skipped"]}')
@@ -102,6 +121,7 @@ def summary(run):
         m = p.get('machine', {})
         print(f'{p["name"]:26}{fmt(p["fps"], 1)}{fmt(timing(p, "mean"))}{fmt(timing(p, "GPU draw time taken"))}'
               f'{fmt(timing(p, "Cull traversal time taken"))}{fmt(timing(p, "Draw traversal time taken"))}'
+              f'{fmt(timing(p, "Occlusion draw time taken"))}{fmt(culled_percent(p), 0, 7)}%'
               f'{fmt(cost, 2, 9)}  {bound(p):11} {fmt(m.get("temp hottest c"), 0, 3)}C gpu {fmt(m.get("gpu mhz"), 0, 4)}MHz'
               f' {fmt(m.get("gpu busy %"), 0, 3)}%')
 
@@ -169,6 +189,8 @@ def compare(a, b):
     for label, key in ROWS:
         x, y = timing(pa['baseline'], key), timing(pb['baseline'], key)
         print(f'{label:14}{fmt(x, 2, 12)}{fmt(y, 2, 12)}{fmt(y - x, 2, 12)}')
+    x, y = culled_percent(pa['baseline']), culled_percent(pb['baseline'])
+    print(f'{"occl. culled %":14}{fmt(x, 1, 12)}{fmt(y, 1, 12)}{fmt(y - x, 1, 12)}')
     print(f'{"limited by":14}{bound(pa["baseline"]):>12}{bound(pb["baseline"]):>12}')
 
     print('\n== What each part costs (ms of frame / of GPU), and how that changed ==')

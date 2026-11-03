@@ -80,6 +80,7 @@ namespace Alpha3
             Shadows,
             Grass,
             Occlusion,
+            OcclusionTune, // the occlusion culling with another buffer width or triangle budget
         };
 
         struct Phase
@@ -88,6 +89,7 @@ namespace Alpha3
             const char* mWhat;
             unsigned mHide; // taken out of the scene camera's cull mask
             Extra mExtra; // or this turned off
+            int mOcclusionWidth = 0, mOcclusionBudget = 0; // Extra::OcclusionTune's (0: as set)
         };
 
         constexpr Phase sPhases[] = {
@@ -104,6 +106,14 @@ namespace Alpha3
             { "no effects", "particles, spell effects, rain and snow", sEffect | sParticles | sWeatherParticles,
                 Extra::None },
             { "no occlusion culling", "the CPU occlusion culling (more is drawn)", 0, Extra::Occlusion },
+            // The occlusion culling's own settings: the baseline has them as set ([Camera] occlusion buffer width, 256 by
+            // default; occluder triangle budget); these try around them: a finer and a coarser buffer, smaller budgets
+            { "occlusion 512 px", "occlusion buffer 512 pixels wide", 0, Extra::OcclusionTune, 512, 0 },
+            { "occlusion 128 px", "occlusion buffer 128 pixels wide", 0, Extra::OcclusionTune, 128, 0 },
+            { "occlusion 256 px 20k", "256 pixels, 20000 occluder triangles a frame", 0, Extra::OcclusionTune, 256,
+                20000 },
+            { "occlusion 256 px 10k", "256 pixels, 10000 occluder triangles a frame", 0, Extra::OcclusionTune, 256,
+                10000 },
             { "no scene", "nothing 3D: what is left is post-processing, the GUI and the swap", sScene, Extra::None },
             { "baseline again", "everything as it is, to see the phone heat up over the run", 0, Extra::None },
         };
@@ -567,6 +577,8 @@ namespace Alpha3
                 mShadowsOn = mShadows && ShadowPeek::on(*mShadows);
                 mGrassOn = grassOn();
                 mOcclusionOn = occlusionOn();
+                // measured as it is when it works, not resting or trying itself out in the middle of a phase
+                occlusionForce(mOcclusionOn);
                 mHeader = header(*scene, *viewer);
 
                 // OSG's stats, as OpenMW's profiler turns them on (F3), kept as they were for after. OpenMW's own CPU
@@ -601,6 +613,7 @@ namespace Alpha3
                     mShadows->enableShadows();
                 setGrassOn(mGrassOn);
                 occlusionPause(false);
+                occlusionTune(0, 0);
             }
 
             void beginPhase(int index, osg::Camera& scene, Clock::time_point now)
@@ -635,6 +648,12 @@ namespace Alpha3
                             skip("occlusion culling is off");
                         else
                             occlusionPause(true);
+                        break;
+                    case Extra::OcclusionTune:
+                        if (!mOcclusionOn)
+                            skip("occlusion culling is off");
+                        else
+                            occlusionTune(p.mOcclusionWidth, p.mOcclusionBudget);
                         break;
                     case Extra::None:
                         break;
@@ -774,6 +793,8 @@ namespace Alpha3
                 }
                 if (scene)
                     restore(*scene);
+                occlusionForce(false);
+                occlusionTune(0, 0);
                 for (const Collect& c : mCollect)
                     if (osg::ref_ptr<osg::Stats> s; c.mStats.lock(s))
                         s->collectStats(c.mName, c.mWas);
@@ -832,6 +853,20 @@ namespace Alpha3
             }
 
             // the scene camera's GPU time, ms (NaN without timer queries)
+            // A value the scene camera's stats hold, averaged over the frames that have it (nan: none)
+            static double sceneValue(const PhaseResult& r, const char* key)
+            {
+                for (const auto& [name, sums] : r.mCameras)
+                {
+                    if (name != sSceneCamera && r.mCameras.size() > 1)
+                        continue;
+                    const auto it = sums.mValues.find(key);
+                    if (it != sums.mValues.end() && it->second.second > 0)
+                        return it->second.first / it->second.second;
+                }
+                return std::nan("");
+            }
+
             static double gpuMs(const PhaseResult& r)
             {
                 for (const auto& [name, sums] : r.mCameras)
@@ -903,8 +938,9 @@ namespace Alpha3
                     property("ro.product.manufacturer").c_str(), property("ro.product.model").c_str());
                 out += line;
                 const bool compare = !previous.mPhases.empty();
-                out += compare ? "                         fps      ms     GPU   cost |  then ms  cost  change\n"
-                               : "                         fps      ms     GPU   cost\n";
+                // occl: the occlusion buffer's drawing (cull thread) and the share of what was tested that it culled
+                out += compare ? "                         fps      ms     GPU   cost   occl culled |  then ms  cost  change\n"
+                               : "                         fps      ms     GPU   cost   occl culled\n";
                 const double baseMs = meanMs(mResults[0]);
                 const double thenBase
                     = compare && previous.mPhases.count("baseline") ? previous.mPhases.at("baseline").first : std::nan("");
@@ -923,8 +959,11 @@ namespace Alpha3
                     const bool isBase = &r == &mResults[0] || name == "baseline again";
                     const double cost = isBase ? std::nan("") : baseMs - ms;
                     std::snprintf(line, sizeof line, "%-22s", name.c_str());
+                    const double tested = sceneValue(r, "Occlusion tested");
+                    const double culled = tested > 0 ? 100.0 * sceneValue(r, "Occlusion culled") / tested : std::nan("");
                     out += line + cell(1000.0 / ms, "%7.1f") + " " + cell(ms, "%7.2f") + " " + cell(gpuMs(r), "%7.2f")
-                        + cell(cost, "%7.2f");
+                        + cell(cost, "%7.2f") + cell(sceneValue(r, "Occlusion draw time taken") * 1000.0, "%7.2f")
+                        + cell(culled, "%6.0f%%");
                     if (compare)
                     {
                         const auto it = previous.mPhases.find(name);
