@@ -1,0 +1,25 @@
+--- a/src/libANGLE/renderer/vulkan/SurfaceVk.cpp
++++ b/src/libANGLE/renderer/vulkan/SurfaceVk.cpp
+@@ -13,6 +13,8 @@
+ 
+ #include "libANGLE/renderer/vulkan/SurfaceVk.h"
+ 
++#include <cstdlib>
++
+ #include "common/debug.h"
+ #include "libANGLE/Context.h"
+ #include "libANGLE/Display.h"
+@@ -136,6 +138,13 @@
+             : 0x3u;
+ 
+     uint32_t minImageCount = std::max(imageCount, surfaceCaps.minImageCount);
++    // Alpha3: more images when the app asks (ALPHA3_SWAPCHAIN_IMAGES, set for frame generation, which presents a
++    // generated frame after each rendered one: with three, the rendered frame's image still being drawn and the
++    // generated one queued leave none for the next frame, and the app waits for the GPU every frame)
++    if (const char *wanted = getenv("ALPHA3_SWAPCHAIN_IMAGES"))
++    {
++        minImageCount = std::max(minImageCount, static_cast<uint32_t>(strtoul(wanted, nullptr, 10)));
++    }
+     // Make sure we don't exceed maxImageCount.
+     if (surfaceCaps.maxImageCount > 0 && minImageCount > surfaceCaps.maxImageCount)
+     {

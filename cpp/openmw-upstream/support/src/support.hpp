@@ -94,7 +94,8 @@ namespace Alpha3
     // swaps as it would. desktop: the Zink context (desktop GLSL, no Swappy).
     bool frameGenRequested();
     // present(presentAt): presentAt is when the frame is to be shown (CLOCK_MONOTONIC nanoseconds), 0 as soon as it can.
-    bool frameGenSwap(osg::GraphicsContext& gc, int width, int height, bool desktop,
+    // periodNs: the display's refresh period, 0 when unknown (generated frames are then never rested).
+    bool frameGenSwap(osg::GraphicsContext& gc, int width, int height, bool desktop, int64_t periodNs,
         const std::function<void(int64_t presentAt)>& present);
 
     // ---- zink.cpp: a clip plane in eye coordinates for the desktop OpenGL context (its modelview stays the identity)

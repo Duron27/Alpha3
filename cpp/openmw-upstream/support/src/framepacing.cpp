@@ -67,8 +67,6 @@ namespace Alpha3
                 // ANGLE brings its own EGL, which Swappy (it talks to the system's) cannot swap; Zink presents by copying
                 if (usesZink() || std::getenv("OSG_USE_ANGLE") != nullptr || std::getenv("OPENMW_NO_SWAPPY") != nullptr)
                 {
-                    if (!usesZink() && frameGenRequested())
-                        Log(Debug::Warning) << "Frame generation needs frame pacing (Swappy, OpenGL ES system driver only): off";
                     return;
                 }
                 auto* env = static_cast<JNIEnv*>(SDL_AndroidGetJNIEnv());
@@ -183,7 +181,8 @@ namespace Alpha3
                 // Frame generation swaps without Swappy: the rendered frame goes out as soon as it is done, and the generated
                 // ones after it carry the time they are to be shown (EGL_ANDROID_presentation_time), so nothing is held
                 // back. The time step is measured.
-                if (frameGenSwap(gc, width, height, false, [&](int64_t presentAt) {
+                // kept by frame generation for the generated frames it sends while the next frame is drawn: by value
+                if (frameGenSwap(gc, width, height, false, static_cast<int64_t>(mPeriod), [display, surface](int64_t presentAt) {
                         static const auto presentationTime = reinterpret_cast<PFNEGLPRESENTATIONTIMEANDROIDPROC>(
                             eglGetProcAddress("eglPresentationTimeANDROID"));
                         if (presentAt != 0 && presentationTime != nullptr)
@@ -434,6 +433,90 @@ namespace Alpha3
         };
     }
 
+    // Frame generation's swaps when Swappy is not used. ANGLE is its own EGL (libEGL_angle.so, which SDL made the context
+    // with): the system's EGL knows nothing of its display and surface, so its functions are taken from it. The generated
+    // frames carry the time they are to be shown (EGL_ANDROID_presentation_time, when the EGL has it) and vertical sync is
+    // on, so each goes out at a refresh of its own; the display's period comes from the Choreographer.
+    static bool plainFrameGenSwap(osg::GraphicsContext& gc)
+    {
+        struct Egl
+        {
+            PFNEGLGETCURRENTDISPLAYPROC getCurrentDisplay = nullptr;
+            PFNEGLGETCURRENTSURFACEPROC getCurrentSurface = nullptr;
+            PFNEGLQUERYSURFACEPROC querySurface = nullptr;
+            PFNEGLSWAPBUFFERSPROC swapBuffers = nullptr;
+            PFNEGLPRESENTATIONTIMEANDROIDPROC presentationTime = nullptr;
+        };
+        static const Egl egl = [] {
+            Egl e;
+            const bool angle = std::getenv("OSG_USE_ANGLE") != nullptr;
+            void* lib = angle ? dlopen("libEGL_angle.so", RTLD_NOW | RTLD_NOLOAD) : nullptr;
+            const auto find = [lib](const char* name) -> void* {
+                if (lib != nullptr)
+                    return dlsym(lib, name);
+                return reinterpret_cast<void*>(eglGetProcAddress(name));
+            };
+            if (angle && lib == nullptr)
+            {
+                Log(Debug::Warning) << "Frame generation: ANGLE's EGL is not loaded, off";
+                return e;
+            }
+            e.getCurrentDisplay = lib != nullptr ? reinterpret_cast<PFNEGLGETCURRENTDISPLAYPROC>(find("eglGetCurrentDisplay"))
+                                                 : &eglGetCurrentDisplay;
+            e.getCurrentSurface = lib != nullptr ? reinterpret_cast<PFNEGLGETCURRENTSURFACEPROC>(find("eglGetCurrentSurface"))
+                                                 : &eglGetCurrentSurface;
+            e.querySurface
+                = lib != nullptr ? reinterpret_cast<PFNEGLQUERYSURFACEPROC>(find("eglQuerySurface")) : &eglQuerySurface;
+            e.swapBuffers
+                = lib != nullptr ? reinterpret_cast<PFNEGLSWAPBUFFERSPROC>(find("eglSwapBuffers")) : &eglSwapBuffers;
+            // an extension: through eglGetProcAddress of that EGL
+            if (lib != nullptr)
+            {
+                if (auto getProc = reinterpret_cast<decltype(&eglGetProcAddress)>(dlsym(lib, "eglGetProcAddress")))
+                    e.presentationTime = reinterpret_cast<PFNEGLPRESENTATIONTIMEANDROIDPROC>(
+                        getProc("eglPresentationTimeANDROID"));
+            }
+            else
+                e.presentationTime
+                    = reinterpret_cast<PFNEGLPRESENTATIONTIMEANDROIDPROC>(eglGetProcAddress("eglPresentationTimeANDROID"));
+            Log(Debug::Info) << "Frame generation: plain swaps through " << (angle ? "ANGLE's EGL" : "the system's EGL")
+                             << (e.presentationTime != nullptr ? ", with presentation times"
+                                                               : ", without presentation times (one per refresh)");
+            return e;
+        }();
+        if (egl.getCurrentDisplay == nullptr || egl.getCurrentSurface == nullptr || egl.swapBuffers == nullptr)
+            return false;
+        EGLDisplay display = egl.getCurrentDisplay();
+        EGLSurface surface = egl.getCurrentSurface(EGL_DRAW);
+        if (display == EGL_NO_DISPLAY || surface == EGL_NO_SURFACE)
+            return false;
+        EGLint width = 0, height = 0;
+        if (egl.querySurface != nullptr)
+        {
+            egl.querySurface(display, surface, EGL_WIDTH, &width);
+            egl.querySurface(display, surface, EGL_HEIGHT, &height);
+        }
+        if (width <= 0 || height <= 0)
+        {
+            const osg::GraphicsContext::Traits* traits = gc.getTraits();
+            if (traits == nullptr)
+                return false;
+            width = traits->width;
+            height = traits->height;
+        }
+        // one frame per refresh at most: a generated frame swapped without vertical sync would replace the rendered one
+        if (SDL_GL_GetSwapInterval() != 1)
+            SDL_GL_SetSwapInterval(1);
+        int64_t vsync = 0, period = 0;
+        VsyncClock::get().sample(vsync, period);
+        // kept by frame generation for the generated frames it sends while the next frame is drawn: by value
+        return frameGenSwap(gc, width, height, false, period, [display, surface](int64_t presentAt) {
+            if (presentAt != 0 && egl.presentationTime != nullptr)
+                egl.presentationTime(display, surface, presentAt);
+            egl.swapBuffers(display, surface);
+        });
+    }
+
     static double pacedFrameSeconds(double measured)
     {
         if (ZinkPacing* pacing = zinkPacing())
@@ -466,11 +549,15 @@ namespace Alpha3
         {
             const osg::GraphicsContext::Traits* traits = gc.getTraits();
             if (traits != nullptr
-                && frameGenSwap(gc, traits->width, traits->height, true, [&](int64_t) { gc.swapBuffersImplementation(); }))
+                && frameGenSwap(gc, traits->width, traits->height, true, 0, [&](int64_t) { gc.swapBuffersImplementation(); }))
                 return;
         }
         else
         {
+            // Frame generation without Swappy (ANGLE, or frame pacing off): plain swaps through the EGL the context was
+            // made with
+            if (frameGenRequested() && plainFrameGenSwap(gc))
+                return;
             // plain swaps (Swappy off): while the phone is hot (thermal.cpp) every other vertical sync at most, then the
             // swap interval it had
             static int sHeldFrom = -1;

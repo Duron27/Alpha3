@@ -114,6 +114,23 @@ namespace Alpha3
             setenv("OSG_USE_ANGLE", "1", 0);
             setenv("SDL_VIDEO_GL_DRIVER", "libGLESv2_angle.so", 0);
             setenv("SDL_VIDEO_EGL_DRIVER", "libEGL_angle.so", 0);
+            // Frame generation queues a generated frame after each rendered one: with ANGLE's three swap chain images the
+            // draw thread then waits for the GPU every frame (Angle/Alpha3SwapchainImages.patch reads this)
+            if (frameGenRequested())
+            {
+                setenv("ALPHA3_SWAPCHAIN_IMAGES", "5", 0);
+                // Android lets a frame be queued to the display only once the GPU has finished the one queued before it,
+                // and ANGLE hands a frame's work to the GPU only at the swap: the generated frame, queued right after the
+                // rendered one, then waited for all of it while the GPU had nothing else to do. Handed over at each
+                // framebuffer change (shadows, reflections, the scene, post processing), most of it is done by then.
+                const char* enabled = std::getenv("ANGLE_FEATURE_OVERRIDES_ENABLED");
+                std::string features = enabled != nullptr ? enabled : "";
+                if (features.find("preferSubmitAtFBOBoundary") == std::string::npos)
+                {
+                    features += features.empty() ? "preferSubmitAtFBOBoundary" : ":preferSubmitAtFBOBoundary";
+                    setenv("ANGLE_FEATURE_OVERRIDES_ENABLED", features.c_str(), 1);
+                }
+            }
         }
         Log(Debug::Info) << "Renderer: "
                          << (zink ? "opengl (Mesa Zink)" : angle ? "opengl es 3.2 (ANGLE on Vulkan)" : "opengl es 3.2")

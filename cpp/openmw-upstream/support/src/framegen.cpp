@@ -37,10 +37,10 @@
 
 #include <EGL/egl.h>
 #include <glad/gles2.h>
-#include <swappy/swappyGL.h>
-#include <swappy/swappyGL_extra.h>
 
 #include <osg/FrameStamp>
+#include <osg/Matrixd>
+#include <osg/Quat>
 #include <osg/GraphicsContext>
 #include <osg/RenderInfo>
 #include <osg/State>
@@ -388,6 +388,64 @@ void main()
             }
         };
 
+        // GPU time of one step of frame generation (GL_EXT_disjoint_timer_query), read back a few frames later so nothing
+        // waits for it; averaged until taken
+        struct GpuTimer
+        {
+            GLuint mQueries[4] = {};
+            bool mIssued[4] = {};
+            int mNext = 0;
+            int mActive = -1;
+            double mTotalMs = 0.0;
+            int mCount = 0;
+
+            static bool available() { return GLAD_GL_EXT_disjoint_timer_query != 0; }
+
+            void begin()
+            {
+                if (!available() || mActive >= 0)
+                    return;
+                if (mQueries[0] == 0)
+                    glGenQueriesEXT(4, mQueries);
+                const int i = mNext;
+                if (mIssued[i])
+                {
+                    GLuint ready = 0;
+                    glGetQueryObjectuivEXT(mQueries[i], GL_QUERY_RESULT_AVAILABLE_EXT, &ready);
+                    if (ready)
+                    {
+                        GLuint64 ns = 0;
+                        glGetQueryObjectui64vEXT(mQueries[i], GL_QUERY_RESULT_EXT, &ns);
+                        mTotalMs += ns / 1.0e6;
+                        ++mCount;
+                    }
+                    mIssued[i] = false;
+                }
+                glBeginQueryEXT(GL_TIME_ELAPSED_EXT, mQueries[i]);
+                mActive = i;
+            }
+
+            void end()
+            {
+                if (mActive < 0)
+                    return;
+                glEndQueryEXT(GL_TIME_ELAPSED_EXT);
+                mIssued[mActive] = true;
+                mActive = -1;
+                mNext = (mNext + 1) % 4;
+            }
+
+            double take()
+            {
+                const double average = mCount > 0 ? mTotalMs / mCount : -1.0;
+                mTotalMs = 0.0;
+                mCount = 0;
+                return average;
+            }
+        };
+
+        GpuTimer sCaptureGpu, sPreGuiGpu, sReprojectGpu;
+
         class FrameGen
         {
         public:
@@ -440,7 +498,7 @@ void main()
                 if (const char* ratio = std::getenv("OPENMW_FRAMEGEN_RATIO"))
                     frames->mRatio = std::max(1, std::atoi(ratio));
                 else
-                    frames->mRatio = 1; // the ramp sets it (not on Zink: one generated frame for every real one)
+                    frames->mRatio = 1; // one rendered frame, then the generated ones
                 if (const char* count = std::getenv("OPENMW_FRAMEGEN_FRAMES"))
                     frames->mMaxFrames = std::clamp(std::atoi(count), 1, 3);
                 if (const char* sign = std::getenv("OPENMW_FRAMEGEN_SIGN"))
@@ -512,7 +570,9 @@ void main()
                 mCurrent = 1 - mCurrent;
                 glBindFramebuffer(GL_FRAMEBUFFER, 0);
                 glBindTexture(GL_TEXTURE_2D, mColor[mCurrent]);
+                sCaptureGpu.begin();
                 glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, width, height);
+                sCaptureGpu.end();
                 if (reprojected)
                     mEstimatorStale = true;
                 else if (mMode == Mode::Software)
@@ -546,7 +606,9 @@ void main()
                 Saved saved = begin();
                 glBindFramebuffer(GL_FRAMEBUFFER, 0);
                 glBindTexture(GL_TEXTURE_2D, mPreGui[frame % 2]);
+                sPreGuiGpu.begin();
                 glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, mWidth, mHeight);
+                sPreGuiGpu.end();
                 mPreGuiFrame[frame % 2] = frame;
                 end(saved);
             }
@@ -558,8 +620,10 @@ void main()
             /// A frame from the camera's motion and the depth: between the previous rendered frame and this one (time: how
             /// far along, 0.5 half way), or extrapolating, past this one (time: how far towards where the camera will be
             /// at the next rendered frame, if it keeps moving as it did).
+            /// target: the view the frame is for, when it is known (the camera of the frame being drawn, part way there);
+            /// then time and extrapolate are not used and the frame is the current one seen from that view.
             bool generateReprojected(const FrameGenView& cur, const FrameGenView& prev, GLuint scene, GLuint prevScene,
-                GLuint depth, GLuint opaqueDepth, float time, bool extrapolate)
+                GLuint depth, GLuint opaqueDepth, float time, bool extrapolate, const osg::Matrixd* target = nullptr)
             {
                 if (mHistory < 1 || mWidth == 0)
                     return false;
@@ -569,7 +633,15 @@ void main()
                 // view space of this frame to view space of the previous one: small numbers, worked out in double
                 const osg::Matrixd curToPrevD = osg::Matrixd::inverse(cur.view) * prev.view;
                 // keeping on as it did: from this view, the next moves as this one did from the previous
-                const osg::Matrixf curToPrev(extrapolate ? osg::Matrixd::inverse(curToPrevD) : curToPrevD);
+                // Seen from a known view: the whole way to it
+                if (target != nullptr)
+                {
+                    time = 1.0f;
+                    extrapolate = true;
+                }
+                const osg::Matrixf curToPrev(target != nullptr ? osg::Matrixd::inverse(cur.view) * *target
+                        : extrapolate                          ? osg::Matrixd::inverse(curToPrevD)
+                                                               : curToPrevD);
                 Saved saved = begin();
                 glBindFramebuffer(GL_FRAMEBUFFER, 0);
                 glViewport(0, 0, mWidth, mHeight);
@@ -591,7 +663,9 @@ void main()
                 glUniform1f(mRpTint, mTint ? 1.0f : 0.0f);
                 glUniform1f(mRpTime, extrapolate ? 1.0f - time : time);
                 glUniform1f(mRpExtrapolate, extrapolate ? 1.0f : 0.0f);
+                sReprojectGpu.begin();
                 glDrawArrays(GL_TRIANGLES, 0, 3);
+                sReprojectGpu.end();
                 for (int unit = 4; unit >= 3; --unit)
                 {
                     glActiveTexture(GL_TEXTURE0 + unit);
@@ -603,7 +677,7 @@ void main()
                 return true;
             }
 
-            /// How many generated frames go out, after how many rendered ones (the ramp's step; OPENMW_FRAMEGEN_RATIO
+            /// How many generated frames go out, after how many rendered ones (the lock's refreshes; OPENMW_FRAMEGEN_RATIO
             /// fixes the ratio)
             void setLevel(int ratio, int count)
             {
@@ -622,12 +696,7 @@ void main()
                 if (mHistory < 2 || mWidth == 0 || mReal % mRatio != 0)
                     return false;
                 fast = fast && !mAlways;
-                if (fast != mResting)
-                {
-                    mResting = fast;
-                    Log(Debug::Info) << "Frame generation " << (fast ? "resting" : "resumed") << ": rendered frames come every "
-                                     << std::fixed << std::setprecision(1) << mInterval << " ms";
-                }
+                mResting = fast;
                 return !fast;
             }
 
@@ -993,7 +1062,7 @@ void main()
             bool mResting = false;
             float mSign = 1.0f;
             int mRatio = 2;
-            // generated frames between two rendered ones: now (the ramp's step) and at most (the launcher's multiplier)
+            // generated frames between two rendered ones: now (the lock's refreshes) and at most (the launcher's multiplier)
             int mFrames = 1;
             int mMaxFrames = 1;
             // the real frame the motion vectors were last estimated for: every frame between it and the one before uses them
@@ -1044,70 +1113,90 @@ void main()
             return request != nullptr && *request != '\0' && std::strcmp(request, "0") != 0;
         }
 
-        // How much is generated ramps up while the rendered frames keep their rate: one generated frame after every fifth
-        // rendered one, then every fourth, third, second, every one, then two and three after each (up to the launcher's
-        // multiplier). A step that costs the rendered frames more than a fifth of their rate is taken back, and the ramp
-        // waits before trying it again. Nothing is held back for it: the rendered frames go out as soon as they are done.
-        struct Ramp
+        // With the display's period known (Android), generated frames fill the refreshes the rendered frames cannot: the
+        // rendered frames are held to a pattern of refreshes they keep up with, and generated frames fill the rest, so every
+        // refresh shows a new frame. On a 60 Hz display:
+        //   frames under 16.7 ms   every refresh rendered, none generated ("resting")
+        //   up to 25 ms            two rendered then one generated every three refreshes (40 + 20)
+        //   up to 33 ms            one rendered then one generated (30 + 30)
+        //   up to 50 ms            one rendered then two generated (20 + 40), when the launcher's multiplier allows
+        //   up to 67 ms            one rendered then three generated (15 + 45), likewise
+        // Every so often the pattern one step lighter is tried for half a second, since nothing shows whether the rendered
+        // frames would fit while they are held.
+        struct Lock
         {
-            static constexpr int sRatios[] = { 5, 4, 3, 2, 1 };
-            static constexpr int sRatioSteps = 5;
+            struct Step
+            {
+                int mRendered; // rendered frames in the pattern, the generated ones after the last
+                int mRefreshes; // refreshes it fills
+            };
+            static constexpr Step sSteps[] = { { 1, 1 }, { 2, 3 }, { 1, 2 }, { 1, 3 }, { 1, 4 } };
+            static constexpr int sStepCount = 5;
 
-            Clock::time_point mWindowStart = Clock::now();
-            Clock::time_point mStepBackAt;
-            int mWindowFrames = 0;
             int mStep = 0;
-            double mReference = 0.0;
-            bool mBackedOff = false;
+            Clock::time_point mWindowStart = Clock::now();
+            Clock::time_point mChangedAt = mWindowStart;
+            std::chrono::seconds mProbeWait{ 10 };
+            int mWindowFrames = 0;
+            bool mProbing = false;
 
-            int ratio() const { return mStep < sRatioSteps ? sRatios[mStep] : 1; }
-            int count() const { return mStep < sRatioSteps ? 1 : 1 + mStep - (sRatioSteps - 1); }
+            const Step& step() const { return sSteps[mStep]; }
+            int rendered() const { return step().mRendered; }
+            int generated() const { return step().mRefreshes - step().mRendered; }
+            /// Refreshes between the last two rendered frames before the generated ones (what one rendered frame's motion
+            /// spans)
+            int lastGap() const { return step().mRendered == 1 ? step().mRefreshes : 1; }
 
-            /// At a rendered frame
-            void frame(Clock::time_point now, int maxFrames, bool resting)
+            void set(int index, Clock::time_point now, double intervalMs, const char* why)
+            {
+                mStep = index;
+                mChangedAt = now;
+                Log(Debug::Info) << "Frame generation: " << why << " (rendered frames every " << std::fixed
+                                 << std::setprecision(1) << intervalMs << " ms), "
+                                 << (generated() == 0 ? std::string("resting")
+                                                      : std::to_string(rendered()) + " rendered then "
+                                             + std::to_string(generated()) + " generated every "
+                                             + std::to_string(step().mRefreshes) + " refreshes");
+            }
+
+            /// At a rendered frame. most: the last step allowed.
+            void frame(Clock::time_point now, double periodMs, int most)
             {
                 ++mWindowFrames;
-                const std::chrono::duration<double> window = now - mWindowStart;
-                if (window < std::chrono::seconds(2))
+                const double windowMs = std::chrono::duration<double, std::milli>(now - mWindowStart).count();
+                if (windowMs < (mProbing ? 500.0 : 1000.0))
                     return;
-                const double rate = mWindowFrames / window.count();
+                const double interval = windowMs / mWindowFrames;
                 mWindowStart = now;
                 mWindowFrames = 0;
-                if (resting)
+                const double budget = periodMs * step().mRefreshes / step().mRendered;
+                const bool holds = interval <= budget * 1.08;
+                if (mProbing)
                 {
-                    // back at the start when frames are needed again
-                    mStep = 0;
-                    mReference = 0.0;
+                    mProbing = false;
+                    if (holds)
+                    {
+                        mProbeWait = std::chrono::seconds(10);
+                        set(mStep, now, interval, "a lighter pattern holds");
+                    }
+                    else
+                    {
+                        set(mStep + 1, now, interval, "the lighter pattern did not hold");
+                        mProbeWait = std::min(mProbeWait * 2, std::chrono::seconds(80));
+                    }
                     return;
                 }
-                if (mReference == 0.0)
+                if (!holds && mStep < most)
                 {
-                    mReference = rate;
-                    return;
+                    mProbeWait = std::chrono::seconds(10);
+                    set(mStep + 1, now, interval, "rendered frames are slower than the pattern");
                 }
-                if (rate < mReference * 0.8 && mStep > 0)
+                else if (mStep > 0 && now - mChangedAt > mProbeWait)
                 {
-                    --mStep;
-                    mBackedOff = true;
-                    mStepBackAt = now;
-                    Log(Debug::Info) << "Frame generation: rendered frames fell to " << std::fixed << std::setprecision(1)
-                                     << rate << " per second (from " << mReference << "), back to " << count()
-                                     << " generated after every " << ratio() << " rendered";
-                    return;
+                    mStep -= 1;
+                    mProbing = true;
+                    mChangedAt = now;
                 }
-                const int top = sRatioSteps - 1 + maxFrames;
-                if (rate >= mReference * 0.9 && mStep < top
-                    && (!mBackedOff || now - mStepBackAt > std::chrono::seconds(20)))
-                {
-                    ++mStep;
-                    mBackedOff = false;
-                    Log(Debug::Info) << "Frame generation: rendered frames at " << std::fixed << std::setprecision(1)
-                                     << rate << " per second, up to " << count() << " generated after every " << ratio()
-                                     << " rendered";
-                }
-                // the reference follows the rate where the ramp settles, so a slower scene does not count as its cost
-                if (!mBackedOff)
-                    mReference += (rate - mReference) * 0.2;
             }
         };
 
@@ -1115,7 +1204,25 @@ void main()
         {
             bool mTried = false;
             std::unique_ptr<FrameGen> mFrames;
-            Ramp mRamp;
+            Lock mLock;
+            Clock::duration mSwapWait{};
+            // where the draw thread's time goes with generated frames: capturing the rendered frame, its swap, drawing
+            // the generated frames, their swaps, and the engine's own frame (from the last swap back to this one)
+            Clock::duration mCaptureTime{}, mRealSwapTime{}, mGenerateTime{}, mGeneratedSwapTime{}, mEngineTime{};
+            Clock::time_point mLastSwapEnd{};
+
+            // Generated frames made from the last rendered frame, sent while the next one is drawn (MidFrame)
+            struct Pending
+            {
+                bool mValid = false;
+                FrameGenView mCur, mPrev;
+                GLuint mScene = 0, mPrevScene = 0, mDepth = 0, mOpaqueDepth = 0;
+                int mCount = 0;
+                int mSpan = 1;
+            } mPending;
+            std::function<void(int64_t)> mPresent;
+            int mSwapFrames = 0;
+            Clock::time_point mSwapLogAt = Clock::now();
         };
 
         // Used on the draw thread only
@@ -1163,6 +1270,77 @@ void main()
         };
     }
 
+    namespace
+    {
+        // The generated frames go out while the next rendered frame is drawn: after its shadows and reflections, before
+        // the scene. Android queues a frame to the display only once the GPU has finished the one queued before it; sent
+        // right after the rendered frame, the generated one waited for all of its GPU work with the GPU given nothing
+        // more, and the draw thread and the GPU took turns. Sent here, each wait is for work the GPU has had a while,
+        // and it has the next part of the frame to do meanwhile.
+        // The view part way (fraction) from one camera to another: positions in a line, rotations along the shortest arc
+        osg::Matrixd viewBetween(const osg::Matrixd& from, const osg::Matrixd& to, double fraction)
+        {
+            const osg::Matrixd a = osg::Matrixd::inverse(from);
+            const osg::Matrixd b = osg::Matrixd::inverse(to);
+            osg::Quat rotation;
+            rotation.slerp(fraction, a.getRotate(), b.getRotate());
+            const osg::Vec3d position = a.getTrans() * (1.0 - fraction) + b.getTrans() * fraction;
+            return osg::Matrixd::inverse(osg::Matrixd::rotate(rotation) * osg::Matrixd::translate(position));
+        }
+
+        // The generated frames show the last rendered frame from cameras between its own and the one of the frame being
+        // drawn now, which the engine has already worked out: where the camera really goes, not a guess from how it was
+        // moving (that overshot when a turn stopped, and the next rendered frame jumped back).
+        class MidFrame : public osg::Camera::DrawCallback
+        {
+        public:
+            void operator()(osg::RenderInfo& renderInfo) const override
+            {
+                State& s = state();
+                FrameGen* frames = s.mFrames.get();
+                State::Pending& pending = s.mPending;
+                if (frames == nullptr || !pending.mValid || !s.mPresent)
+                    return;
+                pending.mValid = false;
+                FrameGenView next;
+                const osg::State* glState = renderInfo.getState();
+                const bool known = glState != nullptr && glState->getFrameStamp() != nullptr
+                    && findView(glState->getFrameStamp()->getFrameNumber(), next) && next.frame > pending.mCur.frame;
+                Clock::time_point mark = Clock::now();
+                for (int i = 1; i <= pending.mCount; ++i)
+                {
+                    // the generated frames fill the refreshes before the frame being drawn
+                    const double fraction = static_cast<double>(i) / (pending.mCount + 1);
+                    const osg::Matrixd target = known ? viewBetween(pending.mCur.view, next.view, fraction) : osg::Matrixd();
+                    if (!frames->generateReprojected(pending.mCur, pending.mPrev, pending.mScene, pending.mPrevScene,
+                            pending.mDepth, pending.mOpaqueDepth, static_cast<float>(i) / pending.mSpan, true,
+                            known ? &target : nullptr))
+                        break;
+                    const Clock::time_point drawn = Clock::now();
+                    s.mGenerateTime += drawn - mark;
+                    s.mPresent(0);
+                    mark = Clock::now();
+                    s.mGeneratedSwapTime += mark - drawn;
+                }
+            }
+        };
+
+        void addMidFrame()
+        {
+            static bool added = false;
+            if (added)
+                return;
+            for (osg::GraphicsContext* gc : osg::GraphicsContext::getAllRegisteredGraphicsContexts())
+                for (osg::Camera* camera : gc->getCameras())
+                    if (camera->getView() != nullptr && camera->getView()->getCamera() == camera)
+                    {
+                        camera->addInitialDrawCallback(new MidFrame);
+                        added = true;
+                        return;
+                    }
+        }
+    }
+
     bool frameGenRequested()
     {
         return requested();
@@ -1176,6 +1354,7 @@ void main()
 
     void frameGenSubmitView(FrameGenView view)
     {
+        addMidFrame();
         std::lock_guard lock(sViewsMutex);
         sViews[view.frame % sViews.size()] = std::move(view);
     }
@@ -1186,7 +1365,7 @@ void main()
         return sCapture.get();
     }
 
-    bool frameGenSwap(osg::GraphicsContext& gc, int width, int height, bool desktop,
+    bool frameGenSwap(osg::GraphicsContext& gc, int width, int height, bool desktop, int64_t periodNs,
         const std::function<void(int64_t presentAt)>& present)
     {
         State& s = state();
@@ -1200,6 +1379,9 @@ void main()
         FrameGen* frames = s.mFrames.get();
         if (frames == nullptr)
             return false;
+        // generated frames the next frame did not send (it was not drawn by the scene camera: a menu, loading)
+        s.mPending.mValid = false;
+        s.mPresent = present;
 
         // The engine's camera and textures for this frame and the one before, when it handed them over
         const osg::State* glState = gc.getState();
@@ -1222,37 +1404,96 @@ void main()
                     && (!cur.postProcessing || frames->hasPreGui(frame));
             }
         }
-        Ramp& ramp = s.mRamp;
-        // Zink is not paced and does not ramp
-        frames->setLevel(desktop ? 1 : ramp.ratio(), desktop ? frames->maxFrames() : ramp.count());
+        Lock& lock = s.mLock;
+        const bool held = !desktop && periodNs > 0;
+        // Zink, or no known display period: one generated frame after every rendered one, the gap from their cadence
+        if (held)
+            frames->setLevel(lock.rendered(), std::max(1, lock.generated()));
+        else
+            frames->setLevel(1, frames->maxFrames());
+        const Clock::time_point captureStart = Clock::now();
+        if (s.mLastSwapEnd != Clock::time_point())
+            s.mEngineTime += captureStart - s.mLastSwapEnd;
         frames->capture(width, height, reproject);
-        const double periodMs = desktop ? 0.0 : SwappyGL_getRefreshPeriodNanos() / 1.0e6;
-        const bool withFrames = frames->due(!desktop && frames->interval() > 0.0 && frames->interval() < periodMs * 1.5);
-        if (!desktop)
-            ramp.frame(Clock::now(), frames->maxFrames(), frames->resting());
-        const int generated = frames->frames();
-        const double gapMs = frames->interval() / (generated + 1);
+        const Clock::time_point now = Clock::now();
+        s.mCaptureTime += now - captureStart;
+        if (held)
+            lock.frame(now, periodNs / 1.0e6, std::min(frames->maxFrames() + 1, Lock::sStepCount - 1));
+        const bool withFrames = frames->due(held && lock.generated() == 0);
 
-        // From the camera and depth, the generated frames are predictions past the rendered one: it goes out at once, and
-        // they are given the times they are to be shown, so nothing waits for them. Without (menus, loading), the motion
-        // estimators show a frame between the last two rendered ones, which holds the rendered one back.
+        const int generated = frames->frames();
+        // how far past the rendered frame each generated one is, in refreshes over those between the last two rendered
+        const int span = held ? lock.lastGap() : generated + 1;
+        const int64_t gapNs = held ? periodNs : static_cast<int64_t>(frames->interval() / (generated + 1) * 1.0e6);
+
+        // From the camera and depth, the generated frames are predictions past the rendered one. The rendered frame goes out
+        // now; the generated ones while the next frame is drawn (MidFrame), and with vertical sync each takes a refresh of
+        // its own, in order. On Zink they go out now, spread over the rendered frames' interval. Without the camera and
+        // depth (menus, loading), the motion estimators show a frame between the last two rendered ones.
         if (withFrames && reproject)
         {
+            const Clock::time_point swapStart = Clock::now();
             present(0);
-            const int64_t shownAt = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                Clock::now().time_since_epoch()).count();
-            for (int i = 1; i <= generated; ++i)
+            s.mRealSwapTime += Clock::now() - swapStart;
+            if (desktop)
             {
-                if (!frames->generateReprojected(cur, prev, scene, prevScene, depth, opaqueDepth,
-                        static_cast<float>(i) / (generated + 1), true))
-                    break;
-                if (desktop)
-                    std::this_thread::sleep_for(std::chrono::microseconds(static_cast<long>(gapMs * 1000.0)));
-                present(desktop ? 0 : shownAt + static_cast<int64_t>(gapMs * 1.0e6 * i));
+                // Zink: no queue throttling to work around, its swaps copy; the generated frames go out now, spread out
+                for (int i = 1; i <= generated; ++i)
+                {
+                    if (!frames->generateReprojected(cur, prev, scene, prevScene, depth, opaqueDepth,
+                            static_cast<float>(i) / span, true))
+                        break;
+                    std::this_thread::sleep_for(std::chrono::nanoseconds(gapNs));
+                    present(0);
+                }
+            }
+            else
+            {
+                State::Pending& pending = s.mPending;
+                pending.mValid = true;
+                pending.mCur = cur;
+                pending.mPrev = prev;
+                pending.mScene = scene;
+                pending.mPrevScene = prevScene;
+                pending.mDepth = depth;
+                pending.mOpaqueDepth = opaqueDepth;
+                pending.mCount = generated;
+                pending.mSpan = span;
+            }
+            s.mSwapWait += Clock::now() - swapStart;
+            ++s.mSwapFrames;
+            if (const double seconds = std::chrono::duration<double>(Clock::now() - s.mSwapLogAt).count();
+                seconds >= 5.0)
+            {
+                const int perGroup = held ? lock.rendered() : 1;
+                Log(Debug::Verbose) << "Frame generation: rendered frames every " << std::fixed << std::setprecision(1)
+                                 << seconds * 1000.0 / (s.mSwapFrames * perGroup)
+                                 << " ms; the swaps and generated frames after them held the draw thread "
+                                 << std::chrono::duration<double, std::milli>(s.mSwapWait).count() / s.mSwapFrames
+                                 << " ms each time";
+                const auto ms = [&](Clock::duration d) {
+                    return std::chrono::duration<double, std::milli>(d).count() / s.mSwapFrames;
+                };
+                Log(Debug::Verbose) << "Frame generation timing per group (ms): engine " << ms(s.mEngineTime)
+                                 << ", capture " << ms(s.mCaptureTime) << ", rendered swap " << ms(s.mRealSwapTime)
+                                 << ", generate " << ms(s.mGenerateTime) << ", generated swaps "
+                                 << ms(s.mGeneratedSwapTime);
+                if (GpuTimer::available())
+                    Log(Debug::Verbose) << "Frame generation GPU time (ms): capture copy " << sCaptureGpu.take()
+                                     << ", copy before the GUI " << sPreGuiGpu.take() << ", reprojection "
+                                     << sReprojectGpu.take();
+                else
+                    Log(Debug::Verbose) << "Frame generation GPU time: no timer queries (GL_EXT_disjoint_timer_query)";
+                s.mEngineTime = s.mCaptureTime = s.mRealSwapTime = s.mGenerateTime = s.mGeneratedSwapTime = {};
+                s.mSwapWait = {};
+                s.mSwapFrames = 0;
+                s.mSwapLogAt = Clock::now();
             }
             // the back buffer has the last generated frame: what the engine draws next covers it
+            s.mLastSwapEnd = Clock::now();
+            return true;
         }
-        else if (withFrames && frames->interpolates() && frames->generate(true, 0.5f))
+        if (withFrames && frames->interpolates() && frames->generate(true, 0.5f))
         {
             present(0);
             if (desktop)
@@ -1266,6 +1507,7 @@ void main()
             if (withFrames && !frames->interpolates() && frames->generate(false, 0.5f))
                 present(0);
         }
+        s.mLastSwapEnd = Clock::now();
         return true;
     }
 }

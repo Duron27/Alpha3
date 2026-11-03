@@ -99,7 +99,8 @@ angle_fetch(cpu_features external/github.com/google/cpu_features ${ANGLE_CPU_FEA
 # Our patches, each once (its own stamp, so a patch added later still reaches an already patched tree)
 #   Force_esVersion.patch      keeps OpenGL ES 3.2 on drivers missing an optional feature
 #   Alpha3VulkanHandle.patch   uses the Vulkan driver the app loaded (Turnip, ALPHA3_VULKAN_HANDLE) over the system one
-foreach(patch_name Force_esVersion Alpha3VulkanHandle)
+#   Alpha3SwapchainImages.patch  more swap chain images when the app asks (ALPHA3_SWAPCHAIN_IMAGES, frame generation)
+foreach(patch_name Force_esVersion Alpha3VulkanHandle Alpha3SwapchainImages)
     set(ANGLE_PATCH "${CMAKE_CURRENT_LIST_DIR}/${patch_name}.patch")
     if(patch_name STREQUAL "Force_esVersion")
         set(ANGLE_PATCH_STAMP "${ANGLE_ROOT}/.alpha3_patched")

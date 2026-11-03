@@ -58,7 +58,7 @@ namespace Alpha3
         return false;
     }
 
-    bool frameGenSwap(osg::GraphicsContext&, int, int, bool, const std::function<void(int64_t)>&)
+    bool frameGenSwap(osg::GraphicsContext&, int, int, bool, int64_t, const std::function<void(int64_t)>&)
     {
         return false;
     }
