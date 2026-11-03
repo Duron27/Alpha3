@@ -96,20 +96,28 @@ angle_fetch(vma external/github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocat
 angle_fetch(jsoncpp external/github.com/open-source-parsers/jsoncpp ${ANGLE_JSONCPP_COMMIT})
 angle_fetch(cpu_features external/github.com/google/cpu_features ${ANGLE_CPU_FEATURES_COMMIT})
 
-# Our patch, once
-set(ANGLE_PATCH "${CMAKE_CURRENT_LIST_DIR}/Force_esVersion.patch")
-set(ANGLE_PATCH_STAMP "${ANGLE_ROOT}/.alpha3_patched")
-if(NOT EXISTS "${ANGLE_PATCH_STAMP}")
-    execute_process(
-        COMMAND patch -p1 -N -i "${ANGLE_PATCH}"
-        WORKING_DIRECTORY "${ANGLE_ROOT}"
-        RESULT_VARIABLE patch_result
-    )
-    if(NOT patch_result EQUAL 0)
-        message(FATAL_ERROR "Force_esVersion.patch does not apply to ANGLE ${ANGLE_COMMIT}")
+# Our patches, each once (its own stamp, so a patch added later still reaches an already patched tree)
+#   Force_esVersion.patch      keeps OpenGL ES 3.2 on drivers missing an optional feature
+#   Alpha3VulkanHandle.patch   uses the Vulkan driver the app loaded (Turnip, ALPHA3_VULKAN_HANDLE) over the system one
+foreach(patch_name Force_esVersion Alpha3VulkanHandle)
+    set(ANGLE_PATCH "${CMAKE_CURRENT_LIST_DIR}/${patch_name}.patch")
+    if(patch_name STREQUAL "Force_esVersion")
+        set(ANGLE_PATCH_STAMP "${ANGLE_ROOT}/.alpha3_patched")
+    else()
+        set(ANGLE_PATCH_STAMP "${ANGLE_ROOT}/.alpha3_patched_${patch_name}")
     endif()
-    file(WRITE "${ANGLE_PATCH_STAMP}" "${ANGLE_PATCH}\n")
-endif()
+    if(NOT EXISTS "${ANGLE_PATCH_STAMP}")
+        execute_process(
+            COMMAND patch -p1 -N -i "${ANGLE_PATCH}"
+            WORKING_DIRECTORY "${ANGLE_ROOT}"
+            RESULT_VARIABLE patch_result
+        )
+        if(NOT patch_result EQUAL 0)
+            message(FATAL_ERROR "${patch_name}.patch does not apply to ANGLE ${ANGLE_COMMIT}")
+        endif()
+        file(WRITE "${ANGLE_PATCH_STAMP}" "${ANGLE_PATCH}\n")
+    endif()
+endforeach()
 
 include(${CMAKE_CURRENT_LIST_DIR}/angle_sources.cmake)
 

@@ -1,0 +1,84 @@
+--- a/src/common/vulkan/libvulkan_loader.cpp
++++ b/src/common/vulkan/libvulkan_loader.cpp
+@@ -11,12 +11,35 @@
+ 
+ #include "common/system_utils.h"
+ 
++#include <cstdlib>
++
+ namespace angle
+ {
+ namespace vk
+ {
++namespace
++{
++// Alpha3: the app loads a custom Vulkan driver (Turnip) through libadrenotools before the first Vulkan call and hands
++// the libvulkan handle over in ALPHA3_VULKAN_HANDLE (hex). The system libvulkan.so would bypass it, so use that one.
++void *AppLibVulkan()
++{
++    const char *text = getenv("ALPHA3_VULKAN_HANDLE");
++    return text && *text ? reinterpret_cast<void *>(strtoull(text, nullptr, 16)) : nullptr;
++}
++}  // namespace
++
++bool IsAppLibVulkan(void *library)
++{
++    return library && library == AppLibVulkan();
++}
++
+ void *OpenLibVulkan()
+ {
++    if (void *appLibrary = AppLibVulkan())
++    {
++        return appLibrary;
++    }
++
+     constexpr const char *kLibVulkanNames[] = {
+ #if defined(ANGLE_PLATFORM_WINDOWS)
+         "vulkan-1.dll",
+--- a/src/common/vulkan/libvulkan_loader.h
++++ b/src/common/vulkan/libvulkan_loader.h
+@@ -17,6 +17,8 @@
+ namespace vk
+ {
+ void *OpenLibVulkan();
++// Alpha3: true for a libvulkan the app opened (Turnip through libadrenotools); ANGLE must not close it.
++bool IsAppLibVulkan(void *library);
+ }
+ }  // namespace angle
+ 
+--- a/src/libANGLE/renderer/vulkan/vk_renderer.cpp
++++ b/src/libANGLE/renderer/vulkan/vk_renderer.cpp
+@@ -2213,7 +2213,8 @@
+ 
+     if (mLibVulkanLibrary)
+     {
+-        angle::CloseSystemLibrary(mLibVulkanLibrary);
++        if (!angle::vk::IsAppLibVulkan(mLibVulkanLibrary))
++            angle::CloseSystemLibrary(mLibVulkanLibrary);
+         mLibVulkanLibrary = nullptr;
+     }
+ 
+@@ -6234,7 +6235,9 @@
+     ANGLE_FEATURE_CONDITION(&mFeatures, supportsGraphicsPipelineLibrary,
+                             mGraphicsPipelineLibraryFeatures.graphicsPipelineLibrary == VK_TRUE &&
+                                 (!isNvidia || driverVersion >= angle::VersionTriple(531, 0, 0)) &&
+-                                !isRADV && !isARMProprietary && !isPowerVR);
++                                !isRADV && !isARMProprietary && !isPowerVR &&
++                                // Alpha3: Turnip offers the feature without listing the extension it needs
++                                ExtensionFound(VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME, deviceExtensionNames));
+ 
+     // When VK_EXT_graphics_pipeline_library is not used:
+     //
+@@ -6392,7 +6395,10 @@
+     // host-copyable one fails due to out-of-that-specific-kind-of-memory.
+     ANGLE_FEATURE_CONDITION(&mFeatures, supportsHostImageCopy,
+                             mHostImageCopyFeatures.hostImageCopy == VK_TRUE &&
+-                                mHostImageCopyProperties.identicalMemoryTypeRequirements);
++                                mHostImageCopyProperties.identicalMemoryTypeRequirements &&
++                                // Alpha3: as above, VK_EXT_host_image_copy needs these two listed
++                                ExtensionFound(VK_KHR_COPY_COMMANDS_2_EXTENSION_NAME, deviceExtensionNames) &&
++                                ExtensionFound(VK_KHR_FORMAT_FEATURE_FLAGS_2_EXTENSION_NAME, deviceExtensionNames));
+     // Software renderers always benefit from host-image-copy, because that's just memcpy.
+     ANGLE_FEATURE_CONDITION(&mFeatures, allowHostImageCopyAfterInitialUpload, isSoftwareRenderer);
+ 

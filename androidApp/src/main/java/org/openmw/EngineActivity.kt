@@ -491,6 +491,14 @@ class EngineActivity : SDLActivity() {
             if (Os.getenv("OSG_USE_ANGLE") != null && Os.getenv("ANGLE_FEATURE_OVERRIDES_DISABLED") == null) {
                 setEnv("ANGLE_FEATURE_OVERRIDES_DISABLED", "useVkEventForImageBarrier:useVkEventForBufferBarrier")
             }
+            // ANGLE on the custom driver (Turnip, loaded by initVulkanDriver above, which hands it over in
+            // ALPHA3_VULKAN_HANDLE): Turnip offers geometry and tessellation shaders, so ANGLE leaves out
+            // GL_EXT_clip_cull_distance, which it can't yet translate in those stages. OpenMW only uses vertex and
+            // fragment shaders, so turn it on; water reflections then clip with real clip planes.
+            if (Os.getenv("OSG_USE_ANGLE") != null && Os.getenv("ALPHA3_VULKAN_HANDLE") != null &&
+                Os.getenv("ANGLE_FEATURE_OVERRIDES_ENABLED") == null) {
+                setEnv("ANGLE_FEATURE_OVERRIDES_ENABLED", "supportsClipCullDistanceInGSAndTS")
+            }
         } catch (e: ErrnoException) {
             Log.e("Alpha3", "Failed setting environment variables.")
             e.printStackTrace()
