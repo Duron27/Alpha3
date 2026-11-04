@@ -560,7 +560,7 @@ fun ResizableDraggableButton(
                                                             }
                                                         } else {
                                                             if (!draggingStarted) {
-                                                                Log.i("DynamicButtons", "!draggingStarted line 591, this is just for info and means nothing.")
+                                                                // Nothing to see here
                                                             }
                                                             draggingStarted = false
                                                             break
