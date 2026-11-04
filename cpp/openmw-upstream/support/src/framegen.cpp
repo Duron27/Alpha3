@@ -249,22 +249,15 @@ void main()
         // point was in the previous frame, and the point is that far between (looked up again from there, so the depth is the
         // point's and not whatever was in front of it). Both frames are read at their positions and blended, unless they
         // disagree: something moved by itself, or came into view, and the current frame is right about it.
-        const char* const sReprojectFragment = R"(#version 300 es
+        // The camera's part: where the point seen at a pixel was (or will be), from the depth and the camera's motion
+        const char* const sReprojectHeader = R"(#version 300 es
 precision highp float;
 precision highp sampler2D;
-uniform sampler2D uCur;
-uniform sampler2D uPrev;
-uniform sampler2D uFinal;
 uniform sampler2D uDepth;
 uniform sampler2D uOpaqueDepth;
 uniform mat4 uCurToPrev;
 uniform vec4 uProj;
 uniform float uReversed;
-uniform float uTint;
-// how far the frame is from the previous one to the current one (0.5: half way). Extrapolating, uCurToPrev goes to the
-// predicted next view instead and uTime is 1 minus how far towards it: the previous frame is then not read.
-uniform float uTime;
-uniform float uExtrapolate;
 in vec2 vUV;
 out vec4 oColor;
 float viewZ(float d)
@@ -289,6 +282,23 @@ vec2 motionAt(vec2 uv)
     vec2 prev = vec2(p.x * uProj.x, p.y * uProj.y) / -p.z;
     return (prev * 0.5 + 0.5) - uv;
 }
+)";
+
+        // The picture's part, shared by the two ways below
+        const char* const sReprojectColorUniforms = R"(
+uniform sampler2D uCur;
+uniform sampler2D uPrev;
+uniform sampler2D uFinal;
+uniform float uTint;
+// how far the frame is from the previous one to the current one (0.5: half way). Extrapolating, uCurToPrev goes to the
+// predicted next view instead and uTime is 1 minus how far towards it: the previous frame is then not read.
+uniform float uTime;
+uniform float uExtrapolate;
+)";
+
+        // In one pass at the window's size, the camera's part worked out for every pixel of it (used where the motion
+        // field below cannot be drawn)
+        const char* const sReprojectFragment = R"(
 void main()
 {
     vec3 final = texture(uFinal, vUV).rgb;
@@ -309,6 +319,52 @@ void main()
     if (any(lessThan(inPrev, vec2(0.0))) || any(greaterThan(inPrev, vec2(1.0))))
         weight = 0.0;
     oColor = vec4(mix(cur, prev, weight) + vec3(0.25, 0.0, 0.0) * uTint, 1.0);
+})";
+
+        // In two: the camera's part at the depth's own size (the scene's: smaller than the window with a render scale) into
+        // a motion field, which the pass at the window's size only looks up. The motion is the same; at the window's size
+        // the pass is the picture's few reads, and it skips the previous frame when it is not used (extrapolating).
+        const char* const sMotionFieldFragment = R"(
+void main()
+{
+    oColor = vec4(motionAt(vUV), 0.0, 1.0);
+})";
+
+        const char* const sReprojectFieldFragment = R"(#version 300 es
+precision highp float;
+precision highp sampler2D;
+uniform sampler2D uMotionField;
+in vec2 vUV;
+out vec4 oColor;
+)"
+            "%COLOR_UNIFORMS%"
+            R"(
+void main()
+{
+    vec3 final = texture(uFinal, vUV).rgb;
+    // The GUI is drawn over the scene after it: shown as it is now, it does not move with the world
+    if (any(greaterThan(abs(final - texture(uCur, vUV).rgb), vec3(0.02))))
+    {
+        oColor = vec4(final, 1.0);
+        return;
+    }
+    vec2 motion = texture(uMotionField, vUV).rg;
+    motion = texture(uMotionField, clamp(vUV - (1.0 - uTime) * motion, vec2(0.0), vec2(1.0))).rg;
+    vec2 inCur = vUV - (1.0 - uTime) * motion;
+    vec3 cur = texture(uCur, clamp(inCur, vec2(0.0), vec2(1.0))).rgb;
+    vec3 tint = vec3(0.25, 0.0, 0.0) * uTint;
+    if (uExtrapolate > 0.5)
+    {
+        oColor = vec4(cur + tint, 1.0);
+        return;
+    }
+    vec2 inPrev = vUV + uTime * motion;
+    vec3 prev = texture(uPrev, clamp(inPrev, vec2(0.0), vec2(1.0))).rgb;
+    vec3 d = abs(cur - prev);
+    float weight = (1.0 - uTime) * (1.0 - smoothstep(0.06, 0.15, max(d.r, max(d.g, d.b))));
+    if (any(lessThan(inPrev, vec2(0.0))) || any(greaterThan(inPrev, vec2(1.0))))
+        weight = 0.0;
+    oColor = vec4(mix(cur, prev, weight) + tint, 1.0);
 })";
 
         // Zink is desktop OpenGL: the shaders are written for OpenGL ES 3.00 and become 3.30 core (no precision lines)
@@ -444,7 +500,7 @@ void main()
             }
         };
 
-        GpuTimer sCaptureGpu, sPreGuiGpu, sReprojectGpu;
+        GpuTimer sCaptureGpu, sPreGuiGpu, sReprojectGpu, sFieldGpu;
 
         class FrameGen
         {
@@ -507,7 +563,9 @@ void main()
                 if (frames->mLumaProgram == 0 || frames->mWarpProgram == 0 || frames->mCopyProgram == 0)
                     return nullptr;
                 frames->mWarp.find(frames->mWarpProgram);
-                frames->mReprojectProgram = compileProgram(sFullscreenVertex, sReprojectFragment);
+                frames->mReprojectProgram = compileProgram(sFullscreenVertex,
+                    (std::string(sReprojectHeader) + sReprojectColorUniforms + sReprojectFragment).c_str());
+                frames->buildMotionField();
                 if (frames->mReprojectProgram != 0)
                 {
                     const GLuint p = frames->mReprojectProgram;
@@ -552,6 +610,64 @@ void main()
             }
 
             ~FrameGen() { release(); }
+
+            /// The two pass reprojection (sMotionFieldFragment, sReprojectFieldFragment); without it the one pass is used
+            void buildMotionField()
+            {
+                mFieldProgram = compileProgram(sFullscreenVertex, (std::string(sReprojectHeader) + sMotionFieldFragment).c_str());
+                std::string light = sReprojectFieldFragment;
+                light.replace(light.find("%COLOR_UNIFORMS%"), 16, sReprojectColorUniforms);
+                mLightProgram = compileProgram(sFullscreenVertex, light.c_str());
+                if (mFieldProgram == 0 || mLightProgram == 0)
+                {
+                    Log(Debug::Warning) << "Frame generation: the motion field shaders did not build, one pass reprojection";
+                    return;
+                }
+                mMfDepth = glGetUniformLocation(mFieldProgram, "uDepth");
+                mMfOpaqueDepth = glGetUniformLocation(mFieldProgram, "uOpaqueDepth");
+                mMfCurToPrev = glGetUniformLocation(mFieldProgram, "uCurToPrev");
+                mMfProj = glGetUniformLocation(mFieldProgram, "uProj");
+                mMfReversed = glGetUniformLocation(mFieldProgram, "uReversed");
+                mLpField = glGetUniformLocation(mLightProgram, "uMotionField");
+                mLpCur = glGetUniformLocation(mLightProgram, "uCur");
+                mLpPrev = glGetUniformLocation(mLightProgram, "uPrev");
+                mLpFinal = glGetUniformLocation(mLightProgram, "uFinal");
+                mLpTint = glGetUniformLocation(mLightProgram, "uTint");
+                mLpTime = glGetUniformLocation(mLightProgram, "uTime");
+                mLpExtrapolate = glGetUniformLocation(mLightProgram, "uExtrapolate");
+            }
+
+            /// The motion field at the depth's size, made again when that changes; false when it cannot be drawn into
+            /// (16 bit float colour needs OpenGL ES 3.2 or EXT_color_buffer_half_float), and then not tried again
+            bool fieldReady(int width, int height)
+            {
+                if (mFieldProgram == 0 || mLightProgram == 0 || mFieldFailed || width <= 0 || height <= 0)
+                    return false;
+                if (mField != 0 && width == mFieldWidth && height == mFieldHeight)
+                    return true;
+                if (mField != 0)
+                    glDeleteTextures(1, &mField);
+                // nearest: a pixel takes the motion of the depth texel it is in, never a blend across an edge
+                mField = makeTexture(GL_RG16F, width, height, GL_NEAREST);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                mFieldWidth = width;
+                mFieldHeight = height;
+                if (mFieldFbo == 0)
+                    glGenFramebuffers(1, &mFieldFbo);
+                glBindFramebuffer(GL_FRAMEBUFFER, mFieldFbo);
+                glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, mField, 0);
+                if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+                {
+                    Log(Debug::Warning) << "Frame generation: cannot draw into a 16 bit float motion field, one pass reprojection";
+                    mFieldFailed = true;
+                    glDeleteTextures(1, &mField);
+                    mField = 0;
+                    return false;
+                }
+                Log(Debug::Info) << "Frame generation: motion from the camera on " << width << "x" << height
+                                 << " (the depth's size), the frame on " << mWidth << "x" << mHeight;
+                return true;
+            }
 
             /// After a real frame is drawn, before it is shown: remember it. reprojected: the frame between is made from the
             /// engine's camera and depth, so the estimators' inputs are not made (they start again when they are needed).
@@ -622,8 +738,10 @@ void main()
             /// at the next rendered frame, if it keeps moving as it did).
             /// target: the view the frame is for, when it is known (the camera of the frame being drawn, part way there);
             /// then time and extrapolate are not used and the frame is the current one seen from that view.
+            /// depthWidth, depthHeight: the depth textures' size, which the motion field is made at
             bool generateReprojected(const FrameGenView& cur, const FrameGenView& prev, GLuint scene, GLuint prevScene,
-                GLuint depth, GLuint opaqueDepth, float time, bool extrapolate, const osg::Matrixd* target = nullptr)
+                GLuint depth, GLuint opaqueDepth, int depthWidth, int depthHeight, float time, bool extrapolate,
+                const osg::Matrixd* target = nullptr)
             {
                 if (mHistory < 1 || mWidth == 0)
                     return false;
@@ -643,22 +761,60 @@ void main()
                         : extrapolate                          ? osg::Matrixd::inverse(curToPrevD)
                                                                : curToPrevD);
                 Saved saved = begin();
-                glBindFramebuffer(GL_FRAMEBUFFER, 0);
-                glViewport(0, 0, mWidth, mHeight);
-                glUseProgram(mReprojectProgram);
                 const auto input = [](int unit, GLint location, GLuint texture) {
                     glActiveTexture(GL_TEXTURE0 + unit);
                     glBindTexture(GL_TEXTURE_2D, texture);
                     glUniform1i(location, unit);
                 };
+                const float proj[4] = { static_cast<float>(cur.projection(0, 0)), static_cast<float>(cur.projection(1, 1)),
+                    static_cast<float>(zNear), static_cast<float>(zFar) };
+                if (fieldReady(depthWidth, depthHeight))
+                {
+                    sFieldGpu.begin();
+                    glBindFramebuffer(GL_FRAMEBUFFER, mFieldFbo);
+                    glViewport(0, 0, mFieldWidth, mFieldHeight);
+                    glUseProgram(mFieldProgram);
+                    input(3, mMfDepth, depth);
+                    input(4, mMfOpaqueDepth, opaqueDepth);
+                    glUniformMatrix4fv(mMfCurToPrev, 1, GL_FALSE, curToPrev.ptr());
+                    glUniform4f(mMfProj, proj[0], proj[1], proj[2], proj[3]);
+                    glUniform1f(mMfReversed, cur.reversedDepth ? 1.0f : 0.0f);
+                    glDrawArrays(GL_TRIANGLES, 0, 3);
+                    sFieldGpu.end();
+
+                    sReprojectGpu.begin();
+                    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+                    glViewport(0, 0, mWidth, mHeight);
+                    glUseProgram(mLightProgram);
+                    input(0, mLpCur, cur.postProcessing ? mPreGui[cur.frame % 2] : scene);
+                    input(1, mLpPrev, cur.postProcessing ? mPreGui[prev.frame % 2] : prevScene);
+                    input(2, mLpFinal, mColor[mCurrent]);
+                    input(3, mLpField, mField);
+                    glUniform1f(mLpTint, mTint ? 1.0f : 0.0f);
+                    glUniform1f(mLpTime, extrapolate ? 1.0f - time : time);
+                    glUniform1f(mLpExtrapolate, extrapolate ? 1.0f : 0.0f);
+                    glDrawArrays(GL_TRIANGLES, 0, 3);
+                    sReprojectGpu.end();
+                    for (int unit = 4; unit >= 3; --unit)
+                    {
+                        glActiveTexture(GL_TEXTURE0 + unit);
+                        glBindTexture(GL_TEXTURE_2D, 0);
+                    }
+                    mReprojectedFrames++;
+                    logUse();
+                    end(saved);
+                    return true;
+                }
+                glBindFramebuffer(GL_FRAMEBUFFER, 0);
+                glViewport(0, 0, mWidth, mHeight);
+                glUseProgram(mReprojectProgram);
                 input(0, mRpCur, cur.postProcessing ? mPreGui[cur.frame % 2] : scene);
                 input(1, mRpPrev, cur.postProcessing ? mPreGui[prev.frame % 2] : prevScene);
                 input(2, mRpFinal, mColor[mCurrent]);
                 input(3, mRpDepth, depth);
                 input(4, mRpOpaqueDepth, opaqueDepth);
                 glUniformMatrix4fv(mRpCurToPrev, 1, GL_FALSE, curToPrev.ptr());
-                glUniform4f(mRpProj, static_cast<float>(cur.projection(0, 0)), static_cast<float>(cur.projection(1, 1)),
-                    static_cast<float>(zNear), static_cast<float>(zFar));
+                glUniform4f(mRpProj, proj[0], proj[1], proj[2], proj[3]);
                 glUniform1f(mRpReversed, cur.reversedDepth ? 1.0f : 0.0f);
                 glUniform1f(mRpTint, mTint ? 1.0f : 0.0f);
                 glUniform1f(mRpTime, extrapolate ? 1.0f - time : time);
@@ -1038,6 +1194,14 @@ void main()
             void release()
             {
                 destroyTextures();
+                if (mField != 0)
+                    glDeleteTextures(1, &mField);
+                if (mFieldFbo != 0)
+                    glDeleteFramebuffers(1, &mFieldFbo);
+                for (GLuint program : { mFieldProgram, mLightProgram })
+                    if (program != 0)
+                        glDeleteProgram(program);
+                mField = mFieldFbo = mFieldProgram = mLightProgram = 0;
                 if (mVao != 0)
                     glDeleteVertexArrays(1, &mVao);
                 if (mFbo != 0)
@@ -1078,6 +1242,13 @@ void main()
             GLuint mReprojectProgram = 0;
             GLint mRpCur = -1, mRpPrev = -1, mRpFinal = -1, mRpDepth = -1, mRpOpaqueDepth = -1, mRpCurToPrev = -1,
                   mRpProj = -1, mRpReversed = -1, mRpTint = -1, mRpTime = -1, mRpExtrapolate = -1;
+            // the two pass reprojection: the motion field and the pass at the window's size
+            GLuint mFieldProgram = 0, mLightProgram = 0, mField = 0, mFieldFbo = 0;
+            int mFieldWidth = 0, mFieldHeight = 0;
+            bool mFieldFailed = false;
+            GLint mMfDepth = -1, mMfOpaqueDepth = -1, mMfCurToPrev = -1, mMfProj = -1, mMfReversed = -1;
+            GLint mLpField = -1, mLpCur = -1, mLpPrev = -1, mLpFinal = -1, mLpTint = -1, mLpTime = -1,
+                  mLpExtrapolate = -1;
             GLuint mPreGui[2] = { 0, 0 };
             unsigned mPreGuiFrame[2] = { ~0u, ~0u };
             bool mEstimatorStale = false;
@@ -1217,6 +1388,7 @@ void main()
                 bool mValid = false;
                 FrameGenView mCur, mPrev;
                 GLuint mScene = 0, mPrevScene = 0, mDepth = 0, mOpaqueDepth = 0;
+                int mDepthWidth = 0, mDepthHeight = 0;
                 int mCount = 0;
                 int mSpan = 1;
             } mPending;
@@ -1313,8 +1485,8 @@ void main()
                     const double fraction = static_cast<double>(i) / (pending.mCount + 1);
                     const osg::Matrixd target = known ? viewBetween(pending.mCur.view, next.view, fraction) : osg::Matrixd();
                     if (!frames->generateReprojected(pending.mCur, pending.mPrev, pending.mScene, pending.mPrevScene,
-                            pending.mDepth, pending.mOpaqueDepth, static_cast<float>(i) / pending.mSpan, true,
-                            known ? &target : nullptr))
+                            pending.mDepth, pending.mOpaqueDepth, pending.mDepthWidth, pending.mDepthHeight,
+                            static_cast<float>(i) / pending.mSpan, true, known ? &target : nullptr))
                         break;
                     const Clock::time_point drawn = Clock::now();
                     s.mGenerateTime += drawn - mark;
@@ -1387,6 +1559,7 @@ void main()
         const osg::State* glState = gc.getState();
         FrameGenView cur, prev;
         GLuint scene = 0, prevScene = 0, depth = 0, opaqueDepth = 0;
+        int depthWidth = 0, depthHeight = 0;
         bool reproject = frames->canReproject() && glState != nullptr && glState->getFrameStamp() != nullptr;
         if (reproject)
         {
@@ -1400,6 +1573,8 @@ void main()
                 prevScene = textureId(*prev.scene, contextId);
                 depth = textureId(*cur.depth, contextId);
                 opaqueDepth = textureId(*cur.opaqueDepth, contextId);
+                depthWidth = cur.depth->getTextureWidth();
+                depthHeight = cur.depth->getTextureHeight();
                 reproject = scene != 0 && prevScene != 0 && depth != 0 && opaqueDepth != 0
                     && (!cur.postProcessing || frames->hasPreGui(frame));
             }
@@ -1440,8 +1615,8 @@ void main()
                 // Zink: no queue throttling to work around, its swaps copy; the generated frames go out now, spread out
                 for (int i = 1; i <= generated; ++i)
                 {
-                    if (!frames->generateReprojected(cur, prev, scene, prevScene, depth, opaqueDepth,
-                            static_cast<float>(i) / span, true))
+                    if (!frames->generateReprojected(cur, prev, scene, prevScene, depth, opaqueDepth, depthWidth,
+                            depthHeight, static_cast<float>(i) / span, true))
                         break;
                     std::this_thread::sleep_for(std::chrono::nanoseconds(gapNs));
                     present(0);
@@ -1457,6 +1632,8 @@ void main()
                 pending.mPrevScene = prevScene;
                 pending.mDepth = depth;
                 pending.mOpaqueDepth = opaqueDepth;
+                pending.mDepthWidth = depthWidth;
+                pending.mDepthHeight = depthHeight;
                 pending.mCount = generated;
                 pending.mSpan = span;
             }
@@ -1480,8 +1657,8 @@ void main()
                                  << ms(s.mGeneratedSwapTime);
                 if (GpuTimer::available())
                     Log(Debug::Verbose) << "Frame generation GPU time (ms): capture copy " << sCaptureGpu.take()
-                                     << ", copy before the GUI " << sPreGuiGpu.take() << ", reprojection "
-                                     << sReprojectGpu.take();
+                                     << ", copy before the GUI " << sPreGuiGpu.take() << ", motion field "
+                                     << sFieldGpu.take() << ", reprojection " << sReprojectGpu.take();
                 else
                     Log(Debug::Verbose) << "Frame generation GPU time: no timer queries (GL_EXT_disjoint_timer_query)";
                 s.mEngineTime = s.mCaptureTime = s.mRealSwapTime = s.mGenerateTime = s.mGeneratedSwapTime = {};
