@@ -260,6 +260,7 @@
     <string name="select_a_unique_key_the_shift_and_alt_keys_toggle">选择唯一键，Shift和Alt键可切换</string>
     <string name="select_a_controller_button">选择一个虚拟控制器按钮</string>
     <string name="select_a_numpad_button">选择一个小键盘按钮</string>
+    <string name="enable_left_thumbstick">启用左摇杆</string>
     <string name="enable_right_thumbstick">启用右摇杆</string>
     <string name="enable_quickSlot">启用快捷栏</string>
     <string name="remove_icons">移除图标</string>

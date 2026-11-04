@@ -259,6 +259,7 @@
     <string name="select_a_unique_key_the_shift_and_alt_keys_toggle">Выбрать уникальную клавишу, клавиши shift и alt переключают.</string>
     <string name="select_a_controller_button">Выберите кнопку виртуального контроллера.</string>
     <string name="select_a_numpad_button">Выберите клавишу цифровой панели.</string>
+    <string name="enable_left_thumbstick">Включить левый джойстик.</string>
     <string name="enable_right_thumbstick">Включить правый джойстик.</string>
     <string name="enable_quickSlot">Слот быстрого доступа</string>
     <string name="remove_icons">Удалить иконки</string>

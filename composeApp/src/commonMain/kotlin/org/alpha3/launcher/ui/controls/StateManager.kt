@@ -4,6 +4,7 @@ import kotlinx.coroutines.IO
 import org.alpha3.launcher.resources.btn_cancel
 import org.alpha3.launcher.resources.cpu_usage
 import org.alpha3.launcher.resources.enable_quickSlot
+import org.alpha3.launcher.resources.enable_left_thumbstick
 import org.alpha3.launcher.resources.enable_right_thumbstick
 import org.alpha3.launcher.resources.select_a_controller_button
 import org.alpha3.launcher.resources.select_a_function_key
@@ -849,6 +850,27 @@ fun KeySelectionMenu(onKeySelected: (Int) -> Unit, usedKeys: List<Int>, containe
                             }
                         }
                     }
+                    HorizontalDivider(color = Color.White, thickness = 1.dp, modifier = Modifier.padding(vertical = 16.dp))
+                    Text(
+                        text = stringResource(Res.string.enable_left_thumbstick),
+                        style = MaterialTheme.typography.titleMedium,
+                        color = Color.White,
+                        modifier = Modifier.padding(bottom = 16.dp)
+                    )
+                    // Off: the left half of the screen walks instead (TouchMoveArea)
+                    val leftThumbEnabled = rememberLeftThumbEnabled()
+                    Switch(
+                        checked = leftThumbEnabled,
+                        onCheckedChange = { isChecked ->
+                            CoroutineScope(Dispatchers.Main).launch {
+                                GameFilesPreferences.setPreference(GameFilesPreferences.ENABLE_LEFT_THUMBSTICK, isChecked)
+                            }
+                        },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.Green,
+                            uncheckedThumbColor = Color.Gray
+                        )
+                    )
                     HorizontalDivider(color = Color.White, thickness = 1.dp, modifier = Modifier.padding(vertical = 16.dp))
                     Text(
                         text = stringResource(Res.string.enable_right_thumbstick),

@@ -75,6 +75,8 @@ object GameFilesPreferences {
     val SUPPORTED_LANGUAGES = stringPreferencesKey("supported_languages")
     val WHATS_NEW_KEY = booleanPreferencesKey("whats_new")
     val AUTO_RUN = booleanPreferencesKey("auto_run")
+    // Off: no left thumbstick, a finger anywhere on the left half of the screen walks instead
+    val ENABLE_LEFT_THUMBSTICK = booleanPreferencesKey("enable_left_thumbstick")
     val HIDE_SYSTEM_BARS = booleanPreferencesKey("hide_system_bars")
     val SCREEN_STAY_ON = booleanPreferencesKey("screen_stay_on")
     val IGNORE_CONTROLLER_KEY = booleanPreferencesKey("ignore_controller")

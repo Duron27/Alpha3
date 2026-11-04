@@ -76,6 +76,10 @@ import org.alpha3.launcher.ui.controls.ScrollWheelIndicator
 import org.alpha3.launcher.ui.controls.UIKeyboard
 import org.alpha3.launcher.ui.controls.UIStateManager
 import org.alpha3.launcher.ui.controls.UIStateManager.configureControls
+import org.alpha3.launcher.ui.controls.TouchLookArea
+import org.alpha3.launcher.ui.controls.TouchMoveArea
+import org.alpha3.launcher.ui.controls.rememberLeftThumbEnabled
+import org.alpha3.launcher.ui.controls.touchAreaActive
 import org.alpha3.launcher.ui.controls.UIStateManager.containerGlobalHeight
 import org.alpha3.launcher.ui.controls.UIStateManager.containerGlobalWidth
 import org.alpha3.launcher.ui.controls.UIStateManager.editMode
@@ -371,6 +375,13 @@ class EngineActivity : SDLActivity() {
                             }
                         }
 
+                        // under the menus and buttons, which keep their touches
+                        val leftThumbEnabled = rememberLeftThumbEnabled()
+                        if (touchAreaActive()) {
+                            if (!enableRightThumb) TouchLookArea(containerWidth = containerWidth)
+                            if (!leftThumbEnabled) TouchMoveArea()
+                        }
+
                         if (!isUIHidden) {
                             OverlayUI(
                                 context = this@EngineActivity,
@@ -394,11 +405,13 @@ class EngineActivity : SDLActivity() {
                             )
                         }
 
-                        ResizableDraggableThumbstick(
-                            context = this@EngineActivity,
-                            containerWidth = containerWidth,
-                            containerHeight = containerHeight
-                        )
+                        if (leftThumbEnabled || UIStateManager.tempCodeGroup != "OpenMW") {
+                            ResizableDraggableThumbstick(
+                                context = this@EngineActivity,
+                                containerWidth = containerWidth,
+                                containerHeight = containerHeight
+                            )
+                        }
 
                         AnimatedVisibility(
                             visible = UIKeyboard.showVKB,

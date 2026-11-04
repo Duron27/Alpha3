@@ -51,6 +51,10 @@ import org.alpha3.launcher.globals.PlayBridge
 import org.alpha3.launcher.ui.controls.MouseIcon
 import org.alpha3.launcher.ui.controls.ResizableDraggableButton
 import org.alpha3.launcher.ui.controls.ResizableDraggableRightThumbstick
+import org.alpha3.launcher.ui.controls.TouchLookArea
+import org.alpha3.launcher.ui.controls.TouchMoveArea
+import org.alpha3.launcher.ui.controls.rememberLeftThumbEnabled
+import org.alpha3.launcher.ui.controls.touchAreaActive
 import org.alpha3.launcher.ui.controls.ResizableDraggableThumbstick
 import org.alpha3.launcher.ui.controls.ScrollWheelIndicator
 import org.alpha3.launcher.ui.controls.UIKeyboard
@@ -159,6 +163,13 @@ fun GameplayScreen(
             }
         }
 
+        // under the menus and buttons, which keep their touches
+        val leftThumbEnabled = rememberLeftThumbEnabled()
+        if (touchAreaActive()) {
+            if (!UIStateManager.enableRightThumb) TouchLookArea(containerWidth)
+            if (!leftThumbEnabled) TouchMoveArea()
+        }
+
         if (!isUIHidden) {
             OverlayUI(context = context, virtualKeyboard = virtualKeyboard, onKeyEvent = onKeyEvent)
         }
@@ -173,7 +184,7 @@ fun GameplayScreen(
             ResizableDraggableRightThumbstick(context, containerWidth, containerHeight)
         }
 
-        ResizableDraggableThumbstick(context, containerWidth, containerHeight)
+        if (leftThumbEnabled || UIStateManager.tempCodeGroup != "OpenMW") ResizableDraggableThumbstick(context, containerWidth, containerHeight)
 
         AnimatedVisibility(
             visible = UIKeyboard.showVKB,
