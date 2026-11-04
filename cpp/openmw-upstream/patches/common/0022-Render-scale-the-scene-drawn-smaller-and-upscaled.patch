@@ -8,6 +8,9 @@ eye's size in VR): the scene's buffers are made that size and the scene camera's
 The canvas then puts the scene (or the post-processing chain's output, drawn into a texture of the scene's size instead
 of on the screen) onto the window through the support library's renderScaleResolve, which upscales and sharpens it. At
 1, renderScaled returns the window's size and none of it changes anything.
+
+The shaders' screenRes is the render size too: updateProjectionMatrix set it back to the window's size on every
+field of view or view distance change, and the water's screen lookups (reflection, shore depth) went wrong.
 ---
 diff --git a/apps/openmw/mwrender/pingpongcanvas.cpp b/apps/openmw/mwrender/pingpongcanvas.cpp
 --- a/apps/openmw/mwrender/pingpongcanvas.cpp
@@ -130,3 +133,20 @@ diff --git a/apps/openmw/mwrender/postprocessor.cpp b/apps/openmw/mwrender/postp
      }
  
      void PostProcessor::triggerShaderReload()
+diff --git a/apps/openmw/mwrender/renderingmanager.cpp b/apps/openmw/mwrender/renderingmanager.cpp
+index ae46671e93..485c7806c0 100644
+--- a/apps/openmw/mwrender/renderingmanager.cpp
++++ b/apps/openmw/mwrender/renderingmanager.cpp
+@@ -1253,7 +1253,11 @@ namespace MWRender
+         }
+         else
+         {
+-            setScreenRes(width, height);
++            // the size the scene is drawn at: smaller than the window with a render scale (the water's screen lookups)
++            if (mPostProcessor)
++                setScreenRes(mPostProcessor->renderWidth(), mPostProcessor->renderHeight());
++            else
++                setScreenRes(width, height);
+         }
+ 
+         // Since our fog is not radial yet, we should take FOV in account, otherwise terrain near viewing distance may
