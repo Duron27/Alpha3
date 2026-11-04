@@ -1,6 +1,10 @@
 // Every swap of the engine's window goes through here (RuntimeHooks::swapBuffers): Swappy (Android Frame Pacing) on the
 // OpenGL ES path, and the frame intervals for the launcher's performance overlay. Moved from OpenMW's
 // SDLUtil::GraphicsWindowSDL2 (Swappy) and OMW::Engine::go (frame times).
+//
+// The overlay gets two lists: the engine's frames (one per rendered frame, omw_record_frame_time) and the frames sent to
+// the screen (every buffer swap, the ones frame generation makes included: omwGetShownFrameTimes). With vertical sync
+// on, the swaps are what the compositor shows, as the system's own frame statistics count them.
 #include "support.hpp"
 
 #include <algorithm>
@@ -10,6 +14,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <limits>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -33,6 +38,43 @@
 #include <components/debug/debuglog.hpp>
 
 extern "C" void omw_record_frame_time(float milliseconds); // apps/openmw/androidmain.cpp
+
+namespace
+{
+    // The intervals between the buffers sent to the screen, for the performance overlay. Frame generation swaps from
+    // its own thread too.
+    constexpr size_t sShownHistory = 240;
+    std::mutex sShownMutex;
+    float sShownTimes[sShownHistory];
+    size_t sShownCount = 0;
+    std::chrono::steady_clock::time_point sShownLast;
+
+    void noteShownFrame()
+    {
+        const auto now = std::chrono::steady_clock::now();
+        std::lock_guard<std::mutex> lock(sShownMutex);
+        if (sShownLast != std::chrono::steady_clock::time_point{})
+            sShownTimes[sShownCount++ % sShownHistory] = std::chrono::duration<float, std::milli>(now - sShownLast).count();
+        sShownLast = now;
+    }
+}
+
+/// The recent intervals between frames sent to the screen in milliseconds, oldest first (EngineActivity)
+extern "C" JNIEXPORT jfloatArray JNICALL Java_org_openmw_EngineActivity_omwGetShownFrameTimes(JNIEnv* env, jobject)
+{
+    float copy[sShownHistory];
+    size_t count;
+    {
+        std::lock_guard<std::mutex> lock(sShownMutex);
+        count = std::min(sShownCount, sShownHistory);
+        for (size_t i = 0; i < count; ++i)
+            copy[i] = sShownTimes[(sShownCount - count + i) % sShownHistory];
+    }
+    jfloatArray result = env->NewFloatArray(static_cast<jsize>(count));
+    if (result != nullptr && count > 0)
+        env->SetFloatArrayRegion(result, 0, static_cast<jsize>(count), copy);
+    return result;
+}
 
 namespace Alpha3
 {
@@ -188,6 +230,7 @@ namespace Alpha3
                         if (presentAt != 0 && presentationTime != nullptr)
                             presentationTime(display, surface, presentAt);
                         eglSwapBuffers(display, surface);
+                        noteShownFrame();
                     }))
                 {
                     sPacedInterval = 0;
@@ -202,6 +245,7 @@ namespace Alpha3
                                      << (hot ? "two display periods at least while the phone is hot" : "the phone has cooled");
                 }
                 SwappyGL_swap(display, surface);
+                noteShownFrame();
                 adapt(Clock::now());
                 sPacedInterval = SwappyGL_getSwapIntervalNS();
                 return true;
@@ -514,6 +558,7 @@ namespace Alpha3
             if (presentAt != 0 && egl.presentationTime != nullptr)
                 egl.presentationTime(display, surface, presentAt);
             egl.swapBuffers(display, surface);
+            noteShownFrame();
         });
     }
 
@@ -549,7 +594,10 @@ namespace Alpha3
         {
             const osg::GraphicsContext::Traits* traits = gc.getTraits();
             if (traits != nullptr
-                && frameGenSwap(gc, traits->width, traits->height, true, 0, [&](int64_t) { gc.swapBuffersImplementation(); }))
+                && frameGenSwap(gc, traits->width, traits->height, true, 0, [&](int64_t) {
+                       gc.swapBuffersImplementation();
+                       noteShownFrame();
+                   }))
                 return;
         }
         else
@@ -576,6 +624,7 @@ namespace Alpha3
             }
         }
         gc.swapBuffersImplementation();
+        noteShownFrame();
     }
 }
 

@@ -120,6 +120,8 @@ class EngineActivity : SDLActivity() {
     external fun initVulkanDriver(enabled: Boolean, nativeLibDir: String, tmpLibDir: String, driverDir: String, driverName: String, bundledFallback: Boolean): Boolean
     external fun omwIsGameRunning(): Boolean
     external fun omwGetFrameTimes(): FloatArray
+    /** Every buffer sent to the screen, generated frames included (support/src/framepacing.cpp) */
+    external fun omwGetShownFrameTimes(): FloatArray
     //external fun omwQuitGame()
     external fun omwGetPlayerHealthCurrent(): Float
     external fun omwGetPlayerHealthModified(): Float
@@ -529,6 +531,7 @@ class EngineActivity : SDLActivity() {
         LaunchedEffect(Unit) {
             while (true) {
                 runCatching { UIStateManager.frameTimes.value = activity.omwGetFrameTimes().toList() }
+                runCatching { UIStateManager.shownFrameTimes.value = activity.omwGetShownFrameTimes().toList() }
                 delay(500.milliseconds)
             }
         }

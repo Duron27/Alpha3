@@ -239,6 +239,8 @@ object UIStateManager {
     var ioWriteMiBs by mutableFloatStateOf(0f)
     /** The engine's last frame intervals in milliseconds, oldest first (empty until a game is running). */
     val frameTimes = MutableStateFlow<List<Float>>(emptyList())
+    /** The intervals between frames sent to the screen, generated ones included; empty where the engine has no such list. */
+    val shownFrameTimes = MutableStateFlow<List<Float>>(emptyList())
     val cpuHistory = MutableStateFlow<List<Int>>(emptyList())
     val gpuHistory = MutableStateFlow<List<Int>>(emptyList())
     val memoryHistory = MutableStateFlow<List<Long>>(emptyList()) // MB

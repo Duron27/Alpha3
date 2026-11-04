@@ -42,6 +42,7 @@ fun PerformanceHud(
     val gpuTempHistory by UIStateManager.gpuTempHistory.collectAsState()
     val memoryHistory by UIStateManager.memoryHistory.collectAsState()
     val frameTimes by UIStateManager.frameTimes.collectAsState()
+    val shownFrameTimes by UIStateManager.shownFrameTimes.collectAsState()
 
     // Use boxWidth and boxHeight but subtract DraggableBox padding (8.dp * 2 = 16.dp)
     val effectiveWidth = (boxWidth - 16).coerceAtLeast(100f)
@@ -55,15 +56,12 @@ fun PerformanceHud(
     val usedMemMB = memoryHistory.lastOrNull() ?: 0L
     val totalMemMB = UIStateManager.totalMemoryMB
 
-    // The last second of frames: the average rate, and the most recent interval
-    var windowMs = 0f
-    var windowFrames = 0
-    for (i in frameTimes.indices.reversed()) {
-        windowMs += frameTimes[i]
-        windowFrames++
-        if (windowMs >= 1000f) break
-    }
-    val fps = if (windowMs > 0f) windowFrames * 1000f / windowMs else 0f
+    // The frames that reached the screen (frame generation's included), else the engine's own; with frame generation
+    // the rendered rate is shown beside it
+    val renderedFps = lastSecondRate(frameTimes)
+    val shownFps = lastSecondRate(shownFrameTimes)
+    val fps = if (shownFps > 0f) shownFps else renderedFps
+    val generating = shownFps > 0f && renderedFps > 0f && shownFps > renderedFps * 1.15f
     val lastFrameMs = frameTimes.lastOrNull() ?: 0f
 
     Box(modifier = Modifier.size(width = effectiveWidth.dp, height = effectiveHeight.dp)) {
@@ -109,7 +107,8 @@ fun PerformanceHud(
             HudLine(
                 "FPS", Color(0xFFE5736B), fontSize,
                 if (fps > 0f) "${fps.toInt()}" else "--", Color.White,
-                if (lastFrameMs > 0f) "${formatMs(lastFrameMs)} ms" else ""
+                if (generating) "${renderedFps.toInt()} rendered"
+                else if (lastFrameMs > 0f) "${formatMs(lastFrameMs)} ms" else ""
             )
             val renderer = UIStateManager.gpuModelName
             if (renderer.isNotEmpty() && renderer != "Unknown") {
@@ -144,6 +143,18 @@ private fun formatRate(mibPerSecond: Float): String =
 private fun formatGiB(megabytes: Long): String = "${megabytes * 10 / 1024 / 10.0}"
 
 private fun formatMs(value: Float): String = "${(value * 10).toInt() / 10.0}"
+
+/** Frames a second over the newest second of intervals (milliseconds, oldest first); 0 without any. */
+private fun lastSecondRate(intervals: List<Float>): Float {
+    var windowMs = 0f
+    var windowFrames = 0
+    for (i in intervals.indices.reversed()) {
+        windowMs += intervals[i]
+        windowFrames++
+        if (windowMs >= 1000f) break
+    }
+    return if (windowMs > 0f) windowFrames * 1000f / windowMs else 0f
+}
 
 /** Green while there is headroom, through yellow and orange to red when a unit is close to its limit. */
 internal fun loadColor(percent: Int): Color = when {
