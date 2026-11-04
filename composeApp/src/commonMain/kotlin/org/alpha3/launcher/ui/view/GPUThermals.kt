@@ -249,11 +249,21 @@ fun readProcessOutput(vararg command: String): String = SystemInfo.services.read
  */
 internal fun readSysfs(path: String): String {
     val file = File(path)
-    if (file.exists() && file.canRead()) {
+    // a missing node: cat could not read it either, and a process per refresh is not free
+    if (!file.exists() || path in unreadableNodes) return ""
+    if (file.canRead()) {
         runCatching { return file.readText().trim() }
     }
-    return runCatching { readProcessOutput("cat", path).trim() }.getOrDefault("")
+    val text = runCatching { readProcessOutput("cat", path).trim() }.getOrDefault("")
+    // refused both ways (SELinux on some ROMs, whatever the file's mode says): not asked again, every refresh would
+    // start a process and log a denial
+    if (text.isEmpty()) unreadableNodes += path
+    return text
 }
+
+// replaced whole, never changed in place: readers on other threads see one set or the other (a lost addition only means
+// one more try)
+private var unreadableNodes: Set<String> = emptySet()
 
 /** Thermal nodes report millidegrees on most devices and whole degrees on some; anything out of range is no reading. */
 internal fun parseTempCelsius(raw: String): Double? {
@@ -267,7 +277,9 @@ internal fun parseTempCelsius(raw: String): Double? {
  * vendor nodes for Mali. Nothing here is chosen by the user.
  */
 internal object HudSources {
-    private fun readable(path: String) = File(path).let { it.exists() && it.canRead() }
+    // Read, not only checked: canRead() looks at the file's mode alone, and SELinux can still refuse the read (LineageOS
+    // denies apps the Adreno nodes). A node found unreadable here is not tried again on every refresh.
+    private fun readable(path: String) = File(path).exists() && readSysfs(path).isNotEmpty()
 
     /** The Adreno folder (/sys/class/kgsl/kgsl-3d0) when there is one. */
     val kgslDir: String? by lazy {

@@ -214,7 +214,7 @@ fun startResourceInfoUpdates(context: PlatformContext) {
                 gpuTemp = readGpuTemperature()?.let { "${it.toInt()}°C" } ?: "--°C"
 
                 // Utilization
-                gpuUtilization = "${readGpuUtilization() ?: 0}%"
+                gpuUtilization = readGpuUtilization()?.let { "$it%" } ?: "--%"
 
                 // Clock
                 gpuClock = readGpuClockMhz()?.let { "$it MHz" } ?: "--MHz"
@@ -230,7 +230,8 @@ fun startResourceInfoUpdates(context: PlatformContext) {
             // Update Histories
             UIStateManager.totalMemoryMB = memoryInfo.totalBytes / (1024 * 1024)
             updateHistory(UIStateManager.cpuHistory, cpuUsage)
-            updateHistory(UIStateManager.gpuHistory, gpuUtilization.removeSuffix("%").trim().toIntOrNull() ?: 0)
+            // no entry where the device does not expose the GPU's load: the overlay shows "--", not 0%
+            gpuUtilization.removeSuffix("%").trim().toIntOrNull()?.let { updateHistory(UIStateManager.gpuHistory, it) }
             updateHistory(UIStateManager.memoryHistory, (memoryInfo.totalBytes - memoryInfo.availableBytes) / (1024 * 1024))
             updateHistory(UIStateManager.cpuTempHistory, cpuTemp.removeSuffix("°C").trim().toIntOrNull() ?: 0)
             updateHistory(UIStateManager.gpuTempHistory, gpuTemp.removeSuffix("°C").trim().toIntOrNull() ?: 0)

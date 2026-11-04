@@ -50,7 +50,8 @@ fun PerformanceHud(
 
     val cpuUsage = cpuHistory.lastOrNull() ?: 0
     val cpuTemp = cpuTempHistory.lastOrNull() ?: 0
-    val gpuUsage = gpuHistory.lastOrNull() ?: 0
+    // null where the device does not let the app read the GPU's load
+    val gpuUsage = gpuHistory.lastOrNull()
     val gpuTemp = gpuTempHistory.lastOrNull() ?: 0
     val hotThread = UIStateManager.cpuBusiestThread
     val usedMemMB = memoryHistory.lastOrNull() ?: 0L
@@ -84,7 +85,7 @@ fun PerformanceHud(
             val clock = UIStateManager.gpuClockMhz
             HudLine(
                 "GPU", Color(0xFF6BD08A), fontSize,
-                "$gpuUsage%", loadColor(gpuUsage),
+                gpuUsage?.let { "$it%" } ?: "--", if (gpuUsage != null) loadColor(gpuUsage) else Color.White,
                 listOfNotNull(if (gpuTemp > 0) "$gpuTemp°C" else null, if (clock > 0) "$clock MHz" else null).joinToString("  ")
             )
             HudLine(
