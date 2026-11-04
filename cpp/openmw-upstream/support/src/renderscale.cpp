@@ -7,6 +7,11 @@
 //
 // Without sharpening the upscale goes straight onto the screen; with it, into a buffer the window's size first, which
 // the sharpening reads.
+//
+// The upscaler "auto" (the default) is FSR 1 EASU unless this GPU is too slow for it: EASU's per pixel arithmetic runs
+// at full precision on OpenGL ES and is paid at the window's size, which took 25 ms a frame on an Adreno 615 at
+// 2560x1600 (bilinear about 1 ms). The pass is timed with GPU timer queries over the first frames, and when it takes
+// longer than sAutoBudgetMs it is upscaled bilinearly from then on (the sharpening stays). "fsr" keeps EASU anyway.
 #include "support.hpp"
 
 #include "experimentalsources.hpp"
@@ -14,6 +19,9 @@
 #include <algorithm>
 #include <cmath>
 #include <string>
+#include <vector>
+
+#include <glad/gles2.h>
 
 #include <osg/FrameBufferObject>
 #include <osg/GLExtensions>
@@ -49,10 +57,17 @@ namespace Alpha3
             Cas,
         };
 
+        // auto: EASU's average GPU time a frame above this, bilinear instead
+        constexpr double sAutoBudgetMs = 3.0;
+        // auto: frames left alone first (shader compiles, textures loading), then the frames measured
+        constexpr int sAutoWarmupFrames = 60;
+        constexpr int sAutoSamples = 30;
+
         struct RenderScaleSettings
         {
             float mScale = 1.f;
             int mUpscaler = Fsr;
+            bool mAuto = false; // FSR, measured, and bilinear when it is too slow here
             int mSharpening = Rcas;
             float mSharpness = 0.5f;
         };
@@ -69,8 +84,9 @@ namespace Alpha3
                 RenderScaleSettings s;
                 const float scale = settingFloat("Experimental", "render scale", 1.f);
                 s.mScale = scale > 0.f && scale < 0.995f ? std::clamp(scale, 0.25f, 1.f) : 1.f;
-                const std::string upscaler = lower(setting("Experimental", "render scale upscaler", "fsr"));
+                const std::string upscaler = lower(setting("Experimental", "render scale upscaler", "auto"));
                 s.mUpscaler = upscaler == "bilinear" ? Bilinear : upscaler == "lanczos" ? Lanczos : Fsr;
+                s.mAuto = upscaler != "bilinear" && upscaler != "lanczos" && upscaler != "fsr";
                 const std::string sharpening = lower(setting("Experimental", "render scale sharpening", "rcas"));
                 s.mSharpening = sharpening == "none" ? NoSharpening : sharpening == "cas" ? Cas : Rcas;
                 s.mSharpness = std::clamp(settingFloat("Experimental", "render scale sharpness", 0.5f), 0.f, 1.f);
@@ -79,6 +95,7 @@ namespace Alpha3
                     static const char* const upscalers[] = { "bilinear", "Lanczos", "FSR 1 EASU" };
                     static const char* const sharpenings[] = { "none", "RCAS", "CAS" };
                     Log(Debug::Info) << "Render scale " << s.mScale << ": upscaled with " << upscalers[s.mUpscaler]
+                                     << (s.mAuto ? " (auto: bilinear if it is too slow on this GPU)" : "")
                                      << ", sharpening " << sharpenings[s.mSharpening] << " (" << s.mSharpness << ")";
                 }
                 return s;
@@ -134,6 +151,98 @@ namespace Alpha3
             }
         };
 
+        // auto: EASU's GPU time over the first frames, then the choice. Timer queries cannot nest, so a frame where another
+        // one is running (OSG's own GPU statistics) is not measured. Without timer queries EASU stays.
+        class AutoUpscaler
+        {
+        public:
+            bool deciding() const { return mDeciding; }
+
+            void begin()
+            {
+                mTiming = false;
+                if (!mDeciding || ++mFrames <= sAutoWarmupFrames)
+                    return;
+                if (GLAD_GL_EXT_disjoint_timer_query == 0)
+                {
+                    Log(Debug::Info) << "Render scale: no GPU timer queries, FSR 1 EASU kept (upscaler auto)";
+                    mDeciding = false;
+                    return;
+                }
+                collect();
+                GLint running = 0;
+                glGetQueryivEXT(GL_TIME_ELAPSED_EXT, GL_CURRENT_QUERY_EXT, &running);
+                if (running != 0 || !mDeciding)
+                    return;
+                if (mQueries[0] == 0)
+                    glGenQueriesEXT(sQueries, mQueries);
+                // a query still in flight is not reused
+                if (mIssued[mNext])
+                    return;
+                glBeginQueryEXT(GL_TIME_ELAPSED_EXT, mQueries[mNext]);
+                mTiming = true;
+            }
+
+            void end()
+            {
+                if (!mTiming)
+                    return;
+                glEndQueryEXT(GL_TIME_ELAPSED_EXT);
+                mIssued[mNext] = true;
+                mNext = (mNext + 1) % sQueries;
+                mTiming = false;
+            }
+
+            /// After the measurement: true when EASU is too slow here
+            bool tooSlow() const { return mTooSlow; }
+
+        private:
+            static constexpr int sQueries = 4;
+
+            void collect()
+            {
+                // a disjoint operation (a clock change) makes the results in flight meaningless
+                GLint disjoint = 0;
+                glGetIntegerv(GL_GPU_DISJOINT_EXT, &disjoint);
+                for (int i = 0; i < sQueries; ++i)
+                {
+                    if (!mIssued[i])
+                        continue;
+                    GLuint ready = 0;
+                    glGetQueryObjectuivEXT(mQueries[i], GL_QUERY_RESULT_AVAILABLE_EXT, &ready);
+                    if (!ready)
+                        continue;
+                    GLuint64 ns = 0;
+                    glGetQueryObjectui64vEXT(mQueries[i], GL_QUERY_RESULT_EXT, &ns);
+                    mIssued[i] = false;
+                    if (!disjoint)
+                        mSamples.push_back(ns / 1.0e6);
+                }
+                if (static_cast<int>(mSamples.size()) < sAutoSamples)
+                    return;
+                // the median: a frame that waited on something else does not decide it
+                std::nth_element(mSamples.begin(), mSamples.begin() + mSamples.size() / 2, mSamples.end());
+                const double ms = mSamples[mSamples.size() / 2];
+                mTooSlow = ms > sAutoBudgetMs;
+                mDeciding = false;
+                glDeleteQueriesEXT(sQueries, mQueries);
+                std::fill(std::begin(mIssued), std::end(mIssued), false);
+                Log(Debug::Info) << "Render scale: FSR 1 EASU takes " << ms << " ms a frame on this GPU, "
+                                 << (mTooSlow ? "over" : "within") << " the " << sAutoBudgetMs << " ms budget: "
+                                 << (mTooSlow ? "upscaled bilinearly from now on (upscaler fsr keeps EASU)"
+                                              : "EASU kept");
+            }
+
+            bool mDeciding = true;
+            bool mTiming = false;
+            bool mTooSlow = false;
+            int mFrames = 0;
+            int mNext = 0;
+            GLuint mQueries[sQueries] = {};
+            bool mIssued[sQueries] = {};
+            std::vector<double> mSamples;
+        };
+
         // Used on the draw thread only
         struct Passes
         {
@@ -143,12 +252,12 @@ namespace Alpha3
             osg::ref_ptr<osg::Uniform> mSharpenSize = new osg::Uniform("a3SourceSize", osg::Vec2f(1.f, 1.f));
             Target mChainOutput; // at the scene's size
             Target mWide; // at the window's size, between the upscale and the sharpening
+            AutoUpscaler mAuto;
 
             Passes()
             {
                 const RenderScaleSettings& s = renderScaleSettings();
-                mUpscale->setAttributeAndModes(
-                    makeProgram("#define A3_UPSCALE " + std::to_string(s.mUpscaler) + "\n", "Alpha3 upscale"));
+                setUpscaler(s.mUpscaler);
                 mUpscale->addUniform(new osg::Uniform("a3Source", 0));
                 mUpscale->addUniform(mUpscaleSize);
                 if (s.mSharpening != NoSharpening)
@@ -159,6 +268,12 @@ namespace Alpha3
                     mSharpen->addUniform(mSharpenSize);
                     mSharpen->addUniform(new osg::Uniform("a3Sharpness", s.mSharpness));
                 }
+            }
+
+            void setUpscaler(int upscaler)
+            {
+                mUpscale->setAttributeAndModes(
+                    makeProgram("#define A3_UPSCALE " + std::to_string(upscaler) + "\n", "Alpha3 upscale"));
             }
         };
 
@@ -221,7 +336,16 @@ namespace Alpha3
             screen.apply(state);
 
         p.mUpscaleSize->set(osg::Vec2f(source.getTextureWidth(), source.getTextureHeight()));
+        const bool measuring = renderScaleSettings().mAuto && p.mAuto.deciding();
+        if (measuring)
+            p.mAuto.begin();
         drawPass(state, *p.mUpscale, source, draw);
+        if (measuring)
+        {
+            p.mAuto.end();
+            if (!p.mAuto.deciding() && p.mAuto.tooSlow())
+                p.setUpscaler(Bilinear);
+        }
 
         if (sharpen)
         {
