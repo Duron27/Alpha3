@@ -37,6 +37,7 @@ namespace osg
     class GraphicsContext;
     class Node;
     class NodeVisitor;
+    class Shader;
     class State;
     class StateSet;
 }
@@ -176,6 +177,13 @@ namespace Alpha3
     bool injectExperimentalShaders(const osg::Shader& shader, std::string& source);
     // What the injection depends on, for the program binary cache's key
     const std::string& experimentalShaderStamp();
+
+    // ---- pointshadows.cpp: point light shadows. Their shader parts, added after the experimental ones (OpenGL ES, merged
+    // shaders); the texture unit of their maps, for the programs' sampler (-1: off); and what of them the program
+    // binary cache's key must know.
+    bool injectPointShadows(const osg::Shader& shader, std::string& source);
+    int pointShadowTextureUnit();
+    std::string pointShadowsShaderStamp();
     // The generated maps and the post-processing passes in the VFS, and the OpenMW settings that use them (called from
     // addKtxTextures, before the renderer reads its settings)
     void addExperimental(VFS::Manager& vfs);

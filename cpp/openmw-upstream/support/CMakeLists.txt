@@ -77,6 +77,7 @@ set(ALPHA3_EXPERIMENTAL_SOURCES
     ambientOcclusion a3_ambientocclusion.omwfx
     look a3_look.omwfx
     upscale upscale.glsl
+    pointShadows pointshadows.glsl
 )
 set(ALPHA3_EXPERIMENTAL_CPP "// Written by support/CMakeLists.txt from src/experimental/\n#include \"experimentalsources.hpp\"\n\nnamespace Alpha3::ExperimentalSources\n{\n")
 set(ALPHA3_EXPERIMENTAL_HPP "// Written by support/CMakeLists.txt from src/experimental/\n#pragma once\n#include <string_view>\n\nnamespace Alpha3::ExperimentalSources\n{\n")
@@ -121,6 +122,7 @@ set(ALPHA3_SUPPORT_SOURCES
     src/meshsplitting.cpp
     src/renderscale.cpp
     src/occlusionculling.cpp
+    src/pointshadows.cpp
     src/texturestreaming.cpp
     src/thermal.cpp
 )

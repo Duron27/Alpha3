@@ -82,6 +82,14 @@ namespace Alpha3
 
     // The #defines the parts are given (their settings), for the program binary cache's key
     std::string experimentalShaderDefines(const ExperimentalSettings& settings);
+
+    // Point light shadows (src/pointshadows.cpp): their library (src/experimental/pointshadows.glsl, given as library) and
+    // the lighting's changes, into the merged object and terrain shaders of OpenGL ES ("objects.vert (merged)", ...), where
+    // the lighting library is part of the shader. The vertex shaders leave the shadowed lights out, the fragment shaders
+    // add them back per pixel, shadowed. All or nothing: a shader with an anchor missing gets no part of it. lights: the
+    // most lights that cast shadows, 0 adds nothing.
+    bool injectPointShadowSource(const std::string& name, bool vertex, int lights, std::string_view library,
+        std::string& source, const MissingAnchor& missing, bool debug = false);
 }
 
 #endif

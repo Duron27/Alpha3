@@ -38,6 +38,16 @@ namespace osgUtil
     class CullVisitor;
 }
 
+namespace SceneUtil
+{
+    class LightManager;
+}
+
+namespace Shader
+{
+    class ShaderManager;
+}
+
 namespace VFS
 {
     class Manager;
@@ -85,6 +95,14 @@ namespace Alpha3
     // influence (in view space) is hidden behind the occlusion buffer's occluders, in the scene camera's cull. Always
     // false when off, and for other cameras (shadows, reflections).
     bool occlusionLightOccluded(osgUtil::CullVisitor& cullVisitor, const osg::BoundingSphere& viewSphere);
+
+    // Point light shadows ([Shadows] point light shadows, src/pointshadows.cpp): the closest point lights cast shadows,
+    // drawn with castMask from sceneRoot's children; their maps on textureUnit. Does nothing when off, on desktop GL and
+    // with clustered lighting.
+    void installPointShadows(SceneUtil::LightManager& sceneRoot, Shader::ShaderManager& shaderManager, int textureUnit,
+        unsigned int castMask);
+    // whether it is on in the settings (the unit is reserved only then)
+    int pointShadowLights();
 
     // Render scale ([Experimental] render scale, src/renderscale.cpp): the 3D scene drawn at this much of the window's
     // size (1: off, and then the calls below are not made), upscaled and sharpened onto the screen.

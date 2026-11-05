@@ -6,6 +6,7 @@
 #include <cctype>
 #include <locale>
 #include <sstream>
+#include <vector>
 
 namespace Alpha3
 {
@@ -331,6 +332,107 @@ namespace Alpha3
     std::string experimentalShaderDefines(const ExperimentalSettings& settings)
     {
         return defines(settings);
+    }
+
+    bool injectPointShadowSource(const std::string& name, bool vertex, int lights, std::string_view library,
+        std::string& source, const MissingAnchor& missing, bool debug)
+    {
+        if (lights <= 0 || name.find("(merged)") == std::string::npos)
+            return false;
+        const bool objects = endsWithName(name, vertex ? "objects.vert" : "objects.frag");
+        const bool terrain = endsWithName(name, vertex ? "terrain.vert" : "terrain.frag");
+        if (!objects && !terrain)
+            return false;
+
+        // lib/light/util.glsl
+        constexpr std::string_view signature
+            = "void calcPointLighting(PointLight light, vec3 viewDir, vec3 viewPos, vec3 viewNormal, float shininess, "
+              "inout vec3 diffuseLight, inout vec3 ambientLight, inout vec3 specularLight) {";
+        constexpr std::string_view diffuse
+            = "    diffuseLight += light.diffuse.xyz * lambert(viewNormal, lightDir, viewDir) * attenuation;";
+        constexpr std::string_view specular = "    specularLight += light.specular.xyz * specularIntensity(viewNormal, "
+                                              "viewDir, shininess, lightDir) * attenuation;";
+        // the per-object light lists (not clustered lighting), which the positions are matched in
+        constexpr std::string_view lightBuffer = "uniform mat4 LightBuffer[";
+        // lib/core/lighting_vertex_impl.glsl, once per lit vertex
+        constexpr std::string_view pointLighting
+            = "void pointLighting(vec2 screenCoord, vec3 viewDir, vec3 viewPos, vec3 viewNormal, float shininess, out "
+              "vec3 diffuseLight, out vec3 ambientLight, out vec3 specularLight)\n{";
+        // objects.frag and terrain.frag, the lighting the vertex shader made
+        constexpr std::string_view vertexLit = "    specular = mix(shadedSpecular, passSpecular, shadowing);";
+        constexpr std::string_view main = "void main()";
+
+        // every anchor first: all of it or none
+        std::vector<std::string_view> anchors{ signature, diffuse, specular, lightBuffer };
+        if (vertex)
+            anchors.push_back(pointLighting);
+        else
+            anchors.insert(anchors.end(), { vertexLit, main });
+        for (std::string_view anchor : anchors)
+        {
+            if (source.find(anchor) == std::string::npos)
+            {
+                if (missing)
+                    missing(name, anchor);
+                return false;
+            }
+        }
+
+        Injection injection(source, name, missing);
+        std::string text = "\n// ---- Alpha3 point light shadows\n#define A3_PS_MAX " + std::to_string(lights) + "\n";
+        text += vertex ? "#define A3_PS_VERTEX\n" : "#define A3_PS_FRAGMENT\n";
+        if (debug)
+            text += "#define A3_PS_DEBUG\n";
+        text += library;
+        injection.insert(signature, text, false);
+        injection.insert(signature, "    int a3ShadowIndex = a3PointShadowIndex(light.position.xyz);", true);
+
+        if (vertex)
+        {
+            // a shadowed light's light to the fragment shader on its own
+            injection.replace(diffuse,
+                "    vec3 a3Diffuse = light.diffuse.xyz * lambert(viewNormal, lightDir, viewDir) * attenuation;\n"
+                "    if (a3ShadowIndex >= 0)\n"
+                "        a3PassShadowDiffuse[a3ShadowIndex] += a3Diffuse;\n"
+                "    else\n"
+                "        diffuseLight += a3Diffuse;");
+            injection.replace(specular,
+                "    vec3 a3Specular = light.specular.xyz * specularIntensity(viewNormal, viewDir, shininess, lightDir) "
+                "* attenuation;\n"
+                "    if (a3ShadowIndex >= 0)\n"
+                "        a3PassShadowSpecular[a3ShadowIndex] += a3Specular;\n"
+                "    else\n"
+                "        specularLight += a3Specular;");
+            return injection.insert(pointLighting, "    a3PointShadowClear();", true);
+        }
+
+        // lit per pixel: shadowed where it is lit
+        injection.replace(diffuse,
+            "    float a3Shadow = a3ShadowIndex >= 0 ? a3PointShadow(a3ShadowIndex, viewPos, viewNormal) : 1.0;\n"
+            "    diffuseLight += light.diffuse.xyz * lambert(viewNormal, lightDir, viewDir) * attenuation * a3Shadow;");
+        injection.replace(specular,
+            "    specularLight += light.specular.xyz * specularIntensity(viewNormal, viewDir, shininess, lightDir) * "
+            "attenuation * a3Shadow;");
+        // lit per vertex: the shadowed lights the vertex shader passed on. Terrain has no specular strength (as
+        // terrain.vert); clampLighting is only there with per pixel lighting: up to 1 as the vertex shader's
+        // (clamped) lighting, or as far as it already went (not clamped).
+        const std::string strength = objects ? "material.specStrength" : "1.0";
+        injection.insert(vertexLit,
+            "    if (!skipLighting(material, passColor))\n"
+            "    {\n"
+            "        vec3 a3Diffuse, a3Specular;\n"
+            "        a3PointShadowLight(passViewPos, viewNormal, a3Diffuse, a3Specular);\n"
+            "        vec3 a3Lit = lighting + getDiffuseColor(material, passColor).xyz * a3Diffuse;\n"
+            "        lighting = min(a3Lit, max(lighting, vec3(1.0)));\n"
+            "        specular += getSpecularColor(material, passColor).xyz * a3Specular * "
+                + strength + ";\n"
+            "    }",
+            true);
+        return injection.insert(main,
+            "#if !PER_PIXEL_LIGHTING\n"
+            "void a3PointShadowLight(vec3 viewPos, vec3 viewNormal, out vec3 diffuseLight, out vec3 specularLight);\n"
+            "#endif",
+            false);
     }
 
     bool injectExperimentalSource(const std::string& name, bool vertex, const ExperimentalSettings& settings,

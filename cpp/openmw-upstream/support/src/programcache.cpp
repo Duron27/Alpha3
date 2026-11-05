@@ -219,6 +219,7 @@ namespace Alpha3
         hash.add(std::string(translatorStamp()));
         hash.add(std::string(converterStamp()));
         hash.add(experimentalShaderStamp());
+        hash.add(pointShadowsShaderStamp());
         hash.add(std::string(std::getenv("OPENMW_DISABLE_SPIRV") ? "nospirv" : "spirv"));
         hash.add(defines);
         for (unsigned i = 0; i < program.getNumShaders(); ++i)

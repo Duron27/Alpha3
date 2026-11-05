@@ -122,6 +122,7 @@ namespace Alpha3
         if (!isDesktopGlsl(source))
             return false;
         injectExperimentalShaders(shader, source);
+        injectPointShadows(shader, source);
         // OpenMW draws its shadow casters, and nothing else, with GL_DEPTH_CLAMP
         const bool depthClamp = shader.getName().find("shadowcasting.vert") != std::string::npos;
         source = translateGlsl(source, stage, glslTarget(), depthClamp);

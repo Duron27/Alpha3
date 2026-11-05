@@ -1,0 +1,62 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Thu, 5 Nov 2026 03:00:00 -0500
+Subject: [PATCH 23/23] Point light shadows: a texture unit and the install
+
+With [Shadows] point light shadows above 0 the rendering manager reserves a texture unit for the point lights' shadow
+maps (a new ShaderManager slot) and has the support library install them on the scene root
+(Alpha3::installPointShadows, support/src/pointshadows.cpp), which picks the closest lights, draws their cube maps
+from the objects, statics and actors and adds their part to the object and terrain shaders.
+---
+diff --git a/components/shader/shadermanager.hpp b/components/shader/shadermanager.hpp
+--- a/components/shader/shadermanager.hpp
++++ b/components/shader/shadermanager.hpp
+@@ -85,6 +85,7 @@
+             OpaqueColorTexture,
+             SkyTexture,
+             ShadowMaps,
++            PointShadowMaps,
+             SLOT_COUNT
+         };
+ 
+diff --git a/components/shader/shadermanager.cpp b/components/shader/shadermanager.cpp
+--- a/components/shader/shadermanager.cpp
++++ b/components/shader/shadermanager.cpp
+@@ -829,6 +829,9 @@
+             case Slot::ShadowMaps:
+                 slotDescr = "shadow maps";
+                 break;
++            case Slot::PointShadowMaps:
++                slotDescr = "point light shadow maps";
++                break;
+             default:
+                 slotDescr = "UNKNOWN";
+         }
+diff --git a/apps/openmw/mwrender/renderingmanager.cpp b/apps/openmw/mwrender/renderingmanager.cpp
+--- a/apps/openmw/mwrender/renderingmanager.cpp
++++ b/apps/openmw/mwrender/renderingmanager.cpp
+@@ -89,6 +89,8 @@
+ #include "vismask.hpp"
+ #include "water.hpp"
+ 
++#include <alpha3/upstream.hpp>
++
+ namespace
+ {
+     class LightManagerUpdateVisitor : public osg::NodeVisitor
+@@ -373,6 +375,12 @@
+         sceneRoot->getOrCreateStateSet()->addUniform(new osg::Uniform("alpha", 1.f));
+         sceneRoot->getOrCreateStateSet()->addUniform(new osg::Uniform("actorFade", 1.f));
+ 
++        if (Alpha3::pointShadowLights() > 0)
++            Alpha3::installPointShadows(*sceneRoot, mResourceSystem->getSceneManager()->getShaderManager(),
++                mResourceSystem->getSceneManager()->getShaderManager().reserveGlobalTextureUnits(
++                    Shader::ShaderManager::Slot::PointShadowMaps),
++                Mask_Object | Mask_Static | Mask_Actor | Mask_Player);
++
+         resourceSystem->getSceneManager()->setUpNormalsRTForStateSet(sceneRoot->getOrCreateStateSet(), true);
+ 
+         mFog = std::make_unique<FogManager>();
+-- 
+2.47.0
+

@@ -247,12 +247,20 @@ namespace Alpha3
                     std::vector<UniformInitializer> more = uniformInitializers(program.getShader(i)->getShaderSource());
                     initializers.insert(initializers.end(), more.begin(), more.end());
                 }
-                if (initializers.empty())
+                // the point light shadow maps' sampler (src/pointshadows.cpp) on its own unit, whatever draws with it
+                const int pointShadowUnit = pointShadowTextureUnit();
+                if (initializers.empty() && pointShadowUnit < 0)
                     return;
 
                 GLint previous = 0;
                 glGetIntegerv(GL_CURRENT_PROGRAM, &previous);
                 glUseProgram(handle);
+                if (pointShadowUnit >= 0)
+                {
+                    const GLint location = glGetUniformLocation(handle, "a3PointShadowMap");
+                    if (location >= 0)
+                        glUniform1i(location, pointShadowUnit);
+                }
                 for (const UniformInitializer& uniform : initializers)
                 {
                     const GLint location = glGetUniformLocation(handle, uniform.name.c_str());
