@@ -186,8 +186,10 @@ interface ModDao {
     @Query("SELECT * FROM mods WHERE modId = :modId")
     suspend fun getModsByModId(modId: String): List<ModDesc>
 
-    @Query("SELECT * FROM mods WHERE modId = :modId")
-    suspend fun getModById(modId: String): ModDesc?
+    // By slug, the table's key: a Nexus mod ID is shared by every list's row for that mod (a Wabbajack list's own
+    // "wj-<list>-<id>" rows, say), so a lookup by it can return another list's row
+    @Query("SELECT * FROM mods WHERE slug = :slug")
+    suspend fun getModBySlug(slug: String): ModDesc?
 
     @Query("SELECT * FROM mods WHERE modId = :modId")
     fun getModsByModIdFlow(modId: String): Flow<List<ModDesc>>

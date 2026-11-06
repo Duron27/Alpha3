@@ -208,7 +208,7 @@ suspend fun calculateAndUpdateSizeOnDisk(mod: ModDesc, info: DownloadInfo) {
             if (destination.exists()) {
                 // Stored as raw bytes, not as a formatted string
                 val totalExtractedSize = getTotalExtractedSize(destination)
-                updateDownloadInfoInDatabase(mod.modId, info.copy(extractedSizeBytes = totalExtractedSize))
+                updateDownloadInfoInDatabase(mod.slug, info.copy(extractedSizeBytes = totalExtractedSize))
                 Log.d("SizeCalculation", "Updated sizeOnDisk for ${mod.slug}: ${formatSize(totalExtractedSize / 1024)}")
             }
         } catch (e: CancellationException) {
@@ -220,11 +220,11 @@ suspend fun calculateAndUpdateSizeOnDisk(mod: ModDesc, info: DownloadInfo) {
 }
 
 /** Points the DB entry at the file that was really saved (MEGA picks its own file name). */
-suspend fun renameDownloadInfoFile(modId: String, oldFileName: String?, newFileName: String) {
+suspend fun renameDownloadInfoFile(slug: String, oldFileName: String?, newFileName: String) {
     withContext(Dispatchers.IO) {
         try {
             val modDao = ModDatabase.getDatabase().modDao()
-            val currentMod = modDao.getModById(modId) ?: return@withContext
+            val currentMod = modDao.getModBySlug(slug) ?: return@withContext
             val updatedInfo = currentMod.downloadInfo.map { info ->
                 if (info.fileName == oldFileName) info.copy(fileName = newFileName) else info
             }
@@ -232,29 +232,29 @@ suspend fun renameDownloadInfoFile(modId: String, oldFileName: String?, newFileN
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.e("DatabaseUpdate", "Failed to rename download file for mod $modId: ${e.message}", e)
+            Log.e("DatabaseUpdate", "Failed to rename download file for mod $slug: ${e.message}", e)
         }
     }
 }
 
-suspend fun updateDownloadInfoInDatabase(modId: String, updatedInfo: DownloadInfo) {
+suspend fun updateDownloadInfoInDatabase(slug: String, updatedInfo: DownloadInfo) {
     withContext(Dispatchers.IO) {
         try {
             val modDao = ModDatabase.getDatabase().modDao()
-            val currentMod = modDao.getModById(modId)
+            val currentMod = modDao.getModBySlug(slug)
             if (currentMod == null) {
-                Log.e("DatabaseUpdate", "Mod with ID $modId not found in database")
+                Log.e("DatabaseUpdate", "Mod $slug not found in database")
                 return@withContext
             }
             val updatedDownloadInfo = currentMod.downloadInfo.map { info ->
                 if (info.fileName == updatedInfo.fileName) updatedInfo else info
             }
             modDao.updateMod(currentMod.copy(downloadInfo = updatedDownloadInfo))
-            Log.d("DatabaseUpdate", "Successfully updated sizeOnDisk for mod $modId")
+            Log.d("DatabaseUpdate", "Successfully updated sizeOnDisk for mod $slug")
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.e("DatabaseUpdate", "Failed to update sizeOnDisk in database for mod $modId: ${e.message}", e)
+            Log.e("DatabaseUpdate", "Failed to update sizeOnDisk in database for mod $slug: ${e.message}", e)
         }
     }
 }

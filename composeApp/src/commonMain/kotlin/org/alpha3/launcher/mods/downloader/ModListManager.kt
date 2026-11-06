@@ -155,15 +155,26 @@ fun processModList(isPremium: Boolean): Flow<List<ModDesc>> = flow {
 
                 // The sync step above saved the links and file IDs it found to the database, not into this mod,
                 // so downloading from `mod` would find no link for a mod that was synced in this very run.
-                val freshMod = modDao.getModById(mod.modId) ?: mod
+                val freshMod = modDao.getModBySlug(mod.slug) ?: mod
 
                 if (onlySync) {
                     ModListManager.finishMod()
-                } else for (info in freshMod.downloadInfo.filter { it.sourceLists.contains(modList) }) {
-                    // A file that is already in the cache only needs unpacking, so it must not wait for a download slot
-                    val cachedAlready = File(modCache, "${info.fileName}").exists() || ExtractMarker.isDone(freshMod, info)
-                    if (cachedAlready) fetchFile(freshMod, info, isPremium)
-                    else downloadPermits.withPermit { fetchFile(freshMod, info, isPremium) }
+                } else {
+                    val files = freshMod.downloadInfo.filter { it.sourceLists.contains(modList) }
+                    // The run counted this mod's files before the sync; any it no longer has are counted off here, or
+                    // the run would wait for them forever
+                    val counted = mod.downloadInfo.count { it.sourceLists.contains(modList) }
+                    repeat(counted - files.size) {
+                        Log.w("ProcessModList", "${mod.slug}: a file on $modList is gone after the sync")
+                        ModListManager.fileFailed()
+                        ModListManager.finishMod()
+                    }
+                    for (info in files) {
+                        // A file that is already in the cache only needs unpacking, so it must not wait for a download slot
+                        val cachedAlready = File(modCache, "${info.fileName}").exists() || ExtractMarker.isDone(freshMod, info)
+                        if (cachedAlready) fetchFile(freshMod, info, isPremium)
+                        else downloadPermits.withPermit { fetchFile(freshMod, info, isPremium) }
+                    }
                 }
             }
         }.awaitAll()
@@ -334,7 +345,7 @@ private suspend fun fetchFile(mod: ModDesc, info: DownloadInfo, isPremium: Boole
                     // MEGA names the file itself, and the extractor opens CACHE/<fileName>,
                     // so point the DB entry at the file that was really saved.
                     val savedInfo = info.copy(fileName = file.name)
-                    renameDownloadInfoFile(mod.modId, info.fileName, file.name)
+                    renameDownloadInfoFile(mod.slug, info.fileName, file.name)
 
                     NexusInfo.downloadProgressMap[progressKey(mod, info)] = "${mod.name} Downloaded"
                     NexusInfo.downloadProgressPercentMap[progressKey(mod, info)] = 100
