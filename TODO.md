@@ -37,3 +37,22 @@ Against a ~26.7 ms frame (37.5 fps rendered, 1280x800, Balmora canal, ANGLE on T
 Ruled out by measurement: water reflection detail, groundcover, anisotropy, sunlight scattering and post-processing off
 are all within noise (~2 fps) at 1280x800. Qualcomm's own GLES driver is slower than ANGLE on Turnip (30.3 vs ~37.7) and
 has no DXT.
+6. **Depth/stencil format.** With reverse depth the scene uses GL_DEPTH32F_STENCIL8 (~5 bytes a pixel). Where nothing
+   reads stencil, use DEPTH32F alone, and invalidate depth before resolve (item 2) so it is never stored at all.
+   The scene colour is already RGBA8 (4 bytes), so a smaller colour format buys nothing there; the 16-bit float targets
+   are the ripple maps (item 0), the post-processing normals (RGB16F, only with normals on) and frame generation's
+   motion/luma textures (512x256 and 1024x1024 RGBA16F, small but checked against R11G11B10F/RG16F).
+7. **Fewer full-screen passes.** Merge the F2 passes (water, clouds, air, mist, sharpen) and the post-processing chain
+   where they can share one read/write of the screen; run blur/bloom-type passes at quarter resolution.
+8. **Textures.** Every texture mipmapped (a missing chain samples full size at distance), a distance mip bias, and
+   compressed formats for generated textures too.
+9. **Packed vertex data.** Half-float positions/UVs and 32-bit packed normals for terrain and groundcover.
+
+## Profiling and inspection tools
+
+- **CPU flamegraph:** `<profileable android:shell="true"/>` in the manifest lets the NDK's simpleperf profile the
+  release build (view in Firefox Profiler or as SVG). Perfetto adds GPU counters and the frame timeline.
+- **RenderDoc:** runs on the PC and captures over adb; attaches only to a debuggable build (or a rooted device). A
+  debuggable build variant just for captures would show every pass, texture and render target of a frame.
+- **What is in memory:** a support-library dump of every live GL texture and render target (name, size, format,
+  estimated bytes), OSG cache sizes and `dumpsys meminfo` totals, to a file or on the performance HUD.
