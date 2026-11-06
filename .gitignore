@@ -55,3 +55,4 @@ androidApp/native-symbols/
 *.jks
 .secure_files/
 /handoff/
+__pycache__/
