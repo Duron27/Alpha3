@@ -34,6 +34,18 @@ interface EngineBridge {
      * about two minutes. False where there is none.
      */
     fun startBenchmark(): Boolean = false
+
+    /**
+     * Asks the running game for the inspector's report (support/src/inspector.cpp): a frame is captured over the next
+     * few frames. False where there is none.
+     */
+    fun requestInspector(): Boolean = false
+
+    /** The inspector's report as JSON once it is made (handed over once); null until then. */
+    fun inspectorReport(): String? = null
+
+    /** The platform's own accounting of the process's memory, as label and value lines. */
+    fun platformMemory(): List<Pair<String, String>> = emptyList()
 }
 
 private object NoEngine : EngineBridge {
@@ -86,4 +98,7 @@ object Engine : EngineBridge {
     override fun keyCodeForChar(char: String): Int? = bridge.keyCodeForChar(char)
     override fun isMouseShown() = bridge.isMouseShown()
     override fun startBenchmark() = bridge.startBenchmark()
+    override fun requestInspector() = bridge.requestInspector()
+    override fun inspectorReport() = bridge.inspectorReport()
+    override fun platformMemory() = bridge.platformMemory()
 }

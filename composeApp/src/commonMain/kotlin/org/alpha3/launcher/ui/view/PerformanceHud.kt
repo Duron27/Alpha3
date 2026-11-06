@@ -80,7 +80,11 @@ fun PerformanceHud(
                     kotlinx.coroutines.delay(1000)
                 }
             }
-            Text(time.value, color = Color.White, fontSize = (fontSize * 1.4f).sp, fontWeight = FontWeight.Bold)
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(time.value, color = Color.White, fontSize = (fontSize * 1.4f).sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                // the info dump: what is in memory, what the frame draws and where the bandwidth goes
+                InspectorButton(fontSize)
+            }
 
             val clock = UIStateManager.gpuClockMhz
             HudLine(

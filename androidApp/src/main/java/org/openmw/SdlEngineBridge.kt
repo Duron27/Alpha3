@@ -1,7 +1,9 @@
 package org.openmw
 
+import android.app.ActivityManager
 import android.content.Context
 import android.hardware.input.InputManager
+import android.os.Debug
 import android.view.InputDevice.SOURCE_GAMEPAD
 import android.view.KeyCharacterMap
 import org.alpha3.launcher.engine.EngineBridge
@@ -39,6 +41,46 @@ class SdlEngineBridge(private val context: Context) : EngineBridge {
 
     override fun startBenchmark(): Boolean =
         runCatching { omwBenchmarkStart() }.isSuccess
+
+    // in libopenmw_upstream (support/src/inspector.cpp)
+    private external fun omwInspectorRequest(): Boolean
+    private external fun omwInspectorReport(): ByteArray?
+
+    override fun requestInspector(): Boolean =
+        runCatching { omwInspectorRequest() }.getOrDefault(false)
+
+    override fun inspectorReport(): String? =
+        runCatching { omwInspectorReport()?.decodeToString() }.getOrNull()
+
+    override fun platformMemory(): List<Pair<String, String>> {
+        val lines = mutableListOf<Pair<String, String>>()
+        fun mb(bytes: Long) = "%.1f MB".format(bytes / 1048576.0)
+        runCatching {
+            val info = Debug.MemoryInfo()
+            Debug.getMemoryInfo(info)
+            // Android's own split of the process (what dumpsys meminfo shows): graphics is what the GPU driver holds
+            for ((key, value) in info.memoryStats.toSortedMap()) {
+                val kb = value.toLongOrNull()
+                lines += key.removePrefix("summary.") to (if (kb != null) mb(kb * 1024) else value)
+            }
+        }
+        lines += "native heap allocated" to mb(Debug.getNativeHeapAllocatedSize())
+        lines += "native heap size" to mb(Debug.getNativeHeapSize())
+        val runtime = Runtime.getRuntime()
+        lines += "Java heap used" to mb(runtime.totalMemory() - runtime.freeMemory())
+        lines += "Java heap limit" to mb(runtime.maxMemory())
+        runCatching {
+            val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+            val memory = ActivityManager.MemoryInfo()
+            activityManager.getMemoryInfo(memory)
+            lines += "device RAM" to mb(memory.totalMem)
+            lines += "device RAM available" to mb(memory.availMem)
+            lines += "low memory threshold" to mb(memory.threshold)
+            lines += "low on memory now" to memory.lowMemory.toString()
+            lines += "app memory class" to "${activityManager.memoryClass} MB (large ${activityManager.largeMemoryClass} MB)"
+        }
+        return lines
+    }
 
     override fun isControllerConnected(): Boolean {
         if (UIStateManager.ignoreController) return false
