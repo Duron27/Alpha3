@@ -651,6 +651,19 @@ namespace Alpha3
             void operator()(unsigned a, unsigned b, unsigned c) { (*mF)(a, b, c); }
         };
 
+        // The scene's opaque bin: bin 0 all the way up to the render stage. The terrain's layers ask for bin 0 of the
+        // bin they are in, so the terrain seen through a door (Alpha3::makeDoorPortal, bin 5) is in a bin 0 too, but
+        // nested in that one: placed where the doorway leads, it is no wall of this side
+        bool inOpaqueBin(const osgUtil::RenderBin* bin)
+        {
+            if (bin == nullptr)
+                return false;
+            for (; bin != nullptr; bin = bin->getParent())
+                if (bin->getBinNum() != 0)
+                    return false;
+            return true;
+        }
+
         // An occluder into a buffer, its vertices taken to view space in [scratch]
         void drawOccluder(DepthBuffer& buffer, std::vector<osg::Vec3f>& scratch, const Occluder& occluder,
             const osg::Matrixf& toView)
@@ -880,10 +893,10 @@ namespace Alpha3
                     ++mRejects[RejectSmall];
                     return;
                 }
-                if (cv.getCurrentRenderBin() == nullptr || cv.getCurrentRenderBin()->getBinNum() != 0)
+                if (!inOpaqueBin(cv.getCurrentRenderBin()))
                 {
                     ++mRejects[RejectBin];
-                    return; // sorted (transparent), first person, water, ...
+                    return; // sorted (transparent), first person, water, what is seen through a door, ...
                 }
                 if (!mRecordedDrawables.insert(&drawable).second)
                     return; // the terrain adds a drawable once per layer

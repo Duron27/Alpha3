@@ -4,16 +4,21 @@
 // What the Android build of stock OpenMW calls in Alpha3's support library (cpp/openmw-upstream/support). Most of the
 // library works through OSG's RuntimeHooks and needs no call; these are the few places the engine has to ask.
 
+#include <array>
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <string>
 #include <string_view>
 #include <vector>
 
 #include <osg/BoundingSphere>
 #include <osg/Camera>
+#include <osg/Group>
 #include <osg/Matrixd>
 #include <osg/Texture>
+#include <osg/Vec3f>
+#include <osg/Vec4f>
 #include <osg/ref_ptr>
 
 struct SDL_Window;
@@ -103,6 +108,76 @@ namespace Alpha3
         unsigned int castMask);
     // whether it is on in the settings (the unit is reserved only then)
     int pointShadowLights();
+
+    // Seamless cells ([Cells] seamless cells, src/seamless.cpp): a change of cells in a game under way (a door, an
+    // exterior cell border) shows no loading screen and no fade.
+    bool seamlessCells();
+    // Seamless doors ([Cells] seamless doors): an exterior door to an interior opens onto it (OpenMW's
+    // mwworld/seamlessdoors.cpp picks the door and builds the interior's objects)
+    bool seamlessDoors();
+    // Cells loaded over frames ([Cells] load cells over frames, with seamless cells; OpenMW's scene.cpp): a change of
+    // cells in a game under way puts the objects within cellLoadNearRadius() of the player in the scene at once and the
+    // rest, nearest first, cellLoadBudget() milliseconds a frame
+    bool cellsOverFrames();
+    float cellLoadNearRadius();
+    float cellLoadBudget();
+    // How the other side of a door portal is lit: as an interior (no fog, the cell's colours), or as the exterior
+    // (the weather's colours, fogged out to the fill colour by fogEnd, where its objects stop)
+    struct DoorPortalLight
+    {
+        osg::Vec4f mAmbient;
+        osg::Vec4f mSun;
+        // what is seen where the other side has nothing: the sky outside, from mFill at the horizon (the fog's
+        // colour) up to mSky overhead; black inside
+        osg::Vec4f mFill;
+        osg::Vec4f mSky;
+        bool mFog = false;
+        float mFogStart = 0.f;
+        float mFogEnd = 0.f;
+        // the weather's clouds over the sky outside (none inside): its texture, the next weather's blended in, and how
+        // far they have scrolled
+        std::string mClouds;
+        std::string mNextClouds;
+        float mCloudBlend = 0.f;
+        float mCloudOffset = 0.f;
+    };
+    // The doorway (quad, world space, where the closed door was; front: its normal, toward the side it is seen from)
+    // and the other side placed behind it (otherToWorld): a group for the scene root (src/doorportal.cpp). With the
+    // camera in the doorway (depth: how near it), the doorway is drawn as a box that deep behind it, over all, so that
+    // the near plane does not cut it away as the player walks through.
+    // door: the closed door's model where it was (world space), its shape the doorway's when the camera is not in it
+    osg::ref_ptr<osg::Group> makeDoorPortal(const std::array<osg::Vec3f, 4>& quad, const osg::Vec3f& front, float depth,
+        osg::ref_ptr<osg::Node> door, osg::ref_ptr<osg::Node> other, const osg::Matrixd& otherToWorld,
+        const DoorPortalLight& light);
+    // the light changed (the weather outside)
+    void setDoorPortalLight(osg::Group& portal, const DoorPortalLight& light);
+
+    // A doorway the player walks through ([Cells] seamless doors): what their collision meets in it, the door and the
+    // wall behind it, does not stop them (OpenMW's mwphysics asks doorwayPassable of each wall it meets; floors still hold
+    // them up). Set from the main thread, asked from the physics threads.
+    struct Doorway
+    {
+        // the doorway's middle at the floor, its normal (horizontal) and the horizontal across it
+        osg::Vec3f mCentre;
+        osg::Vec3f mNormal;
+        osg::Vec3f mAcross;
+        float mHalfWidth = 0.f;
+        float mHeight = 0.f;
+        // how far in front of it and behind it
+        float mDepth = 0.f;
+    };
+    // actor: the player's collision object; nullptr: no doorway
+    void setDoorway(const void* actor, const Doorway* doorway);
+    bool doorwayPassable(const void* actor, const osg::Vec3f& point, const osg::Vec3f& normal);
+
+    // The weather outside while the player is in an interior (OpenMW's mwworld/weather.cpp), for the view out through
+    // a door: the fog's colour (the sky's, at the horizon), the sky's overhead, the ambient light and the sun's
+    void setOutsideLight(const osg::Vec4f& fog, const osg::Vec4f& sky, const osg::Vec4f& ambient, const osg::Vec4f& sun);
+    bool outsideLight(osg::Vec4f& fog, osg::Vec4f& sky, osg::Vec4f& ambient, osg::Vec4f& sun);
+    // and its clouds (textures, the blend between them, their speed), scrolled by duration as the sky scrolls them
+    void setOutsideClouds(const std::string& texture, const std::string& next, float blend, float speed, float duration);
+    // light's mClouds, mNextClouds, mCloudBlend and mCloudOffset
+    void outsideClouds(DoorPortalLight& light);
 
     // Render scale ([Experimental] render scale, src/renderscale.cpp): the 3D scene drawn at this much of the window's
     // size (1: off, and then the calls below are not made), upscaled and sharpened onto the screen.

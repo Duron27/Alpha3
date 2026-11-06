@@ -1,0 +1,1470 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Thu, 5 Nov 2026 10:00:00 -0500
+Subject: [PATCH 24/24] Seamless cells: no loading screen, and doors walked through
+
+With [Cells] seamless cells (Alpha3::seamlessCells) a cell change after the first goes without the fade and the
+loading screen: Scene takes a quiet loading listener for the cell grid, the terrain preload and the interior load.
+
+With [Cells] seamless doors (Alpha3::seamlessDoors) the player activating a door between an exterior and an interior
+(either way, or between interiors) opens it (MWWorld::SeamlessDoors, mwworld/seamlessdoors.cpp): the door's model
+swings open and the other side is drawn through the doorway (Alpha3::makeDoorPortal, support/src/doorportal.cpp),
+placed so that the door there sits on this one: the interior's objects, or the exterior's objects and terrain (the
+terrain's chunk manager, now reachable) lit by the weather outside (weather.cpp tells Alpha3 while in an interior).
+The player walks through the doorway: mwphysics' actor sweeps and unstuck let the door and the wall in it through
+(Alpha3::doorwayPassable). Crossing it they are in the other cell at the same place and heading, the door there open
+behind them.
+---
+diff --git a/apps/openmw/CMakeLists.txt b/apps/openmw/CMakeLists.txt
+--- a/apps/openmw/CMakeLists.txt
++++ b/apps/openmw/CMakeLists.txt
+@@ -76,7 +76,7 @@
+     )
+ 
+ add_openmw_dir (mwworld
+-    refdata worldimp scene globals class action nullaction actionteleport
++    refdata worldimp scene seamlessdoors globals class action nullaction actionteleport
+     containerstore actiontalk actiontake manualref player cellvisitors failedaction
+     worldmodel localscripts customdata inventorystore ptr actionopen actionread actionharvest
+     actionequip timestamp actionalchemy cellstore actionapply actioneat
+diff --git a/apps/openmw/mwclass/door.cpp b/apps/openmw/mwclass/door.cpp
+--- a/apps/openmw/mwclass/door.cpp
++++ b/apps/openmw/mwclass/door.cpp
+@@ -22,7 +22,9 @@
+ #include "../mwworld/customdata.hpp"
+ #include "../mwworld/esmstore.hpp"
+ #include "../mwworld/failedaction.hpp"
++#include "../mwworld/nullaction.hpp"
+ #include "../mwworld/ptr.hpp"
++#include "../mwworld/seamlessdoors.hpp"
+ #include "../mwworld/worldmodel.hpp"
+ 
+ #include "../mwgui/tooltips.hpp"
+@@ -192,6 +194,14 @@
+                 }
+                 else
+                 {
++                    // Alpha3: the door opened onto the interior, or the player walked in
++                    MWWorld::SeamlessDoors* seamless = MWWorld::SeamlessDoors::get();
++                    if (seamless && actor == MWMechanics::getPlayer() && seamless->activate(ptr))
++                    {
++                        std::unique_ptr<MWWorld::Action> action = std::make_unique<MWWorld::NullAction>();
++                        action->setSound(openSound);
++                        return action;
++                    }
+                     std::unique_ptr<MWWorld::Action> action = std::make_unique<MWWorld::ActionTeleport>(
+                         ptr.getCellRef().getDestCell(), ptr.getCellRef().getDoorDest(), true);
+                     action->setSound(openSound);
+diff --git a/apps/openmw/mwworld/scene.cpp b/apps/openmw/mwworld/scene.cpp
+--- a/apps/openmw/mwworld/scene.cpp
++++ b/apps/openmw/mwworld/scene.cpp
+@@ -1,5 +1,6 @@
+ #include "scene.hpp"
+ 
++#include <algorithm>
+ #include <atomic>
+ #include <chrono>
+ #include <limits>
+@@ -53,6 +54,8 @@
+ #include "player.hpp"
+ #include "worldimp.hpp"
+ 
++#include <alpha3/upstream.hpp>
++
+ namespace
+ {
+     using MWWorld::RotationOrder;
+@@ -104,6 +107,20 @@
+         return ptr.getClass().getCorrectedModel(ptr);
+     }
+ 
++    // Seamless cells ([Cells] seamless cells): a change of cells in a game under way shows no loading screen and no fade
++    bool seamlessChange(const MWWorld::CellStore* current)
++    {
++        return current != nullptr && Alpha3::seamlessCells();
++    }
++
++    Loading::Listener* cellChangeListener(const MWWorld::CellStore* current)
++    {
++        static Loading::Listener quiet;
++        if (seamlessChange(current))
++            return &quiet;
++        return MWBase::Environment::get().getWindowManager()->getLoadingScreen();
++    }
++
+     // Null node meant to distinguish objects that aren't in the scene from paged objects
+     // TODO: find a more clever way to make paging exclusion more reliable?
+     static osg::ref_ptr<SceneUtil::PositionAttitudeTransform> pagedNode = new SceneUtil::PositionAttitudeTransform;
+@@ -357,6 +374,8 @@
+             mChangeCellGridRequest.reset();
+         }
+ 
++        insertDeferredObjects();
++
+         mPreloader->updateCache(mRendering.getReferenceTime());
+         preloadCells(duration);
+     }
+@@ -366,6 +385,7 @@
+         if (mActiveCells.find(cell) == mActiveCells.end())
+             return;
+         Log(Debug::Info) << "Unloading cell " << cell->getCell()->getDescription();
++        std::erase_if(mDeferredObjects, [&](const std::pair<CellStore*, Ptr>& deferred) { return deferred.first == cell; });
+ 
+         ListAndResetObjectsVisitor visitor;
+ 
+@@ -496,6 +516,7 @@
+         if (respawn)
+             cell.respawn();
+ 
++        mLoadPosition = position;
+         insertCell(cell, loadingListener, navigatorUpdateGuard);
+ 
+         mRendering.addCell(&cell);
+@@ -670,7 +691,7 @@
+             cellsPositionsToLoad.emplace_back(x, y);
+         });
+ 
+-        Loading::Listener* loadingListener = MWBase::Environment::get().getWindowManager()->getLoadingScreen();
++        Loading::Listener* loadingListener = cellChangeListener(mCurrentCell);
+         Loading::ScopedLoad load(loadingListener);
+         loadingListener->setLabel("#{OMWEngine:LoadingExterior}");
+         loadingListener->setProgressRange(refsToLoad);
+@@ -932,11 +953,11 @@
+         std::string_view cellName, const ESM::Position& position, bool adjustPlayerPos, bool changeEvent)
+     {
+         CellStore& cell = mWorld.getWorldModel().getInterior(cellName);
+-        bool useFading = (mCurrentCell != nullptr);
++        bool useFading = (mCurrentCell != nullptr) && !seamlessChange(mCurrentCell);
+         if (useFading)
+             MWBase::Environment::get().getWindowManager()->fadeScreenOut(0.5);
+ 
+-        Loading::Listener* loadingListener = MWBase::Environment::get().getWindowManager()->getLoadingScreen();
++        Loading::Listener* loadingListener = cellChangeListener(mCurrentCell);
+         loadingListener->setLabel("#{OMWEngine:LoadingInterior}");
+         Loading::ScopedLoad load(loadingListener);
+ 
+@@ -947,7 +968,8 @@
+ 
+             if (adjustPlayerPos)
+                 mWorld.getPlayerPtr().getClass().adjustPosition(mWorld.getPlayerPtr(), true);
+-            MWBase::Environment::get().getWindowManager()->fadeScreenIn(0.5);
++            if (useFading)
++                MWBase::Environment::get().getWindowManager()->fadeScreenIn(0.5);
+             return;
+         }
+ 
+@@ -998,8 +1020,8 @@
+     void Scene::changeToExteriorCell(
+         const ESM::RefId& extCellId, const ESM::Position& position, bool adjustPlayerPos, bool changeEvent)
+     {
+-
+-        if (changeEvent)
++        const bool useFading = changeEvent && !seamlessChange(mCurrentCell);
++        if (useFading)
+             MWBase::Environment::get().getWindowManager()->fadeScreenOut(0.5);
+         CellStore& current = mWorld.getWorldModel().getCell(extCellId);
+ 
+@@ -1010,7 +1032,7 @@
+ 
+         changePlayerCell(current, position, adjustPlayerPos);
+ 
+-        if (changeEvent)
++        if (useFading)
+             MWBase::Environment::get().getWindowManager()->fadeScreenIn(0.5);
+ 
+         MWBase::Environment::get().getWorld()->getPostProcessor()->setExteriorFlag(true);
+@@ -1032,6 +1054,23 @@
+         const bool isInterior = !cell.isExterior();
+         InsertVisitor insertVisitor(cell, loadingListener);
+         cell.forEach(insertVisitor);
++        // Alpha3: with seamless cells, only what is near the player now and the rest over the next frames
++        if (seamlessChange(mCurrentCell) && Alpha3::cellsOverFrames())
++        {
++            const float near = Alpha3::cellLoadNearRadius();
++            const osg::Vec3f centre = mLoadPosition;
++            std::vector<MWWorld::Ptr>& toInsert = insertVisitor.mToInsert;
++            const auto far = std::stable_partition(toInsert.begin(), toInsert.end(), [&](const MWWorld::Ptr& ptr) {
++                return (ptr.getRefData().getPosition().asVec3() - centre).length2() < near * near;
++            });
++            for (auto it = far; it != toInsert.end(); ++it)
++                mDeferredObjects.emplace_back(&cell, *it);
++            toInsert.erase(far, toInsert.end());
++            std::stable_sort(mDeferredObjects.begin(), mDeferredObjects.end(), [&](const auto& a, const auto& b) {
++                return (a.second.getRefData().getPosition().asVec3() - centre).length2()
++                    < (b.second.getRefData().getPosition().asVec3() - centre).length2();
++            });
++        }
+         insertVisitor.insert(
+             [&](const MWWorld::Ptr& ptr) { addObject(ptr, mWorld, mPagedRefs, *mPhysics, mRendering); });
+         insertVisitor.insert([&](const MWWorld::Ptr& ptr) {
+@@ -1039,6 +1078,51 @@
+         });
+     }
+ 
++    void Scene::insertDeferredObjects()
++    {
++        if (mDeferredObjects.empty())
++            return;
++        const auto start = std::chrono::steady_clock::now();
++        const auto budget = std::chrono::duration<float, std::milli>(Alpha3::cellLoadBudget());
++        const bool isInterior = mCurrentCell && !mCurrentCell->isExterior();
++        auto navigatorUpdateGuard = mNavigator.makeUpdateGuard();
++        std::size_t done = 0;
++        while (done < mDeferredObjects.size() && (done == 0 || std::chrono::steady_clock::now() - start < budget))
++        {
++            auto& [cell, ptr] = mDeferredObjects[done++];
++            // gone, hidden, or put in the scene meanwhile (a script enabling it)
++            if (!mActiveCells.contains(cell) || ptr.mRef->isDeleted() || !ptr.getRefData().isEnabled()
++                || ptr.getRefData().getBaseNode() || mPhysics->getActor(ptr))
++                continue;
++            try
++            {
++                addObject(ptr, mWorld, mPagedRefs, *mPhysics, mRendering);
++                addObject(ptr, mWorld, *mPhysics, mLowestPoint, isInterior, mNavigator, navigatorUpdateGuard.get());
++            }
++            catch (const std::exception& e)
++            {
++                Log(Debug::Error) << "failed to render '" << ptr.getCellRef().getRefId() << "': " << e.what();
++            }
++        }
++        navigatorUpdateGuard.reset();
++        mDeferredObjects.erase(mDeferredObjects.begin(), mDeferredObjects.begin() + done);
++
++        static int frames = 0;
++        static std::size_t objects = 0;
++        static float milliseconds = 0.f;
++        ++frames;
++        objects += done;
++        milliseconds += std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - start).count();
++        if (mDeferredObjects.empty())
++        {
++            Log(Debug::Verbose) << "Cells loaded over frames: " << objects << " objects in " << frames << " frames, "
++                                << milliseconds << " ms";
++            frames = 0;
++            objects = 0;
++            milliseconds = 0.f;
++        }
++    }
++
+     void Scene::addObjectToScene(const Ptr& ptr)
+     {
+         const bool isInterior = mCurrentCell && !mCurrentCell->isExterior();
+@@ -1292,7 +1376,7 @@
+         if (!sync)
+             return;
+ 
+-        Loading::Listener* loadingListener = MWBase::Environment::get().getWindowManager()->getLoadingScreen();
++        Loading::Listener* loadingListener = cellChangeListener(mCurrentCell);
+         Loading::ScopedLoad load(loadingListener);
+ 
+         loadingListener->setLabel("#{OMWEngine:InitializingData}");
+diff --git a/apps/openmw/mwworld/scene.hpp b/apps/openmw/mwworld/scene.hpp
+--- a/apps/openmw/mwworld/scene.hpp
++++ b/apps/openmw/mwworld/scene.hpp
+@@ -121,6 +121,12 @@
+         void insertCell(CellStore& cell, Loading::Listener* loadingListener,
+             const DetourNavigator::UpdateGuard* navigatorUpdateGuard);
+ 
++        // Alpha3 ([Cells] load cells over frames): a cell's objects away from where the player arrives, put in the
++        // scene a few each frame, nearest first
++        osg::Vec3f mLoadPosition;
++        std::vector<std::pair<CellStore*, Ptr>> mDeferredObjects;
++        void insertDeferredObjects();
++
+         osg::Vec2i mCurrentGridCenter;
+ 
+         // Load and unload cells as necessary to create a cell grid with "X" and "Y" in the center
+diff --git a/apps/openmw/mwworld/worldimp.cpp b/apps/openmw/mwworld/worldimp.cpp
+--- a/apps/openmw/mwworld/worldimp.cpp
++++ b/apps/openmw/mwworld/worldimp.cpp
+@@ -1,4 +1,5 @@
+ #include "worldimp.hpp"
++#include "seamlessdoors.hpp"
+ 
+ #include <charconv>
+ #include <vector>
+@@ -506,6 +507,7 @@
+ 
+     World::~World()
+     {
++        SeamlessDoors::destroy();
+         // Must be cleared before mRendering is destroyed
+         if (mProjectileManager)
+             mProjectileManager->clear();
+@@ -1598,6 +1600,13 @@
+ 
+         mWorldScene->update(duration);
+ 
++        if (!paused)
++            if (SeamlessDoors* seamless = SeamlessDoors::get())
++            {
++                const MWPhysics::Actor* player = mPhysics->getActor(getPlayerPtr());
++                seamless->update(duration, player ? player->getCollisionObject() : nullptr);
++            }
++
+         mRendering->update(duration, paused);
+ 
+         updateSoundListener();
+diff --git a/apps/openmw/mwworld/weather.cpp b/apps/openmw/mwworld/weather.cpp
+--- a/apps/openmw/mwworld/weather.cpp
++++ b/apps/openmw/mwworld/weather.cpp
+@@ -1,5 +1,7 @@
+ #include "weather.hpp"
+ 
++#include <optional>
++
+ #include <components/esm/stringrefid.hpp>
+ #include <components/misc/resourcehelpers.hpp>
+ #include <components/resource/resourcesystem.hpp>
+@@ -12,6 +14,8 @@
+ #include <components/esm3/loadregn.hpp>
+ #include <components/esm3/weatherstate.hpp>
+ 
++#include <alpha3/upstream.hpp>
++
+ #include "../mwbase/environment.hpp"
+ #include "../mwbase/soundmanager.hpp"
+ #include "../mwbase/world.hpp"
+@@ -904,6 +908,21 @@
+         else
+             mNightDayMode = Default;
+ 
++        // Alpha3: the weather outside, also for the view out through an open door from inside
++        std::optional<MWRender::WeatherResult> outside;
++        if (isExterior || Alpha3::seamlessDoors())
++        {
++            outside = calculateWeatherResult(time.getHour(), duration, paused);
++            if (Alpha3::seamlessDoors())
++            {
++                Alpha3::setOutsideLight(
++                    outside->mFogColor, outside->mSkyColor, outside->mAmbientColor, outside->mSunColor);
++                Alpha3::setOutsideClouds(std::string(outside->mCloudTexture.value()),
++                    std::string(outside->mNextCloudTexture.value()), outside->mCloudBlendFactor,
++                    outside->mCloudSpeed, paused ? 0.f : duration);
++            }
++        }
++
+         if (!isExterior)
+         {
+             mRendering.setSkyEnabled(false);
+@@ -914,7 +933,7 @@
+             return;
+         }
+ 
+-        const MWRender::WeatherResult result = calculateWeatherResult(time.getHour(), duration, paused);
++        const MWRender::WeatherResult& result = *outside;
+ 
+         if (!paused)
+         {
+diff --git a/apps/openmw/mwphysics/actorconvexcallback.cpp b/apps/openmw/mwphysics/actorconvexcallback.cpp
+--- a/apps/openmw/mwphysics/actorconvexcallback.cpp
++++ b/apps/openmw/mwphysics/actorconvexcallback.cpp
+@@ -5,6 +5,8 @@
+ #include <BulletCollision/CollisionDispatch/btCollisionObject.h>
+ #include <components/misc/convert.hpp>
+ 
++#include <alpha3/upstream.hpp>
++
+ #include "projectile.hpp"
+ 
+ namespace MWPhysics
+@@ -91,6 +93,11 @@
+                 = convexResult.m_hitCollisionObject->getWorldTransform().getBasis() * convexResult.m_hitNormalLocal;
+         }
+ 
++        // Alpha3: the doorway of an open door the player walks through
++        if (Alpha3::doorwayPassable(
++                mMe, Misc::Convert::toOsg(convexResult.m_hitPointLocal), Misc::Convert::toOsg(hitNormalWorld)))
++            return 1;
++
+         // dot product of the motion vector against the collision contact normal
+         btScalar dotCollision = mMotion.dot(hitNormalWorld);
+         if (dotCollision <= mMinCollisionDot)
+diff --git a/apps/openmw/mwphysics/movementsolver.cpp b/apps/openmw/mwphysics/movementsolver.cpp
+--- a/apps/openmw/mwphysics/movementsolver.cpp
++++ b/apps/openmw/mwphysics/movementsolver.cpp
+@@ -7,6 +7,8 @@
+ #include <components/esm3/loadgmst.hpp>
+ #include <components/misc/convert.hpp>
+ 
++#include <alpha3/upstream.hpp>
++
+ #include "../mwbase/environment.hpp"
+ 
+ #include "../mwworld/esmstore.hpp"
+@@ -39,6 +41,7 @@
+         public:
+             explicit ContactCollectionCallback(const btCollisionObject& me, const osg::Vec3f& velocity)
+                 : mVelocity(Misc::Convert::toBullet(velocity))
++                , mMe(&me)
+             {
+                 m_collisionFilterGroup = me.getBroadphaseHandle()->m_collisionFilterGroup;
+                 m_collisionFilterMask = me.getBroadphaseHandle()->m_collisionFilterMask & ~CollisionType_Projectile;
+@@ -54,6 +57,10 @@
+                 // >=, that would break detection when not moving)
+                 if (contact.m_normalWorldOnB.dot(mVelocity) > 0.0)
+                     return 0.0;
++                // Alpha3: the doorway of an open door the player walks through
++                if (Alpha3::doorwayPassable(mMe, Misc::Convert::toOsg(contact.getPositionWorldOnB()),
++                        Misc::Convert::toOsg(contact.m_normalWorldOnB)))
++                    return 0.0;
+                 auto delta = contact.m_normalWorldOnB * -contact.m_distance1;
+                 mContactSum += delta;
+                 mMaxX = std::max(std::abs(delta.x()), mMaxX);
+@@ -82,6 +89,7 @@
+ 
+         protected:
+             btVector3 mVelocity;
++            const btCollisionObject* mMe;
+         };
+     }
+ 
+diff --git a/components/terrain/world.hpp b/components/terrain/world.hpp
+--- a/components/terrain/world.hpp
++++ b/components/terrain/world.hpp
+@@ -112,6 +112,9 @@
+ 
+         void setActiveGrid(const osg::Vec4i& grid) { mActiveGrid = grid; }
+ 
++        // Alpha3: the terrain seen out through an open door
++        ChunkManager* getChunkManager() { return mChunkManager.get(); }
++
+     protected:
+         Storage* mStorage;
+ 
+diff --git a/apps/openmw/mwworld/seamlessdoors.cpp b/apps/openmw/mwworld/seamlessdoors.cpp
+new file mode 100644
+--- /dev/null
++++ b/apps/openmw/mwworld/seamlessdoors.cpp
+@@ -0,0 +1,880 @@
++#include "seamlessdoors.hpp"
++
++#include <algorithm>
++#include <array>
++#include <chrono>
++#include <cmath>
++#include <limits>
++#include <set>
++
++#include <osg/ComputeBoundsVisitor>
++#include <osg/MatrixTransform>
++#include <osg/Quat>
++
++#include <alpha3/upstream.hpp>
++
++#include <components/debug/debuglog.hpp>
++#include <components/esm/util.hpp>
++#include <components/esm3/loadcrea.hpp>
++#include <components/esm3/loadligh.hpp>
++#include <components/esm3/loadnpc.hpp>
++#include <components/misc/constants.hpp>
++#include <components/misc/convert.hpp>
++#include <components/misc/resourcehelpers.hpp>
++#include <components/misc/strings/algorithm.hpp>
++#include <components/resource/resourcesystem.hpp>
++#include <components/resource/scenemanager.hpp>
++#include <components/sceneutil/lightcommon.hpp>
++#include <components/sceneutil/lightmanager.hpp>
++#include <components/sceneutil/lightutil.hpp>
++#include <components/sceneutil/positionattitudetransform.hpp>
++#include <components/sceneutil/util.hpp>
++#include <components/terrain/chunkmanager.hpp>
++#include <components/terrain/world.hpp>
++
++#include "../mwbase/environment.hpp"
++#include "../mwbase/world.hpp"
++#include "../mwmechanics/creaturestats.hpp"
++#include "../mwrender/animation.hpp"
++#include "../mwrender/animationpriority.hpp"
++#include "../mwrender/blendmask.hpp"
++#include "../mwrender/creatureanimation.hpp"
++#include "../mwrender/npcanimation.hpp"
++#include "../mwrender/renderingmanager.hpp"
++#include "../mwrender/vismask.hpp"
++
++#include "actionteleport.hpp"
++#include "cellstore.hpp"
++#include "class.hpp"
++#include "worldmodel.hpp"
++
++namespace MWWorld
++{
++    namespace
++    {
++        using Clock = std::chrono::steady_clock;
++
++        std::unique_ptr<SeamlessDoors> sInstance;
++
++        // how far out from the door the exterior is seen through it (its objects, then fog)
++        constexpr float sOutsideRadius = 7000.f;
++        // the most people and creatures seen through a door
++        constexpr std::size_t sMaxActors = 16;
++        // the doorway's depth for the camera in it, and for the player's collision
++        constexpr float sCameraDepth = 56.f;
++        constexpr float sPassDepth = 100.f;
++        // swung open or shut in this many seconds
++        constexpr float sSwingTime = 1.1f;
++        // building what is seen through the door: this much of each frame
++        constexpr auto sBuildBudget = std::chrono::microseconds(4000);
++
++        // A door's model: its bounding box in its own space (the transform left out) and that transform
++        struct DoorShape
++        {
++            osg::BoundingBox mBox;
++            osg::Matrixd mMatrix;
++            // the door's thin side along x, else along y
++            bool mThinX = false;
++
++            explicit DoorShape(SceneUtil::PositionAttitudeTransform& node)
++            {
++                osg::ComputeBoundsVisitor bounds;
++                for (unsigned int i = 0; i < node.getNumChildren(); ++i)
++                    node.getChild(i)->accept(bounds);
++                mBox = bounds.getBoundingBox();
++                node.computeLocalToWorldMatrix(mMatrix, nullptr);
++                mThinX = mBox.xMax() - mBox.xMin() < mBox.yMax() - mBox.yMin();
++            }
++
++            // its middle at the floor (doors' heights differ: one's floor goes on the other's)
++            osg::Vec3f floorCentre() const
++            {
++                return osg::Vec3f(mBox.center().x(), mBox.center().y(), mBox.zMin()) * mMatrix;
++            }
++
++            osg::Vec3f centre() const { return mBox.center() * mMatrix; }
++
++            // its normal, horizontal, toward the side that the point is on
++            osg::Vec3f normalToward(const osg::Vec3f& point) const
++            {
++                const osg::Vec3f local = mThinX ? osg::Vec3f(1, 0, 0) : osg::Vec3f(0, 1, 0);
++                osg::Vec3f normal = (mBox.center() + local) * mMatrix - centre();
++                normal.z() = 0.f;
++                normal.normalize();
++                if ((point - centre()) * normal < 0.f)
++                    normal = -normal;
++                return normal;
++            }
++
++            // a point of the door's middle plane: along its width, at a height (its own space)
++            osg::Vec3f onPlane(float along, float z) const
++            {
++                const float mid = mThinX ? mBox.center().x() : mBox.center().y();
++                const osg::Vec3f local = mThinX ? osg::Vec3f(mid, along, z) : osg::Vec3f(along, mid, z);
++                return local * mMatrix;
++            }
++            float alongMin() const { return mThinX ? mBox.yMin() : mBox.xMin(); }
++            float alongMax() const { return mThinX ? mBox.yMax() : mBox.xMax(); }
++            float thickness() const { return mThinX ? mBox.xMax() - mBox.xMin() : mBox.yMax() - mBox.yMin(); }
++        };
++
++        float heading(const osg::Vec3f& v)
++        {
++            return std::atan2(v.y(), v.x());
++        }
++
++        // a door's leaf, hinged on one side, opening toward front
++        SeamlessDoors::Leaf makeLeaf(SceneUtil::PositionAttitudeTransform& node, const osg::Vec3f& front)
++        {
++            const DoorShape shape(node);
++            SeamlessDoors::Leaf leaf;
++            leaf.mNode = &node;
++            leaf.mClosed = node.getAttitude();
++            leaf.mClosedPosition = node.getPosition();
++            leaf.mHinge = shape.onPlane(shape.alongMin(), shape.mBox.center().z());
++            const osg::Vec3f turned
++                = osg::Quat(osg::PI_2f, osg::Vec3f(0, 0, -1)) * (shape.centre() - leaf.mHinge) + leaf.mHinge;
++            leaf.mSign = (turned - shape.centre()) * front >= 0.f ? 1.f : -1.f;
++            return leaf;
++        }
++
++        void poseLeaf(const SeamlessDoors::Leaf& leaf, float swing)
++        {
++            if (!leaf.mNode)
++                return;
++            // eased in and out
++            const float eased = swing * swing * (3.f - 2.f * swing);
++            const osg::Quat turn(leaf.mSign * eased * osg::PI_2f, osg::Vec3f(0, 0, -1));
++            leaf.mNode->setAttitude(leaf.mClosed * turn);
++            leaf.mNode->setPosition(turn * (leaf.mClosedPosition - leaf.mHinge) + leaf.mHinge);
++        }
++
++        bool shown(const Ptr& ptr)
++        {
++            return ptr.getRefData().isEnabled() && ptr.getCellRef().getCount() > 0
++                && !Misc::ResourceHelpers::isHiddenMarker(ptr.getCellRef().getRefId());
++        }
++
++        // An object for the view through the door: its model where the cell has it, with its light
++        osg::ref_ptr<SceneUtil::PositionAttitudeTransform> makeObject(
++            const Ptr& ptr, Resource::SceneManager& sceneManager)
++        {
++            const VFS::Path::Normalized model = ptr.getClass().getCorrectedModel(ptr);
++            if (model.empty())
++                return nullptr;
++            osg::ref_ptr<osg::Node> instance;
++            try
++            {
++                instance = sceneManager.getInstance(model);
++            }
++            catch (const std::exception& e)
++            {
++                Log(Debug::Warning) << "Seamless doors: " << model << ": " << e.what();
++                return nullptr;
++            }
++            const ESM::Position& pos = ptr.getRefData().getPosition();
++            osg::ref_ptr<SceneUtil::PositionAttitudeTransform> node = new SceneUtil::PositionAttitudeTransform;
++            node->setPosition(pos.asVec3());
++            node->setAttitude(Misc::Convert::makeOsgQuat(pos));
++            const float scale = ptr.getCellRef().getScale();
++            node->setScale(osg::Vec3f(scale, scale, scale));
++            node->setNodeMask(MWRender::Mask_Object);
++            node->addChild(instance);
++            if (ptr.getType() == ESM::Light::sRecordId)
++                SceneUtil::addLight(
++                    node, SceneUtil::LightCommon(*ptr.get<ESM::Light>()->mBase), MWRender::Mask_Lighting, false);
++            node->addCullCallback(new SceneUtil::LightListCallback);
++            return node;
++        }
++
++        // A leaf's back: the model of the door on the other side (place: from its space to the leaf's), where it is, back
++        // to back with the leaf (the two doors' fronts face away from each other). Added with the leaf closed
++        osg::ref_ptr<osg::Node> addBack(SceneUtil::PositionAttitudeTransform& leaf, const Ptr& back,
++            const osg::Matrixd& place, Resource::SceneManager& sceneManager)
++        {
++            osg::ref_ptr<SceneUtil::PositionAttitudeTransform> model = makeObject(back, sceneManager);
++            if (!model)
++                return nullptr;
++            osg::Matrixd backMatrix;
++            model->computeLocalToWorldMatrix(backMatrix, nullptr);
++            osg::Matrixd leafMatrix;
++            leaf.computeLocalToWorldMatrix(leafMatrix, nullptr);
++            osg::ref_ptr<osg::MatrixTransform> transform
++                = new osg::MatrixTransform(backMatrix * place * osg::Matrixd::inverse(leafMatrix));
++            transform->setName("Alpha3 door back");
++            for (unsigned int i = 0; i < model->getNumChildren(); ++i)
++                transform->addChild(model->getChild(i));
++            leaf.addChild(transform);
++            return transform;
++        }
++
++        // A person or creature for the view through the door, idling where the cell has them (not in the scene:
++        // their cell is not loaded)
++        std::unique_ptr<MWRender::Animation> makeActor(
++            const Ptr& ptr, Resource::ResourceSystem& resourceSystem, osg::Group& parent)
++        {
++            if (ptr.getRefData().getBaseNode())
++                return nullptr;
++            const ESM::Position& pos = ptr.getRefData().getPosition();
++            osg::ref_ptr<SceneUtil::PositionAttitudeTransform> base = new SceneUtil::PositionAttitudeTransform;
++            base->setPosition(pos.asVec3());
++            base->setAttitude(osg::Quat(pos.rot[2], osg::Vec3f(0, 0, -1)));
++            const float scale = ptr.getCellRef().getScale();
++            osg::Vec3f scaleVec(scale, scale, scale);
++            ptr.getClass().adjustScale(ptr, scaleVec, true);
++            base->setScale(scaleVec);
++            base->setNodeMask(MWRender::Mask_Actor);
++            std::unique_ptr<MWRender::Animation> animation;
++            try
++            {
++                if (ptr.getType() == ESM::NPC::sRecordId)
++                    animation = std::make_unique<MWRender::NpcAnimation>(ptr, base, &resourceSystem, true);
++                else if (ptr.getType() == ESM::Creature::sRecordId)
++                {
++                    const VFS::Path::Normalized model = ptr.getClass().getCorrectedModel(ptr);
++                    if (model.empty())
++                        return nullptr;
++                    const VFS::Path::Normalized animationMesh
++                        = Misc::ResourceHelpers::correctActorModelPath(model, resourceSystem.getVFS());
++                    const bool animated
++                        = !(animationMesh == model && Misc::StringUtils::ciEndsWith(animationMesh.value(), ".nif"));
++                    // a creature's animation is built on its base node, which the cell has not given it
++                    ptr.getRefData().setBaseNode(base);
++                    animation = std::make_unique<MWRender::CreatureAnimation>(
++                        ptr, std::string(animationMesh.value()), &resourceSystem, animated);
++                    ptr.getRefData().setBaseNode(nullptr);
++                }
++                else
++                    return nullptr;
++            }
++            catch (const std::exception& e)
++            {
++                ptr.getRefData().setBaseNode(nullptr);
++                Log(Debug::Warning) << "Seamless doors: " << ptr.getCellRef().getRefId() << ": " << e.what();
++                return nullptr;
++            }
++            if (animation->hasAnimation("idle"))
++                animation->play("idle", MWRender::AnimPriority(1), MWRender::BlendMask_All, false, 1.f, "loop start",
++                    "loop stop", 0.f, std::numeric_limits<uint32_t>::max(), true);
++            parent.addChild(base);
++            return animation;
++        }
++
++        // The cells of a side: an interior, or the exterior's cells around a point
++        std::vector<CellStore*> sideCells(CellStore& cell, const osg::Vec3f& around)
++        {
++            std::vector<CellStore*> cells;
++            if (cell.getCell()->isExterior())
++            {
++                WorldModel& worldModel = *MWBase::Environment::get().getWorldModel();
++                const ESM::RefId worldspace = cell.getCell()->getWorldSpace();
++                const ESM::ExteriorCellLocation centre
++                    = ESM::positionToExteriorCellLocation(around.x(), around.y(), worldspace);
++                for (int x = -1; x <= 1; ++x)
++                    for (int y = -1; y <= 1; ++y)
++                        cells.push_back(&worldModel.getExterior(
++                            ESM::ExteriorCellLocation(centre.mX + x, centre.mY + y, worldspace)));
++            }
++            else
++                cells.push_back(&cell);
++            for (CellStore* c : cells)
++                if (c->getState() != CellStore::State_Loaded)
++                    c->load();
++            return cells;
++        }
++
++        // What of a side is to be built, nearest the door first: its objects but the door (the leaf, if any, first),
++        // outside its ground, or its people and creatures (actors)
++        std::unique_ptr<SeamlessDoors::Content> gather(
++            const std::vector<CellStore*>& cells, const Ptr& door, bool leaf, bool actors)
++        {
++            auto content = std::make_unique<SeamlessDoors::Content>();
++            content->mGroup = new osg::Group;
++            const osg::Vec3f centre = door.getRefData().getPosition().asVec3();
++            const bool outside = cells.front()->getCell()->isExterior();
++            auto inReach = [&](const Ptr& ptr) {
++                osg::Vec3f offset = ptr.getRefData().getPosition().asVec3() - centre;
++                offset.z() = 0.f;
++                return !outside || offset.length2() < sOutsideRadius * sOutsideRadius;
++            };
++            for (CellStore* cell : cells)
++                cell->forEach([&](const Ptr& ptr) {
++                    if (ptr == door || !shown(ptr) || !inReach(ptr))
++                        return true;
++                    if (ptr.getClass().isActor())
++                    {
++                        if (actors && !ptr.getClass().getCreatureStats(ptr).isDead())
++                            content->mActors.push_back(ptr);
++                    }
++                    else if (!actors)
++                        content->mObjects.push_back(ptr);
++                    return true;
++                });
++            auto byDistance = [&](std::vector<Ptr>& list) {
++                std::sort(list.begin(), list.end(), [&](const Ptr& a, const Ptr& b) {
++                    return (a.getRefData().getPosition().asVec3() - centre).length2()
++                        < (b.getRefData().getPosition().asVec3() - centre).length2();
++                });
++            };
++            byDistance(content->mObjects);
++            byDistance(content->mActors);
++            if (content->mActors.size() > sMaxActors)
++                content->mActors.resize(sMaxActors);
++            // built from the back of the lists
++            std::reverse(content->mObjects.begin(), content->mObjects.end());
++            std::reverse(content->mActors.begin(), content->mActors.end());
++            if (leaf)
++            {
++                content->mLeafDoor = door;
++                content->mObjects.push_back(door);
++            }
++            if (outside && !actors)
++            {
++                const ESM::RefId worldspace = cells.front()->getCell()->getWorldSpace();
++                content->mCellSize = static_cast<float>(ESM::getCellSize(worldspace));
++                for (CellStore* cell : cells)
++                    content->mChunks.emplace_back(
++                        cell->getCell()->getGridX() + 0.5f, cell->getCell()->getGridY() + 0.5f);
++            }
++            return content;
++        }
++
++        // Some of it built, until the deadline (one thing at least)
++        void build(SeamlessDoors::Content& content, Clock::time_point deadline)
++        {
++            MWRender::RenderingManager& rendering = *MWBase::Environment::get().getWorld()->getRenderingManager();
++            Resource::ResourceSystem& resources = *rendering.getResourceSystem();
++            do
++            {
++                if (!content.mObjects.empty())
++                {
++                    const Ptr ptr = content.mObjects.back();
++                    content.mObjects.pop_back();
++                    const bool otherModel = ptr == content.mLeafDoor && !content.mLeafModel.isEmpty();
++                    osg::ref_ptr<SceneUtil::PositionAttitudeTransform> node
++                        = makeObject(otherModel ? content.mLeafModel : ptr, *resources.getSceneManager());
++                    if (!node)
++                        continue;
++                    if (otherModel)
++                    {
++                        node->setPosition(node->getPosition() * content.mLeafPlace);
++                        node->setAttitude(node->getAttitude() * content.mLeafPlace.getRotate());
++                    }
++                    content.mGroup->addChild(node);
++                    content.mBuilt.emplace_back(ptr, node);
++                    if (ptr == content.mLeafDoor)
++                    {
++                        content.mLeaf = makeLeaf(*node, content.mLeafFront);
++                        // the door there on its back, seen once the player is through
++                        if (otherModel)
++                            content.mLeaf.mBack = addBack(*node, ptr, osg::Matrixd(), *resources.getSceneManager());
++                    }
++                }
++                else if (!content.mChunks.empty())
++                {
++                    const osg::Vec2f centre = content.mChunks.back();
++                    content.mChunks.pop_back();
++                    Terrain::World* terrain = rendering.getTerrain();
++                    if (!terrain || !terrain->getChunkManager())
++                        continue;
++                    try
++                    {
++                        const osg::Vec3f place3(centre * content.mCellSize, 0.f);
++                        osg::ref_ptr<osg::Node> chunk
++                            = terrain->getChunkManager()->getChunk(1.f, centre, 0, 0, true, place3, false);
++                        if (!chunk)
++                            continue;
++                        osg::ref_ptr<SceneUtil::PositionAttitudeTransform> place
++                            = new SceneUtil::PositionAttitudeTransform;
++                        place->setPosition(place3);
++                        place->addChild(chunk);
++                        content.mGroup->addChild(place);
++                        content.mTerrain.push_back(place);
++                    }
++                    catch (const std::exception& e)
++                    {
++                        Log(Debug::Warning) << "Seamless doors: terrain: " << e.what();
++                    }
++                }
++                else if (!content.mActors.empty())
++                {
++                    const Ptr ptr = content.mActors.back();
++                    content.mActors.pop_back();
++                    if (std::unique_ptr<MWRender::Animation> animation = makeActor(ptr, resources, *content.mGroup))
++                    {
++                        content.mAnimations.push_back(std::move(animation));
++                        content.mBuilt.emplace_back(ptr, content.mGroup->getChild(content.mGroup->getNumChildren() - 1));
++                    }
++                }
++            } while (!content.done() && Clock::now() < deadline);
++        }
++
++        // how long a stand-in is kept at most
++        constexpr float sStandInTime = 30.f;
++
++        // the light outside, as the weather has it
++        Alpha3::DoorPortalLight outsideLight()
++        {
++            Alpha3::DoorPortalLight light;
++            osg::Vec4f fog(0.6f, 0.62f, 0.65f, 1.f);
++            osg::Vec4f sky(0.4f, 0.55f, 0.75f, 1.f);
++            osg::Vec4f ambient(0.4f, 0.4f, 0.4f, 1.f);
++            osg::Vec4f sun(0.6f, 0.6f, 0.55f, 1.f);
++            Alpha3::outsideLight(fog, sky, ambient, sun);
++            light.mAmbient = ambient;
++            light.mSun = sun;
++            light.mFill = fog;
++            light.mSky = sky;
++            light.mFog = true;
++            light.mFogStart = sOutsideRadius * 0.45f;
++            light.mFogEnd = sOutsideRadius;
++            Alpha3::outsideClouds(light);
++            return light;
++        }
++
++        Alpha3::DoorPortalLight interiorLight(const Cell& cell)
++        {
++            Alpha3::DoorPortalLight light;
++            light.mAmbient = SceneUtil::colourFromRGB(cell.getMood().mAmbiantColor);
++            light.mSun = SceneUtil::colourFromRGB(cell.getMood().mDirectionalColor);
++            light.mFill = osg::Vec4f(0.f, 0.f, 0.f, 1.f);
++            light.mSky = light.mFill;
++            return light;
++        }
++
++        float milliseconds(Clock::time_point since)
++        {
++            return std::chrono::duration<float, std::milli>(Clock::now() - since).count();
++        }
++    }
++
++    SeamlessDoors::Content::~Content()
++    {
++        // the animations before the group their nodes are in
++        mAnimations.clear();
++    }
++
++    SeamlessDoors::SeamlessDoors() = default;
++
++    SeamlessDoors::~SeamlessDoors()
++    {
++        dropStandIn();
++    }
++
++    SeamlessDoors* SeamlessDoors::get()
++    {
++        if (!Alpha3::seamlessDoors())
++            return nullptr;
++        if (!sInstance)
++            sInstance = std::make_unique<SeamlessDoors>();
++        return sInstance.get();
++    }
++
++    void SeamlessDoors::destroy()
++    {
++        Alpha3::setDoorway(nullptr, nullptr);
++        sInstance.reset();
++    }
++
++    bool SeamlessDoors::activate(const Ptr& door)
++    {
++        if (mPortal && door == mDoor)
++        {
++            // open: shut it; shutting: open it again
++            mOpening = !mOpening;
++            return true;
++        }
++        close();
++        return open(door, false, nullptr);
++    }
++
++    bool SeamlessDoors::open(const Ptr& door, bool alreadyOpen, std::unique_ptr<Content> prebuilt)
++    {
++        const Clock::time_point start = Clock::now();
++        MWBase::World& world = *MWBase::Environment::get().getWorld();
++        WorldModel& worldModel = *MWBase::Environment::get().getWorldModel();
++        auto fail = [](const char* why) {
++            Log(Debug::Verbose) << "Seamless doors: a teleport instead, " << why;
++            return false;
++        };
++        CellStore* here = door.getCell();
++        auto* doorNode = dynamic_cast<SceneUtil::PositionAttitudeTransform*>(door.getRefData().getBaseNode());
++        if (!doorNode)
++            return fail("the door has no transform");
++        CellStore* dest = worldModel.findCell(door.getCellRef().getDestCell());
++        if (!dest)
++            return fail("no destination");
++        const bool hereOutside = here->getCell()->isExterior();
++        const bool outside = dest->getCell()->isExterior();
++        if (hereOutside && outside)
++            return fail("from an exterior to an exterior");
++        const ESM::Position destination = door.getCellRef().getDoorDest();
++        const std::vector<CellStore*> cells = sideCells(*dest, destination.asVec3());
++
++        // the door there that leads back through this one: its destination nearest this door
++        const osg::Vec3f doorPosition = door.getRefData().getPosition().asVec3();
++        Ptr other;
++        float otherDistance = 1024.f * 1024.f;
++        for (CellStore* cell : cells)
++            cell->forEach([&](const Ptr& ptr) {
++                if (!ptr.getClass().isDoor() || !ptr.getCellRef().getTeleport())
++                    return true;
++                if (hereOutside)
++                {
++                    const CellStore* back = worldModel.findCell(ptr.getCellRef().getDestCell());
++                    if (!back || !back->getCell()->isExterior()
++                        || back->getCell()->getWorldSpace() != here->getCell()->getWorldSpace())
++                        return true;
++                }
++                else if (ptr.getCellRef().getDestCell() != here->getCell()->getId())
++                    return true;
++                const float distance = (ptr.getCellRef().getDoorDest().asVec3() - doorPosition).length2();
++                if (distance < otherDistance)
++                {
++                    otherDistance = distance;
++                    other = ptr;
++                }
++                return true;
++            });
++        if (other.isEmpty())
++            return fail("no door back near this one");
++        Resource::SceneManager& sceneManager = *world.getRenderingManager()->getResourceSystem()->getSceneManager();
++        const osg::ref_ptr<SceneUtil::PositionAttitudeTransform> otherModel = makeObject(other, sceneManager);
++        if (!otherModel)
++            return fail("the door back has no model");
++
++        // The other side placed so that its door is on this one, the two facing each other's way: walking in through
++        // this door is walking out of that one
++        const DoorShape shape(*doorNode);
++        const DoorShape otherShape(*otherModel);
++        // each door's front: where the other door's destination is (on this side, where one comes out of it)
++        mNormal = shape.normalToward(other.getCellRef().getDoorDest().asVec3());
++        const osg::Vec3f otherNormal = otherShape.normalToward(destination.asVec3());
++        // turned about z so that this front goes to the other door's back
++        const float turn = heading(-otherNormal) - heading(mNormal);
++        mYaw = -turn;
++        mToOther = osg::Matrixd::translate(-shape.floorCentre())
++            * osg::Matrixd::rotate(osg::Quat(turn, osg::Vec3f(0, 0, 1)))
++            * osg::Matrixd::translate(otherShape.floorCentre());
++
++        // the doorway: the closed door's middle plane, a little bigger
++        const float a0 = shape.alongMin();
++        const float a1 = shape.alongMax();
++        const float grow = (a1 - a0) * 0.03f;
++        const std::array<osg::Vec3f, 4> quad{ shape.onPlane(a0 - grow, shape.mBox.zMin()),
++            shape.onPlane(a1 + grow, shape.mBox.zMin()), shape.onPlane(a1 + grow, shape.mBox.zMax() + grow),
++            shape.onPlane(a0 - grow, shape.mBox.zMax() + grow) };
++        mCentre = (quad[0] + quad[1]) * 0.5f;
++        mAcross = quad[1] - quad[0];
++        mAcross.z() = 0.f;
++        mHalfWidth = mAcross.normalize() * 0.5f;
++        mHeight = quad[3].z() - quad[0].z();
++
++        // the doorway's shape: the closed door's model where it is
++        osg::ref_ptr<osg::MatrixTransform> closedDoor = new osg::MatrixTransform(shape.mMatrix);
++        try
++        {
++            closedDoor->addChild(sceneManager.getInstance(door.getClass().getCorrectedModel(door)));
++        }
++        catch (const std::exception&)
++        {
++            return fail("the door has no model");
++        }
++
++        // What is seen through it, built a little each frame, the door there first: from an exterior this door swings
++        // into the interior (a copy of it there, seen through the doorway), from an interior this one swings in. Its people
++        // and creatures are not built ahead (they are in the scene until the player is through).
++        mContent = prebuilt ? std::move(prebuilt) : gather(cells, other, hereOutside, false);
++        mContent->mLeafFront = otherNormal;
++        if (hereOutside)
++        {
++            mContent->mLeafModel = door;
++            mContent->mLeafPlace = mToOther;
++        }
++        mContent->mActors = gather(cells, other, false, true)->mActors;
++        if (hereOutside && !mContent->mLeaf.mNode)
++            build(*mContent, Clock::now());
++        // and this side as it will be seen from there
++        mReverse = gather(sideCells(*here, doorPosition), door, outside, false);
++        mReverse->mLeafFront = mNormal;
++        if (outside)
++        {
++            mReverse->mLeafModel = other;
++            mReverse->mLeafPlace = osg::Matrixd::inverse(mToOther);
++        }
++
++        mOtherOutside = outside;
++        const Alpha3::DoorPortalLight light = outside ? outsideLight() : interiorLight(*dest->getCell());
++        mPortal = Alpha3::makeDoorPortal(
++            quad, mNormal, sCameraDepth, closedDoor, mContent->mGroup, osg::Matrixd::inverse(mToOther), light);
++        world.getRenderingManager()->getLightRoot()->addChild(mPortal);
++        mDoor = door;
++        mOther = other;
++        mOtherCell = door.getCellRef().getDestCell();
++
++        // this door: hidden from an exterior (its copy there swings), else swung toward the player
++        mLeaf = makeLeaf(*doorNode, mNormal);
++        mHidden = hereOutside;
++        // swung, its back is seen from outside: the door there on it
++        if (!mHidden)
++            mLeaf.mBack = addBack(*doorNode, other, osg::Matrixd::inverse(mToOther), sceneManager);
++        mNodeMask = doorNode->getNodeMask();
++        if (mHidden)
++            doorNode->setNodeMask(0);
++        mSwing = alreadyOpen ? 1.f : 0.f;
++        mOpening = true;
++        pose();
++        if (alreadyOpen)
++        {
++            const Alpha3::Doorway doorway{ mCentre, mNormal, mAcross, mHalfWidth, mHeight, sPassDepth };
++            Alpha3::setDoorway(mPlayerCollision, &doorway);
++        }
++        Log(Debug::Info) << "Seamless doors: " << dest->getCell()->getDescription() << " opened in "
++                         << milliseconds(start) << " ms (to build: " << mContent->mObjects.size() << " objects, "
++                         << mContent->mActors.size() << " actors, " << mContent->mChunks.size()
++                         << " terrain cells; this side " << mReverse->mObjects.size() << " objects)";
++        Log(Debug::Verbose) << "Seamless doors: doorway " << mHalfWidth * 2.f << " wide, " << mHeight
++                            << " high, door " << shape.thickness() << " thick; the door there "
++                            << otherShape.alongMax() - otherShape.alongMin() << " wide, " << otherShape.thickness()
++                            << " thick";
++        return true;
++    }
++
++    void SeamlessDoors::pose()
++    {
++        poseLeaf(mLeaf, mHidden ? 0.f : mSwing);
++        if (mContent)
++            poseLeaf(mContent->mLeaf, mSwing);
++    }
++
++    void SeamlessDoors::update(float duration, const void* playerCollision)
++    {
++        mPlayerCollision = playerCollision;
++        updateStandIn(duration);
++        if (!mPortal)
++            return;
++        MWBase::World& world = *MWBase::Environment::get().getWorld();
++        const Ptr player = world.getPlayerPtr();
++        // on the door's side: its cell, or outside any cell of its worldspace (a door on a cell's border)
++        const CellStore* playerCell = player.getCell();
++        const CellStore* doorCell = mDoor.isEmpty() ? nullptr : mDoor.getCell();
++        const bool sameSide = doorCell
++            && (playerCell == doorCell
++                || (playerCell->getCell()->isExterior() && doorCell->getCell()->isExterior()
++                    && playerCell->getCell()->getWorldSpace() == doorCell->getCell()->getWorldSpace()));
++        if (!sameSide || !mDoor.getRefData().getBaseNode())
++        {
++            close();
++            return;
++        }
++
++        // a little more of what is seen through it, then of this side for the way back
++        const Clock::time_point deadline = Clock::now() + sBuildBudget;
++        if (!mContent->done())
++            build(*mContent, deadline);
++        if (mContent->done() && !mReverse->done() && Clock::now() < deadline)
++            build(*mReverse, deadline);
++        for (const std::unique_ptr<MWRender::Animation>& animation : mContent->mAnimations)
++            animation->runAnimation(duration);
++
++        const float before = mSwing;
++        mSwing = std::clamp(mSwing + (mOpening ? duration : -duration) / sSwingTime, 0.f, 1.f);
++        if (mSwing != before || mContent->mLeaf.mNode)
++            pose();
++        if (!mOpening && mSwing <= 0.f)
++        {
++            close();
++            return;
++        }
++        if (mOtherOutside)
++            Alpha3::setDoorPortalLight(*mPortal, outsideLight());
++
++        // the doorway open to the player's collision once the door is half open
++        const bool passable = mSwing > 0.5f;
++        if (passable)
++        {
++            const Alpha3::Doorway doorway{ mCentre, mNormal, mAcross, mHalfWidth, mHeight, sPassDepth };
++            Alpha3::setDoorway(playerCollision, &doorway);
++        }
++        else
++            Alpha3::setDoorway(nullptr, nullptr);
++
++        const osg::Vec3f relative = player.getRefData().getPosition().asVec3() - mCentre;
++        const float out = relative * mNormal;
++        const float along = std::abs(relative * mAcross);
++        if (passable && out < 0.f && out > -sPassDepth * 2.f && along < mHalfWidth && relative.z() > -64.f
++            && relative.z() < mHeight)
++            cross();
++        else if (mOpening && relative.length2() > 1000.f * 1000.f)
++            // left open behind: it swings shut
++            mOpening = false;
++    }
++
++    void SeamlessDoors::cross()
++    {
++        const Clock::time_point start = Clock::now();
++        MWBase::World& world = *MWBase::Environment::get().getWorld();
++        const Ptr player = world.getPlayerPtr();
++        const ESM::Position now = player.getRefData().getPosition();
++        // the same place and heading on the other side
++        ESM::Position to = now;
++        const osg::Vec3f there = now.asVec3() * mToOther;
++        to.pos[0] = there.x();
++        to.pos[1] = there.y();
++        to.pos[2] = there.z();
++        to.rot[2] = now.rot[2] + mYaw;
++        const Ptr door = mDoor;
++        const Ptr other = mOther;
++        const ESM::RefId cell = mOtherCell;
++        const ESM::Position followersTo = door.getCellRef().getDoorDest();
++        // what the player will see back through the door: this side, built while the door opened (the rest now)
++        std::unique_ptr<Content> reverse = std::move(mReverse);
++        if (reverse)
++            while (!reverse->done())
++                build(*reverse, Clock::now() + std::chrono::hours(1));
++        const float built = milliseconds(start);
++        // what was seen through the door, for what of that side is put in the scene over the next frames
++        std::unique_ptr<Content> standIn = Alpha3::cellsOverFrames() ? std::move(mContent) : nullptr;
++        close();
++        dropStandIn();
++
++        // followers go too, where the door would have put them
++        std::set<Ptr> followers;
++        ActionTeleport::getFollowers(
++            player, followers, MWBase::Environment::get().getWorldModel()->getCell(cell).isExterior());
++        // not adjusted (put on the ground): the cell changed, then the player placed exactly
++        world.changeToCell(cell, to, false);
++        world.moveObject(world.getPlayerPtr(), to.asVec3());
++        world.rotateObject(world.getPlayerPtr(), to.asRotationVec3());
++        for (const Ptr& follower : followers)
++            ActionTeleport(cell, followersTo, false).execute(follower, true);
++        if (standIn)
++            keepStandIn(std::move(standIn));
++        const float changed = milliseconds(start);
++
++        // and the door there open behind them, onto the side they left
++        if (!other.isEmpty())
++            open(other, true, std::move(reverse));
++        Log(Debug::Verbose) << "Seamless doors: through from (" << now.pos[0] << ", " << now.pos[1] << ", "
++                            << now.pos[2] << ") to (" << to.pos[0] << ", " << to.pos[1] << ", " << to.pos[2]
++                            << "), " << milliseconds(start) << " ms: the rest of the way back built in " << built
++                            << ", the cell changed in " << changed - built << ", the door opened in "
++                            << milliseconds(start) - changed;
++    }
++
++    void SeamlessDoors::close()
++    {
++        Alpha3::setDoorway(nullptr, nullptr);
++        if (mPortal)
++        {
++            for (osg::Group* parent : mPortal->getParents())
++                parent->removeChild(mPortal);
++            mPortal = nullptr;
++            if (mLeaf.mNode && mLeaf.mBack)
++                mLeaf.mNode->removeChild(mLeaf.mBack);
++            if (!mDoor.isEmpty() && mLeaf.mNode && mDoor.getRefData().getBaseNode() == mLeaf.mNode.get())
++            {
++                poseLeaf(mLeaf, 0.f);
++                if (mHidden)
++                    mLeaf.mNode->setNodeMask(mNodeMask);
++            }
++        }
++        mContent.reset();
++        mReverse.reset();
++        mLeaf = Leaf();
++        mHidden = false;
++        mDoor = Ptr();
++        mOther = Ptr();
++        mOtherCell = ESM::RefId();
++        mOpening = false;
++    }
++
++    void SeamlessDoors::keepStandIn(std::unique_ptr<Content> standIn)
++    {
++        MWBase::World& world = *MWBase::Environment::get().getWorld();
++        MWRender::RenderingManager& rendering = *world.getRenderingManager();
++        const CellStore* cell = world.getPlayerPtr().getCell();
++        if (!cell)
++            return;
++        // in the scene as it is (in the other side's space, where the player now is), not through the door
++        osg::ref_ptr<osg::Group> group = standIn->mGroup;
++        while (group->getNumParents() > 0)
++            group->getParent(0)->removeChild(group);
++        // the ground is in the scene at once, and the door the player came through (open behind them); the objects
++        // the scene draws by their ground's pages (object paging) are drawn already
++        for (const osg::ref_ptr<osg::Node>& node : standIn->mTerrain)
++            group->removeChild(node);
++        standIn->mTerrain.clear();
++        std::vector<ESM::RefNum> paged;
++        if (cell->getCell()->isExterior())
++        {
++            const int x = cell->getCell()->getGridX();
++            const int y = cell->getCell()->getGridY();
++            const int half = Constants::CellGridRadius;
++            rendering.getPagedRefnums(osg::Vec4i(x - half, y - half, x + half + 1, y + half + 1), paged);
++            std::sort(paged.begin(), paged.end());
++        }
++        std::erase_if(standIn->mBuilt, [&](const std::pair<Ptr, osg::ref_ptr<osg::Node>>& built) {
++            const ESM::RefNum refNum = built.first.getCellRef().getRefNum();
++            if (built.first != standIn->mLeafDoor
++                && !(refNum.hasContentFile() && std::binary_search(paged.begin(), paged.end(), refNum)))
++                return false;
++            group->removeChild(built.second);
++            return true;
++        });
++        standIn->mLeaf = Leaf();
++        mStandIn = std::move(standIn);
++        mStandInCell = cell;
++        mStandInWorldspace = cell->getCell()->getWorldSpace();
++        mStandInAge = 0.f;
++        rendering.getLightRoot()->addChild(group);
++        updateStandIn(0.f);
++    }
++
++    void SeamlessDoors::updateStandIn(float duration)
++    {
++        if (!mStandIn)
++            return;
++        mStandInAge += duration;
++        const CellStore* cell = MWBase::Environment::get().getWorld()->getPlayerPtr().getCell();
++        // gone with the player leaving its side (its cells may be taken out of the scene)
++        const bool sameSide = cell
++            && (cell == mStandInCell
++                || (cell->getCell()->isExterior() && mStandInCell->getCell()->isExterior()
++                    && cell->getCell()->getWorldSpace() == mStandInWorldspace));
++        if (!sameSide || mStandInAge > sStandInTime)
++        {
++            dropStandIn();
++            return;
++        }
++        // each gone once its object is in the scene (or hidden, or gone)
++        osg::Group& group = *mStandIn->mGroup;
++        std::erase_if(mStandIn->mBuilt, [&](const std::pair<Ptr, osg::ref_ptr<osg::Node>>& built) {
++            const Ptr& ptr = built.first;
++            if (!ptr.getRefData().getBaseNode() && !ptr.mRef->isDeleted() && ptr.getRefData().isEnabled())
++                return false;
++            group.removeChild(built.second);
++            return true;
++        });
++        if (mStandIn->mBuilt.empty())
++        {
++            Log(Debug::Verbose) << "Seamless doors: stand-in gone after " << mStandInAge << " s";
++            dropStandIn();
++            return;
++        }
++        for (const std::unique_ptr<MWRender::Animation>& animation : mStandIn->mAnimations)
++            animation->runAnimation(duration);
++    }
++
++    void SeamlessDoors::dropStandIn()
++    {
++        if (!mStandIn)
++            return;
++        osg::ref_ptr<osg::Group> group = mStandIn->mGroup;
++        while (group->getNumParents() > 0)
++            group->getParent(0)->removeChild(group);
++        mStandIn.reset();
++        mStandInCell = nullptr;
++        mStandInWorldspace = ESM::RefId();
++    }
++}
+diff --git a/apps/openmw/mwworld/seamlessdoors.hpp b/apps/openmw/mwworld/seamlessdoors.hpp
+new file mode 100644
+--- /dev/null
++++ b/apps/openmw/mwworld/seamlessdoors.hpp
+@@ -0,0 +1,143 @@
++#ifndef GAME_MWWORLD_SEAMLESSDOORS_H
++#define GAME_MWWORLD_SEAMLESSDOORS_H
++
++#include <memory>
++#include <vector>
++
++#include <osg/Group>
++#include <osg/Matrixd>
++#include <osg/Quat>
++#include <osg/Vec2f>
++#include <osg/Vec3f>
++#include <osg/ref_ptr>
++
++#include <components/esm/refid.hpp>
++
++#include "ptr.hpp"
++
++namespace SceneUtil
++{
++    class PositionAttitudeTransform;
++}
++
++namespace MWRender
++{
++    class Animation;
++}
++
++namespace MWWorld
++{
++    class CellStore;
++
++    // Seamless doors ([Cells] seamless doors, Alpha3): the player opening a door between an exterior and an interior
++    // (either way, or between two interiors) swings it open onto the other side, drawn through the doorway
++    // (Alpha3::makeDoorPortal) and placed so that the door there is where this one is: its objects, its people and
++    // creatures (idling), and outside its ground and sky. The door swings into the interior. The player walks through
++    // the doorway (its door and wall do not stop them, Alpha3::doorwayPassable) and, crossing it, is in the other cell
++    // at the same place and heading, the door there open behind them onto the side they left: with seamless cells
++    // there is no loading screen and no fade, so the change of cells is not seen. What is seen through the door, both
++    // ways, is built a little each frame while it swings open, so that crossing builds nothing. Activating the open
++    // door shuts it.
++    class SeamlessDoors
++    {
++    public:
++        // nullptr when off
++        static SeamlessDoors* get();
++        static void destroy();
++
++        SeamlessDoors();
++        ~SeamlessDoors();
++
++        // Door::activate, the player activating a teleport door: true when it opened (or shut), false for the usual
++        // teleport
++        bool activate(const Ptr& door);
++
++        // every frame of the game running; playerCollision: the player's collision object (for the doorway)
++        void update(float duration, const void* playerCollision);
++
++        // the open door shut at once and the other side gone
++        void close();
++
++        // A door's swinging model: its node, closed attitude and position, hinge and which way it opens
++        struct Leaf
++        {
++            osg::ref_ptr<SceneUtil::PositionAttitudeTransform> mNode;
++            osg::Quat mClosed;
++            osg::Vec3f mClosedPosition;
++            osg::Vec3f mHinge;
++            float mSign = 1.f;
++            // the door on the other side's model on its back (a door's model has a front only)
++            osg::ref_ptr<osg::Node> mBack;
++        };
++
++        // What is seen through a door, built a little at a time: the models of a side's objects (in its own space),
++        // its ground, the door there swinging (the leaf), its people and creatures
++        struct Content
++        {
++            osg::ref_ptr<osg::Group> mGroup;
++            std::vector<Ptr> mObjects;
++            std::vector<osg::Vec2f> mChunks;
++            float mCellSize = 0.f;
++            Ptr mLeafDoor;
++            // seen from an exterior, the leaf is the exterior's door (an interior's door has no back: it is against a
++            // wall), placed in this side's space
++            Ptr mLeafModel;
++            osg::Matrixd mLeafPlace;
++            // the way it opens (its side's front, in its space)
++            osg::Vec3f mLeafFront;
++            Leaf mLeaf;
++            std::vector<Ptr> mActors;
++            std::vector<std::unique_ptr<MWRender::Animation>> mAnimations;
++            // what has been built: each object's or actor's node, and the ground's
++            std::vector<std::pair<Ptr, osg::ref_ptr<osg::Node>>> mBuilt;
++            std::vector<osg::ref_ptr<osg::Node>> mTerrain;
++
++            ~Content();
++            bool done() const { return mObjects.empty() && mChunks.empty() && mActors.empty(); }
++        };
++
++    private:
++        bool open(const Ptr& door, bool alreadyOpen, std::unique_ptr<Content> prebuilt);
++        void cross();
++        void pose();
++        // The other side's view kept in the scene once the player is through, while its cell is put in the scene over
++        // frames ([Cells] load cells over frames): a stand-in for each object until it is in the scene itself
++        void keepStandIn(std::unique_ptr<Content> standIn);
++        void updateStandIn(float duration);
++        void dropStandIn();
++
++        Ptr mDoor;
++        // the door on the other side and its cell
++        Ptr mOther;
++        ESM::RefId mOtherCell;
++        bool mOtherOutside = false;
++        osg::ref_ptr<osg::Group> mPortal;
++        // the other side, and this side as it will be seen from there once the player is through
++        std::unique_ptr<Content> mContent;
++        std::unique_ptr<Content> mReverse;
++        osg::Matrixd mToOther;
++        float mYaw = 0.f;
++        // the doorway: its middle at the floor, its normal toward this side, the horizontal across it
++        osg::Vec3f mCentre;
++        osg::Vec3f mNormal;
++        osg::Vec3f mAcross;
++        float mHalfWidth = 0.f;
++        float mHeight = 0.f;
++        const void* mPlayerCollision = nullptr;
++        // this door: swung (an interior's, toward the player) or hidden (an exterior's: the door there is seen,
++        // swinging into the interior)
++        Leaf mLeaf;
++        bool mHidden = false;
++        unsigned int mNodeMask = 0;
++        // how far open (0 to 1) and whether opening or shutting
++        float mSwing = 0.f;
++        bool mOpening = false;
++        // the stand-in, its cell (an interior's, or the exterior's worldspace) and how long it has been there
++        std::unique_ptr<Content> mStandIn;
++        const CellStore* mStandInCell = nullptr;
++        ESM::RefId mStandInWorldspace;
++        float mStandInAge = 0.f;
++    };
++}
++
++#endif
+-- 
+2.47.0
+

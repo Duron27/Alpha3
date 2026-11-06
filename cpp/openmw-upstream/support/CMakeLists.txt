@@ -123,6 +123,8 @@ set(ALPHA3_SUPPORT_SOURCES
     src/renderscale.cpp
     src/occlusionculling.cpp
     src/pointshadows.cpp
+    src/seamless.cpp
+    src/doorportal.cpp
     src/texturestreaming.cpp
     src/thermal.cpp
 )

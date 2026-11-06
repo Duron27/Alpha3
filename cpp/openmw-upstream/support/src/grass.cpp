@@ -1242,6 +1242,11 @@ namespace Alpha3
         const osg::Camera* camera = cv.getCurrentCamera();
         if (camera == nullptr || camera->getName() != sSceneCamera)
             return;
+        // only this side's: not what is seen through a door (Alpha3::makeDoorPortal, nested in its bin), placed where
+        // the doorway leads
+        for (const osgUtil::RenderBin* bin = cv.getCurrentRenderBin(); bin != nullptr; bin = bin->getParent())
+            if (bin->getBinNum() != 0)
+                return;
         // TerrainDrawable has no META_Object of its own (its className() is osg::Geometry's), so by its type
         auto* terrain = dynamic_cast<Terrain::TerrainDrawable*>(&drawable);
         if (terrain == nullptr)
@@ -1251,8 +1256,8 @@ namespace Alpha3
             if (!experimentalSettings().mGrassClearance)
                 return;
             const osg::Geometry* geometry = drawable.asGeometry();
-            if (geometry == nullptr || cv.getCurrentRenderBin() == nullptr || cv.getCurrentRenderBin()->getBinNum() != 0
-                || !geometry->getBoundingBox().valid() || geometry->getName().rfind("Alpha3 ", 0) == 0)
+            if (geometry == nullptr || cv.getCurrentRenderBin() == nullptr || !geometry->getBoundingBox().valid()
+                || geometry->getName().rfind("Alpha3 ", 0) == 0)
                 return;
             Grass::get().obstacleAdded(cv, *geometry, modelView);
             return;
