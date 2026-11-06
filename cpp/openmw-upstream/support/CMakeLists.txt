@@ -100,6 +100,7 @@ file(CONFIGURE OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/generated/experimentalsources.
 
 # What the engine and the hooks call; linked into whatever needs it
 set(ALPHA3_SUPPORT_SOURCES
+    src/bandwidth.cpp
     src/bcdecode.cpp
     src/blobstore.cpp
     src/glesdialect.cpp

@@ -1,0 +1,231 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Fri, 6 Nov 2026 10:00:00 -0500
+Subject: [PATCH 25/25] Bandwidth: idle ripples, the opaque copy only when read,
+ buffers discarded
+
+For tile GPUs, through the support library (src/bandwidth.cpp), each a setting:
+
+- [Water] idle ripples: once nothing has touched the water for Alpha3::ripplesIdleAfter() seconds, the ripple map is
+  cleared once and the two simulation passes stop until the next ripple. Each pass discards its target first.
+- [Video] skip unused opaque copy: the OpaqueResolve bin copies the scene's colour and depth only when
+  Alpha3::opaqueCopyWanted says something drawn after reads them; without the copy, the first person model's depth
+  is not drawn into it either. The post processor tells it whether its chain has a technique of the user's.
+- [Video] discard unused buffers: the post processor's camera discards the window's buffers before drawing over them,
+  and the first person model's depth buffer is discarded once drawn.
+---
+ apps/openmw/mwrender/npcanimation.cpp  | 22 ++++++++++++-------
+ apps/openmw/mwrender/opaqueblit.cpp    |  6 +++++-
+ apps/openmw/mwrender/postprocessor.cpp |  7 +++++++
+ apps/openmw/mwrender/ripples.cpp       | 29 ++++++++++++++++++++++++++
+ apps/openmw/mwrender/ripples.hpp       |  4 ++++
+ 5 files changed, 60 insertions(+), 8 deletions(-)
+
+diff --git a/apps/openmw/mwrender/npcanimation.cpp b/apps/openmw/mwrender/npcanimation.cpp
+index df5943d66d..269c308c81 100644
+--- a/apps/openmw/mwrender/npcanimation.cpp
++++ b/apps/openmw/mwrender/npcanimation.cpp
+@@ -6,6 +6,8 @@
+ #include <osgUtil/CullVisitor>
+ #include <osgUtil/RenderBin>
+ 
++#include <alpha3/upstream.hpp>
++
+ #include <components/debug/debuglog.hpp>
+ 
+ #include <components/misc/rng.hpp>
+@@ -348,19 +350,25 @@ namespace MWRender
+             glClear(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+             // color accumulation pass
+             bin->drawImplementation(renderInfo, previous);
++            // its depth is not needed again
++            Alpha3::discardDrawBuffers(false, true);
+ 
+             auto primaryFBO = postProcessor->getPrimaryFbo(frameId);
+             primaryFBO->apply(*state);
+ 
+-            postProcessor->getFbo(PostProcessor::FBO_OpaqueDepth, frameId)->apply(*state);
++            // into the opaque copy, unless this frame has none
++            if (!Alpha3::opaqueCopySkipped(state->getFrameStamp()->getFrameNumber()))
++            {
++                postProcessor->getFbo(PostProcessor::FBO_OpaqueDepth, frameId)->apply(*state);
+ 
+-            // depth accumulation pass
+-            osg::ref_ptr<osg::StateSet> restore = bin->getStateSet();
+-            bin->setStateSet(mStateSet);
+-            bin->drawImplementation(renderInfo, previous);
+-            bin->setStateSet(restore);
++                // depth accumulation pass
++                osg::ref_ptr<osg::StateSet> restore = bin->getStateSet();
++                bin->setStateSet(mStateSet);
++                bin->drawImplementation(renderInfo, previous);
++                bin->setStateSet(restore);
+ 
+-            primaryFBO->apply(*state);
++                primaryFBO->apply(*state);
++            }
+ 
+             state->checkGLErrors("after DepthClearCallback::drawImplementation");
+         }
+diff --git a/apps/openmw/mwrender/opaqueblit.cpp b/apps/openmw/mwrender/opaqueblit.cpp
+index ed643c1722..113573446a 100644
+--- a/apps/openmw/mwrender/opaqueblit.cpp
++++ b/apps/openmw/mwrender/opaqueblit.cpp
+@@ -2,6 +2,8 @@
+ 
+ #include <osgUtil/RenderStage>
+ 
++#include <alpha3/upstream.hpp>
++
+ #include <components/stereo/multiview.hpp>
+ #include <components/stereo/stereomanager.hpp>
+ 
+@@ -10,7 +12,9 @@ namespace MWRender
+     void OpaqueColorBinCallback::drawImplementation(
+         osgUtil::RenderBin* bin, osg::RenderInfo& renderInfo, osgUtil::RenderLeaf*& previous)
+     {
+-        resolve(bin, renderInfo);
++        // not in the frames where nothing drawn after reads the copy
++        if (Alpha3::opaqueCopyWanted(*bin, renderInfo))
++            resolve(bin, renderInfo);
+         bin->drawImplementation(renderInfo, previous);
+     }
+ 
+diff --git a/apps/openmw/mwrender/postprocessor.cpp b/apps/openmw/mwrender/postprocessor.cpp
+index f60bd8cca0..1a1f636ae9 100644
+--- a/apps/openmw/mwrender/postprocessor.cpp
++++ b/apps/openmw/mwrender/postprocessor.cpp
+@@ -149,6 +149,8 @@ namespace MWRender
+         mHUDCamera->addChild(mCanvases[0]);
+         mHUDCamera->addChild(mCanvases[1]);
+         mHUDCamera->setCullCallback(new HUDCullCallback);
++        // it draws over the whole window: what the window had is not needed
++        mHUDCamera->addPreDrawCallback(Alpha3::discardWindowCallback());
+         mViewer->getCamera()->addCullCallback(mPingPongCull);
+ 
+         // resolves the multisampled depth buffer and optionally draws an additional depth postpass
+@@ -588,12 +590,15 @@ namespace MWRender
+         mPassLights = false;
+ 
+         std::vector<Fx::Types::RenderTarget> attachmentsToDirty;
++        bool userTechniques = false;
+ 
+         for (const auto& technique : mTechniques)
+         {
+             if (!technique->isValid())
+                 continue;
+ 
++            userTechniques = userTechniques || !technique->getInternal();
++
+             if (technique->getGLSLVersion() > mGLSLVersion)
+             {
+                 Log(Debug::Warning) << "Technique " << technique->getName() << " requires GLSL version "
+@@ -730,6 +735,8 @@ namespace MWRender
+         }
+ 
+         mCanvases[frameId]->setPasses(Fx::DispatchArray(mTemplateData));
++        // the scene's opaque copy is kept for the depth of the user's techniques
++        Alpha3::setPostProcessingReadsDepth(userTechniques);
+ 
+         if (auto hud = MWBase::Environment::get().getWindowManager()->getPostProcessorHud())
+             hud->updateTechniques();
+diff --git a/apps/openmw/mwrender/ripples.cpp b/apps/openmw/mwrender/ripples.cpp
+index 549d3b5bba..46aab2c2b1 100644
+--- a/apps/openmw/mwrender/ripples.cpp
++++ b/apps/openmw/mwrender/ripples.cpp
+@@ -4,6 +4,8 @@
+ #include <osg/Texture2D>
+ #include <osgUtil/CullVisitor>
+ 
++#include <alpha3/upstream.hpp>
++
+ #include <components/debug/debuglog.hpp>
+ #include <components/resource/imagemanager.hpp>
+ #include <components/resource/resourcesystem.hpp>
+@@ -143,6 +145,7 @@ namespace MWRender
+     void RipplesSurface::updateState(const osg::FrameStamp& frameStamp, State& state)
+     {
+         state.mPaused = mPaused;
++        state.mClear = false;
+ 
+         if (mPaused)
+             return;
+@@ -172,6 +175,20 @@ namespace MWRender
+         const osg::Vec2f offset = mCurrentPlayerPos - mLastPlayerPos;
+         mLastPlayerPos = mCurrentPlayerPos;
+ 
++        // Nothing has touched the water for a while: the damping has flattened the waves, the map is cleared once and
++        // left until the next ripple
++        const float idleAfter = Alpha3::ripplesIdleAfter();
++        if (mPositionCount > 0 || idleAfter <= 0.f)
++            mLastRippleTime = simulationTime;
++        else if (simulationTime - mLastRippleTime > idleAfter)
++        {
++            state.mPaused = true;
++            state.mClear = !mIdle;
++            mIdle = true;
++            return;
++        }
++        mIdle = false;
++
+         state.mStateset->getUniform("positionCount")->set(static_cast<int>(mPositionCount));
+         state.mStateset->getUniform("offset")->set(offset);
+ 
+@@ -211,6 +228,15 @@ namespace MWRender
+         osg::State& state = *renderInfo.getState();
+         const std::size_t currentFrame = state.getFrameStamp()->getFrameNumber() % 2;
+         const State& frameState = mState[currentFrame];
++        if (frameState.mClear)
++        {
++            state.pushStateSet(frameState.mStateset);
++            state.apply();
++            mFBOs[0]->apply(state, osg::FrameBufferObject::DRAW_FRAMEBUFFER);
++            glClearColor(0, 0, 0, 0);
++            glClear(GL_COLOR_BUFFER_BIT);
++            state.popStateSet();
++        }
+         if (frameState.mPaused)
+         {
+             return;
+@@ -250,6 +276,8 @@ namespace MWRender
+         else
+         {
+             mFBOs[1]->apply(state, osg::FrameBufferObject::DRAW_FRAMEBUFFER);
++            // every texel is written: the tile GPU need not load what was there
++            Alpha3::discardDrawBuffers(true, false);
+             state.applyTextureAttribute(0, mTextures[0]);
+             osg::Geometry::drawImplementation(renderInfo);
+         }
+@@ -273,6 +301,7 @@ namespace MWRender
+         else
+         {
+             mFBOs[0]->apply(state, osg::FrameBufferObject::DRAW_FRAMEBUFFER);
++            Alpha3::discardDrawBuffers(true, false);
+             state.applyTextureAttribute(0, mTextures[1]);
+             osg::Geometry::drawImplementation(renderInfo);
+         }
+diff --git a/apps/openmw/mwrender/ripples.hpp b/apps/openmw/mwrender/ripples.hpp
+index e355b16ecd..f24453304e 100644
+--- a/apps/openmw/mwrender/ripples.hpp
++++ b/apps/openmw/mwrender/ripples.hpp
+@@ -54,6 +54,8 @@ namespace MWRender
+         struct State
+         {
+             bool mPaused = true;
++            // the map is cleared, the simulation idle (Alpha3::ripplesIdleAfter)
++            bool mClear = false;
+             osg::ref_ptr<osg::StateSet> mStateset;
+         };
+ 
+@@ -84,6 +86,8 @@ namespace MWRender
+ 
+         double mLastSimulationTime = 0;
+         double mRemainingWaveTime = 0;
++        double mLastRippleTime = 0;
++        bool mIdle = false;
+     };
+ 
+     class Ripples : public osg::Camera
+-- 
+2.55.0
+

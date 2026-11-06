@@ -13,20 +13,24 @@ Storm lean of the grass, grass antialiasing, yellow bushels, fireflies at night,
 
 Against a ~26.7 ms frame (37.5 fps rendered, 1280x800, Balmora canal, ANGLE on Turnip).
 
-0. **Water ripple simulation: measured +5 fps (37.4 -> 42.6, ~3.3 ms) with it skipped.** `ripples.cpp` runs two full
-   1024x1024 RGBA16F passes every frame whenever water is visible (outdoors nearly always), whether or not anything touches
-   the water. On GLES it takes the fragment path (compute needs GL 4.4) with no clear, so a tiler loads, samples and stores
-   8 MB twice. Fixed cost, not scaled by the window, so it hits every device. Fix: stop simulating once nothing has emitted
-   for a few seconds (the damping flattens the field; clear it once and idle), invalidate the target before each pass, and
-   consider 512x512 on weak GPUs.
+Items 0-2 are done (patch 0025, `support/src/bandwidth.cpp`), each a setting on by default. Measured 2026-11-06 on the
+tablet, 1280x800, frame generation and point light shadows off (two runs each, game restarted per run):
+- Balmora canal: all off 38.8 / 41.8 fps, all on 50.1 / 45.3 fps. Idle ripples alone 49.4 / 45.7: it is nearly all
+  of it. The opaque copy is needed there (water in view); discards alone 40.5.
+- South Wall Cornerclub (no water, 60 fps cap): skipping the opaque copy takes GPU busy from 73% to 63% at the same
+  clock (~1.7 ms a frame). Discards: no change (63% either way); ANGLE on Turnip probably skips those loads already.
+- With frame generation on the rendered rate is pinned at 30.1 either way (paced to half of 60 Hz), and with point
+  light shadows (4 lights, 8 faces a frame) the canal renders ~15 fps either way: those dominate the frame now.
+- 0: `[Water] idle ripples`: the simulation stops (map cleared once) 6 s after the last ripple; its targets are
+  discarded before each pass. Not done: a 512x512 map on weak GPUs (`sRTTSize` is a constant the water shader shares).
+- 1: `[Video] skip unused opaque copy`: the copy is made only when a later bin reads it (water, soft particles,
+  distortion: found by their `opaqueDepthTex`/`opaqueColorTex`/`particleSize` uniforms), the post-processing chain has
+  a user technique, or frame generation is on. **Frame generation always needs it** (first person mask), so the
+  tablet's best setup (frame gen) gains nothing here; frame gen could use the scene depth when no first person model
+  is drawn. Without the copy the first person depth pass into it is skipped too (one fewer framebuffer switch).
+- 2: `[Video] discard unused buffers`: the window's colour/depth/stencil before the post processor's final draw, the
+  first person depth after use, the ripple targets.
 
-1. **Skip the opaque colour/depth copy when nothing reads it.** `opaqueblit.cpp` (the OpaqueResolve bin) copies the scene's
-   colour and depth after the opaque geometry every frame. On a tiler that is a mid-frame flush, a ~8 MB copy and a reload
-   (~2.5-3.5 ms at 1280x800). Only water refraction and the first-person depth fix read it. Expect +3-5 fps where no water
-   is on screen, ~0 looking at water.
-2. **glInvalidateFramebuffer.** Never called by OpenMW, OSG or the support library. Discard the window's unused depth and
-   stencil (post-processing draws to its own FBO), the window's colour before the final full-screen copy, and the first-person
-   depth renderbuffer after use. +0-1.5 fps; drivers may already skip some of it.
 3. **First-person arms without framebuffer switches.** `DepthClearCallback` (npcanimation.cpp) switches render targets three
    times a frame while hands or a weapon are out, each a full tile flush. Draw them in a squeezed depth range instead.
 4. **mediump in the hot shaders.** The shader converter forces highp everywhere; Adreno 6xx runs mediump at twice the rate.

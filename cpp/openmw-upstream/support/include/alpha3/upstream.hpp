@@ -34,6 +34,7 @@ namespace osg
     class GraphicsContext;
     class Node;
     class FrameBufferObject;
+    class RenderInfo;
     class State;
     class Viewport;
 }
@@ -41,6 +42,7 @@ namespace osg
 namespace osgUtil
 {
     class CullVisitor;
+    class RenderBin;
 }
 
 namespace SceneUtil
@@ -191,6 +193,25 @@ namespace Alpha3
     // draws the fullscreen triangle.
     void renderScaleResolve(
         osg::State& state, osg::Texture& source, const osg::Viewport& screen, const std::function<void()>& draw);
+
+    // Memory bandwidth on tile GPUs (src/bandwidth.cpp).
+    // [Water] idle ripples: seconds without a ripple after which the ripple simulation clears its map and stops until
+    // the next one (0: off, it always runs)
+    float ripplesIdleAfter();
+    // [Video] discard unused buffers: glInvalidateFramebuffer on what is bound for drawing (the window's, or an FBO's
+    // first colour attachment and packed depth stencil). Does nothing when off.
+    void discardDrawBuffers(bool color, bool depthStencil);
+    // for the post processor's camera, which draws the finished scene over the whole window: a pre draw callback
+    // discarding the window's colour, depth and stencil (null when off)
+    osg::Camera::DrawCallback* discardWindowCallback();
+    // [Video] skip unused opaque copy: whether the scene's colour and depth are copied after the opaque geometry this
+    // frame (the OpaqueResolve bin): something drawn after reads them (water, soft particles, distortion), the
+    // post-processing chain may, or frame generation does. Always true when off and for other cameras.
+    bool opaqueCopyWanted(const osgUtil::RenderBin& resolveBin, osg::RenderInfo& renderInfo);
+    // that frame's copy was skipped: what only adds to it (the first person model's depth) can be skipped too
+    bool opaqueCopySkipped(unsigned frameNumber);
+    // the post-processing chain has a technique of the user's (from the post processor, when its chain changes)
+    void setPostProcessingReadsDepth(bool reads);
 
     // Frame generation (OPENMW_FRAMEGEN) builds the frame between two rendered ones from the camera's motion and the
     // scene's depth when the engine hands them over: each frame, from the main thread before it is rendered.
