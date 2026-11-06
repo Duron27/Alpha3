@@ -227,6 +227,7 @@ namespace Alpha3
                 textureReleaseFrame();
                 textureStreamingFrame();
                 Alpha3::swapBuffers(gc);
+                inspectorSwapped(gc);
             }
 
             void clipPlaneApplied(osg::State&, unsigned int index, const osg::Vec4d& eyePlane) override
@@ -318,6 +319,7 @@ namespace Alpha3
                 noteMainThread();
                 omw_frame_update();
                 benchmarkFrame();
+                inspectorMainThread();
             }
 
             bool nodeOccluded(osg::CullStack& cullStack, const osg::Node& node) override

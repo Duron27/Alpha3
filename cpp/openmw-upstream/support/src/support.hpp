@@ -37,9 +37,15 @@ namespace osg
     class GraphicsContext;
     class Node;
     class NodeVisitor;
+    class RenderInfo;
     class Shader;
     class State;
     class StateSet;
+}
+
+namespace osgUtil
+{
+    class RenderStage;
 }
 
 namespace Alpha3
@@ -203,6 +209,14 @@ namespace Alpha3
     void benchmarkDrawableAdded(osg::NodeVisitor& cullVisitor);
     void benchmarkRequest();
     void benchmarkFrame();
+    // ---- inspector.cpp (the launcher's performance HUD, "Inspect"): one report of what the game has in memory, what it
+    // draws and where the GPU's time and memory bandwidth go. The request (any thread; JNI), each frame (the main
+    // thread, before it is drawn), the end of each swap (draw thread) and the scene camera's sorted stage (draw thread,
+    // from the OpaqueResolve bin)
+    bool inspectorRequest();
+    void inspectorMainThread();
+    void inspectorSwapped(osg::GraphicsContext& gc);
+    void inspectorSceneStage(const osgUtil::RenderStage& stage, osg::RenderInfo& renderInfo);
     // ---- experimentalstate.cpp: the state that gives a drawable its own variant of its program by its texture (tree
     // sway, the procedural material), and the defines OpenMW's shaders import for them
     const osg::StateSet* experimentalDrawableState(osg::NodeVisitor& cullVisitor, osg::Drawable& drawable);

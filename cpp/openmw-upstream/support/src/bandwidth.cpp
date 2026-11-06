@@ -195,6 +195,9 @@ namespace Alpha3
 
     bool opaqueCopyWanted(const osgUtil::RenderBin& resolveBin, osg::RenderInfo& renderInfo)
     {
+        // the performance HUD's inspector walks the scene camera's stage from here, which every frame draws
+        if (const osgUtil::RenderStage* stage = resolveBin.getStage())
+            inspectorSceneStage(*stage, renderInfo);
         if (!skipOpaqueCopyOn())
             return true;
         // other cameras' copies (none are made: opaqueblit.cpp copies only the scene camera's) are left to OpenMW

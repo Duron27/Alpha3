@@ -111,6 +111,7 @@ set(ALPHA3_SUPPORT_SOURCES
     src/generatedmaps.cpp
     src/grass.cpp
     src/benchmark.cpp
+    src/inspector.cpp
     src/experimentalstate.cpp
     src/ktxtextures.cpp
     src/programcache.cpp
