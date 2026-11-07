@@ -11,6 +11,7 @@
 #include <alpha3/upstream.hpp>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <mutex>
@@ -20,8 +21,20 @@ namespace Alpha3
     namespace
     {
         std::mutex sDoorwayMutex;
-        std::atomic<const void*> sDoorwayActor{ nullptr };
-        Doorway sDoorway;
+        std::atomic<std::size_t> sDoorwayCount{ 0 };
+        std::array<Doorway, 4> sDoorways;
+
+        bool inDoorway(const Doorway& doorway, const osg::Vec3f& point, const osg::Vec3f& normal)
+        {
+            const osg::Vec3f relative = point - doorway.mCentre;
+            // The doorway's walls, its door and a lintel lower than the door (a low doorway on one side of a door
+            // between two cells) do not stop an actor. A floor holds them up as anywhere else, but not what is in the
+            // wall around the door there (a sill, a step up into the wall): they walk through at the door's floor
+            const float out = relative * doorway.mNormal;
+            const bool floor = normal.z() > 0.7f && (relative.z() < 12.f || std::abs(out) > 40.f);
+            return !floor && std::abs(relative * doorway.mAcross) < doorway.mHalfWidth
+                && std::abs(out) < doorway.mDepth && relative.z() > -8.f && relative.z() < doorway.mHeight;
+        }
 
         std::mutex sOutsideMutex;
         bool sOutsideKnown = false;
@@ -67,32 +80,28 @@ namespace Alpha3
 
     void setDoorway(const void* actor, const Doorway* doorway)
     {
+        setDoorways(doorway, actor && doorway ? 1 : 0);
+    }
+
+    void setDoorways(const Doorway* doorways, std::size_t count)
+    {
         std::lock_guard<std::mutex> lock(sDoorwayMutex);
-        if (!actor || !doorway)
-        {
-            sDoorwayActor = nullptr;
-            return;
-        }
-        sDoorway = *doorway;
-        sDoorwayActor = actor;
+        count = std::min(count, sDoorways.size());
+        for (std::size_t i = 0; i < count; ++i)
+            sDoorways[i] = doorways[i];
+        sDoorwayCount = count;
     }
 
     bool doorwayPassable(const void* actor, const osg::Vec3f& point, const osg::Vec3f& normal)
     {
-        // most calls: no doorway, or another actor
-        if (!actor || sDoorwayActor.load(std::memory_order_relaxed) != actor)
+        // most calls: no doorway
+        if (!actor || sDoorwayCount.load(std::memory_order_relaxed) == 0)
             return false;
         std::lock_guard<std::mutex> lock(sDoorwayMutex);
-        if (sDoorwayActor.load(std::memory_order_relaxed) != actor)
-            return false;
-        const osg::Vec3f relative = point - sDoorway.mCentre;
-        // The doorway's walls, its door and a lintel lower than the door (a low doorway on one side of a door between
-        // two cells) do not stop the player. A floor holds them up as anywhere else, but not what is in the wall
-        // around the door there (a sill, a step up into the wall): they walk through at the door's floor
-        const float out = relative * sDoorway.mNormal;
-        const bool floor = normal.z() > 0.7f && (relative.z() < 12.f || std::abs(out) > 40.f);
-        return !floor && std::abs(relative * sDoorway.mAcross) < sDoorway.mHalfWidth && std::abs(out) < sDoorway.mDepth
-            && relative.z() > -8.f && relative.z() < sDoorway.mHeight;
+        for (std::size_t i = 0; i < sDoorwayCount.load(std::memory_order_relaxed); ++i)
+            if (inDoorway(sDoorways[i], point, normal))
+                return true;
+        return false;
     }
 
     void setOutsideLight(const osg::Vec4f& fog, const osg::Vec4f& sky, const osg::Vec4f& ambient, const osg::Vec4f& sun)

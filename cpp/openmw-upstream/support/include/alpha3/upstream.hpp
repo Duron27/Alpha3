@@ -170,6 +170,10 @@ namespace Alpha3
     };
     // actor: the player's collision object; nullptr: no doorway
     void setDoorway(const void* actor, const Doorway* doorway);
+    // Live cells: the doorways every actor walks through (the door's on each side, each in its own cell's space); at
+    // most 4, none: count 0
+    void setDoorways(const Doorway* doorways, std::size_t count);
+    // actor: the actor's collision object (any actor)
     bool doorwayPassable(const void* actor, const osg::Vec3f& point, const osg::Vec3f& normal);
 
     // The weather outside while the player is in an interior (OpenMW's mwworld/weather.cpp), for the view out through
