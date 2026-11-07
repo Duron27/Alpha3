@@ -15,6 +15,7 @@
 #include <osg/BoundingSphere>
 #include <osg/Camera>
 #include <osg/Group>
+#include <osg/Matrix>
 #include <osg/Matrixd>
 #include <osg/Texture>
 #include <osg/Vec3f>
@@ -110,6 +111,11 @@ namespace Alpha3
         unsigned int castMask);
     // whether it is on in the settings (the unit is reserved only then)
     int pointShadowLights();
+    // The state of an object lit by these lights (OpenMW's per-object light list: the lights' ids, in the view of
+    // viewMatrix) when some of them are shadowed: the define A3_PS_ON, the number of them (the object and terrain
+    // shaders have the point light shadow code under it, a varying for each), and which shadow maps they have. The
+    // others draw without it (the code costs every vertex and pixel of a shader that has it, used or not).
+    void pointShadowListState(const osg::RefMatrix* viewMatrix, const std::vector<int>& lightIds, osg::StateSet& state);
 
     // Seamless cells ([Cells] seamless cells, src/seamless.cpp): a change of cells in a game under way (a door, an
     // exterior cell border) shows no loading screen and no fade.

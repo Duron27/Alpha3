@@ -1,0 +1,28 @@
+From 15d0a4aab02e47f7c7fd571e7533abeb570a2da0 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Sat, 7 Nov 2026 17:40:04 -0500
+Subject: [PATCH] Point light shadows: the light list's shadowed lights in its
+ state set
+
+The light manager hands each object's light list to the support library, which adds the
+shadow code (A3_PS_ON, the shadowed lights' slots) only for objects a shadowed light reaches.
+---
+ components/sceneutil/lightmanager.cpp | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/components/sceneutil/lightmanager.cpp b/components/sceneutil/lightmanager.cpp
+index 986de7abf3..c95f279c88 100644
+--- a/components/sceneutil/lightmanager.cpp
++++ b/components/sceneutil/lightmanager.cpp
+@@ -560,6 +560,8 @@ namespace SceneUtil
+ 
+         stateset->addUniform(data);
+         stateset->addUniform(new osg::Uniform("PointLightCount", static_cast<int>(lightList.size())));
++        // Alpha3: the point light shadows' shader code, for the objects a shadowed light reaches
++        Alpha3::pointShadowListState(viewMatrix, found->first.second, *stateset);
+ 
+         found->second = stateset;
+         return stateset;
+-- 
+2.55.0
+

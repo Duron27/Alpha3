@@ -89,7 +89,15 @@ namespace Alpha3
     // add them back per pixel, shadowed. All or nothing: a shader with an anchor missing gets no part of it. lights: the
     // most lights that cast shadows, 0 adds nothing.
     bool injectPointShadowSource(const std::string& name, bool vertex, int lights, std::string_view library,
-        std::string& source, const MissingAnchor& missing, bool debug = false);
+        std::string& source, const MissingAnchor& missing, bool debug = false, int taps = 4, float minLight = 0.f);
+    // Whether a shader (by its name) is one the point light shadows go into: the merged objects and terrain shaders
+    bool pointShadowShader(const std::string& name);
+    // OpenMW's fragment shaders whose programs import A3_PS_ON
+    bool pointShadowImporter(std::string_view source);
+
+    // When this file was built: the program binary cache's key takes it, so programs compiled with older injections
+    // (the code here, not only the sources it inserts) are not loaded again
+    const char* injectionStamp();
 }
 
 #endif

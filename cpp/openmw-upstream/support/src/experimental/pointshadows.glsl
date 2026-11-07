@@ -9,37 +9,97 @@
 // position is the same (the same numbers, from the same world position and view matrix).
 //
 // Lit per vertex, a shadowed light's diffuse and specular light go to the fragment shader on their own
-// (a3PassShadowDiffuse, a3PassShadowSpecular, by its index), which shadows them per pixel (a3PointShadowLight) and adds
-// them. Lit per pixel, calcPointLighting shadows them itself.
+// (a3PassShadowLight<index>, a3PassShadowSpecular), which shadows them per pixel (a3PointShadowLight) and adds them.
+// Lit per pixel, calcPointLighting shadows them itself.
+//
+// A3_PS_ON is the number of shadowed lights in the object's light list (1 to A3_PS_MAX), set with it by the CPU
+// (pointShadowListState), and a3PointShadowSlots which maps they have: the shaders carry only those.
 
-uniform int a3PointShadowCount;
+#define A3_PS_COUNT A3_PS_ON
 uniform vec4 a3PointShadowLights[A3_PS_MAX];
+uniform ivec4 a3PointShadowSlots;
 
+// which of the object's shadowed lights (0 to A3_PS_COUNT - 1) this light is, or -1
 int a3PointShadowIndex(vec3 viewLightPos)
 {
-    for (int i = 0; i < A3_PS_MAX; ++i)
+    for (int i = 0; i < A3_PS_COUNT; ++i)
     {
-        if (i >= a3PointShadowCount)
-            break;
-        vec3 d = viewLightPos - a3PointShadowLights[i].xyz;
+        vec3 d = viewLightPos - a3PointShadowLights[a3PointShadowSlots[i]].xyz;
         if (dot(d, d) < 1.0)
             return i;
     }
     return -1;
 }
 
-#ifdef A3_PS_VERTEX
-varying vec3 a3PassShadowDiffuse[A3_PS_MAX];
-varying vec3 a3PassShadowSpecular[A3_PS_MAX];
+// Lit per vertex, each shadowed light goes to the fragment shader in one varying of its own (no arrays: a varying array
+// written at a dynamic index is spilled to memory on some GPUs, costing many milliseconds): its colour times the
+// attenuation (rgb) and lambert (a), and one more holds each light's specular intensity times the attenuation. The
+// specular colour is the diffuse one (as OpenMW makes a light's; negative lights cast no shadows). Medium precision:
+// they are light, and the GPU carries half as much.
+#if defined(A3_PS_VERTEX) || !PER_PIXEL_LIGHTING
+varying mediump vec4 a3PassShadowLight0;
+#if A3_PS_COUNT > 1
+varying mediump vec4 a3PassShadowLight1;
+#endif
+#if A3_PS_COUNT > 2
+varying mediump vec4 a3PassShadowLight2;
+#endif
+#if A3_PS_COUNT > 3
+varying mediump vec4 a3PassShadowLight3;
+#endif
+#if A3_PS_COUNT > 1
+varying mediump vec4 a3PassShadowSpecular;
+#else
+varying mediump float a3PassShadowSpecular;
+#endif
+#endif
 
+#ifdef A3_PS_VERTEX
 // at the start of pointLighting, which every lit vertex goes through once
 void a3PointShadowClear()
 {
-    for (int i = 0; i < A3_PS_MAX; ++i)
-    {
-        a3PassShadowDiffuse[i] = vec3(0.0);
-        a3PassShadowSpecular[i] = vec3(0.0);
-    }
+    a3PassShadowLight0 = vec4(0.0);
+#if A3_PS_COUNT > 1
+    a3PassShadowLight1 = vec4(0.0);
+#endif
+#if A3_PS_COUNT > 2
+    a3PassShadowLight2 = vec4(0.0);
+#endif
+#if A3_PS_COUNT > 3
+    a3PassShadowLight3 = vec4(0.0);
+#endif
+#if A3_PS_COUNT > 1
+    a3PassShadowSpecular = vec4(0.0);
+#else
+    a3PassShadowSpecular = 0.0;
+#endif
+}
+
+void a3PointShadowPassDiffuse(int index, vec3 colour, float lambertTerm)
+{
+    vec4 value = vec4(colour, lambertTerm);
+    if (index == 0) a3PassShadowLight0 = value;
+#if A3_PS_COUNT > 1
+    if (index == 1) a3PassShadowLight1 = value;
+#endif
+#if A3_PS_COUNT > 2
+    if (index == 2) a3PassShadowLight2 = value;
+#endif
+#if A3_PS_COUNT > 3
+    if (index == 3) a3PassShadowLight3 = value;
+#endif
+}
+
+void a3PointShadowPassSpecular(int index, float intensity)
+{
+#if A3_PS_COUNT > 1
+    if (index == 0) a3PassShadowSpecular.x = intensity;
+    else if (index == 1) a3PassShadowSpecular.y = intensity;
+    else if (index == 2) a3PassShadowSpecular.z = intensity;
+    else a3PassShadowSpecular.w = intensity;
+#else
+    a3PassShadowSpecular = intensity;
+#endif
 }
 #endif
 
@@ -51,15 +111,24 @@ uniform float a3PointShadowFade[A3_PS_MAX];
 uniform vec3 a3PointShadowFaceOrigins[A3_PS_MAX * 6];
 // the rotation from this camera's view space to the world's, which the cube faces follow
 uniform mat3 a3PointShadowViewToWorld;
+// a light whose light here (its colour times the attenuation, summed) is no more than this casts no shadow here: too
+// little of the light there is ([Shadows] point light shadow min light, min contrast)
+uniform float a3PointShadowMinLight;
 // x: near plane, y: one texel of a face (1 / resolution), z: depth bias, w: 1 / the lights (the atlas' rows)
 uniform vec4 a3PointShadowParams;
 
 // 1 lit, 0 in shadow
-float a3PointShadow(int index, vec3 viewPos, vec3 viewNormal)
+// index: the object's shadowed light (0 to A3_PS_COUNT - 1)
+float a3PointShadow(int local, vec3 viewPos, vec3 viewNormal)
 {
+    int index = a3PointShadowSlots[local];
     float strength = a3PointShadowFade[index];
     if (strength <= 0.0)
         return 1.0;
+#if A3_PS_TAPS <= 0
+    // testing ([Shadows] point light shadow test level)
+    return 1.0;
+#endif
     float texel = a3PointShadowParams.y;
     // the face: by the direction from the light where it is now
     vec3 v = a3PointShadowViewToWorld * (viewPos - a3PointShadowLights[index].xyz);
@@ -91,40 +160,63 @@ float a3PointShadow(int index, vec3 viewPos, vec3 viewNormal)
     // the face's tile; uv keeps 1.5 texels from its edges, so the taps below stay inside it
     vec2 tile = vec2(float(face), float(index));
     vec2 scale = vec2(1.0 / 6.0, a3PointShadowParams.w);
+#if A3_PS_TAPS >= 4
     // four taps half a texel apart, each filtered (2x2 comparisons): a soft edge three texels wide
-    float lit = shadow2D(a3PointShadowMap, vec3((tile + uv + vec2(-0.5, -0.5) * texel) * scale, depth)).r
+    float lit = (shadow2D(a3PointShadowMap, vec3((tile + uv + vec2(-0.5, -0.5) * texel) * scale, depth)).r
         + shadow2D(a3PointShadowMap, vec3((tile + uv + vec2(0.5, -0.5) * texel) * scale, depth)).r
         + shadow2D(a3PointShadowMap, vec3((tile + uv + vec2(-0.5, 0.5) * texel) * scale, depth)).r
-        + shadow2D(a3PointShadowMap, vec3((tile + uv + vec2(0.5, 0.5) * texel) * scale, depth)).r;
-    return mix(1.0, lit * 0.25, strength);
+        + shadow2D(a3PointShadowMap, vec3((tile + uv + vec2(0.5, 0.5) * texel) * scale, depth)).r) * 0.25;
+#else
+    // one tap, filtered (2x2 comparisons): a soft edge a texel wide, a quarter of the texture reads
+    float lit = shadow2D(a3PointShadowMap, vec3((tile + uv) * scale, depth)).r;
+#endif
+    return mix(1.0, lit, strength);
 }
 
 // lit per vertex only: a shader lit per pixel has a vertex shader without these
 #if !PER_PIXEL_LIGHTING
-varying vec3 a3PassShadowDiffuse[A3_PS_MAX];
-varying vec3 a3PassShadowSpecular[A3_PS_MAX];
-
 // The shadowed lights the vertex shader lit, shadowed here
+void a3PointShadowOne(int index, mediump vec4 passed, mediump float specularTerm, vec3 viewPos, vec3 viewNormal,
+    inout vec3 diffuseLight, inout vec3 specularLight)
+{
+    mediump vec3 d = passed.rgb * passed.a;
+    mediump vec3 s = passed.rgb * specularTerm;
+    // too little of its light here to see its shadow ([Shadows] point light shadow min light, min contrast)
+    if (dot(passed.rgb, vec3(1.0)) <= a3PointShadowMinLight)
+    {
+        diffuseLight += d;
+        specularLight += s;
+        return;
+    }
+    float shadow = a3PointShadow(index, viewPos, viewNormal);
+#ifdef A3_PS_DEBUG
+    // [Shadows] point light shadow debug: where the light is shadowed, red
+    diffuseLight += vec3(1.0, 0.0, 0.0) * (1.0 - shadow);
+#endif
+    diffuseLight += d * shadow;
+    specularLight += s * shadow;
+}
+
 void a3PointShadowLight(vec3 viewPos, vec3 viewNormal, out vec3 diffuseLight, out vec3 specularLight)
 {
     diffuseLight = vec3(0.0);
     specularLight = vec3(0.0);
-    for (int i = 0; i < A3_PS_MAX; ++i)
-    {
-        if (i >= a3PointShadowCount)
-            break;
-        vec3 d = a3PassShadowDiffuse[i];
-        vec3 s = a3PassShadowSpecular[i];
-        if (dot(d + s, vec3(1.0)) <= 0.0)
-            continue;
-        float shadow = a3PointShadow(i, viewPos, viewNormal);
-#ifdef A3_PS_DEBUG
-        // [Shadows] point light shadow debug: where the light is shadowed, red
-        diffuseLight += vec3(1.0, 0.0, 0.0) * (1.0 - shadow);
+#if A3_PS_TAPS < 0
+    // testing: the fragment shader takes nothing of it (the shadowed lights are lost)
+    return;
 #endif
-        diffuseLight += d * shadow;
-        specularLight += s * shadow;
-    }
+#if A3_PS_COUNT > 1
+    a3PointShadowOne(0, a3PassShadowLight0, a3PassShadowSpecular.x, viewPos, viewNormal, diffuseLight, specularLight);
+    a3PointShadowOne(1, a3PassShadowLight1, a3PassShadowSpecular.y, viewPos, viewNormal, diffuseLight, specularLight);
+#else
+    a3PointShadowOne(0, a3PassShadowLight0, a3PassShadowSpecular, viewPos, viewNormal, diffuseLight, specularLight);
+#endif
+#if A3_PS_COUNT > 2
+    a3PointShadowOne(2, a3PassShadowLight2, a3PassShadowSpecular.z, viewPos, viewNormal, diffuseLight, specularLight);
+#endif
+#if A3_PS_COUNT > 3
+    a3PointShadowOne(3, a3PassShadowLight3, a3PassShadowSpecular.w, viewPos, viewNormal, diffuseLight, specularLight);
+#endif
 }
 #endif
 #endif

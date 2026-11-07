@@ -335,7 +335,7 @@ namespace Alpha3
     }
 
     bool injectPointShadowSource(const std::string& name, bool vertex, int lights, std::string_view library,
-        std::string& source, const MissingAnchor& missing, bool debug)
+        std::string& source, const MissingAnchor& missing, bool debug, int taps, float minLight)
     {
         if (lights <= 0 || name.find("(merged)") == std::string::npos)
             return false;
@@ -379,45 +379,65 @@ namespace Alpha3
         }
 
         Injection injection(source, name, missing);
-        std::string text = "\n// ---- Alpha3 point light shadows\n#define A3_PS_MAX " + std::to_string(lights) + "\n";
+        // All of it under A3_PS_ON (set by the light list state of the objects a shadowed light reaches,
+        // pointShadowsReach; the merged shader imports it, mergeShaderStage): the others compile without it, OpenMW's
+        // own code in its place
+        const auto gated = [](std::string_view on, std::string_view off) {
+            return "#ifdef A3_PS_ON\n" + std::string(on) + "\n#else\n" + std::string(off) + "\n#endif";
+        };
+        std::string text = "\n// ---- Alpha3 point light shadows\n#ifdef A3_PS_ON\n#define A3_PS_MAX " + std::to_string(lights)
+            + "\n";
         text += vertex ? "#define A3_PS_VERTEX\n" : "#define A3_PS_FRAGMENT\n";
         if (debug)
             text += "#define A3_PS_DEBUG\n";
+        text += "#define A3_PS_TAPS " + std::to_string(taps) + "\n";
+        text += "#define A3_PS_MIN_LIGHT " + std::to_string(minLight) + "\n";
         text += library;
+        text += "\n#endif\n";
         injection.insert(signature, text, false);
-        injection.insert(signature, "    int a3ShadowIndex = a3PointShadowIndex(light.position.xyz);", true);
+        injection.insert(signature,
+            "#ifdef A3_PS_ON\n    int a3ShadowIndex = a3PointShadowIndex(light.position.xyz);\n#endif", true);
 
         if (vertex)
         {
             // a shadowed light's light to the fragment shader on its own
+            // a shadowed light's light to the fragment shader on its own
             injection.replace(diffuse,
-                "    vec3 a3Diffuse = light.diffuse.xyz * lambert(viewNormal, lightDir, viewDir) * attenuation;\n"
-                "    if (a3ShadowIndex >= 0)\n"
-                "        a3PassShadowDiffuse[a3ShadowIndex] += a3Diffuse;\n"
-                "    else\n"
-                "        diffuseLight += a3Diffuse;");
+                gated("    float a3Lambert = lambert(viewNormal, lightDir, viewDir);\n"
+                      "    if (a3ShadowIndex >= 0)\n"
+                      "        a3PointShadowPassDiffuse(a3ShadowIndex, light.diffuse.xyz * attenuation, a3Lambert);\n"
+                      "    else\n"
+                      "        diffuseLight += light.diffuse.xyz * a3Lambert * attenuation;",
+                    diffuse));
             injection.replace(specular,
-                "    vec3 a3Specular = light.specular.xyz * specularIntensity(viewNormal, viewDir, shininess, lightDir) "
-                "* attenuation;\n"
-                "    if (a3ShadowIndex >= 0)\n"
-                "        a3PassShadowSpecular[a3ShadowIndex] += a3Specular;\n"
-                "    else\n"
-                "        specularLight += a3Specular;");
-            return injection.insert(pointLighting, "    a3PointShadowClear();", true);
+                gated("    float a3SpecularTerm = specularIntensity(viewNormal, viewDir, shininess, lightDir) * "
+                      "attenuation;\n"
+                      "    if (a3ShadowIndex >= 0)\n"
+                      "        a3PointShadowPassSpecular(a3ShadowIndex, a3SpecularTerm);\n"
+                      "    else\n"
+                      "        specularLight += light.specular.xyz * a3SpecularTerm;",
+                    specular));
+            return injection.insert(pointLighting, "#ifdef A3_PS_ON\n    a3PointShadowClear();\n#endif", true);
         }
 
         // lit per pixel: shadowed where it is lit
         injection.replace(diffuse,
-            "    float a3Shadow = a3ShadowIndex >= 0 ? a3PointShadow(a3ShadowIndex, viewPos, viewNormal) : 1.0;\n"
-            "    diffuseLight += light.diffuse.xyz * lambert(viewNormal, lightDir, viewDir) * attenuation * a3Shadow;");
+            gated("    float a3Shadow = a3ShadowIndex >= 0 && attenuation * dot(light.diffuse.xyz, vec3(1.0)) > "
+                  "a3PointShadowMinLight\n"
+                  "        ? a3PointShadow(a3ShadowIndex, viewPos, viewNormal) : 1.0;\n"
+                  "    diffuseLight += light.diffuse.xyz * lambert(viewNormal, lightDir, viewDir) * attenuation * "
+                  "a3Shadow;",
+                diffuse));
         injection.replace(specular,
-            "    specularLight += light.specular.xyz * specularIntensity(viewNormal, viewDir, shininess, lightDir) * "
-            "attenuation * a3Shadow;");
+            gated("    specularLight += light.specular.xyz * specularIntensity(viewNormal, viewDir, shininess, lightDir) "
+                  "* attenuation * a3Shadow;",
+                specular));
         // lit per vertex: the shadowed lights the vertex shader passed on. Terrain has no specular strength (as
         // terrain.vert); clampLighting is only there with per pixel lighting: up to 1 as the vertex shader's
         // (clamped) lighting, or as far as it already went (not clamped).
         const std::string strength = objects ? "material.specStrength" : "1.0";
         injection.insert(vertexLit,
+            "#ifdef A3_PS_ON\n"
             "    if (!skipLighting(material, passColor))\n"
             "    {\n"
             "        vec3 a3Diffuse, a3Specular;\n"
@@ -426,13 +446,34 @@ namespace Alpha3
             "        lighting = min(a3Lit, max(lighting, vec3(1.0)));\n"
             "        specular += getSpecularColor(material, passColor).xyz * a3Specular * "
                 + strength + ";\n"
-            "    }",
+            "    }\n"
+            "#endif",
             true);
         return injection.insert(main,
-            "#if !PER_PIXEL_LIGHTING\n"
+            "#if defined(A3_PS_ON) && !PER_PIXEL_LIGHTING\n"
             "void a3PointShadowLight(vec3 viewPos, vec3 viewNormal, out vec3 diffuseLight, out vec3 specularLight);\n"
             "#endif",
             false);
+    }
+
+    const char* injectionStamp()
+    {
+        return __DATE__ " " __TIME__;
+    }
+
+    bool pointShadowImporter(std::string_view source)
+    {
+        // objects.frag and terrain.frag: the main shaders that light with the light list (groundcover's too, left out)
+        return source.find("void main()") != std::string_view::npos
+            && source.find("doLighting(") != std::string_view::npos
+            && source.find("#define GROUNDCOVER") == std::string_view::npos;
+    }
+
+    bool pointShadowShader(const std::string& name)
+    {
+        return name.find("(merged)") != std::string::npos
+            && (endsWithName(name, "objects.vert") || endsWithName(name, "objects.frag")
+                || endsWithName(name, "terrain.vert") || endsWithName(name, "terrain.frag"));
     }
 
     bool injectExperimentalSource(const std::string& name, bool vertex, const ExperimentalSettings& settings,

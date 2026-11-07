@@ -59,6 +59,21 @@ namespace Alpha3
             bool mOwnObject;
             float mDistance;
             float mNear;
+            // shadow map taps per shaded pixel (each a 2x2 filtered comparison): 1 or 4
+            int mTaps;
+            // the reflection, refraction and other cameras that draw the scene read the shadows too
+            bool mOtherCameras;
+            // light (the sum of its colour) below which a pixel does not look its shadow up
+            float mMinLight;
+            // the maps' depth: 16 (half the memory and bandwidth; a light's range is short) or 24
+            int mDepthBits;
+            // the scene reads the maps (false: they are still drawn, for measuring what that costs)
+            bool mReceive;
+            // a light is shadowed only where its light is at least this part of the sun's and ambient light (0: as far
+            // as it reaches): the faces see less, the pixels beyond look nothing up
+            float mContrast;
+            // testing: the shaders skip the map lookups (all lit), keeping the rest
+            int mNoLookup;
         };
 
         const Config& config()
@@ -73,6 +88,13 @@ namespace Alpha3
                 out.mDebug = settingBool("Shadows", "point light shadow debug", false);
                 out.mDistance = std::max(settingFloat("Shadows", "point light shadow distance", 2048.f), 1.f);
                 out.mNear = std::max(settingFloat("Shadows", "point light shadow near", 16.f), 1.f);
+                out.mTaps = settingInt("Shadows", "point light shadow taps", 1) >= 4 ? 4 : 1;
+                out.mOtherCameras = settingBool("Shadows", "point light shadows in reflections", false);
+                out.mMinLight = std::clamp(settingFloat("Shadows", "point light shadow min light", 0.01f), 0.f, 1.f);
+                out.mDepthBits = settingInt("Shadows", "point light shadow depth bits", 16) >= 24 ? 24 : 16;
+                out.mReceive = settingBool("Shadows", "point light shadow receive", true);
+                out.mNoLookup = std::clamp(settingInt("Shadows", "point light shadow test level", 0), 0, 2);
+                out.mContrast = std::clamp(settingFloat("Shadows", "point light shadow min contrast", 0.15f), 0.f, 4.f);
                 return out;
             }();
             return c;
@@ -88,6 +110,16 @@ namespace Alpha3
 
         // the lights the shaders were made for: set once the feature is installed, before anything is compiled
         std::atomic<int> sShaderLights{ 0 };
+
+        // This frame's shadowed lights (their ids) and the views (the render stages' initial view matrices) that read
+        // them, for pointShadowsReach. Cull thread only.
+        // the shadowed lights: their ids and slots (rows of the atlas)
+        std::vector<std::pair<int, int>> sShadowedIds;
+        std::vector<const osg::RefMatrix*> sReceivingViews;
+        unsigned int sReachFrame = ~0u;
+        // light list state sets made, and those that read the shadows, since the last report
+        unsigned int sReachAsked = 0;
+        unsigned int sReachHits = 0;
         std::atomic<int> sTextureUnit{ -1 };
 
         // the faces: the direction each looks along and its up, as pointshadows.glsl picks them
@@ -104,6 +136,37 @@ namespace Alpha3
             { { 0, 0, 1 }, { 0, 1, 0 } },
             { { 0, 0, -1 }, { 0, 1, 0 } },
         } };
+
+        float colourSum(const osg::Vec4f& colour)
+        {
+            return colour.x() + colour.y() + colour.z();
+        }
+
+        // How far the light's diffuse light (the sum of its colour, times OpenMW's attenuation: lib/light/util.glsl
+        // calcAttenuation) stays above the threshold, up to its radius. The attenuation only falls with the distance.
+        float lightReach(const SceneUtil::Light& light, float radius, float threshold)
+        {
+            const float colour = colourSum(light.getDiffuse());
+            const auto lit = [&](float d) {
+                const float divisor = light.getConstantAttenuation() + light.getLinearAttenuation() * d
+                    + light.getQuadraticAttenuation() * d * d;
+                float x = std::clamp((d / radius - 0.75f) / 0.25f, 0.f, 1.f);
+                x = 1.f - x * x;
+                const float fade = 1.f - x * x;
+                return colour * (1.f - fade) / std::max(divisor, 1e-6f);
+            };
+            if (radius <= 0.f || lit(0.f) <= threshold)
+                return 0.f;
+            if (lit(radius) > threshold)
+                return radius;
+            float low = 0.f, high = radius;
+            for (int i = 0; i < 16; ++i)
+            {
+                const float mid = (low + high) * 0.5f;
+                (lit(mid) > threshold ? low : high) = mid;
+            }
+            return high;
+        }
 
         // What a light's faces traverse: the scene's children, with the casting state. Inside the camera's cull, so
         // the render bin (ShadowsBin) is the face's own render stage's.
@@ -142,6 +205,7 @@ namespace Alpha3
             osg::ref_ptr<osg::Uniform> mFade;
             osg::ref_ptr<osg::Uniform> mFaceOrigins;
             osg::ref_ptr<osg::Uniform> mViewToWorld;
+            osg::ref_ptr<osg::Uniform> mMinLight;
         };
 
         struct CameraState
@@ -162,6 +226,8 @@ namespace Alpha3
             // world space position and the maps' far plane, this frame
             osg::Vec3f mPosition;
             float mFar = 0;
+            // the threshold mFar was found with: the faces are drawn again when it changes much (dusk, a cell)
+            float mFarThreshold = -1;
             std::array<osg::ref_ptr<osg::Camera>, sFaces> mCameras;
             // when each face was last drawn for this light (0: not yet) and where the light was then
             std::array<unsigned int, sFaces> mDrawn{};
@@ -182,9 +248,9 @@ namespace Alpha3
                 // one depth texture, a row of six faces per light (OSG has texture arrays on OpenGL ES 3 off)
                 mTexture = new osg::Texture2D;
                 mTexture->setTextureSize(c.mResolution * sFaces, c.mResolution * c.mLights);
-                mTexture->setInternalFormat(GL_DEPTH_COMPONENT24);
+                mTexture->setInternalFormat(c.mDepthBits >= 24 ? GL_DEPTH_COMPONENT24 : GL_DEPTH_COMPONENT16);
                 mTexture->setSourceFormat(GL_DEPTH_COMPONENT);
-                mTexture->setSourceType(GL_UNSIGNED_INT);
+                mTexture->setSourceType(c.mDepthBits >= 24 ? GL_UNSIGNED_INT : GL_UNSIGNED_SHORT);
                 mTexture->setFilter(osg::Texture::MIN_FILTER, osg::Texture::LINEAR);
                 mTexture->setFilter(osg::Texture::MAG_FILTER, osg::Texture::LINEAR);
                 mTexture->setWrap(osg::Texture::WRAP_S, osg::Texture::CLAMP_TO_EDGE);
@@ -250,12 +316,20 @@ namespace Alpha3
                     report(*cv);
                 }
 
-                if (!mAnyLight)
+                // the scene camera's own: the water's reflection and the like draw without them (a3PointShadowCount
+                // is 0 at the root), unless [Shadows] point light shadows in reflections
+                if (!mAnyLight || (!sceneCamera && !config().mOtherCameras))
                 {
                     traverse(node, nv);
                     return;
                 }
 
+                if (sReachFrame != frame)
+                {
+                    sReachFrame = frame;
+                    sReceivingViews.clear();
+                }
+                sReceivingViews.push_back(viewMatrix);
                 ReceiveState& receive = receiveState(camera, frame);
                 fillReceiveState(receive, *viewMatrix);
                 cv->pushStateSet(receive.mStateSet);
@@ -349,9 +423,11 @@ namespace Alpha3
                 if (mReportStart > 0.0 && mFrames > 0)
                     Log(Debug::Verbose) << "Point light shadows: " << static_cast<float>(mLightFrames) / mFrames
                                         << " lights shadowing, " << static_cast<float>(mFacesDrawn) / mFrames
-                                        << " faces drawn a frame (" << mFrames << " frames)";
+                                        << " faces drawn a frame (" << mFrames << " frames), " << sReachHits << " of "
+                                        << sReachAsked << " light lists read them";
                 mReportStart = now;
                 mFrames = mLightFrames = mFacesDrawn = 0;
+                sReachAsked = sReachHits = 0;
             }
 
             void pickLights(osgUtil::CullVisitor& cv, const osg::RefMatrix& viewMatrix, unsigned int frame)
@@ -368,6 +444,12 @@ namespace Alpha3
                     float mScore;
                     float mDistance;
                 };
+                // the light a point light stands out against: the sun's (or the cell's) and the ambient
+                float level = 0.f;
+                if (const std::shared_ptr<SceneUtil::Light>& sun = mScene->getSunlight())
+                    level = colourSum(sun->getDiffuse()) + colourSum(sun->getAmbient());
+                mThreshold = std::max(c.mMinLight, c.mContrast * level);
+
                 std::vector<Candidate> candidates;
                 for (const auto& bound : mScene->getLightsInViewSpace(&cv, &viewMatrix, frame))
                 {
@@ -375,7 +457,7 @@ namespace Alpha3
                     const SceneUtil::Light* light = source->getLight(frame);
                     if (source->getEmpty() || light->getDiffuse().x() < 0.f)
                         continue;
-                    const float radius = source->getRadius() * multiplier;
+                    const float radius = lightReach(*light, source->getRadius() * multiplier, mThreshold);
                     const float distance = bound.mViewBound.center().length();
                     if (radius <= c.mNear * 2.f || distance > c.mDistance)
                         continue;
@@ -420,6 +502,7 @@ namespace Alpha3
                             mSlots[s].mLight = newcomers.back()->mLight;
                             mSlots[s].mStart = now;
                             mSlots[s].mDrawn.fill(0);
+                            mSlots[s].mFarThreshold = -1.f;
                             mSlots[s].mOwner = config().mOwnObject ? nullptr : ownerOf(mSlots[s].mLight.get());
                             newcomers.pop_back();
                         }
@@ -427,8 +510,10 @@ namespace Alpha3
                 }
 
                 mAnyLight = false;
-                for (Slot& slot : mSlots)
+                sShadowedIds.clear();
+                for (std::size_t s = 0; s < mSlots.size(); ++s)
                 {
+                    Slot& slot = mSlots[s];
                     osg::ref_ptr<SceneUtil::LightSource> source;
                     if (!slot.mLight.lock(source))
                     {
@@ -438,13 +523,22 @@ namespace Alpha3
                     const SceneUtil::Light* light = source->getLight(frame);
                     const osg::Vec4f position = light->getPosition();
                     slot.mPosition = osg::Vec3f(position.x(), position.y(), position.z());
-                    slot.mFar = source->getRadius() * multiplier;
+                    // the far plane the faces were drawn with stays until the threshold moves by a quarter
+                    if (slot.mFarThreshold < 0.f || std::abs(mThreshold - slot.mFarThreshold) > slot.mFarThreshold * 0.25f)
+                    {
+                        slot.mFar = std::max(lightReach(*light, source->getRadius() * multiplier, mThreshold),
+                            c.mNear * 2.f);
+                        slot.mFarThreshold = mThreshold;
+                        slot.mDrawn.fill(0);
+                    }
                     const float distance = (slot.mPosition * viewMatrix).length();
                     const float fadeIn = std::clamp(static_cast<float>((now - slot.mStart) / 0.3), 0.f, 1.f);
                     const float fadeOut
                         = std::clamp((c.mDistance - distance) / (c.mDistance * 0.2f), 0.f, 1.f);
                     slot.mFade = fadeIn * fadeOut;
                     mAnyLight = true;
+                    if (slot.mFade > 0.f)
+                        sShadowedIds.emplace_back(source->getId(), static_cast<int>(s));
                 }
             }
 
@@ -541,10 +635,10 @@ namespace Alpha3
                     receive.mFaceOrigins
                         = new osg::Uniform(osg::Uniform::FLOAT_VEC3, "a3PointShadowFaceOrigins", lights * sFaces);
                     receive.mViewToWorld = new osg::Uniform(osg::Uniform::FLOAT_MAT3, "a3PointShadowViewToWorld");
+                    receive.mMinLight = new osg::Uniform("a3PointShadowMinLight", 0.f);
                     for (osg::Uniform* uniform :
                         { receive.mCount.get(), receive.mLights.get(), receive.mFade.get(), receive.mFaceOrigins.get(),
-                            receive.mViewToWorld.get(),
-                            mParams.get() })
+                            receive.mViewToWorld.get(), receive.mMinLight.get(), mParams.get() })
                         receive.mStateSet->addUniform(uniform);
                 }
                 return receive;
@@ -574,6 +668,7 @@ namespace Alpha3
                         receive.mFade->setElement(s, 0.f);
                     }
                 }
+                receive.mMinLight->set(mThreshold);
                 const osg::Matrixd inverse = osg::Matrixd::inverse(viewMatrix);
                 // GLSL's m * v is OSG's v * m: the inverse view's rotation, as it is
                 receive.mViewToWorld->set(osg::Matrix3(inverse(0, 0), inverse(0, 1), inverse(0, 2), inverse(1, 0),
@@ -586,6 +681,7 @@ namespace Alpha3
             osg::ref_ptr<osg::Uniform> mParams;
             std::vector<Slot> mSlots;
             bool mAnyLight = false;
+            float mThreshold = 0.f;
             double mReportStart = 0.0;
             unsigned int mFrames = 0;
             unsigned int mLightFrames = 0;
@@ -615,12 +711,41 @@ namespace Alpha3
         sShaderLights = c.mLights;
         sceneRoot.addCullCallback(new PointShadows(sceneRoot, shaderManager, textureUnit, castMask));
         Log(Debug::Info) << "Point light shadows: " << c.mLights << " lights, " << c.mResolution << "x"
-                         << c.mResolution << " maps, out to " << c.mDistance << " units, texture unit " << textureUnit;
+                         << c.mResolution << " maps (" << c.mDepthBits << " bit depth, "
+                         << c.mResolution * sFaces * c.mResolution * c.mLights * (c.mDepthBits >= 24 ? 4 : 2) / 1024
+                         << " KiB), " << c.mTaps << (c.mTaps == 1 ? " tap" : " taps") << ", out to " << c.mDistance
+                         << " units, texture unit " << textureUnit << (c.mOtherCameras ? ", in reflections" : "");
     }
 
     int pointShadowLights()
     {
         return config().mLights;
+    }
+
+    void pointShadowListState(const osg::RefMatrix* viewMatrix, const std::vector<int>& lightIds, osg::StateSet& state)
+    {
+        ++sReachAsked;
+        if (sShaderLights <= 0 || sShadowedIds.empty() || !config().mReceive
+            || std::find(sReceivingViews.begin(), sReceivingViews.end(), viewMatrix) == sReceivingViews.end())
+            return;
+        // the list's shadowed lights, in its order (the closest first): their slots
+        int slots[sMaxLights] = { 0, 0, 0, 0 };
+        int count = 0;
+        for (std::size_t i = 0; i < lightIds.size(); ++i)
+        {
+            for (const auto& [shadowedId, slot] : sShadowedIds)
+            {
+                if (shadowedId == lightIds[i] && count < sMaxLights)
+                    slots[count++] = slot;
+            }
+        }
+        if (count == 0)
+            return;
+        ++sReachHits;
+        state.setDefine("A3_PS_ON", std::to_string(count));
+        osg::ref_ptr<osg::Uniform> uniform = new osg::Uniform(osg::Uniform::INT_VEC4, "a3PointShadowSlots");
+        uniform->set(slots[0], slots[1], slots[2], slots[3]);
+        state.addUniform(uniform);
     }
 
     bool injectPointShadows(const osg::Shader& shader, std::string& source)
@@ -636,8 +761,9 @@ namespace Alpha3
                 Log(Debug::Warning) << "Point light shadows: '" << anchor << "' not found in " << name
                                     << ", left out of it";
         };
+        const Config& c = config();
         return injectPointShadowSource(shader.getName(), shader.getType() == osg::Shader::VERTEX, lights,
-            ExperimentalSources::pointShadows, source, missing, config().mDebug);
+            ExperimentalSources::pointShadows, source, missing, c.mDebug, c.mNoLookup ? -c.mNoLookup + 1 : c.mTaps, c.mMinLight);
     }
 
     int pointShadowTextureUnit()
@@ -650,7 +776,8 @@ namespace Alpha3
         const int lights = sShaderLights;
         if (lights <= 0)
             return "ps:0";
-        return "ps:" + std::to_string(lights) + (config().mDebug ? "d:" : ":")
-            + std::to_string(sourceHash(ExperimentalSources::pointShadows));
+        const Config& c = config();
+        return "ps:" + std::to_string(lights) + (c.mDebug ? "d:" : ":") + "t" + std::to_string(c.mNoLookup ? -c.mNoLookup + 1 : c.mTaps) + ":m"
+            + std::to_string(c.mMinLight) + ":" + std::to_string(sourceHash(ExperimentalSources::pointShadows));
     }
 }

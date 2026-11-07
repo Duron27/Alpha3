@@ -13,8 +13,13 @@
 // merged meshes of object paging, which keep their textures.
 #include "support.hpp"
 
+#include "experimentalshaders.hpp"
 #include "generatedmaps.hpp"
 
+#include <alpha3/upstream.hpp>
+#include <components/debug/debuglog.hpp>
+
+#include <atomic>
 #include <cmath>
 #include <limits>
 #include <map>
@@ -181,5 +186,17 @@ namespace Alpha3
         if (shader.getType() == osg::Shader::FRAGMENT && proceduralShader(shader.getShaderSource())
             && experimentalSettings().mProcedural)
             defines.insert(std::string(sMaterialDefine));
+        // Point light shadows: the objects and terrain shaders get their code under A3_PS_ON (src/pointshadows.cpp),
+        // which the light list state of the objects a shadowed light reaches sets. Imported by OpenMW's own shaders
+        // (the program's define list is theirs; the merged shader stands in for them only at link), known by their
+        // source: they are not named yet
+        if (shader.getType() == osg::Shader::FRAGMENT && pointShadowLights() > 0
+            && pointShadowImporter(shader.getShaderSource()))
+        {
+            defines.insert("A3_PS_ON");
+            static std::atomic<int> imports{ 0 };
+            if (imports++ < 4)
+                Log(Debug::Info) << "Point light shadows: A3_PS_ON imported (" << shader.getName() << ")";
+        }
     }
 }

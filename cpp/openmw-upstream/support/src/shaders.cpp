@@ -3,6 +3,7 @@
 // already translated; OSG now asks for them through RuntimeHooks when it compiles.
 #include "support.hpp"
 
+#include "experimentalshaders.hpp"
 #include "glesdialect.hpp"
 
 #include <algorithm>
@@ -157,6 +158,16 @@ namespace Alpha3
             if (library == main)
                 continue;
             source += "\n// ---- " + library->getName() + "\n" + foldForMerge(library->getShaderSource(), true);
+        }
+
+        // Point light shadows: the objects and terrain shaders get their code under A3_PS_ON (src/pointshadows.cpp). OSG
+        // compiles each shader with the defines it imports itself, so the merged one imports it too (the program picks
+        // its variant by OpenMW's shaders' imports: experimentalImportDefines)
+        if (pointShadowTextureUnit() >= 0 && pointShadowShader(main->getName() + " (merged)"))
+        {
+            const std::size_t version = source.find("#version");
+            const std::size_t lineEnd = version == std::string::npos ? std::string::npos : source.find('\n', version);
+            source.insert(lineEnd == std::string::npos ? 0 : lineEnd + 1, "#pragma import_defines(A3_PS_ON)\n");
         }
 
         // Several programs link the same shaders: they share one merged shader, which is then compiled once. Held
