@@ -664,6 +664,16 @@ namespace Alpha3
             return true;
         }
 
+        // What is culled inside a door portal (Alpha3::makeDoorPortal, bins 3-7) is the other side, drawn where the
+        // doorway leads: this side's walls, behind which it would lie, do not hide it
+        bool throughDoor(osgUtil::CullVisitor& cv)
+        {
+            for (const osgUtil::RenderBin* bin = cv.getCurrentRenderBin(); bin != nullptr; bin = bin->getParent())
+                if (bin->getBinNum() >= 3 && bin->getBinNum() <= 7)
+                    return true;
+            return false;
+        }
+
         // An occluder into a buffer, its vertices taken to view space in [scratch]
         void drawOccluder(DepthBuffer& buffer, std::vector<osg::Vec3f>& scratch, const Occluder& occluder,
             const osg::Matrixf& toView)
@@ -834,7 +844,7 @@ namespace Alpha3
             bool nodeOccluded(osg::CullStack& cullStack, const osg::Node& node)
             {
                 osgUtil::CullVisitor* cv = sceneCull(cullStack);
-                if (cv == nullptr || !ready(*cv))
+                if (cv == nullptr || !ready(*cv) || throughDoor(*cv))
                     return false;
                 const osg::BoundingSphere& bound = node.getBound();
                 const osg::Matrix& modelView = *cv->getModelViewMatrix();
@@ -850,7 +860,7 @@ namespace Alpha3
             bool boxOccluded(osg::CullStack& cullStack, const osg::BoundingBox& box)
             {
                 osgUtil::CullVisitor* cv = sceneCull(cullStack);
-                if (cv == nullptr || !ready(*cv))
+                if (cv == nullptr || !ready(*cv) || throughDoor(*cv))
                     return false;
                 const osg::Matrix& modelView = *cv->getModelViewMatrix();
                 osg::Vec3f corners[8];
@@ -862,7 +872,7 @@ namespace Alpha3
             // A point light's sphere of influence in view space: hidden everywhere, it lights no pixel that is drawn
             bool lightOccluded(osgUtil::CullVisitor& cv, const osg::BoundingSphere& viewSphere)
             {
-                if (sceneCull(cv) == nullptr || !ready(cv))
+                if (sceneCull(cv) == nullptr || !ready(cv) || throughDoor(cv))
                     return false;
                 const osg::Vec3f center = viewSphere.center();
                 const float radius = viewSphere.radius();
