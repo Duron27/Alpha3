@@ -435,11 +435,12 @@ fun GraphicsSettingsSection() {
                 "gles" to "OpenGL ES 3.2 (device driver)",
                 "angle" to "ANGLE (OpenGL ES on Vulkan)",
                 "zink" to "Zink (OpenGL on Vulkan)",
+                "vulkan" to "Vulkan 1.0 (native, in development)",
             )
-            val rendererShort = mapOf("gles" to "Device", "angle" to "ANGLE", "zink" to "Zink")
+            val rendererShort = mapOf("gles" to "Device", "angle" to "ANGLE", "zink" to "Zink", "vulkan" to "Vulkan")
             SettingRow(
                 title = "Renderer (stock OpenMW)",
-                subtitle = "Device is fastest. ANGLE and Zink run on Vulkan."
+                subtitle = "Device is fastest. ANGLE and Zink run on Vulkan. Vulkan draws natively (in development)."
             ) {
                 Box(modifier = Modifier.clickable { rendererExpanded = true }) {
                     Text(rendererShort[glRenderer] ?: "Device", modifier = Modifier.padding(8.dp), color = White)

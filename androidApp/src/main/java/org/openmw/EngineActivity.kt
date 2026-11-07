@@ -497,6 +497,11 @@ class EngineActivity : SDLActivity() {
                         setEnv("OSG_USE_ANGLE", "1")
                         setEnv("OPENMW_GLES_VERSION", "32")
                     }
+                    // the native Vulkan 1.0 renderer (support/src/vulkan); falls back to OpenGL ES when Vulkan can't start
+                    "vulkan" -> {
+                        setEnv("OSG_USE_VULKAN", "1")
+                        setEnv("OPENMW_GLES_VERSION", "32")
+                    }
                     else -> setEnv("OPENMW_GLES_VERSION", "32")
                 }
             }
