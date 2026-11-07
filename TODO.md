@@ -5,11 +5,6 @@
 Recommended starting with screen-space contact shadows for point lights, which are cheap. Real cube-map shadows are
 much heavier. Waiting on the user's go-ahead.
 
-## MyGUI HUD layout in the overlay's edit mode (asked 2026-11-07)
-
-While the touch overlay is in edit mode, the MyGUI HUD elements (health/magic/fatigue bars, weapon and spell boxes,
-minimap, ...) can be moved and resized too, like the overlay's controls, and the layout is kept.
-
 ## Not yet seen on the phone
 
 Storm lean of the grass, grass antialiasing, yellow bushels, fireflies at night, the enlarged bugs.

@@ -153,6 +153,11 @@ fun GameplayScreen(
             )
         }
 
+        // the game's HUD: moved and resized here too (under the controls, which keep their touches)
+        if (UIStateManager.editMode && UIStateManager.tempCodeGroup == "OpenMW") {
+            HudLayoutEditor(containerWidth, containerHeight)
+        }
+
         AnimatedVisibility(
             visible = UIStateManager.isCursorVisible == 1 && UIStateManager.tempCodeGroup == "OpenMW" && !isUIHidden,
             enter = fadeIn() + expandIn(),

@@ -1,0 +1,38 @@
+From e1f273b24ea2a81c65d35a3cf8d62f77df931163 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Sat, 7 Nov 2026 17:51:13 -0500
+Subject: [PATCH] HUD: its elements moved and resized from the touch overlay's
+ edit mode
+
+HUD::onFrame ends by handing its main widget to the support library, which places the
+elements (bars, weapon, spell and sneak boxes, effects, minimap, names) where the player put
+them and at their size.
+---
+ apps/openmw/mwgui/hud.cpp | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/apps/openmw/mwgui/hud.cpp b/apps/openmw/mwgui/hud.cpp
+index d1bf8b06e4..40b75f2dc3 100644
+--- a/apps/openmw/mwgui/hud.cpp
++++ b/apps/openmw/mwgui/hud.cpp
+@@ -1,5 +1,7 @@
+ #include "hud.hpp"
+ 
++#include <alpha3/upstream.hpp>
++
+ #include <MyGUI_Button.h>
+ #include <MyGUI_ImageBox.h>
+ #include <MyGUI_InputManager.h>
+@@ -331,6 +333,9 @@ namespace MWGui
+ 
+             mDrowningFlash->setAlpha(intensity);
+         }
++
++        // Alpha3: the HUD's elements where the touch overlay's edit mode put them, and at their size
++        Alpha3::hudLayoutFrame(mMainWidget);
+     }
+ 
+     void HUD::setSelectedSpell(const ESM::RefId& spellId, int successChancePercent)
+-- 
+2.55.0
+

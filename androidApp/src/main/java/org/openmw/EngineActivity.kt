@@ -362,6 +362,11 @@ class EngineActivity : SDLActivity() {
                             )
                         }
 
+                        // the game's HUD: moved and resized here too (under the controls, which keep their touches)
+                        if (editMode && UIStateManager.tempCodeGroup == "OpenMW") {
+                            org.alpha3.launcher.ui.overlay.HudLayoutEditor(containerWidth, containerHeight)
+                        }
+
                         AnimatedVisibility(
                             visible = isCursorVisible == 1 && (UIStateManager.tempCodeGroup == "OpenMW" || UIStateManager.tempCodeGroup == "UQM") && !isUIHidden,
                             enter = fadeIn() + expandIn(),

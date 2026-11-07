@@ -61,6 +61,12 @@ namespace Alpha3
     // Alpha3/cache, kept when the app is reinstalled)
     std::filesystem::path cacheDirectory();
 
+    // ---- hudlayout.cpp: the launcher's side. One line an element: "name visible left top width height scale scales
+    // placed", in fractions of the screen; set takes left and top the same way (keep: write the file)
+    std::string hudLayoutReport();
+    void hudLayoutSet(const std::string& name, float left, float top, float scale, bool keep);
+    void hudLayoutReset();
+
     // The renderer prepareRenderer() picked
     bool usesZink();
     // [Video] renderer = vulkan (OSG_USE_VULKAN): the native Vulkan 1.0 renderer (src/vulkan/), OSG drawing nothing

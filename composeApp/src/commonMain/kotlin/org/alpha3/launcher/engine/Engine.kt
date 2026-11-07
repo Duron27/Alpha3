@@ -46,6 +46,18 @@ interface EngineBridge {
 
     /** The platform's own accounting of the process's memory, as label and value lines. */
     fun platformMemory(): List<Pair<String, String>> = emptyList()
+
+    /**
+     * Where the game's HUD elements are (support/src/hudlayout.cpp), for the overlay's edit mode: one line an element,
+     * "name visible left top width height scale scales placed", in fractions of the screen. Null without a game.
+     */
+    fun hudLayout(): String? = null
+
+    /** Puts a HUD element at [left], [top] (fractions of the screen) and [scale]; [keep] writes the layout file. */
+    fun hudSet(name: String, left: Float, top: Float, scale: Float, keep: Boolean) {}
+
+    /** Every HUD element back where the game puts it. */
+    fun hudReset() {}
 }
 
 private object NoEngine : EngineBridge {
@@ -101,4 +113,8 @@ object Engine : EngineBridge {
     override fun requestInspector() = bridge.requestInspector()
     override fun inspectorReport() = bridge.inspectorReport()
     override fun platformMemory() = bridge.platformMemory()
+    override fun hudLayout() = bridge.hudLayout()
+    override fun hudSet(name: String, left: Float, top: Float, scale: Float, keep: Boolean) =
+        bridge.hudSet(name, left, top, scale, keep)
+    override fun hudReset() = bridge.hudReset()
 }

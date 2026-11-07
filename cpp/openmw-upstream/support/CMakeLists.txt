@@ -110,6 +110,7 @@ set(ALPHA3_SUPPORT_SOURCES
     ${CMAKE_CURRENT_BINARY_DIR}/generated/experimentalsources.cpp
     src/generatedmaps.cpp
     src/grass.cpp
+    src/hudlayout.cpp
     src/benchmark.cpp
     src/inspector.cpp
     src/experimentalstate.cpp

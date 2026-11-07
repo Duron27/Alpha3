@@ -40,6 +40,11 @@ namespace osg
     class Viewport;
 }
 
+namespace MyGUI
+{
+    class Widget;
+}
+
 namespace osgUtil
 {
     class CullVisitor;
@@ -353,6 +358,10 @@ namespace Alpha3
     // (androidmain.cpp); also exported as alpha3_navmesh_run for iOS.
     int buildNavMesh(
         int argc, const char* const* argv, const std::function<void(const NavMeshProgress&)>& progress = {});
+
+    // End of HUD::onFrame (main: the HUD's main widget): its elements where the touch overlay's edit mode put them,
+    // at their size (src/hudlayout.cpp)
+    void hudLayoutFrame(MyGUI::Widget* main);
 }
 
 #endif

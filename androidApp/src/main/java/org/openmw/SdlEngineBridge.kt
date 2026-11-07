@@ -52,6 +52,21 @@ class SdlEngineBridge(private val context: Context) : EngineBridge {
     override fun inspectorReport(): String? =
         runCatching { omwInspectorReport()?.decodeToString() }.getOrNull()
 
+    // in libopenmw_upstream (support/src/hudlayout.cpp)
+    private external fun omwHudLayout(): ByteArray?
+    private external fun omwHudSet(name: String, left: Float, top: Float, scale: Float, keep: Boolean)
+    private external fun omwHudReset()
+
+    override fun hudLayout(): String? = runCatching { omwHudLayout()?.decodeToString() }.getOrNull()
+
+    override fun hudSet(name: String, left: Float, top: Float, scale: Float, keep: Boolean) {
+        runCatching { omwHudSet(name, left, top, scale, keep) }
+    }
+
+    override fun hudReset() {
+        runCatching { omwHudReset() }
+    }
+
     override fun platformMemory(): List<Pair<String, String>> {
         val lines = mutableListOf<Pair<String, String>>()
         fun mb(bytes: Long) = "%.1f MB".format(bytes / 1048576.0)
