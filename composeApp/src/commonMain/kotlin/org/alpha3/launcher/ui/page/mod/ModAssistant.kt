@@ -131,6 +131,8 @@ import androidx.compose.ui.graphics.graphicsLayer
 import coil3.compose.LocalPlatformContext
 import org.jetbrains.compose.resources.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import org.alpha3.launcher.ui.view.MyFloatingActionButton
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
@@ -168,6 +170,10 @@ import org.alpha3.launcher.utils.stringRes
 import sh.calvin.reorderable.ReorderableItem
 import sh.calvin.reorderable.rememberReorderableLazyListState
 import org.alpha3.launcher.io.File
+import org.alpha3.launcher.ui.theme.LocalLauncherTheme
+import org.alpha3.launcher.ui.theme.NavEntry
+import org.alpha3.launcher.ui.theme.ThemedNav
+import org.alpha3.launcher.ui.theme.ThemedSections
 import org.alpha3.launcher.tools.moddev.ModDevOps
 import org.alpha3.launcher.tools.moddev.ModDevToolsDialog
 import kotlin.time.Duration.Companion.seconds
@@ -175,6 +181,7 @@ import kotlin.time.Duration.Companion.seconds
 @OptIn(ExperimentalMaterial3Api::class, InternalCoroutinesApi::class)
 @Composable
 private fun ModTabRow(
+    vertical: Boolean = false,
     viewModel: ModAssistantViewModel = LocalModAssistantViewModel.current
 ) {
     val context = LocalPlatformContext.current
@@ -268,6 +275,55 @@ private fun ModTabRow(
         resetStates()
         settingsTab = tab.ordinal
         selectedTabIndex = SETTINGS_TAB_BASE + tab.ordinal
+    }
+
+    // A theme other than Classic (Settings > Appearance) shows the same sections its own way, none of it scrolling
+    val launcherTheme = LocalLauncherTheme.current
+    if (!launcherTheme.isClassic) {
+        val entries = buildList {
+            categories.forEachIndexed { index, category ->
+                add(NavEntry(categoryIcon(index), category.tag, selectedTabIndex == index) { openCategory(index) })
+            }
+            if (Platform.features.supportsModDownloader) {
+                add(NavEntry(Icons.Outlined.CloudDownload, stringResource(Res.string.mod_downloader), selectedTabIndex == 4) { openDownloader() })
+            }
+            if (Platform.features.supportsModTools) {
+                add(NavEntry(Icons.Outlined.Build, stringResource(Res.string.mod_tools), selectedTabIndex == 5) { openModTools() })
+            }
+            settingsTabs.forEach { tab ->
+                add(NavEntry(tab.icon(), tab.title(), selectedTabIndex == SETTINGS_TAB_BASE + tab.ordinal) { openSettings(tab) })
+            }
+            add(NavEntry(Icons.Default.Search, stringResource(Res.string.search_mods), selectedTabIndex == 7, utility = true) {
+                resetStates()
+                showSearchDialog = true
+                selectedTabIndex = 7
+            })
+            add(NavEntry(Icons.Outlined.HelpOutline, "Help", selectedTabIndex == HELP_TAB, utility = true) {
+                resetStates()
+                showHelp = true
+                selectedTabIndex = HELP_TAB
+            })
+            if (newFeatureEnabledChecked) {
+                if (Platform.features.supportsTerminal) add(NavEntry(Icons.Outlined.Terminal, "Terminal", selectedTabIndex == 8, utility = true) {
+                    resetStates()
+                    terminal = true
+                    selectedTabIndex = 8
+                })
+                if (Platform.features.supportsKram) add(NavEntry(Icons.Outlined.Memory, "Kram", selectedTabIndex == 9, utility = true) {
+                    resetStates()
+                    kram = true
+                    selectedTabIndex = 9
+                })
+            }
+        }
+        ThemedNav(
+            state = launcherTheme,
+            entries = entries,
+            vertical = vertical,
+            core = { MyFloatingActionButton() },
+            trailing = { if (layoutType != NavigationSuiteType.NavigationBar) BarOptions(context) },
+        )
+        return
     }
 
     Row(
@@ -464,14 +520,20 @@ fun ModValuesList(
     // Reload the mod values and update the UI
     categorizedModValues = ModValue.updateUIFromModValues(categories.map { it.key })
 
-    Column {
-        Row(
-            modifier = Modifier
-                .background(transparentBlack),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            ModTabRow()
-        }
+    val launcherTheme = LocalLauncherTheme.current
+    ThemedSections(
+        state = launcherTheme,
+        classicBar = {
+            Row(
+                modifier = Modifier
+                    .background(transparentBlack),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                ModTabRow()
+            }
+        },
+        nav = { vertical -> ModTabRow(vertical = vertical) },
+    ) {
 
         AnimatedVisibility(
             visible = showDialog,
@@ -717,8 +779,11 @@ fun ModValuesList(
                                 when {
                                     isHighlighted -> Color(0xFF4CAF50)
                                     isDragging -> Color(0xFF8BC34A) // Color during drag
-                                    modValue.isChecked -> Color.DarkGray
-                                    else -> Color.DarkGray.copy(alpha = 0.5f)
+                                    launcherTheme.isClassic && modValue.isChecked -> Color.DarkGray
+                                    launcherTheme.isClassic -> Color.DarkGray.copy(alpha = 0.5f)
+                                    // a theme's own card colour: a mod that is off is dimmer
+                                    modValue.isChecked -> launcherTheme.tokens.surface.copy(alpha = 0.92f)
+                                    else -> launcherTheme.tokens.surface.copy(alpha = 0.45f)
                                 }, label = ""
                             )
                             val scaling by animateFloatAsState(if (isDragging) 1.05f else 1f)
@@ -847,14 +912,42 @@ fun ModValuesList(
                                                 }
                                             )
                                         }
+                                        val shownPath = if (translationChecked) translatedText else modValue.value.replace("/storage/emulated/0/", "")
+                                        if (launcherTheme.tokens.compactRows) {
+                                            // one line: the mod's name bold, its folder dim, the load order a small number
+                                            val trimmed = shownPath.trim().removeSurrounding("\"").trimEnd('/')
+                                            val name = trimmed.substringAfterLast('/')
+                                            val folder = trimmed.substringBeforeLast('/', "")
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Text(
+                                                    text = name,
+                                                    style = MaterialTheme.typography.bodyMedium.copy(color = launcherTheme.tokens.onBackground, fontWeight = FontWeight.SemiBold),
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                    modifier = Modifier.weight(1f, fill = false)
+                                                )
+                                                if (folder.isNotEmpty()) Text(
+                                                    text = "  $folder",
+                                                    style = MaterialTheme.typography.bodySmall.copy(color = launcherTheme.tokens.dim),
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                    modifier = Modifier.weight(1f, fill = false)
+                                                )
+                                                Text(
+                                                    text = "  #${modValue.id}",
+                                                    style = MaterialTheme.typography.labelSmall.copy(color = launcherTheme.tokens.primary)
+                                                )
+                                            }
+                                        } else {
                                         Text(
-                                            text = if (translationChecked) translatedText else modValue.value.replace("/storage/emulated/0/", ""),
+                                            text = shownPath,
                                             style = MaterialTheme.typography.bodyMedium.copy(color = Color.White)
                                         )
                                         Text(
                                             text = stringResource(Res.string.load_order_s, modValue.id.toString()),
                                             style = MaterialTheme.typography.bodySmall.copy(color = Color.White)
                                         )
+                                        }
                                     }
                                     Box(
                                         modifier = Modifier,

@@ -556,7 +556,10 @@ fun BackgroundAnimation() {
                 }
             }
     ) {
-        when (backgroundAnimation) {
+        // a theme other than Classic draws its own (Settings > Appearance)
+        val launcherTheme = org.alpha3.launcher.ui.theme.LocalLauncherTheme.current
+        if (!launcherTheme.isClassic) org.alpha3.launcher.ui.theme.ThemeBackdrop(launcherTheme)
+        else when (backgroundAnimation) {
             "BouncingBackground" -> BouncingBackground()
             "RotatingImageBackground" -> RotatingImageBackground()
             "CircularBackground" -> CircularBackground()

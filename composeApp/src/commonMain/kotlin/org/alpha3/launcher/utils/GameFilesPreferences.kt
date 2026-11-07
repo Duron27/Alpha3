@@ -71,6 +71,9 @@ object GameFilesPreferences {
     val KOTLIN_NAVMESH_KEY = booleanPreferencesKey("kotlin_navmesh")
     val TRANSLATION_ENABLED_KEY = booleanPreferencesKey("translation_enabled")
     val BACKGROUND_ANIMATION_KEY = stringPreferencesKey("background_animation")
+    // Settings > Appearance: the launcher theme (ui/theme/LauncherThemes.kt), and its animations held still
+    val UI_THEME_KEY = stringPreferencesKey("ui_theme")
+    val REDUCE_MOTION_KEY = booleanPreferencesKey("reduce_motion")
     val LANGUAGE_KEY = stringPreferencesKey("language")
     val SUPPORTED_LANGUAGES = stringPreferencesKey("supported_languages")
     val WHATS_NEW_KEY = booleanPreferencesKey("whats_new")

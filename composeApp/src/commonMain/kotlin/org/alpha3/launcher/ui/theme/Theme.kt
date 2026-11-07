@@ -5,6 +5,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import org.alpha3.launcher.utils.GameFilesPreferences
 import androidx.compose.runtime.Immutable
 import androidx.compose.ui.graphics.Color
 
@@ -284,16 +288,27 @@ fun OpenMWTheme(
     dynamicColor: Boolean = false,
     content: @Composable () -> Unit
 ) {
-    val colorScheme = (if (dynamicColor) platformDynamicColorScheme(darkTheme) else null)
+    // Settings > Appearance: Classic (the default) is the launcher's own scheme, as before
+    val themeId by GameFilesPreferences.getPreference(GameFilesPreferences.UI_THEME_KEY, LauncherTheme.Classic.id)
+        .collectAsState(initial = LauncherTheme.Classic.id)
+    val reduceMotion by GameFilesPreferences.getPreference(GameFilesPreferences.REDUCE_MOTION_KEY, false)
+        .collectAsState(initial = false)
+    val theme = LauncherTheme.fromId(themeId)
+
+    val colorScheme = if (theme != LauncherTheme.Classic) theme.tokens.colorScheme()
+    else (if (dynamicColor) platformDynamicColorScheme(darkTheme) else null)
         ?: if (darkTheme) darkScheme else lightScheme
+    val typography = if (theme != LauncherTheme.Classic) theme.tokens.typography() else AppTypography
 
     SystemBarsEffect(darkTheme)
 
-    MaterialTheme(
-        colorScheme = colorScheme,
-        typography = AppTypography,
-        content = content
-    )
+    CompositionLocalProvider(LocalLauncherTheme provides LauncherThemeState(theme, reduceMotion)) {
+        MaterialTheme(
+            colorScheme = colorScheme,
+            typography = typography,
+            content = content
+        )
+    }
 }
 
 /** Wallpaper based colors where the platform supports them, null otherwise. */

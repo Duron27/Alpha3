@@ -205,7 +205,9 @@ fun SettingPage(navigateToHome: () -> Unit) {
             }
         },
         content = { innerPadding ->
-            when (selectedBackgroundAnimation) {
+            val launcherTheme = org.alpha3.launcher.ui.theme.LocalLauncherTheme.current
+            if (!launcherTheme.isClassic) org.alpha3.launcher.ui.theme.ThemeBackdrop(launcherTheme)
+            else when (selectedBackgroundAnimation) {
                 "BouncingBackground" -> BouncingBackground()
                 "RotatingImageBackground" -> RotatingImageBackground()
                 "CircularBackground" -> CircularBackground()
@@ -224,6 +226,7 @@ fun SettingPage(navigateToHome: () -> Unit) {
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     if (codeGroupOption == "OpenMW" && layoutType == NavigationSuiteType.NavigationBar) {
+                        item { AppearanceSettingsSection() }
                         item { GeneralSettingsSection() }
                         item { GraphicsSettingsSection() }
                         item { ControlsSettingsSection() }
@@ -244,12 +247,14 @@ fun SettingPage(navigateToHome: () -> Unit) {
                         }
                     } else if (codeGroupOption == "UQM") {
                         item { UQM() }
+                        item { AppearanceSettingsSection() }
                         item { GeneralSettingsSection() }
                         item { ControlsSettingsSection() }
                         if (newFeatureEnabledChecked) {
                             item { DeveloperToolsSection() }
                         }
                     } else if (codeGroupOption == "Dethrace") {
+                        item { AppearanceSettingsSection() }
                         item { GeneralSettingsSection() }
                         item { ControlsSettingsSection() }
                         if (newFeatureEnabledChecked) {
@@ -286,7 +291,10 @@ fun SettingSectionCard(
             .alpha(targetAlpha),
         shape = RoundedCornerShape(12.dp),
         colors = CardDefaults.elevatedCardColors(
-            containerColor = customColor.copy(alpha = 0.9f)
+            // a theme other than Classic: its own card colour
+            containerColor = org.alpha3.launcher.ui.theme.LocalLauncherTheme.current.let {
+                if (it.isClassic) customColor.copy(alpha = 0.9f) else it.tokens.surface.copy(alpha = 0.92f)
+            }
         )
     ) {
         Column {
@@ -884,6 +892,7 @@ fun ToggleFeatureSwitch() {
 @Composable
 fun FeaturesSwitches() {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        AppearanceSettingsSection()
         GeneralSettingsSection()
         GraphicsSettingsSection()
         ControlsSettingsSection()
