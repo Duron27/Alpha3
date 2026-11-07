@@ -131,7 +131,12 @@ set(ALPHA3_SUPPORT_SOURCES
     src/thermal.cpp
 )
 if (ANDROID)
-    list(APPEND ALPHA3_SUPPORT_SOURCES src/framegen.cpp src/framepacing.cpp src/zink.cpp)
+    list(APPEND ALPHA3_SUPPORT_SOURCES src/framegen.cpp src/framepacing.cpp src/zink.cpp
+        # the native Vulkan 1.0 renderer ([Video] renderer = vulkan)
+        src/vulkan/vk.cpp src/vulkan/vma.cpp src/vulkan/device.cpp src/vulkan/context.cpp src/vulkan/window.cpp
+        src/vulkan/renderer.cpp src/vulkan/translator.cpp src/vulkan/resources.cpp src/vulkan/programs.cpp)
+    # VMA is third-party code: its warnings are not ours
+    set_source_files_properties(src/vulkan/vma.cpp PROPERTIES COMPILE_OPTIONS -w)
     set(ALPHA3_SUPPORT_SYSTEM_LIBS android EGL log)
 else()
     enable_language(OBJCXX)
@@ -148,7 +153,8 @@ add_custom_target(alpha3_build_id
     BYPRODUCTS ${CMAKE_CURRENT_BINARY_DIR}/generated/buildid.hpp)
 add_dependencies(alpha3_support alpha3_build_id)
 target_include_directories(alpha3_support PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_BINARY_DIR}/generated)
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_BINARY_DIR}/generated
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/vma)
 target_compile_options(alpha3_support PRIVATE -fPIC)
 target_link_libraries(alpha3_support
     components

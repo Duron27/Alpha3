@@ -173,7 +173,8 @@ namespace Alpha3
                     if (usesAngle())
                         load = reinterpret_cast<GLADloadfunc>(angleProcAddress);
 #endif
-                    if (!usesZink() && !gladLoadGLES2(load))
+                    // Zink's and Vulkan's window contexts load glad themselves
+                    if (!usesZink() && !usesVulkan() && !gladLoadGLES2(load))
                         Log(Debug::Error) << "Failed to initialize GLAD";
                     enableDebugOutput();
                     // the settings are loaded by the time there is a window

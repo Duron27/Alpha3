@@ -63,6 +63,8 @@ namespace Alpha3
 
     // The renderer prepareRenderer() picked
     bool usesZink();
+    // [Video] renderer = vulkan (OSG_USE_VULKAN): the native Vulkan 1.0 renderer (src/vulkan/), OSG drawing nothing
+    bool usesVulkan();
     bool usesGles();
 
     // ---- angle.cpp (iOS): OSG_USE_ANGLE, and ANGLE's eglGetProcAddress (null when ANGLE is not loaded)

@@ -7,6 +7,10 @@
 
 #include <SDL_hints.h>
 
+#ifdef __ANDROID__
+#include "vulkan/device.hpp"
+#endif
+
 #include <components/debug/debuglog.hpp>
 #ifdef __ANDROID__
 #include <components/files/androidpath.hpp>
@@ -80,6 +84,11 @@ namespace Alpha3
         return std::getenv("OSG_USE_ZINK") != nullptr;
     }
 
+    bool usesVulkan()
+    {
+        return std::getenv("OSG_USE_VULKAN") != nullptr;
+    }
+
     bool usesGles()
     {
         return !usesZink();
@@ -93,6 +102,27 @@ namespace Alpha3
         // ANGLE turns Zink off: OSG's GL lookups (glad.patch) would otherwise still go to OSMesa
         if (std::getenv("OSG_USE_ANGLE") != nullptr)
             unsetenv("OSG_USE_ZINK");
+        // Vulkan ([Video] renderer = vulkan, or OSG_USE_VULKAN): only on a phone whose driver can start it, checked
+        // before the window is made (it is made without an OpenGL surface, so OpenGL ES cannot take over after)
+#ifdef __ANDROID__
+        if (std::getenv("OSG_USE_ZINK") == nullptr && std::getenv("OSG_USE_ANGLE") == nullptr
+            && (std::getenv("OSG_USE_VULKAN") != nullptr || renderer == "vulkan"))
+        {
+            if (Vk::probe())
+            {
+                setenv("OSG_USE_VULKAN", "1", 1);
+                setenv("OPENMW_GLES_VERSION", "32", 0);
+                SDL_SetHint(SDL_HINT_VIDEO_EXTERNAL_CONTEXT, "1");
+                // nothing is compiled ahead for OpenGL: the translator makes its objects when it first draws them
+                // (an OpenGL upload would also let go of images the translator still reads)
+                setenv("OPENMW_DONT_PRECOMPILE", "1", 1);
+                Log(Debug::Info) << "Renderer: vulkan (native, Vulkan 1.0) (setting '" << renderer << "')";
+                return true;
+            }
+            unsetenv("OSG_USE_VULKAN");
+            Log(Debug::Warning) << "Renderer: Vulkan cannot start on this phone, using OpenGL ES 3.2";
+        }
+#endif
         const bool zink = std::getenv("OSG_USE_ZINK") != nullptr
             || (renderer == "opengl" && std::getenv("OPENMW_GLES_VERSION") == nullptr
                 && std::getenv("OSG_USE_ANGLE") == nullptr);

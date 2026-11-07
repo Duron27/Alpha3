@@ -1,0 +1,101 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Fri, 6 Nov 2026 11:00:00 -0500
+Subject: [PATCH 26/26] Vulkan: the window's context and the main camera's renderer
+ from the support library
+
+The graphics window takes its context from Alpha3::createWindowContext (Zink's or Vulkan's, when [Video] renderer
+picks one) instead of asking for Zink by name, and under Vulkan the main camera gets the support library's renderer,
+which records the culled frame as Vulkan commands instead of drawing it with OpenGL.
+---
+ apps/openmw/engine.cpp                   | 9 +++++++--
+ components/sdlutil/sdlgraphicswindow.cpp | 8 +++++---
+ components/sdlutil/sdlgraphicswindow.hpp | 4 ++--
+ 3 files changed, 14 insertions(+), 7 deletions(-)
+
+diff --git a/apps/openmw/engine.cpp b/apps/openmw/engine.cpp
+index e0bc11c523..6639dfa28e 100644
+--- a/apps/openmw/engine.cpp
++++ b/apps/openmw/engine.cpp
+@@ -525,6 +525,7 @@ void OMW::Engine::setSkipMenu(bool skipMenu, bool newGame)
+ // Alpha3's support library (C linkage, so the declaration needs no include of the library)
+ extern "C" bool alpha3PrepareRenderer();
+ extern "C" double alpha3PacedFrameSeconds(double measured);
++extern "C" void alpha3InstallVulkanRenderer(osg::Camera* camera);
+ #endif
+ 
+ void OMW::Engine::createWindow()
+@@ -554,8 +555,8 @@ void OMW::Engine::createWindow()
+ 
+ #ifdef ANDROID
+     {
+-        // Alpha3's support library: [Video] renderer picks Mesa Zink (desktop GL, no EGL surface on the window) or the
+-        // system OpenGL ES 3.2 driver
++        // Alpha3's support library: [Video] renderer picks Mesa Zink (desktop GL, no EGL surface on the window), native
++        // Vulkan (no EGL surface either) or the system OpenGL ES 3.2 driver
+         if (alpha3PrepareRenderer())
+             flags &= ~SDL_WINDOW_OPENGL;
+     }
+@@ -664,6 +665,10 @@ void OMW::Engine::createWindow()
+ 
+     osg::ref_ptr<osg::Camera> camera = mViewer->getCamera();
+     camera->setGraphicsContext(graphicsWindow);
++#ifdef ANDROID
++    // under Vulkan the main camera's culled frame is recorded as Vulkan commands instead of drawn with OpenGL
++    alpha3InstallVulkanRenderer(camera.get());
++#endif
+     camera->setViewport(0, 0, graphicsWindow->getTraits()->width, graphicsWindow->getTraits()->height);
+ 
+     osg::ref_ptr<SceneUtil::OperationSequence> realizeOperations = new SceneUtil::OperationSequence(false);
+diff --git a/components/sdlutil/sdlgraphicswindow.cpp b/components/sdlutil/sdlgraphicswindow.cpp
+index d934ac1655..7209f0c5d7 100644
+--- a/components/sdlutil/sdlgraphicswindow.cpp
++++ b/components/sdlutil/sdlgraphicswindow.cpp
+@@ -103,9 +103,11 @@ namespace SDLUtil
+         }
+ 
+ #ifdef ANDROID
+-        if (getenv("OSG_USE_ZINK") != nullptr)
++        // Zink's or Vulkan's own context, when [Video] renderer picked one of them
++        bool ownContext = false;
++        mZink = Alpha3::createWindowContext(mWindow, ownContext);
++        if (ownContext)
+         {
+-            mZink = Alpha3::ZinkContext::create(mWindow);
+             if (!mZink)
+                 return;
+             _traits->red = _traits->green = _traits->blue = _traits->alpha = 8;
+@@ -250,7 +252,7 @@ namespace SDLUtil
+ 
+ #ifdef ANDROID
+         if (mZink)
+-            return Alpha3::ZinkContext::release();
++            return mZink->release();
+ #endif
+         return SDL_GL_MakeCurrent(nullptr, nullptr) == 0;
+     }
+diff --git a/components/sdlutil/sdlgraphicswindow.hpp b/components/sdlutil/sdlgraphicswindow.hpp
+index 24ef107fae..fd5b7b7422 100644
+--- a/components/sdlutil/sdlgraphicswindow.hpp
++++ b/components/sdlutil/sdlgraphicswindow.hpp
+@@ -14,7 +14,7 @@
+ #ifdef ANDROID
+ namespace Alpha3
+ {
+-    class ZinkContext;
++    class WindowContext;
+ }
+ #endif
+ 
+@@ -27,7 +27,7 @@ namespace SDLUtil
+         SDL_GLContext mContext;
+ #ifdef ANDROID
+         // renderer = opengl: desktop GL through Mesa Zink instead of an SDL/EGL context (Alpha3's support library)
+-        std::unique_ptr<Alpha3::ZinkContext> mZink;
++        std::unique_ptr<Alpha3::WindowContext> mZink;
+ #endif
+ 
+         bool mValid;
+-- 
+2.55.0
+

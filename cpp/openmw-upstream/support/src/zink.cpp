@@ -159,7 +159,7 @@ namespace Alpha3
             Log(Debug::Error) << "Failed to initialize GLAD";
         Log(Debug::Info) << "Zink: OSMesa context " << zink->mWidth << "x" << zink->mHeight;
 
-        release();
+        releaseCurrent();
         return zink;
     }
 
@@ -179,7 +179,7 @@ namespace Alpha3
         return true;
     }
 
-    bool ZinkContext::release()
+    bool ZinkContext::releaseCurrent()
     {
         return osmesa().makeCurrent(nullptr, nullptr, 0, 0, 0) != 0;
     }

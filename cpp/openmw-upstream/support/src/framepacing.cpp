@@ -107,7 +107,8 @@ namespace Alpha3
             {
                 mTried = true;
                 // ANGLE brings its own EGL, which Swappy (it talks to the system's) cannot swap; Zink presents by copying
-                if (usesZink() || std::getenv("OSG_USE_ANGLE") != nullptr || std::getenv("OPENMW_NO_SWAPPY") != nullptr)
+                if (usesZink() || usesVulkan() || std::getenv("OSG_USE_ANGLE") != nullptr
+                    || std::getenv("OPENMW_NO_SWAPPY") != nullptr)
                 {
                     return;
                 }
@@ -583,6 +584,13 @@ namespace Alpha3
         if (usesZink() && gc.getState() != nullptr)
             gc.getState()->setTimestampBits(0);
 
+        // Vulkan presents with FIFO (the display's rate at most) in the graphics window's swap (src/vulkan/context.cpp)
+        if (usesVulkan())
+        {
+            gc.swapBuffersImplementation();
+            noteShownFrame();
+            return;
+        }
         // one window, swapped on the draw thread
         static Pacing sPacing;
         static FrameTimes sFrameTimes;

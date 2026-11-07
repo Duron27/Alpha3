@@ -236,23 +236,45 @@ namespace Alpha3
     // 3.20 that glslang and SPIRV-Cross make of them, so they need that conversion on (OPENMW_DISABLE_SPIRV turns it off).
     bool computeShadersAvailable();
 
+    // The context of a window SDL has no OpenGL context for (made without SDL_WINDOW_OPENGL): Zink's, or Vulkan's.
+    // SDLUtil::GraphicsWindowSDL2 makes it current, releases it and presents through it.
+    class WindowContext
+    {
+    public:
+        virtual ~WindowContext() = default;
+        // What the context was made with, for the traits of the graphics context
+        virtual int depthBits() const = 0;
+        virtual int stencilBits() const = 0;
+        virtual bool makeCurrent() = 0;
+        virtual bool release() = 0;
+        // Hands the frame to the window; follows the window's size
+        virtual void present() = 0;
+    };
+
+    // The renderer prepareRenderer() picked, when it needs a context of its own (wanted is then true): Zink's or
+    // Vulkan's. Null when it could not start (the reason is logged), or when SDL makes the context (wanted false).
+    std::unique_ptr<WindowContext> createWindowContext(SDL_Window* window, bool& wanted);
+
+    // Under Vulkan, gives the main camera the renderer that records its culled frame as Vulkan commands instead of
+    // drawing it with OpenGL (src/vulkan/renderer.cpp). Does nothing for the other renderers.
+    void installVulkanRenderer(osg::Camera& camera);
+
     // Desktop OpenGL through Mesa Zink (libOSMesa_8.so) for a window that has no SDL/EGL context: the frame is drawn into
     // a buffer of OSMesa's and copied to the window's ANativeWindow on every swap.
-    class ZinkContext
+    class ZinkContext : public WindowContext
     {
     public:
         // Null if Zink cannot start (the reason is logged)
         static std::unique_ptr<ZinkContext> create(SDL_Window* window);
-        ~ZinkContext();
+        ~ZinkContext() override;
 
-        // What the context was made with, for the traits of the graphics context
-        int depthBits() const { return 24; }
-        int stencilBits() const { return mStencilBits; }
+        int depthBits() const override { return 24; }
+        int stencilBits() const override { return mStencilBits; }
 
-        bool makeCurrent();
-        static bool release();
-        // Hands the frame to the window; follows the window's size
-        void present();
+        bool makeCurrent() override;
+        bool release() override { return releaseCurrent(); }
+        static bool releaseCurrent();
+        void present() override;
 
     private:
         ZinkContext() = default;
