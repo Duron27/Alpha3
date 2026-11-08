@@ -26,6 +26,13 @@ interface EngineBridge {
     /** Key code (see [KeyCodes]) that types [char] on a virtual keyboard, null when there is none. */
     fun keyCodeForChar(char: String): Int?
 
+    /**
+     * The part of a game pixel the relative mouse motion has moved past [getMouseX] / [getMouseY] that SDL has not been
+     * given yet (it takes whole pixels): added to them it is where the cursor really is, for drawing it smoothly.
+     */
+    fun mouseFractionX(): Float = 0f
+    fun mouseFractionY(): Float = 0f
+
     /** True while the engine wants a visible mouse cursor (menus open). Polled every frame. */
     fun isMouseShown(): Boolean = false
 
@@ -97,6 +104,8 @@ object Engine : EngineBridge {
         bridge.onNativeMouse(button, action, x, y, relative)
     override fun getMouseX() = bridge.getMouseX()
     override fun getMouseY() = bridge.getMouseY()
+    override fun mouseFractionX() = bridge.mouseFractionX()
+    override fun mouseFractionY() = bridge.mouseFractionY()
     override fun nativeCommitText(text: String, newCursorPosition: Int) =
         bridge.nativeCommitText(text, newCursorPosition)
     override fun isControllerConnected() = bridge.isControllerConnected()

@@ -102,6 +102,13 @@ import com.composables.core.rememberScrollAreaState
 import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.launch
 import org.alpha3.launcher.engine.Engine
+import org.alpha3.launcher.utils.IniFloat
+import org.alpha3.launcher.utils.SystemInfo
+import org.alpha3.launcher.utils.readIniValues
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.ui.platform.LocalDensity
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.Dispatchers
 import org.alpha3.launcher.engine.Engine.onNativeMouse
 import org.alpha3.launcher.utils.Uri
 import org.alpha3.launcher.ui.controls.UIStateManager.configureControls
@@ -137,8 +144,10 @@ fun MouseIcon(
                 // gameplay screen) has run; then use the container size (same pixels as SDL's mouse coordinates).
                 val sdlWidth = Engine.resolutionX.toFloat().takeIf { it > 0f } ?: containerWidth
                 val sdlHeight = Engine.resolutionY.toFloat().takeIf { it > 0f } ?: containerHeight
-                val rawX = Engine.getMouseX().toFloat()
-                val rawY = Engine.getMouseY().toFloat()
+                // OpenMW's whole-pixel position plus the fraction the motion has gone past it: the arrow glides between
+                // game pixels instead of stepping a whole one at a time (two screen pixels at half resolution)
+                val rawX = Engine.getMouseX() + Engine.mouseFractionX()
+                val rawY = Engine.getMouseY() + Engine.mouseFractionY()
                 xPos = (rawX * (containerWidth / sdlWidth)) + (offsetXMouse ?: 0f)
                 yPos = (rawY * (containerHeight / sdlHeight)) + (offsetYMouse ?: 0f)
             }
@@ -160,6 +169,57 @@ fun MouseIcon(
         )
     }
 }
+/**
+ * The experimental cursor magnifier ([Experimental] cursor magnifier in settings.cfg): a round lens over the game that
+ * follows where a click lands. With OpenMW's cursor shown it magnifies around the cursor's point (where OpenMW has it,
+ * not the arrow's display offset) and sits just above it so the arrow stays in sight; in look mode it sits on the
+ * middle of the screen, where activating happens. The overlay's lens button switches it while the setting is on.
+ */
+@Composable
+fun CursorMagnifier(containerWidth: Float, containerHeight: Float) {
+    var zoom by remember { mutableFloatStateOf(2f) }
+    var sizeDp by remember { mutableFloatStateOf(140f) }
+    LaunchedEffect(Unit) {
+        val experimental = withContext(Dispatchers.IO) { readIniValues()["Experimental"].orEmpty() }
+        fun number(key: String): Float? = when (val v = experimental.firstOrNull { it.first == key }?.second) {
+            is IniFloat -> v.text.toFloatOrNull()
+            is Int -> v.toFloat()
+            else -> null
+        }
+        zoom = (number("cursor magnifier zoom") ?: 2f).coerceIn(1.1f, 8f)
+        sizeDp = (number("cursor magnifier size") ?: 140f).coerceIn(60f, 400f)
+        UIStateManager.magnifierAvailable = SystemInfo.services.canMagnify &&
+            experimental.firstOrNull { it.first == "cursor magnifier" }?.second == true
+    }
+
+    val density = LocalDensity.current.density
+    val active = UIStateManager.magnifierAvailable && UIStateManager.magnifierOn && !editMode &&
+        UIStateManager.tempCodeGroup == "OpenMW"
+
+    LaunchedEffect(active, zoom, sizeDp, containerWidth, containerHeight) {
+        if (!active) {
+            SystemInfo.services.hideMagnifier()
+            return@LaunchedEffect
+        }
+        val sizePx = (sizeDp * density).toInt()
+        while (true) {
+            withFrameNanos {
+                if (UIStateManager.isCursorVisible != 0) {
+                    val sdlWidth = Engine.resolutionX.toFloat().takeIf { it > 0f } ?: containerWidth
+                    val sdlHeight = Engine.resolutionY.toFloat().takeIf { it > 0f } ?: containerHeight
+                    SystemInfo.services.showMagnifier(
+                        Engine.getMouseX() / sdlWidth, Engine.getMouseY() / sdlHeight,
+                        -(sizePx / 2f + 12f * density), sizePx, zoom
+                    )
+                } else {
+                    SystemInfo.services.showMagnifier(0.5f, 0.5f, 0f, sizePx, zoom)
+                }
+            }
+        }
+    }
+    DisposableEffect(Unit) { onDispose { SystemInfo.services.hideMagnifier() } }
+}
+
 @Composable
 fun ScrollWheelIndicator(
     context: PlatformContext,

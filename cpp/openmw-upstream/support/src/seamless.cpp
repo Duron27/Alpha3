@@ -50,13 +50,13 @@ namespace Alpha3
 
     bool seamlessCells()
     {
-        static const bool enabled = settingBool("Cells", "seamless cells", true);
+        static const bool enabled = settingBool("Cells", "seamless cells", false);
         return enabled;
     }
 
     bool seamlessDoors()
     {
-        static const bool enabled = seamlessCells() && settingBool("Cells", "seamless doors", true);
+        static const bool enabled = seamlessCells() && settingBool("Cells", "seamless doors", false);
         return enabled;
     }
 

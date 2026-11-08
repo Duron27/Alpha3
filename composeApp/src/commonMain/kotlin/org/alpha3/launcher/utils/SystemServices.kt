@@ -39,6 +39,16 @@ open class SystemServices {
 
     /** Runs a command and returns its output; used to read root-only sysfs nodes. */
     open fun readProcessOutput(vararg command: String): String = ""
+
+    /** Whether [showMagnifier] does anything here (the experimental cursor magnifier). */
+    open val canMagnify: Boolean = false
+
+    /**
+     * Shows (or moves) a round lens [sizePx] across with the game picture [zoom] times larger around ([x], [y]), given as
+     * fractions of the game surface; the lens is centred [lensOffsetY] pixels below that point (negative: above it).
+     */
+    open fun showMagnifier(x: Float, y: Float, lensOffsetY: Float, sizePx: Int, zoom: Float) {}
+    open fun hideMagnifier() {}
 }
 
 object SystemInfo {

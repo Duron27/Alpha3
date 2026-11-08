@@ -103,6 +103,9 @@ Alpha3 is an Android launcher plus a build of stock OpenMW. Repo: `/home/arinmal
 - Untracked `HANDOFF.md` and `handoff/` are this note and its scripts. They aren't meant to be committed unless the user wants them.
 
 ## Seamless cells and doors (2026-11-05, UNCOMMITTED, waiting for the user to try it)
+**Off by default since 2026-11-08** (user's request): `seamless cells`, `seamless doors` (and so live cells, patch 0027)
+are `false` in `alpha3.cfg` and in `seamless.cpp`'s fallbacks, and `[Shadows] point light shadows` is `0` (`alpha3.cfg`,
+`pointshadows.cpp`). Profiles made before keep whatever their settings.cfg says.
 Files: `support/src/seamless.cpp` (settings), `support/src/doorportal.cpp` (the stencil portal),
 `support/include/alpha3/upstream.hpp`, `support/CMakeLists.txt`, `cpp/settings/alpha3.cfg` (`[Cells]`), and patch
 `0024-Seamless-cells-no-loading-screen-and-doors-open-onto.patch` (scene.cpp quiet listener; new
@@ -131,3 +134,61 @@ Files: `support/src/seamless.cpp` (settings), `support/src/doorportal.cpp` (the 
 - Crossing hitch profiled (simpleperf, 2026-11-05): of ~140 ms going out, ~90 ms CPU is OpenMW's `Scene::insertCell`
   for the 9 exterior cells: model cloning 24%, NPC animation build 22%, physics addObject 20%. Removing it means
   loading the cell over several frames (an engine change, not started).
+
+## Texture memory: every texture is held twice (found in openmw-xenon, 2026-11-08, NOT applied here)
+Found while porting Alpha3's Vulkan renderer to the Xbox 360 (`~/AndroidStudioProjects/openmw-xenon`, which copies
+`cpp/openmw-upstream/support/src/vulkan/` at `15ef7f8` into `renderer/from-alpha3/`). It applies to Alpha3 as it
+stands; nothing in this repo has been changed.
+
+- **How textures load:** OpenMW reads a DDS straight out of the BSA through a stream over that file's slice of the
+  archive (`Files::openConstrainedFileStream`, an 8 KB buffer; the archive is never unpacked or held). OSG's DDS
+  reader keeps the DXT1/3/5 blocks and mipmaps compressed in an `osg::Image`, and the Vulkan renderer maps them to
+  BC1-3 (`resources.cpp`, the `GL_COMPRESSED_*_S3TC_*` cases) and uploads the blocks as they are. Kept compressed, a
+  512x512 texture with mips is ~171 KB (DXT1) or ~341 KB (DXT5) against ~1.33 MB as RGBA8. Only uncompressed sources
+  (TGA/BMP, generated maps) go up as RGBA8, RGB padded to 4 bytes.
+- **The waste:** after the upload the `osg::Image` stays in the heap, so each texture sits once in CPU memory and once
+  in GPU memory. OSG would drop it only for textures with `setUnRefImageDataAfterApply(true)`, and OpenMW never sets
+  that on NIF textures: `engine.cpp` calls `SceneManager::setUnRefImageDataAfterApply(false)` ("keep to Off for now to
+  allow better state sharing"), and `SceneManager::mUnRefImageDataAfterApply` is set but never read anywhere. Only
+  MyGUI's static textures set it. Alpha3's Vulkan renderer doesn't look at the flag at all. This likely holds for the
+  GL path too, since NIF textures never get the flag (not checked on Alpha3).
+- **The fix in openmw-xenon** (`Resources::releaseImages` in `renderer/from-alpha3/src/vulkan/resources.cpp`, under
+  `__XSDK__`; here it would go in `cpp/openmw-upstream/support/src/vulkan/resources.cpp`): after a successful upload in `Resources::texture()`, if every image of the texture has a file name and
+  isn't `DYNAMIC`, call `texture.setImage(i, nullptr)` for each and set the entry's `mSource` to null, so the next
+  frame's "same source" check keeps the upload instead of retrying. Images the game writes into (fog of war, the
+  global map overlay, terrain blend maps) have no file name and are left alone. OpenMW's image cache keeps the image
+  a few seconds longer (`cache expiry delay`), so models loading meanwhile still find it. The GPU copy lives as long
+  as the `osg::Texture` (it's never evicted while the texture is alive), so the pixels are never needed again.
+- **Reads of `getImage(0)` checked:** `shadervisitor.cpp` (normal and specular map names: runs when a model loads,
+  before upload, and null-checks), `terrain/material.cpp` (normal map format, null-checked), `texturereport.cpp`
+  (debug). All tolerate a null image.
+- **Risk:** the draw thread clears `texture->_image` while a loading thread might read it (the SharedStateManager
+  comparing textures). The image cache still holds the image, so a stale read isn't a freed one, but it is a data race.
+  Shared-state merging also no longer matches an uploaded texture with a new one of the same image, so that image can
+  end up on the GPU twice.
+- **Why it matters:** on the console (512 MB shared) Seyda Neen had 206 MB of heap in use with 591 cached images, and
+  16 MB free. How much the release frees there isn't measured yet: the build reports textures released and MB of
+  pixels in `user/stats.log`. On Alpha3, measure before and after in the same save, e.g. heap and RSS from
+  `dumpsys meminfo com.alpha3.launcher`, if phones run short of memory.
+
+## Touch cursor movement and the cursor magnifier (2026-11-08, committed)
+**Cursor smoothness** (`androidApp/.../SdlEngineBridge.kt`; every relative mouse move from the right thumbstick,
+dynamic buttons and touch areas goes through `onNativeMouse` there):
+- Cause, measured on the SM-T720 (screenrecord + frame-by-frame cursor tracking, `getevent -lt`): the panel reports a
+  slow drag in 1-px steps, x and y in separate reports, a slow diagonal being runs of 3-5 steps on one axis then the
+  other. The controls apply a fixed ~2 game px per screen px (4 screen px at the 1280x800 window), so the finger's
+  wobble showed as stairs ("etch a sketch"). SDL2's `Android_OnMouse` also casts motion to int, dropping fractions.
+- Fix, in order: pointer acceleration while OpenMW's cursor is shown (`GAIN_SLOW` 0.45 under `ACCEL_SLOW` 150 game
+  px/s, `GAIN_FAST` 1.4 over `ACCEL_FAST` 1500, smoothstep between; look mode keeps plain gain), a 1€ filter run per
+  display frame on Choreographer (`MIN_CUTOFF_HZ` 1.0, `BETA` 0.02), then the int remainder carried (`carryX/Y`, as
+  `IosEngineBridge` already did). Clicks flush the waiting motion first. `MouseIcon` draws at `getMouseX() +
+  Engine.mouseFractionX()` so the arrow moves between game pixels.
+- What did not work: the fraction carry alone, and a fixed 20 ms smoothing (the user found that worse). The user called
+  the acceleration build "perfect, or at least better". iOS has only the carry.
+
+**Cursor magnifier** (`[Experimental] cursor magnifier = false`, `cursor magnifier zoom = 2.0`, `cursor magnifier size =
+140` dp): Android's `android.widget.Magnifier` on SDL's SurfaceView (`AndroidSystemServices.showMagnifier`, Android
+10+), driven each frame by `CursorMagnifier` in `ui/controls/mouse.kt`: above the cursor's real point when it is shown,
+on the screen centre in look mode. The overlay toolbar gets a zoom button (`UIStateManager.magnifierOn`) while the
+setting is on. **Built but not yet tried on a device.** The settings editor only lists keys already in the profile's
+settings.cfg, and existing profiles do not get new keys from `alpha3.cfg`; they were added to the tablet's by hand.

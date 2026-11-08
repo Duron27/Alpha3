@@ -80,7 +80,7 @@ namespace Alpha3
         {
             static const Config c = [] {
                 Config out;
-                out.mLights = std::clamp(settingInt("Shadows", "point light shadows", 2), 0, sMaxLights);
+                out.mLights = std::clamp(settingInt("Shadows", "point light shadows", 0), 0, sMaxLights);
                 out.mResolution = std::clamp(settingInt("Shadows", "point light shadow resolution", 256), 64, 1024);
                 out.mFacesPerFrame = std::clamp(
                     settingInt("Shadows", "point light shadow faces per frame", 2), 1, sMaxLights * sFaces);

@@ -18,6 +18,7 @@ import android.os.VibratorManager
 import android.system.Os
 import android.system.OsConstants
 import android.view.WindowManager
+import android.widget.Magnifier
 import androidx.core.content.ContextCompat
 import org.alpha3.launcher.paths.OpenMWPaths
 import org.alpha3.launcher.resources.Res
@@ -27,6 +28,7 @@ import org.alpha3.launcher.ui.overlay.MemoryInfo
 import org.alpha3.launcher.ui.view.humanReadableByteCountBin
 import org.alpha3.launcher.utils.SystemServices
 import org.alpha3.launcher.utils.stringRes
+import org.libsdl.app.SDLActivity
 import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
@@ -235,5 +237,47 @@ class AndroidSystemServices(private val context: Context) : SystemServices() {
         } catch (e: Exception) {
             "$e"
         }
+    }
+
+    // The experimental cursor magnifier: Android's own Magnifier on SDL's SurfaceView, which copies the lens' few pixels
+    // out of the game's surface (PixelCopy), so it works with either renderer and costs the engine nothing.
+    override val canMagnify: Boolean get() = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+
+    private var magnifier: Magnifier? = null
+    private var magnifierFor: Triple<Any, Int, Float>? = null
+    private var lastSourceX = Float.NaN
+    private var lastSourceY = Float.NaN
+
+    override fun showMagnifier(x: Float, y: Float, lensOffsetY: Float, sizePx: Int, zoom: Float) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
+        val view = SDLActivity.getSurface() ?: return
+        if (view.width <= 0 || view.height <= 0 || !view.isAttachedToWindow) return
+        val key = Triple<Any, Int, Float>(view, sizePx, zoom)
+        val lens = magnifier.takeIf { magnifierFor == key } ?: run {
+            magnifier?.dismiss()
+            Magnifier.Builder(view)
+                .setSize(sizePx, sizePx)
+                .setCornerRadius(sizePx / 2f)
+                .setInitialZoom(zoom)
+                .setOverlay(null)
+                .setElevation(4f * context.resources.displayMetrics.density)
+                .build()
+                .also { magnifier = it; magnifierFor = key; lastSourceX = Float.NaN }
+        }
+        val sx = x.coerceIn(0f, 1f) * view.width
+        val sy = y.coerceIn(0f, 1f) * view.height
+        if (sx == lastSourceX && sy == lastSourceY) {
+            lens.update()  // show() only copies again when the point moves; the game behind it does not stand still
+        } else {
+            lens.show(sx, sy, sx, sy + lensOffsetY)
+            lastSourceX = sx
+            lastSourceY = sy
+        }
+    }
+
+    override fun hideMagnifier() {
+        magnifier?.dismiss()
+        magnifier = null
+        magnifierFor = null
     }
 }

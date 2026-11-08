@@ -215,6 +215,11 @@ object UIStateManager {
     var isBatteryStatusEnabled by mutableStateOf(false)
     var isLoggingEnabled by mutableStateOf(false)
     var isPerformanceHudEnabled by mutableStateOf(false)
+
+    /** [Experimental] cursor magnifier in settings.cfg: the lens and its overlay button are there at all. */
+    var magnifierAvailable by mutableStateOf(false)
+    /** The overlay button's switch for the lens, while [magnifierAvailable]. */
+    var magnifierOn by mutableStateOf(true)
     var logcatLevel by mutableStateOf("V")
     // this is for MainPage.kt
     var showLogCat by mutableStateOf(false)

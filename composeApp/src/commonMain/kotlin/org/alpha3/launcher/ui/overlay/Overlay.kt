@@ -68,6 +68,8 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ZoomIn
+import androidx.compose.material.icons.filled.ZoomOut
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
@@ -795,6 +797,27 @@ fun OverlayUI(
                                     }
 
                                 TravelMenuPopup(onKeyEvent = onKeyEvent)
+
+                                // the experimental cursor magnifier's switch, there while settings.cfg has it on
+                                if (UIStateManager.magnifierAvailable) {
+                                    val lensIcon = if (UIStateManager.magnifierOn) Icons.Default.ZoomIn else Icons.Default.ZoomOut
+                                    IconButton(onClick = { UIStateManager.magnifierOn = !UIStateManager.magnifierOn }) {
+                                        if (iconGlowChecked) {
+                                            Icon(
+                                                imageVector = lensIcon,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(30.dp).scale(scaleFactor).blur(blurRadius),
+                                                tint = shadowColor,
+                                            )
+                                        }
+                                        Icon(
+                                            imageVector = lensIcon,
+                                            contentDescription = if (UIStateManager.magnifierOn) "Hide Magnifier" else "Show Magnifier",
+                                            modifier = Modifier.size(24.dp),
+                                            tint = if (matchIconColorChecked) menuColor.copy(alpha = menuAlpha) else Color.Black
+                                        )
+                                    }
+                                }
                             }
 
                             if (editMode) {

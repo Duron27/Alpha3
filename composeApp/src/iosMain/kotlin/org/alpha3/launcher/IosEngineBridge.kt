@@ -141,6 +141,8 @@ class IosEngineBridge : EngineBridge {
         if (ix != 0 || iy != 0) sendMouseMotion?.invoke(null, 0u, 1, ix, iy)
     }
 
+    override fun mouseFractionX() = carryX
+    override fun mouseFractionY() = carryY
     override fun getMouseX() = mousePosition().first
     override fun getMouseY() = mousePosition().second
 

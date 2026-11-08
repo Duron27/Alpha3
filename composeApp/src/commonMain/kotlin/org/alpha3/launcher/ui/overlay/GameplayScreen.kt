@@ -168,6 +168,8 @@ fun GameplayScreen(
             }
         }
 
+        org.alpha3.launcher.ui.controls.CursorMagnifier(containerWidth, containerHeight)
+
         // under the menus and buttons, which keep their touches
         val leftThumbEnabled = rememberLeftThumbEnabled()
         if (touchAreaActive()) {
