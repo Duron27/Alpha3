@@ -223,6 +223,8 @@ object UIStateManager {
     var isLogcatEnabled by mutableStateOf(false)
     val expandedSections = mutableStateListOf<String>()
     var editMode by mutableStateOf(false)
+    /** The terminal tab is on screen: the floating Play button keeps off it (its corner is the terminal's). */
+    var terminalShown by mutableStateOf(false)
     val gridSize = mutableIntStateOf(50)
     val gridVisible = mutableStateOf(false)
     val gridAlpha = mutableFloatStateOf(0.25f)

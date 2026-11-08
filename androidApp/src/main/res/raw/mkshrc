@@ -1,0 +1,38 @@
+# The launcher terminal's shell start file: mksh reads it through ENV. Terminal.kt fills in the kram switch and folder.
+[ -r /system/etc/mkshrc ] && . /system/etc/mkshrc
+
+HISTFILE="$HOME/.mksh_history"
+HISTSIZE=5000
+set -o emacs
+
+alias ls='ls -F --color=auto'
+alias ll='ls -alF --color=auto'
+alias la='ls -AF --color=auto'
+alias grep='grep --color=auto'
+alias storage='cd "$STORAGE"'
+alias alpha3='cd "$STORAGE/Alpha3"'
+
+# the directory in the prompt, with the shared storage as ~
+_a3_pwd() {
+	case "$PWD" in
+	"$STORAGE") echo '~' ;;
+	"$STORAGE"/*) echo "~${PWD#"$STORAGE"}" ;;
+	*) echo "$PWD" ;;
+	esac
+}
+
+# green name, blue directory: \001 marks the colour codes so the line editor counts the prompt's width right
+_e=$(printf '\033'); _d=$(printf '\001'); _r=$(printf '\r')
+PS1="$_d$_r$_d${_e}[1;32m${_d}openmw$_d${_e}[0m$_d:$_d${_e}[1;34m$_d"'$(_a3_pwd)'"$_d${_e}[0m$_d\$ "
+unset _e _r
+
+# kram is a library in the app, not a program: the app runs it and hands its output back through two pipes
+if [ "@KRAM@" = 1 ]; then
+	kram() {
+		printf '%s\0' "$@" > '@DIR@/kram.in' || return 1
+		cat '@DIR@/kram.out'
+		return "$(cat '@DIR@/kram.rc' 2>/dev/null || echo 1)"
+	}
+else
+	kram() { echo 'kram is only in builds with the fork engine (-PALPHA3_OPENMW_FORK=ON)' >&2; return 1; }
+fi

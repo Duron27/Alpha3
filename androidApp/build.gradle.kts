@@ -304,6 +304,9 @@ dependencies {
     implementation(libs.core.ktx)
     implementation(libs.androidx.core.ktx)
     implementation("androidx.browser:browser:1.8.0") // Custom Tabs for the Nexus free-member download flow
+    // the terminal (utils/Terminal.kt): a shell in a pseudo-terminal, drawn by an xterm emulator (Apache 2.0)
+    implementation("com.github.termux.termux-app:terminal-view:v0.118.3")
+    implementation("com.github.termux.termux-app:terminal-emulator:v0.118.3")
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.appcompat)
     implementation(libs.androidx.documentfile)

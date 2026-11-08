@@ -707,6 +707,10 @@ fun ModValuesList(
             enter = fadeIn() + expandIn(),
             exit = fadeOut() + shrinkOut()
         ) {
+            androidx.compose.runtime.DisposableEffect(Unit) {
+                org.alpha3.launcher.ui.controls.UIStateManager.terminalShown = true
+                onDispose { org.alpha3.launcher.ui.controls.UIStateManager.terminalShown = false }
+            }
             Terminal()
         }
         AnimatedVisibility(

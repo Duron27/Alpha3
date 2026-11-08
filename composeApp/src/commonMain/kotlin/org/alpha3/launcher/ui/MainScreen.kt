@@ -97,7 +97,7 @@ fun MainScreen() {
             navController = navController,
         )
     }
-    if (floatingPlay) {
+    if (floatingPlay && !org.alpha3.launcher.ui.controls.UIStateManager.terminalShown) {
         Box(
             modifier = Modifier
                 .align(Alignment.BottomEnd)
