@@ -186,6 +186,21 @@ fun ModToolsScreen() {
                 )
             }
             if (experimental) item {
+                ToolRow(
+                    title = "Realistic textures: Balmora (experimental)",
+                    description = "Downloads CC0 photo textures from Poly Haven (plaster, cobblestones, paving, wood, bark, rusty " +
+                        "iron, rock, grass and dirt) and blends each with the game texture it replaces: the original's colours and grime stay, " +
+                        "the photo gives the detail. Covers Balmora (Hlaalu walls and trims, roads, posts, crates and doors) and the rock and ground of the land around it. " +
+                        "Written to their own folder (alpha3_realtex), added to openmw.cfg after your mods; Remove takes it " +
+                        "out again. Normal maps are made too, used with [Shaders] auto use object/terrain normal maps. " +
+                        "About 40 MB to download, kept for rebuilds.",
+                    actions = {
+                        SmallAction(if (runner.realTexturesMade) "Rebuild" else "Build", !runner.running, runner::buildBalmoraTextures)
+                        if (runner.realTexturesMade) SmallAction("Remove", !runner.running, runner::removeBalmoraTextures)
+                    },
+                )
+            }
+            if (experimental) item {
                 val report = runner.pruneReport
                 ToolRow(
                     title = "Remove overridden files (experimental)",

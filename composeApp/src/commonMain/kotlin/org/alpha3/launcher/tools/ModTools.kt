@@ -24,6 +24,10 @@ import org.alpha3.launcher.tools.merge.runAlpha3Merge
 import org.alpha3.launcher.tools.lightfixes.LightFixesOptions
 import org.alpha3.launcher.tools.lightfixes.runLightFixes
 import org.alpha3.launcher.tools.navmesh.KotlinNavMesh
+import org.alpha3.launcher.tools.realtex.BALMORA_SET
+import org.alpha3.launcher.tools.realtex.buildRealTextures
+import org.alpha3.launcher.tools.realtex.realTexturesDir
+import org.alpha3.launcher.tools.realtex.removeRealTextures
 import org.alpha3.launcher.tools.openmw.PruneReport
 import org.alpha3.launcher.tools.openmw.TextCodec
 import org.alpha3.launcher.tools.openmw.deleteOverriddenFiles
@@ -161,6 +165,57 @@ class ModToolsRunner(private val fs: ToolFs, private val platform: ToolPlatform)
                 log("Delete failed: ${(e as? ToolException)?.message ?: e}")
                 status = "Delete failed"
             } finally {
+                running = false
+            }
+        }
+    }
+
+    /** Where the realistic textures go: a data folder of their own, after the mods. */
+    val realTexturesFolder get() = realTexturesDir(outputDir)
+
+    /** Whether the realistic textures are made (their folder exists). */
+    var realTexturesMade by mutableStateOf(fs.isDirectory(realTexturesDir(OpenMWPaths.USER_GENERATED)))
+        private set
+
+    /** Experimental: Balmora's textures made over from CC0 photo textures (Poly Haven), into their own data folder. */
+    fun buildBalmoraTextures() {
+        if (running) return
+        running = true
+        job = scope.launch {
+            try {
+                status = "Making realistic textures"
+                log("--- Realistic textures: Balmora")
+                if (!fs.isFile(cfg)) { log("$cfg does not exist; set up the game files from the launcher first"); status = "No openmw.cfg yet"; return@launch }
+                val r = buildRealTextures(fs, platform, cfg, realTexturesFolder, BALMORA_SET, log = ::log)
+                log("Made ${r.made} textures (${r.skipped} not in the load order) in $realTexturesFolder")
+                status = "Realistic textures done"
+            } catch (e: CancellationException) {
+                status = "Cancelled"
+                throw e
+            } catch (e: Exception) {
+                log("Realistic textures failed: ${(e as? ToolException)?.message ?: e}")
+                status = "Realistic textures failed"
+            } finally {
+                realTexturesMade = fs.isDirectory(realTexturesFolder)
+                running = false
+            }
+        }
+    }
+
+    /** Takes the realistic textures out of openmw.cfg and deletes them. */
+    fun removeBalmoraTextures() {
+        if (running) return
+        running = true
+        job = scope.launch {
+            try {
+                log("--- Realistic textures: remove")
+                removeRealTextures(fs, cfg, realTexturesFolder, ::log)
+                status = "Realistic textures removed"
+            } catch (e: Exception) {
+                log("Remove failed: $e")
+                status = "Remove failed"
+            } finally {
+                realTexturesMade = fs.isDirectory(realTexturesFolder)
                 running = false
             }
         }
