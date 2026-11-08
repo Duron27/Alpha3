@@ -19,6 +19,14 @@ import android.system.Os
 import android.system.OsConstants
 import android.view.WindowManager
 import android.widget.Magnifier
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.ColorFilter
+import android.graphics.Paint
+import android.graphics.PixelFormat
+import android.graphics.RectF
+import android.graphics.drawable.Drawable
 import androidx.core.content.ContextCompat
 import org.alpha3.launcher.paths.OpenMWPaths
 import org.alpha3.launcher.resources.Res
@@ -27,6 +35,7 @@ import org.alpha3.launcher.resources.charging
 import org.alpha3.launcher.ui.overlay.MemoryInfo
 import org.alpha3.launcher.ui.view.humanReadableByteCountBin
 import org.alpha3.launcher.utils.SystemServices
+import org.alpha3.launcher.utils.MagnifierCursor
 import org.alpha3.launcher.utils.stringRes
 import org.libsdl.app.SDLActivity
 import java.io.BufferedReader
@@ -244,34 +253,67 @@ class AndroidSystemServices(private val context: Context) : SystemServices() {
     override val canMagnify: Boolean get() = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
 
     private var magnifier: Magnifier? = null
-    private var magnifierFor: Triple<Any, Int, Float>? = null
+    private var magnifierFor: List<Any?>? = null
     private var lastSourceX = Float.NaN
     private var lastSourceY = Float.NaN
+    private var cursorBitmap: Pair<String, Bitmap?>? = null
 
-    override fun showMagnifier(x: Float, y: Float, lensOffsetY: Float, sizePx: Int, zoom: Float) {
+    override fun showMagnifier(x: Float, y: Float, sizePx: Int, zoom: Float, cursor: MagnifierCursor?) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
         val view = SDLActivity.getSurface() ?: return
         if (view.width <= 0 || view.height <= 0 || !view.isAttachedToWindow) return
-        val key = Triple<Any, Int, Float>(view, sizePx, zoom)
+        // SDL's surface buffer can be smaller than the view (the [Video] resolution stretched over the screen): the
+        // Magnifier reads the buffer as if it were view sized, so the point to copy from is scaled to the buffer, and
+        // the zoom divided by it, to keep the lens' magnification the asked one on screen
+        val frame = view.holder.surfaceFrame
+        val bx = if (frame.width() > 0) frame.width().toFloat() / view.width else 1f
+        val by = if (frame.height() > 0) frame.height().toFloat() / view.height else 1f
+        val lensZoom = zoom / bx
+        val key = listOf(view, sizePx, lensZoom, cursor)
         val lens = magnifier.takeIf { magnifierFor == key } ?: run {
             magnifier?.dismiss()
             Magnifier.Builder(view)
                 .setSize(sizePx, sizePx)
                 .setCornerRadius(sizePx / 2f)
-                .setInitialZoom(zoom)
-                .setOverlay(null)
+                .setInitialZoom(lensZoom)
+                .setOverlay(cursor?.let { cursorDrawable(it) })
                 .setElevation(4f * context.resources.displayMetrics.density)
+                // kept where it is asked for even at the screen's edge, so the arrow's tip stays on the magnified point
+                .setClippingEnabled(false)
                 .build()
                 .also { magnifier = it; magnifierFor = key; lastSourceX = Float.NaN }
         }
-        val sx = x.coerceIn(0f, 1f) * view.width
-        val sy = y.coerceIn(0f, 1f) * view.height
+        val vx = x.coerceIn(0f, 1f) * view.width
+        val vy = y.coerceIn(0f, 1f) * view.height
+        val sx = vx * bx
+        val sy = vy * by
         if (sx == lastSourceX && sy == lastSourceY) {
             lens.update()  // show() only copies again when the point moves; the game behind it does not stand still
         } else {
-            lens.show(sx, sy, sx, sy + lensOffsetY)
+            lens.show(sx, sy, vx, vy)
             lastSourceX = sx
             lastSourceY = sy
+        }
+    }
+
+    /** The cursor arrow over the lens: as MouseIcon draws it (fit in its box, top-left), its corner on the centre. */
+    private fun cursorDrawable(cursor: MagnifierCursor): Drawable? {
+        val bitmap = cursorBitmap?.takeIf { it.first == cursor.imagePath }?.second
+            ?: BitmapFactory.decodeFile(cursor.imagePath).also { cursorBitmap = cursor.imagePath to it }
+            ?: return null
+        return object : Drawable() {
+            private val paint = Paint(Paint.FILTER_BITMAP_FLAG)
+            override fun draw(canvas: Canvas) {
+                val b = bounds
+                val scale = cursor.sizePx / maxOf(bitmap.width, bitmap.height).toFloat()
+                val left = b.exactCenterX() + cursor.offsetXPx
+                val top = b.exactCenterY() + cursor.offsetYPx
+                canvas.drawBitmap(bitmap, null, RectF(left, top, left + bitmap.width * scale, top + bitmap.height * scale), paint)
+            }
+            override fun setAlpha(alpha: Int) { paint.alpha = alpha }
+            override fun setColorFilter(colorFilter: ColorFilter?) { paint.colorFilter = colorFilter }
+            @Deprecated("Deprecated in Java")
+            override fun getOpacity() = PixelFormat.TRANSLUCENT
         }
     }
 

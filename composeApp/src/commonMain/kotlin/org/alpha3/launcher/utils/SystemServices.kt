@@ -44,12 +44,16 @@ open class SystemServices {
     open val canMagnify: Boolean = false
 
     /**
-     * Shows (or moves) a round lens [sizePx] across with the game picture [zoom] times larger around ([x], [y]), given as
-     * fractions of the game surface; the lens is centred [lensOffsetY] pixels below that point (negative: above it).
+     * Shows (or moves) a round lens [sizePx] across, centred on ([x], [y]) (fractions of the game surface), with the game
+     * picture there [zoom] times larger. With a [cursor] its arrow is drawn on top at its normal size, the tip on the
+     * centre: on exactly the point that is magnified, where a click lands.
      */
-    open fun showMagnifier(x: Float, y: Float, lensOffsetY: Float, sizePx: Int, zoom: Float) {}
+    open fun showMagnifier(x: Float, y: Float, sizePx: Int, zoom: Float, cursor: MagnifierCursor?) {}
     open fun hideMagnifier() {}
 }
+
+/** The cursor arrow drawn over the magnifier: its image file, the size it is shown at, and the arrow's display offset. */
+data class MagnifierCursor(val imagePath: String, val sizePx: Int, val offsetXPx: Float, val offsetYPx: Float)
 
 object SystemInfo {
     var services: SystemServices = SystemServices()

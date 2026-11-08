@@ -47,6 +47,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ZoomIn
+import androidx.compose.material.icons.filled.ZoomOut
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Gamepad
@@ -420,6 +422,26 @@ fun ResizableDraggableRightThumbstick(
                                 )
                                 .border(2.dp, if (painter == null) rightThumbColor else Color.Transparent, CircleShape)
                         )
+                    }
+                    // the experimental cursor magnifier's switch, there while settings.cfg has it on
+                    if (!editMode && UIStateManager.magnifierAvailable) {
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .size(30.dp)
+                                .alpha(buttonAlpha.coerceAtLeast(0.6f))
+                                .background(Color.Black.copy(alpha = 0.5f), shape = CircleShape)
+                                .border(2.dp, rightThumbColor, shape = CircleShape)
+                                .clickable { UIStateManager.magnifierOn = !UIStateManager.magnifierOn },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = if (UIStateManager.magnifierOn) Icons.Default.ZoomIn else Icons.Default.ZoomOut,
+                                contentDescription = if (UIStateManager.magnifierOn) "Hide Magnifier" else "Show Magnifier",
+                                tint = rightThumbColor,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
                     }
                     if (editMode) {
                         Box(

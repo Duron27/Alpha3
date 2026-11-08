@@ -104,6 +104,7 @@ import kotlinx.coroutines.launch
 import org.alpha3.launcher.engine.Engine
 import org.alpha3.launcher.utils.IniFloat
 import org.alpha3.launcher.utils.SystemInfo
+import org.alpha3.launcher.utils.MagnifierCursor
 import org.alpha3.launcher.utils.readIniValues
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.platform.LocalDensity
@@ -171,9 +172,9 @@ fun MouseIcon(
 }
 /**
  * The experimental cursor magnifier ([Experimental] cursor magnifier in settings.cfg): a round lens over the game that
- * follows where a click lands. With OpenMW's cursor shown it magnifies around the cursor's point (where OpenMW has it,
- * not the arrow's display offset) and sits just above it so the arrow stays in sight; in look mode it sits on the
- * middle of the screen, where activating happens. The overlay's lens button switches it while the setting is on.
+ * follows where a click lands. With OpenMW's cursor shown it is centred on the cursor's point, with the arrow drawn over
+ * it at its normal size, tip on the centre; in look mode it sits on the middle of the screen, where activating happens.
+ * The button on the right thumbstick switches it while the setting is on.
  */
 @Composable
 fun CursorMagnifier(containerWidth: Float, containerHeight: Float) {
@@ -193,10 +194,12 @@ fun CursorMagnifier(containerWidth: Float, containerHeight: Float) {
     }
 
     val density = LocalDensity.current.density
+    val offsetX = GameFilesPreferences.getNullablePreference(GameFilesPreferences.OFFSET_X_MOUSE).collectAsState(initial = 0f).value ?: 0f
+    val offsetY = GameFilesPreferences.getNullablePreference(GameFilesPreferences.OFFSET_Y_MOUSE).collectAsState(initial = 0f).value ?: 0f
     val active = UIStateManager.magnifierAvailable && UIStateManager.magnifierOn && !editMode &&
         UIStateManager.tempCodeGroup == "OpenMW"
 
-    LaunchedEffect(active, zoom, sizeDp, containerWidth, containerHeight) {
+    LaunchedEffect(active, zoom, sizeDp, containerWidth, containerHeight, offsetX, offsetY) {
         if (!active) {
             SystemInfo.services.hideMagnifier()
             return@LaunchedEffect
@@ -207,12 +210,15 @@ fun CursorMagnifier(containerWidth: Float, containerHeight: Float) {
                 if (UIStateManager.isCursorVisible != 0) {
                     val sdlWidth = Engine.resolutionX.toFloat().takeIf { it > 0f } ?: containerWidth
                     val sdlHeight = Engine.resolutionY.toFloat().takeIf { it > 0f } ?: containerHeight
+                    // the arrow as MouseIcon draws it (32 dp, its display offset), tip on the lens' centre
+                    val cursor = MagnifierCursor("${userUI}/pointer_arrow.png", (32 * density).toInt(), offsetX, offsetY)
                     SystemInfo.services.showMagnifier(
-                        Engine.getMouseX() / sdlWidth, Engine.getMouseY() / sdlHeight,
-                        -(sizePx / 2f + 12f * density), sizePx, zoom
+                        (Engine.getMouseX() + Engine.mouseFractionX()) / sdlWidth,
+                        (Engine.getMouseY() + Engine.mouseFractionY()) / sdlHeight,
+                        sizePx, zoom, cursor
                     )
                 } else {
-                    SystemInfo.services.showMagnifier(0.5f, 0.5f, 0f, sizePx, zoom)
+                    SystemInfo.services.showMagnifier(0.5f, 0.5f, sizePx, zoom, null)  // the crosshair
                 }
             }
         }

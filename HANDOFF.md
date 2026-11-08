@@ -188,7 +188,13 @@ dynamic buttons and touch areas goes through `onNativeMouse` there):
 
 **Cursor magnifier** (`[Experimental] cursor magnifier = false`, `cursor magnifier zoom = 2.0`, `cursor magnifier size =
 140` dp): Android's `android.widget.Magnifier` on SDL's SurfaceView (`AndroidSystemServices.showMagnifier`, Android
-10+), driven each frame by `CursorMagnifier` in `ui/controls/mouse.kt`: above the cursor's real point when it is shown,
-on the screen centre in look mode. The overlay toolbar gets a zoom button (`UIStateManager.magnifierOn`) while the
-setting is on. **Built but not yet tried on a device.** The settings editor only lists keys already in the profile's
-settings.cfg, and existing profiles do not get new keys from `alpha3.cfg`; they were added to the tablet's by hand.
+10+), driven each frame by `CursorMagnifier` in `ui/controls/mouse.kt`. With the cursor shown the lens is centred on
+OpenMW's cursor point (sub-pixel), and `pointer_arrow.png` is drawn over it as the Magnifier's overlay at MouseIcon's size
+and offset, tip on the centre: the magnified spot is where the click lands. In look mode it sits on the screen centre
+(crosshair), no arrow. The SurfaceView's buffer is the [Video] resolution stretched over the view (1280x800 on the
+2560x1600 tablet); Magnifier reads the buffer as if view sized, so the source point is scaled by buffer/view and the zoom
+divided by it (without that it sampled twice as far out at 1x). Clipping is off so the lens is not pushed in at the
+screen edge. The switch is a small zoom button on the right thumbstick's top-right (`UIStateManager.magnifierOn`),
+there while the setting is on. Checked on the tablet's main menu 2026-11-08. The settings editor only lists keys already
+in the profile's settings.cfg, and existing profiles do not get new keys from `alpha3.cfg`; they were added to the
+tablet's by hand.
