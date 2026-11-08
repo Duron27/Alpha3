@@ -521,6 +521,7 @@ internal fun readBlocks(bytes: ByteArray): Pair<List<NifBlock>, String?> {
     while (bytes[nl].toInt() != '\n'.code) nl++
     r.buf.position(nl + 1)
     val version = r.int()
+    if (version == 0x14000005 || version == 0x14000004) return readBlocksGamebryo(r, version)
     if (version != 0x04000002) return emptyList<NifBlock>() to "unsupported NIF version 0x${version.toString(16)}"
     val count = r.int()
     val blocks = ArrayList<NifBlock>(count)
@@ -625,6 +626,142 @@ internal fun readBlocks(bytes: ByteArray): Pair<List<NifBlock>, String?> {
                     // block indices stay valid and resume at the next block's type name.
                     require(r.resyncToNextBlock() || i == count - 1) { "unsupported block $type" }
                 }
+            }
+            blocks += b
+        }
+    } catch (e: Exception) {
+        return blocks to "block ${blocks.size} @${r.buf.position()}: ${e.message ?: e::class.simpleName}"
+    }
+    return blocks to null
+}
+
+/**
+ * NIF 20.0.0.4/20.0.0.5 (Gamebryo, the Oblivion-era format some Morrowind mods ship, e.g. Better Bodies'
+ * bb_skinf_br.nif). Layouts follow OpenMW's components/nif readers for these versions: a block type table instead
+ * of type names before each block, 1-byte bools, extra data as a ref list, collision refs, no velocity/bounds.
+ */
+private fun readBlocksGamebryo(r: NifReader, version: Int): Pair<List<NifBlock>, String?> {
+    val blocks = ArrayList<NifBlock>()
+    try {
+        r.byte() // endian (1 = little)
+        val userVersion = r.int()
+        val count = r.int()
+        require(count in 0..200000) { "bad block count $count" }
+        if (userVersion in 3..11 || (userVersion >= 3 && version >= 0x14000005)) {
+            val bethVersion = r.int()
+            fun exportString() { r.skip(r.byte()) }
+            exportString() // author
+            if (bethVersion >= 131) r.int() else exportString() // process script
+            exportString() // export script
+            if (bethVersion >= 103) exportString()
+        }
+        val typeNames = Array(r.ushort()) { r.string() }
+        val typeIndex = IntArray(count) { r.ushort() and 0x7FFF }
+        repeat(r.int()) { r.int() } // groups
+        fun bool() = r.byte() != 0
+        fun net(b: NifBlock) {
+            b.name = r.string()
+            val extras = r.refs()
+            b.extra = extras.firstOrNull() ?: -1
+            b.controller = r.int()
+        }
+        fun avObject(b: NifBlock) {
+            net(b)
+            b.flags = r.ushort()
+            b.translation = r.floats(3)
+            b.matrix = r.floats(9)
+            b.scale = r.float()
+            b.properties = r.refs()
+            r.int() // collision
+        }
+        fun texture(): Int? {
+            if (!bool()) return null
+            val src = r.int()
+            r.skip(4 + 4 + 4) // clamp, filter, uv set
+            if (bool()) r.skip(8 + 8 + 4 + 4 + 8) // texture transform
+            return src
+        }
+        for (i in 0 until count) {
+            val type = typeNames[typeIndex[i]]
+            val b = NifBlock(type)
+            when (type) {
+                "NiNode", "RootCollisionNode", "NiBSAnimationNode", "NiBillboardNode", "NiSwitchNode", "NiLODNode", "AvoidNode" -> {
+                    require(type != "NiLODNode") { "unsupported $type" }
+                    avObject(b)
+                    b.children = r.refs()
+                    r.refs() // effects
+                    if (type == "NiSwitchNode") { r.ushort(); b.switchIndex = r.int() }
+                    if (type == "NiBillboardNode") r.ushort()
+                }
+                "NiTriShape" -> {
+                    avObject(b)
+                    b.data = r.int(); b.skin = r.int()
+                    if (bool()) { r.string(); r.int() } // material data (one name + extra)
+                }
+                "NiTriShapeData" -> {
+                    r.int() // group id
+                    val n = r.ushort()
+                    r.skip(2) // keep / compress flags
+                    if (bool()) b.positions = r.floats(n * 3)
+                    val dataFlags = r.ushort()
+                    if (bool()) {
+                        b.normals = r.floats(n * 3)
+                        // 20.0.0.x keeps tangents in a "Tangent space" NiBinaryExtraData, not inline (flag 0x1000 set anyway).
+                        if (dataFlags and 0x1000 != 0 && version >= 0x14020007) r.skip(n * 24)
+                    }
+                    r.skip(16) // bounding sphere
+                    if (bool()) b.colors = r.floats(n * 4)
+                    val uvSets = dataFlags and 0x3F
+                    if (uvSets > 0) { b.uvs = r.floats(n * 2); r.skip((uvSets - 1) * n * 8) }
+                    r.ushort() // consistency
+                    r.skip(4) // additional data ref
+                    val tris = r.ushort()
+                    var numIndices = r.int()
+                    if (!bool()) numIndices = 0
+                    require(numIndices in 0..tris * 3 + 3) { "bad index count $numIndices for $tris triangles, $n vertices, flags $dataFlags" }
+                    b.indices = IntArray(numIndices) { r.ushort() }
+                    repeat(r.ushort()) { r.skip(r.ushort() * 2) } // match groups
+                }
+                "NiTexturingProperty" -> {
+                    net(b)
+                    r.int() // apply mode
+                    val slots = r.int()
+                    require(slots in 0..32) { "bad texture slot count $slots" }
+                    for (s in 0 until slots) {
+                        val src = texture()
+                        if (s == 0 && src != null) b.source = src
+                        if (s == 5 && src != null) r.skip(24)
+                    }
+                    repeat(r.int()) { if (texture() != null) r.int() } // shader textures
+                }
+                "NiSourceTexture" -> {
+                    net(b)
+                    r.byte() // external
+                    b.fileName = r.string().ifEmpty { null }
+                    r.int() // pixel data ref
+                    r.skip(4 + 4 + 4) // pixel layout, mipmaps, alpha
+                    r.skip(1 + 1) // static, direct rendering
+                }
+                "NiMaterialProperty" -> {
+                    net(b)
+                    r.skip(12) // ambient
+                    b.diffuse = r.floats(3)
+                    r.skip(12) // specular
+                    b.emissive = r.floats(3)
+                    r.skip(4) // glossiness
+                    b.alpha = r.float()
+                }
+                "NiAlphaProperty" -> { net(b); b.alphaFlags = r.ushort(); r.skip(1) }
+                "NiVertexColorProperty" -> { net(b); r.skip(2); b.vertexMode = r.int(); r.skip(4) }
+                "NiZBufferProperty" -> { net(b); r.skip(2 + 4) }
+                "NiSpecularProperty", "NiWireframeProperty", "NiDitherProperty", "NiShadeProperty" -> { net(b); r.skip(2) }
+                "NiStencilProperty" -> { net(b); r.skip(1 + 4 + 4 + 4 + 4 + 4 + 4 + 4) }
+                "NiBinaryExtraData" -> { b.name = r.string(); r.skip(r.int()) }
+                "NiStringExtraData" -> { b.name = r.string(); b.text = r.string() }
+                "NiTextKeyExtraData" -> { b.name = r.string(); b.textKeys = List(r.int()) { r.float() to r.string() } }
+                "NiIntegerExtraData", "NiFloatExtraData" -> { b.name = r.string(); r.skip(4) }
+                // No block sizes in this version either, so anything else ends the read here.
+                else -> throw IllegalStateException("unsupported block $type")
             }
             blocks += b
         }

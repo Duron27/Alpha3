@@ -47,6 +47,7 @@ class ModAssistantViewModel : ViewModel() {
     var autoMods = mutableStateOf(false)
     var downloader = mutableStateOf(false)
     var terminal = mutableStateOf(false)
+    var constructionSet = mutableStateOf(false)
     var kram = mutableStateOf(false)
     var showDialogSettings = mutableStateOf(false)
     var showSearchDialog = mutableStateOf(false)

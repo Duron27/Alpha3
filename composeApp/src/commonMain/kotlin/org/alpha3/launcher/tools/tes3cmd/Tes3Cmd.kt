@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 package org.alpha3.launcher.tools.tes3cmd
 
+import org.alpha3.launcher.tools.openmw.isOfficialContent
+import org.alpha3.launcher.tools.openmw.refuseOfficial
 import org.alpha3.launcher.tools.openmw.*
 
 /** Options shared by commands that rewrite plugins. */
@@ -53,6 +55,7 @@ class Tes3Cmd(
     }
 
     internal fun copyFile(from: String, to: String) {
+        refuseOfficial(to)
         val r = fs.openRead(from)
         try {
             fs.delete(to)
@@ -87,6 +90,7 @@ class Tes3Cmd(
     }
 
     internal fun move(from: String, to: String) {
+        refuseOfficial(to)
         fs.delete(to)
         fs.rename(from, to)
     }
@@ -103,6 +107,10 @@ class Tes3Cmd(
             return
         }
         var newName = newName0
+        if (newName == null && o.outputDir == null && isOfficialContent(plugin)) {
+            fs.delete(tmp)
+            fail("$plugin is an official Morrowind file and is read-only; it was not changed")
+        }
         if (o.outputDir != null) {
             fs.mkdirs(o.outputDir)
             newName = joinPath(o.outputDir, baseName(newName ?: plugin))

@@ -68,6 +68,7 @@ import androidx.compose.material.icons.outlined.Memory
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.SportsEsports
 import androidx.compose.material.icons.outlined.Terminal
+import androidx.compose.material.icons.outlined.Architecture
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
@@ -196,6 +197,7 @@ private fun ModTabRow(
     var autoMods by viewModel.autoMods
     var downloader by viewModel.downloader
     var terminal by viewModel.terminal
+    var constructionSet by viewModel.constructionSet
     var kram by viewModel.kram
     var showDialogSettings by viewModel.showDialogSettings
     var showSearchDialog by viewModel.showSearchDialog
@@ -211,6 +213,7 @@ private fun ModTabRow(
         showMods = false
         showNav = false
         terminal = false
+        constructionSet = false
         kram = false
         showModTools = false
         showHelp = false
@@ -235,6 +238,7 @@ private fun ModTabRow(
         add(HELP_TAB)
         if (newFeatureEnabledChecked) {
             if (Platform.features.supportsTerminal) add(8)
+            if (Platform.features.supportsModTools) add(CS_TAB)
             if (Platform.features.supportsKram) add(9)
         }
     }
@@ -308,6 +312,11 @@ private fun ModTabRow(
                     resetStates()
                     terminal = true
                     selectedTabIndex = 8
+                })
+                if (Platform.features.supportsModTools) add(NavEntry(Icons.Outlined.Architecture, "Construction Set", selectedTabIndex == CS_TAB, utility = true) {
+                    resetStates()
+                    constructionSet = true
+                    selectedTabIndex = CS_TAB
                 })
                 if (Platform.features.supportsKram) add(NavEntry(Icons.Outlined.Memory, "Kram", selectedTabIndex == 9, utility = true) {
                     resetStates()
@@ -394,6 +403,11 @@ private fun ModTabRow(
                 resetStates()
                 terminal = true
                 selectedTabIndex = 8
+            }
+            if (Platform.features.supportsModTools) NavPill(selectedTabIndex == CS_TAB, Icons.Outlined.Architecture, label = null, description = "Construction Set") {
+                resetStates()
+                constructionSet = true
+                selectedTabIndex = CS_TAB
             }
             if (Platform.features.supportsKram) NavPill(selectedTabIndex == 9, Icons.Outlined.Memory, label = null, description = "Kram") {
                 resetStates()
@@ -490,6 +504,7 @@ fun ModValuesList(
     val showHelp by viewModel.showHelp
     val settingsTab by viewModel.settingsTab
     var downloader by viewModel.downloader
+    val constructionSet by viewModel.constructionSet
     var terminal by viewModel.terminal
     var kram by viewModel.kram
     var showDialogSettings by viewModel.showDialogSettings
@@ -712,6 +727,18 @@ fun ModValuesList(
                 onDispose { org.alpha3.launcher.ui.controls.UIStateManager.terminalShown = false }
             }
             Terminal()
+        }
+        AnimatedVisibility(
+            visible = constructionSet,
+            enter = fadeIn() + expandIn(),
+            exit = fadeOut() + shrinkOut()
+        ) {
+            // full screen like the terminal: the floating Play button would cover the editor
+            androidx.compose.runtime.DisposableEffect(Unit) {
+                org.alpha3.launcher.ui.controls.UIStateManager.terminalShown = true
+                onDispose { org.alpha3.launcher.ui.controls.UIStateManager.terminalShown = false }
+            }
+            org.alpha3.launcher.cs.ui.ConstructionSet()
         }
         AnimatedVisibility(
             visible = downloader && isNetworkAvailable(context),
@@ -1536,6 +1563,7 @@ private fun isNetworkAvailable(context: PlatformContext): Boolean = Platform.fea
 /** Tab ids at and above this are [SettingsTab]s; below it they are the mod screen's own tabs. */
 private const val SETTINGS_TAB_BASE = 10
 private const val HELP_TAB = 20
+private const val CS_TAB = 21
 
 /** The settings pages that a landscape layout shows as tabs. */
 enum class SettingsTab {

@@ -51,6 +51,8 @@
     <!-- Allow access to the vibrator -->
     <uses-permission android:name="android.permission.VIBRATE" />
 
+    <!-- allowNativeHeapPointerTagging off: Android 11+ tags malloc pointers in their top byte, and LuaJIT (GC64) takes
+         only 47-bit pointers, so the Lua profiler's allocator ([Lua] lua profiler) failed and the profiler was disabled -->
     <application
         android:appCategory="game"
         android:hasFragileUserData="true"
@@ -67,6 +69,7 @@
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:largeHeap="true"
+        android:allowNativeHeapPointerTagging="false"
         android:exported="true"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"

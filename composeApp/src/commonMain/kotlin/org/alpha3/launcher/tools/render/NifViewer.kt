@@ -72,15 +72,20 @@ private val Muted = Color.White.copy(alpha = 0.65f)
 private val Red = Color(0xFFE57373)
 
 /** One mesh of the model: drawn with its texture, or plain. */
-private class Part(val label: String, val texture: String?, val textureFound: Boolean, val triangles: Int, val textured: SceneMesh, val plain: SceneMesh)
+internal class Part(val label: String, val texture: String?, val textureFound: Boolean, val triangles: Int, val textured: SceneMesh, val plain: SceneMesh)
 
 /** A model ready to draw: its parts in model space, and the box they fill. */
-private class ViewModel(val parts: List<Part>, val center: FloatArray, val radius: Float, val info: String)
+internal class ViewModel(val parts: List<Part>, val center: FloatArray, val radius: Float, val info: String)
 
-private fun loadModel(file: File, fs: ToolFs, assetDirs: List<String>): ViewModel {
-    val model = parseNif(file.readBytes(), includeSkinned = true)
-    if (model.meshes.isEmpty()) error(model.error ?: "no renderable geometry in ${file.name}")
-    val assets = MwAssets(fs, assetDirs)
+private fun loadModel(file: File, fs: ToolFs, assetDirs: List<String>): ViewModel =
+    loadModel(file.name, listOf(file.readBytes()), MwAssets(fs, assetDirs))
+
+/** [nifs] drawn together (a head and its hair, say), their textures from [assets]. */
+internal fun loadModel(name: String, nifs: List<ByteArray>, assets: MwAssets): ViewModel {
+    val models = nifs.map { parseNif(it, includeSkinned = true) }
+    val all = models.flatMap { it.meshes }
+    if (all.isEmpty()) error(models.firstNotNullOfOrNull { it.error } ?: "no renderable geometry in $name")
+    val model = MwModel(all, models.firstNotNullOfOrNull { it.error })
     val cache = HashMap<String, Bitmap?>()
     val parts = model.meshes.mapIndexed { i, m ->
         val tex = m.texture?.let { name -> cache.getOrPut(name.lowercase()) { assets.readTexture(name) } }
@@ -127,6 +132,30 @@ fun AssetViewerDialog(file: File, fs: ToolFs, assetDirs: List<String>, onDismiss
 @Composable
 internal fun AssetViewerContent(file: File, fs: ToolFs, assetDirs: List<String>, onDismiss: () -> Unit, modifier: Modifier = Modifier) {
     val isMesh = file.extension.lowercase() in setOf("nif")
+    AssetViewerCore(
+        file.name, file, isMesh, loadMesh = { loadModel(file, fs, assetDirs) },
+        loadImage = { loadImage(file) ?: error("cannot read ${file.name}") }, onDismiss = onDismiss, modifier = modifier,
+    )
+}
+
+/**
+ * The viewer for a model or image that comes from anywhere: [loadMesh] or [loadImage] run once per [key] on a
+ * background thread. Without [onDismiss] there is no Close button; [showParts] adds the mesh and texture switches.
+ */
+@OptIn(ExperimentalComposeUiApi::class)
+@Composable
+internal fun AssetViewerCore(
+    title: String,
+    key: Any,
+    isMesh: Boolean,
+    loadMesh: () -> ViewModel,
+    loadImage: () -> Bitmap,
+    onDismiss: (() -> Unit)?,
+    modifier: Modifier = Modifier,
+    showParts: Boolean = true,
+    subtitle: String? = null,
+) {
+    val file = key
     var model by remember(file) { mutableStateOf<ViewModel?>(null) }
     var image by remember(file) { mutableStateOf<ImageBitmap?>(null) }
     var imageInfo by remember(file) { mutableStateOf("") }
@@ -151,12 +180,12 @@ internal fun AssetViewerContent(file: File, fs: ToolFs, assetDirs: List<String>,
         withContext(Dispatchers.IO) {
             try {
                 if (isMesh) {
-                    val m = loadModel(file, fs, assetDirs)
+                    val m = loadMesh()
                     shown.clear(); shown.addAll(List(m.parts.size) { true })
                     model = m
                     info = m.info
                 } else {
-                    val img = loadImage(file) ?: error("cannot read ${file.name}")
+                    val img = loadImage()
                     image = argbToImageBitmap(img.width, img.height, img.levels[0].third.let { px -> IntArray(px.size) { px[it] } })
                     imageInfo = "${img.width} x ${img.height}"
                 }
@@ -227,14 +256,15 @@ internal fun AssetViewerContent(file: File, fs: ToolFs, assetDirs: List<String>,
             Column(modifier = Modifier.fillMaxSize().padding(12.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Column(modifier = Modifier.weight(1f)) {
-                        Text(file.name, color = Gold, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                        Text(title, color = Gold, fontSize = 16.sp, fontWeight = FontWeight.Bold)
                         Text(if (isMesh) info.ifEmpty { "Loading model..." } else imageInfo, color = Muted, fontSize = 11.sp)
+                        subtitle?.let { Text(it, color = Muted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) }
                     }
                     if (isMesh) {
                         SmallButton(if (spin) "Stop spinning" else "Spin") { spin = !spin }
                         SmallButton("Reset view") { yaw = 0.6f; pitch = 0.35f; zoom = 1f; panX = 0f; panY = 0f; panZ = 0f; brightness = 1f }
                     }
-                    Button(onClick = onDismiss, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E3A8A), contentColor = Color.White), shape = RoundedCornerShape(6.dp)) {
+                    if (onDismiss != null) Button(onClick = onDismiss, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E3A8A), contentColor = Color.White), shape = RoundedCornerShape(6.dp)) {
                         Text("Close", fontSize = 12.sp)
                     }
                 }
@@ -298,15 +328,15 @@ internal fun AssetViewerContent(file: File, fs: ToolFs, assetDirs: List<String>,
                             val img = image
                             when {
                                 e != null -> Text("Cannot show this file: $e", color = Red, fontSize = 12.sp, modifier = Modifier.padding(16.dp))
-                                isMesh && f != null -> Image(f, file.name, contentScale = ContentScale.FillBounds, filterQuality = FilterQuality.Medium, modifier = Modifier.fillMaxSize())
-                                !isMesh && img != null -> Image(img, file.name, contentScale = ContentScale.Fit, filterQuality = FilterQuality.None, modifier = Modifier.fillMaxSize().padding(8.dp))
+                                isMesh && f != null -> Image(f, title, contentScale = ContentScale.FillBounds, filterQuality = FilterQuality.Medium, modifier = Modifier.fillMaxSize())
+                                !isMesh && img != null -> Image(img, title, contentScale = ContentScale.Fit, filterQuality = FilterQuality.None, modifier = Modifier.fillMaxSize().padding(8.dp))
                                 else -> Text("Loading...", color = Color.Gray, fontSize = 12.sp)
                             }
                         }
                     }
                     val side: @Composable (Modifier) -> Unit = { pm ->
                         val m = model
-                        if (isMesh && m != null) {
+                        if (isMesh && m != null && showParts) {
                             // Switches for the files involved
                             Column(modifier = pm.background(Color(0xFF1B1E24), RoundedCornerShape(8.dp)).padding(10.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                 Text("Show", color = Gold, fontSize = 13.sp, fontWeight = FontWeight.Bold)
@@ -315,7 +345,7 @@ internal fun AssetViewerContent(file: File, fs: ToolFs, assetDirs: List<String>,
                                     SmallButton("All on") { for (i in shown.indices) shown[i] = true; textureOff.clear(); texturedAll = true }
                                     SmallButton("All off") { for (i in shown.indices) shown[i] = false }
                                 }
-                                Text("Meshes in ${file.name}", color = Muted, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
+                                Text("Meshes in $title", color = Muted, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
                                 m.parts.forEachIndexed { i, part ->
                                     Switch("${part.label} (${part.triangles} tris)", shown.getOrElse(i) { true }) { if (i < shown.size) shown[i] = it }
                                 }
@@ -330,7 +360,9 @@ internal fun AssetViewerContent(file: File, fs: ToolFs, assetDirs: List<String>,
                         }
                 
                     }
-                    if (compact) {
+                    if (!showParts || !isMesh) {
+                        viewport(Modifier.fillMaxSize())
+                    } else if (compact) {
                         Column(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             viewport(Modifier.weight(1f).fillMaxWidth())
                             side(Modifier.fillMaxWidth().height(150.dp))
@@ -342,7 +374,8 @@ internal fun AssetViewerContent(file: File, fs: ToolFs, assetDirs: List<String>,
                         }
                     }
                 }
-                if (isMesh) {
+                // embedded (no Close button): just the view; the full viewer has the sliders
+                if (isMesh && onDismiss != null) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 6.dp)) {
                         Text("Brightness", color = Color.White, fontSize = 12.sp)
                         Slider(

@@ -80,6 +80,9 @@ internal class MwRenderer(val width: Int, val height: Int) {
 
     /** Leave pixels no geometry touched fully transparent (ARGB output) instead of filling them with the fog color. */
     var transparent = false
+
+    /** Skip triangles seen from behind (one-sided, as the game draws them), so rooms can be looked into from outside. */
+    var cullBackFaces = false
     private val zbuf = FloatArray(width * height)
 
     private val vs = 14
@@ -210,6 +213,11 @@ internal class MwRenderer(val width: Int, val height: Int) {
     private fun emit(a: FloatArray, b: FloatArray, c: FloatArray, meshIndex: Int) {
         val base = triCount * 42
         writeVertex(base, a); writeVertex(base + 14, b); writeVertex(base + 28, c)
+        if (cullBackFaces) {
+            // counter-clockwise in the game is clockwise on screen (y grows downward)
+            val area = (tri[base + 14] - tri[base]) * (tri[base + 29] - tri[base + 1]) - (tri[base + 28] - tri[base]) * (tri[base + 15] - tri[base + 1])
+            if (area > 0f) return
+        }
         triMesh[triCount++] = meshIndex
     }
 

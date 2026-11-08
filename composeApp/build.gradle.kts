@@ -42,6 +42,8 @@ kotlin {
         androidResources {
             enable = true
         }
+        // JVM tests of the launcher's file tools (src/androidHostTest), run with :composeApp:testAndroidHostTest
+        withHostTest {}
     }
 
     listOf(
@@ -106,6 +108,9 @@ kotlin {
             implementation(libs.androidx.room.runtime)
         }
         commonTest.dependencies {
+            implementation(libs.kotlin.test)
+        }
+        getByName("androidHostTest").dependencies {
             implementation(libs.kotlin.test)
         }
     }

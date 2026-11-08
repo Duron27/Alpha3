@@ -1,5 +1,6 @@
 package org.alpha3.launcher.tools
 
+import org.alpha3.launcher.tools.openmw.isOfficialContent
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
@@ -290,6 +291,8 @@ class ModToolsRunner(private val fs: ToolFs, private val platform: ToolPlatform)
             for (name in omw.content.distinct()) {
                 // Only Morrowind-format plugins that live in a mod folder; the base game and generated plugins are left alone.
                 if (!Regex("\\.es[pm]$", RegexOption.IGNORE_CASE).containsMatchIn(name) || name.startsWith("Clean_", ignoreCase = true)) continue
+                // the official files are never changed
+                if (isOfficialContent(name)) continue
                 val path = try { vfs.loose(name).path } catch (e: ToolNotFound) { continue }
                 val file = File(path)
                 if (!cleanOverwrite && File(file.parent, "Clean_${file.name}").exists()) continue

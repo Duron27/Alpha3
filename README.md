@@ -15,6 +15,7 @@ OpenMW for Android and iOS, with a launcher that sets up Morrowind, downloads wh
   - [Free Nexus accounts](#free-nexus-accounts-slow-downloads)
 - [Mod Tools](#mod-tools)
 - [Free up space: remove overridden files](#free-up-space-remove-overridden-files-experimental)
+- [Construction Set](#construction-set-experimental)
 - [Settings, GPU driver and controls](#settings-gpu-driver-and-controls)
 - [Help and search inside the app](#help-and-search-inside-the-app)
 - [Troubleshooting](#troubleshooting)
@@ -132,6 +133,8 @@ Open **Mods > Mod Tools**. Tick the tools you want and press **Run selected**, o
 
 The generated plugins go in the `alpha3_generated` folder, which the launcher adds to your data folders. Run the tools again whenever you change your load order or add mods.
 
+With developer options on, Mod Tools also has **Realistic textures: Balmora (experimental)**. It downloads free CC0 photo textures from [Poly Haven](https://polyhaven.com) and blends their detail into about 35 of Balmora's textures (Hlaalu walls, roofs, roads, wood, stone), with normal maps. They go in `alpha3_realtex`, which is added after your other data folders so it wins. **Rebuild** makes them again, and **Remove** takes them out. The normal maps only show when **auto use object normal maps** is on.
+
 ## Free up space: remove overridden files (experimental)
 
 Big mod lists often contain many files that a later mod replaces. OpenMW only ever loads the last one, so the others are dead weight.
@@ -149,6 +152,31 @@ Things to know before you delete:
 - Updating or re-extracting a mod can bring its files back. Scan again afterwards.
 
 On a test list with 2,082 overlapping files, the scan found 1,138 overridden files (273 MiB) that were safe to remove.
+
+## Construction Set (experimental)
+
+A plugin editor in the launcher, made for touch, in the spirit of the original Construction Set and OpenMW-CS. Turn on developer options, then open **Construction Set** (the arch icon) from the menu.
+
+- **Open** a plugin from your load order. Its masters are read too, so every record from `Morrowind.esm`, the expansions and your other masters is listed and can be changed in your plugin.
+- **The official files are read-only.** `Morrowind.esm`, `Tribunal.esm`, `Bloodmoon.esm` and Bethesda's official plugins are never written, by the Construction Set or any other tool in the launcher. Picking one starts a new mod that has it as a master, and your changes go there.
+- **New** makes an empty `.esp` (or `.omwaddon`) over the masters you tick. New plugins go in the `alpha3_cs` folder.
+- **Only this plugin** (on by default when you open a mod) lists just what the plugin adds, changes or deletes, so a mod's changes don't get lost among the master's records. The type list shows the plugin's counts and puts the types it touches first. Turn it off to browse everything.
+- **Records**: pick a type on the left, then search the list. Colours show what each record is: from a master, changed, new or deleted. **Create**, **Clone**, **Delete** and **Revert** work on the selected record. New records start with values that work (a new NPC gets a race, class, head and hair and is levelled by the game; a new weapon can be swung).
+- **3D preview**: records with a model show it above the form. Drag to turn it, pinch to zoom, or open **Full screen** for the part and texture switches. An NPC shows its head and hair. Items with an icon can switch to **Icon**. Models and textures come from your data folders and their BSA archives, the same way the game finds them. Both Morrowind's NIF format (4.0.0.2) and the later 20.0.0.5 format that some mods use (for example Better Bodies' female body) can be shown.
+- **Cells**: pick **Cell** to open a cell in a 3D view, drawn on the GPU (OpenGL ES 3). Every file's objects are merged the way the game merges them.
+  - Tap an object to select it. **Look** turns the view with one finger; two fingers move and zoom.
+  - **Move**, **Turn** and **Raise** drag the selected object. **Frame cell** shows the whole cell.
+  - To get around, hold the arrows in the corner to fly forward, back and sideways, and the two on the left to go up and down. Double-tap a spot to fly to it.
+  - **Full screen** gives the view the whole screen, with the tools on top. **Exit full screen** goes back, and whatever you selected stays selected.
+  - **Live** keeps the view running: lights flicker and pulse as their flags say, and water moves.
+  - The inspector has position, rotation and scale, plus owner, lock, door destination, count and the rest. **Place object** adds any item, NPC, creature or static. **Cell settings** edits lighting, water, region and flags.
+  - Your plugin only stores what you changed. A moved or deleted master object becomes an override in your plugin, and the master stays as it was.
+- **Record editor**: a form for every subrecord. Numbers, text, flag chips, drop-downs for skills, attributes and magic effects, and pickers for references to other records (inventory items, spells, scripts, sounds). Subrecords can be added and removed.
+- **Undo** and **Redo**, **Header** (author, description, masters) and **Save**. Saving writes to a temporary file, keeps the previous save as `<name>.bak`, then offers to add the plugin to your load order.
+
+Supported record types are game settings, globals, classes, factions, races, skills, magic effects, scripts (header only), regions, birthsigns, sounds, sound generators, spells, land textures, enchantments, body parts, statics, doors, activators, containers, lights, NPCs, creatures, every item type, and levelled items and creatures. Any record or subrecord the editor doesn't know is kept byte for byte. A plugin that is opened and saved without changes comes out identical (checked on `Morrowind.esm`, `Tribunal.esm`, `Bloodmoon.esm` and several mods).
+
+Not yet: dialogue, script text, landscape (exterior cells show their objects without the ground), animated NPCs and creatures, full NPC bodies in the preview, and path grids. Use OpenMW-CS on a PC for those for now.
 
 ## Settings, GPU driver and controls
 
