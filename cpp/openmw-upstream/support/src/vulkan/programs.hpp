@@ -113,6 +113,10 @@ namespace Alpha3::Vk
         std::unordered_map<std::string, VkPipeline> mPipelines;
         bool mUsesBuiltins = false;
         VkShaderStageFlags mDrawStages = 0; // the stages with the block of OSG's matrices (binding 2)
+        // the light list's uniforms (OpenMW's LightBuffer and PointLightCount, point light shadows' slots), in a block of
+        // their own (binding 3, the same in both stages): a draw with another light list sends only these
+        UniformBlock mLightUniforms;
+        VkShaderStageFlags mLightStages = 0;
         uint32_t mVaryingEnd = 0; // one past the highest varying location
         std::string mSources[2]; // the GLSL given to glslang, kept for a pipeline the driver refuses (dumped once)
     };

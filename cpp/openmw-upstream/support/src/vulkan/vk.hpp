@@ -90,6 +90,7 @@
     X(vkDestroyDescriptorPool)                                                                                         \
     X(vkResetDescriptorPool)                                                                                           \
     X(vkAllocateDescriptorSets)                                                                                        \
+    X(vkFreeDescriptorSets)                                                                                            \
     X(vkUpdateDescriptorSets)                                                                                          \
     X(vkCreateFramebuffer)                                                                                             \
     X(vkDestroyFramebuffer)                                                                                            \

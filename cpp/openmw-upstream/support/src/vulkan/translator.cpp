@@ -184,7 +184,8 @@ namespace Alpha3::Vk
         struct DrawTemplate
         {
             Variant* mVariant = nullptr;
-            std::vector<uint8_t> mBlocks[2]; // the vertex and fragment stage's uniforms, but for the per draw ones
+            // the vertex and fragment stage's uniforms (but for the per draw ones) and the light list's
+            std::vector<uint8_t> mBlocks[3];
             struct Patch
             {
                 int mStage;
@@ -193,19 +194,11 @@ namespace Alpha3::Vk
             };
             std::vector<Patch> mPatches;
             std::vector<VkDescriptorImageInfo> mImages; // the samplers' elements in binding order
-            std::vector<std::pair<std::array<VkBuffer, 3>, VkDescriptorSet>> mSets;
-            // the blocks of a volatile state's draws this frame, by the state sets their uniforms came from
-            struct Copy
-            {
-                uint64_t mKey;
-                VkBuffer mBuffer[2];
-                VkDeviceSize mOffset[2];
-            };
-            std::vector<Copy> mCopies;
+            std::vector<std::pair<std::array<VkBuffer, 4>, VkDescriptorSet>> mSets;
 
             // What the blocks and images are made from again each frame (and for each target): the uniforms' values,
             // over the initializers' (mBase), and the textures of the samplers' elements
-            std::vector<uint8_t> mBase[2];
+            std::vector<uint8_t> mBase[3];
             struct Source
             {
                 int mStage;
@@ -227,8 +220,36 @@ namespace Alpha3::Vk
             const void* mTargetColor = nullptr;
             const void* mTargetDepth = nullptr;
             // the blocks of a draw that needs nothing patched, once per frame
-            VkBuffer mStatic[2]{};
-            VkDeviceSize mStaticOffset[2]{};
+            VkBuffer mStatic[3]{};
+            VkDeviceSize mStaticOffset[3]{};
+            // the sources' modified counts mBlocks was written with: they are written again only when one changes
+            std::vector<unsigned> mStamps;
+            bool mWritten = false;
+            // descriptor sets kept from frame to frame, for each frame slot: made again when the buffers (the slot's
+            // stream chunks), the images or the resources' image generation change
+            struct Kept
+            {
+                std::array<VkBuffer, 4> mBuffers{};
+                std::vector<VkDescriptorImageInfo> mImages;
+                uint64_t mGeneration = 0;
+                VkDescriptorSet mSet = VK_NULL_HANDLE;
+            };
+            std::vector<Kept> mKept[sFramesInFlight];
+            // where its kept sets go when it does (the translator frees them once the frames using them are done)
+            std::shared_ptr<std::vector<VkDescriptorSet>> mFreed;
+
+            DrawTemplate() = default;
+            DrawTemplate(const DrawTemplate&) = delete;
+            DrawTemplate& operator=(const DrawTemplate&) = delete;
+            ~DrawTemplate()
+            {
+                if (!mFreed)
+                    return;
+                for (const auto& kept : mKept)
+                    for (const Kept& set : kept)
+                        if (set.mSet != VK_NULL_HANDLE)
+                            mFreed->push_back(set.mSet);
+            }
         };
 
         struct Accumulated
@@ -652,6 +673,32 @@ namespace Alpha3::Vk
             if (components == 0)
                 return;
             const osg::FloatArray* floats = uniform.getFloatArray();
+            // floats into a float member (vectors, matrices and the light lists' arrays, nearly all of them): a column
+            // at a time, without a conversion per value
+            if (floats != nullptr)
+            {
+                const Shape shape = shapeOf(member.mGlType);
+                if (shape.mBase == 'f' && shape.mColumns * shape.mRows == components)
+                {
+                    const uint32_t stride = member.mArrayStride != 0
+                        ? member.mArrayStride
+                        : (shape.mColumns > 1 ? shape.mColumns * 16 : 16);
+                    const uint32_t elements = std::min<uint32_t>(uniform.getNumElements(), member.mArraySize);
+                    const uint32_t columnBytes = shape.mRows * 4;
+                    const float* data = floats->empty() ? nullptr : &floats->front();
+                    const size_t available = floats->size();
+                    for (uint32_t e = 0; e < elements; ++e)
+                        for (uint32_t c = 0; c < shape.mColumns; ++c)
+                        {
+                            const size_t index = static_cast<size_t>(e) * components + c * shape.mRows;
+                            const uint32_t at = member.mOffset + e * stride + (shape.mColumns > 1 ? c * 16 : 0);
+                            if (at + columnBytes > blockSize || index + shape.mRows > available)
+                                return;
+                            std::memcpy(block + at, data + index, columnBytes);
+                        }
+                    return;
+                }
+            }
             const osg::DoubleArray* doubles = uniform.getDoubleArray();
             const osg::IntArray* ints = uniform.getIntArray();
             const osg::UIntArray* uints = uniform.getUIntArray();
@@ -860,6 +907,10 @@ void main()
                 }
                 const osg::Timer_t begun = osg::Timer::instance()->tick();
                 mWaitSeconds += osg::Timer::instance()->delta_s(start, begun);
+                for (VkDescriptorSet set : *mFreedSets)
+                    mContext.freeKeptSetLater(set);
+                mFreedSets->clear();
+                mSharedBlocks.clear();
                 mResources.beginFrame();
                 mState = sceneView.getState();
                 mFrameNumber = sceneView.getFrameStamp() ? sceneView.getFrameStamp()->getFrameNumber() : 0;
@@ -1597,13 +1648,16 @@ void main()
             }
 
             // The state of a leaf's StateGraph with the bins' StateSets put in after its root's
-            // A hash of what a state set holds: the attributes, modes, textures and uniforms (by object) and the defines
-            static uint64_t fingerprint(const osg::StateSet& stateSet, bool uniformObjects)
+            // Hashes of what a state set holds: the attributes, modes, textures, uniforms (by name) and defines; and the
+            // same with the uniforms' objects too (objects). One pass for both: step() needs both for every state set
+            // of every draw, every frame.
+            static uint64_t fingerprint(const osg::StateSet& stateSet, uint64_t& objects)
             {
                 uint64_t hash = 0xcbf29ce484222325ull;
-                const auto mix = [&](uint64_t value) {
-                    hash ^= value + 0x9e3779b97f4a7c15ull + (hash << 6) + (hash >> 2);
+                const auto mixInto = [](uint64_t& into, uint64_t value) {
+                    into ^= value + 0x9e3779b97f4a7c15ull + (into << 6) + (into >> 2);
                 };
+                const auto mix = [&](uint64_t value) { mixInto(hash, value); };
                 for (const auto& [key, ref] : stateSet.getAttributeList())
                 {
                     mix(key.first);
@@ -1625,18 +1679,21 @@ void main()
                         mix(reinterpret_cast<uintptr_t>(ref.first.get()));
                         mix(ref.second);
                     }
-                for (const auto& [name, ref] : stateSet.getUniformList())
-                {
-                    mix(std::hash<std::string>()(name));
-                    if (uniformObjects)
-                        mix(reinterpret_cast<uintptr_t>(ref.first.get()));
-                    mix(ref.second);
-                }
                 for (const auto& [name, define] : stateSet.getDefineList())
                 {
                     mix(std::hash<std::string>()(name));
                     mix(std::hash<std::string>()(define.first));
                     mix(define.second);
+                }
+                objects = hash;
+                for (const auto& [name, ref] : stateSet.getUniformList())
+                {
+                    const uint64_t named = std::hash<std::string>()(name);
+                    mix(named);
+                    mix(ref.second);
+                    mixInto(objects, named);
+                    mixInto(objects, reinterpret_cast<uintptr_t>(ref.first.get()));
+                    mixInto(objects, ref.second);
                 }
                 return hash;
             }
@@ -1648,13 +1705,13 @@ void main()
             {
                 if (stateSet == nullptr && texture == nullptr)
                     return parent;
-                uint64_t hash = stateSet != nullptr ? fingerprint(*stateSet, false)
+                uint64_t objects = 0;
+                uint64_t hash = stateSet != nullptr ? fingerprint(*stateSet, objects)
                                                     : reinterpret_cast<uintptr_t>(texture) * 0x9e3779b97f4a7c15ull + 0x7e47;
                 if (stateSet == nullptr)
                     hash ^= 0x5bd1e9955bd1e995ull;
                 Step& entry = mSteps[StepKey{ parent->mId, hash }];
                 entry.mLastUse = mFrameCounter;
-                const uint64_t objects = stateSet != nullptr ? fingerprint(*stateSet, true) : 0;
                 if (entry.mState)
                 {
                     if (!entry.mState->mVolatile && (entry.mSource != stateSet || entry.mObjects != objects))
@@ -1900,8 +1957,9 @@ void main()
                 auto made = std::make_unique<DrawTemplate>();
                 DrawTemplate& draw = *made;
                 draw.mVariant = &variant;
-                const UniformBlock* blocks[2] = { &variant.mVertexUniforms, &variant.mFragmentUniforms };
-                for (int stage = 0; stage < 2; ++stage)
+                const UniformBlock* blocks[3]
+                    = { &variant.mVertexUniforms, &variant.mFragmentUniforms, &variant.mLightUniforms };
+                for (int stage = 0; stage < 3; ++stage)
                 {
                     std::vector<uint8_t>& bytes = draw.mBase[stage];
                     bytes.assign(blocks[stage]->mSize, 0);
@@ -1963,15 +2021,31 @@ void main()
                 draw.mTargetColor = mTarget.mColor;
                 draw.mTargetDepth = mTarget.mDepth;
                 draw.mSets.clear();
-                draw.mCopies.clear();
-                draw.mStatic[0] = draw.mStatic[1] = VK_NULL_HANDLE;
+                draw.mStatic[0] = draw.mStatic[1] = draw.mStatic[2] = VK_NULL_HANDLE;
                 const Variant& variant = *draw.mVariant;
-                const UniformBlock* blocks[2] = { &variant.mVertexUniforms, &variant.mFragmentUniforms };
-                for (int stage = 0; stage < 2; ++stage)
-                    draw.mBlocks[stage] = draw.mBase[stage];
-                for (const DrawTemplate::Source& source : draw.mSources)
+                const UniformBlock* blocks[3]
+                    = { &variant.mVertexUniforms, &variant.mFragmentUniforms, &variant.mLightUniforms };
+                // the uniforms' values: each written again only when it changed (OSG counts each change). Volatile
+                // ones are written for each draw from its own state sets instead.
+                if (!draw.mWritten || draw.mStamps.size() != draw.mSources.size())
+                {
+                    for (int stage = 0; stage < 3; ++stage)
+                        draw.mBlocks[stage] = draw.mBase[stage];
+                    draw.mStamps.assign(draw.mSources.size(), ~0u);
+                    draw.mWritten = true;
+                }
+                for (size_t i = 0; i < draw.mSources.size(); ++i)
+                {
+                    const DrawTemplate::Source& source = draw.mSources[i];
+                    if (source.mOwner->mVolatile && draw.mStamps[i] != ~0u)
+                        continue;
+                    const unsigned count = source.mUniform->getModifiedCount();
+                    if (count == draw.mStamps[i])
+                        continue;
+                    draw.mStamps[i] = count;
                     writeUniform(draw.mBlocks[source.mStage].data(), blocks[source.mStage]->mSize, *source.mMember,
                         *source.mUniform);
+                }
                 draw.mVolatile.clear();
                 for (const DrawTemplate::Source& source : draw.mSources)
                     if (source.mOwner->mVolatile)
@@ -2011,21 +2085,63 @@ void main()
                 }
             }
 
-            VkDescriptorSet descriptorSet(DrawTemplate& draw, const std::array<VkBuffer, 3>& buffers)
+            static bool sameImages(const std::vector<VkDescriptorImageInfo>& a, const std::vector<VkDescriptorImageInfo>& b)
+            {
+                if (a.size() != b.size())
+                    return false;
+                for (size_t i = 0; i < a.size(); ++i)
+                    if (a[i].sampler != b[i].sampler || a[i].imageView != b[i].imageView
+                        || a[i].imageLayout != b[i].imageLayout)
+                        return false;
+                return true;
+            }
+
+            VkDescriptorSet descriptorSet(DrawTemplate& draw, const std::array<VkBuffer, 4>& buffers)
             {
                 for (const auto& [key, set] : draw.mSets)
                     if (key == buffers)
                         return set;
                 Variant& variant = *draw.mVariant;
-                VkDescriptorSet set = mContext.allocateSet(variant.mSetLayout);
+                // a set kept from this slot's last frames, if nothing it holds changed
+                std::vector<DrawTemplate::Kept>& kept = draw.mKept[mContext.frameSlot()];
+                DrawTemplate::Kept* reuse = nullptr;
+                for (DrawTemplate::Kept& candidate : kept)
+                    if (candidate.mBuffers == buffers)
+                        reuse = &candidate;
+                if (reuse != nullptr && reuse->mGeneration == mResources.mImageGeneration
+                    && sameImages(reuse->mImages, draw.mImages))
+                {
+                    draw.mSets.emplace_back(buffers, reuse->mSet);
+                    return reuse->mSet;
+                }
+                if (reuse == nullptr && kept.size() < 4)
+                {
+                    kept.emplace_back();
+                    reuse = &kept.back();
+                }
+                VkDescriptorSet set = VK_NULL_HANDLE;
+                if (reuse != nullptr)
+                {
+                    // the old set may still be read by this slot's last frame: freed once that is done
+                    if (reuse->mSet != VK_NULL_HANDLE)
+                        mContext.freeKeptSetLater(reuse->mSet);
+                    reuse->mSet = set = mContext.allocateKeptSet(variant.mSetLayout);
+                    reuse->mBuffers = buffers;
+                    reuse->mImages = draw.mImages;
+                    reuse->mGeneration = mResources.mImageGeneration;
+                    draw.mFreed = mFreedSets;
+                }
+                else
+                    set = mContext.allocateSet(variant.mSetLayout);
                 if (set == VK_NULL_HANDLE)
                     return set;
                 VkWriteDescriptorSet writes[64];
                 uint32_t count = 0;
-                VkDescriptorBufferInfo bufferInfos[3]{};
-                const uint32_t sizes[3] = { variant.mVertexUniforms.mSize, variant.mFragmentUniforms.mSize,
-                    variant.mDrawStages != 0 ? sDrawBlockSize : 0u };
-                for (uint32_t binding = 0; binding < 3; ++binding)
+                VkDescriptorBufferInfo bufferInfos[4]{};
+                const uint32_t sizes[4] = { variant.mVertexUniforms.mSize, variant.mFragmentUniforms.mSize,
+                    variant.mDrawStages != 0 ? sDrawBlockSize : 0u,
+                    variant.mLightStages != 0 ? variant.mLightUniforms.mSize : 0u };
+                for (uint32_t binding = 0; binding < 4; ++binding)
                 {
                     if (sizes[binding] == 0)
                         continue;
@@ -2065,19 +2181,24 @@ void main()
                 Variant& variant = *draw.mVariant;
                 const VkDeviceSize alignment
                     = std::max<VkDeviceSize>(mContext.device().mProperties.limits.minUniformBufferOffsetAlignment, 16);
-                std::array<VkBuffer, 3> buffers{};
-                uint32_t offsets[3]{};
-                uint32_t offsetCount = 0;
+                std::array<VkBuffer, 4> buffers{};
+                VkDeviceSize bufferOffsets[4]{};
 
-                VkBuffer stateBuffers[2]{};
-                VkDeviceSize stateOffsets[2]{};
-                if (draw.mVolatile.empty())
+                // the state's blocks (vertex, fragment, lights at bindings 0, 1 and 3): sent once a frame, but for
+                // those with volatile uniforms (the light list's), sent for each set of them. A lights block is
+                // shared by every draw of the frame with the same light uniforms.
+                static constexpr uint32_t bindingOf[3] = { 0, 1, 3 };
+                for (int stage = 0; stage < 3; ++stage)
                 {
-                    for (int stage = 0; stage < 2; ++stage)
+                    const std::vector<uint8_t>& bytes = draw.mBlocks[stage];
+                    if (bytes.empty() || (stage == 2 && variant.mLightStages == 0))
+                        continue;
+                    const uint32_t binding = bindingOf[stage];
+                    bool hasVolatile = false;
+                    for (const DrawTemplate::Source* source : draw.mVolatile)
+                        hasVolatile |= source->mStage == stage;
+                    if (!hasVolatile)
                     {
-                        const std::vector<uint8_t>& bytes = draw.mBlocks[stage];
-                        if (bytes.empty())
-                            continue;
                         if (draw.mStatic[stage] == VK_NULL_HANDLE)
                         {
                             Span span = mResources.stream(bytes.size(), alignment);
@@ -2087,69 +2208,57 @@ void main()
                             draw.mStatic[stage] = span.mBuffer;
                             draw.mStaticOffset[stage] = span.mOffset;
                         }
-                        stateBuffers[stage] = draw.mStatic[stage];
-                        stateOffsets[stage] = draw.mStaticOffset[stage];
+                        buffers[binding] = draw.mStatic[stage];
+                        bufferOffsets[binding] = draw.mStaticOffset[stage];
+                        continue;
                     }
-                }
-                else
-                {
-                    // the state sets the volatile uniforms come from for this draw
-                    const osg::StateSet* sources[8]{};
+                    // what the block is made of: the template's uniforms (for a block with others than the volatile
+                    // ones) and the draw's state sets the volatile ones come from (their uniforms stay as they are
+                    // for the frame)
                     uint64_t key = 0xcbf29ce484222325ull;
-                    for (size_t i = 0; i < draw.mVolatile.size(); ++i)
+                    const auto mix = [&](uint64_t value) { key = (key ^ value) * 0x100000001b3ull; };
+                    mix(reinterpret_cast<uintptr_t>(&variant));
+                    mix(static_cast<uint64_t>(stage));
+                    bool onlyVolatile = stage == 2;
+                    uint32_t lastLevel = ~0u;
+                    for (const DrawTemplate::Source& source : draw.mSources)
                     {
-                        const osg::StateSet* stateSet = chainStateSet(draw.mVolatile[i]->mLevel);
-                        if (i < 8)
-                            sources[i] = stateSet;
-                        key = (key ^ reinterpret_cast<uintptr_t>(stateSet)) * 0x100000001b3ull;
-                    }
-                    const DrawTemplate::Copy* copy = nullptr;
-                    for (const DrawTemplate::Copy& existing : draw.mCopies)
-                        if (existing.mKey == key)
-                            copy = &existing;
-                    if (copy == nullptr)
-                    {
-                        DrawTemplate::Copy made{ key, {}, {} };
-                        for (int stage = 0; stage < 2; ++stage)
+                        if (source.mStage != stage)
+                            continue;
+                        if (!source.mOwner->mVolatile)
                         {
-                            const std::vector<uint8_t>& bytes = draw.mBlocks[stage];
-                            if (bytes.empty())
-                                continue;
-                            Span span = mResources.stream(bytes.size(), alignment);
-                            if (span.mData == nullptr)
-                                return false;
-                            std::memcpy(span.mData, bytes.data(), bytes.size());
-                            for (size_t i = 0; i < draw.mVolatile.size(); ++i)
-                            {
-                                const DrawTemplate::Source& source = *draw.mVolatile[i];
-                                if (source.mStage != stage)
-                                    continue;
-                                const osg::StateSet* stateSet
-                                    = i < 8 ? sources[i] : chainStateSet(source.mLevel);
-                                const osg::Uniform* uniform
-                                    = stateSet ? stateSet->getUniform(source.mMember->mName) : nullptr;
-                                if (uniform != nullptr)
-                                    writeUniform(
-                                        span.mData, static_cast<uint32_t>(bytes.size()), *source.mMember, *uniform);
-                            }
-                            made.mBuffer[stage] = span.mBuffer;
-                            made.mOffset[stage] = span.mOffset;
+                            onlyVolatile = false;
+                            continue;
                         }
-                        draw.mCopies.push_back(made);
-                        copy = &draw.mCopies.back();
+                        if (source.mLevel == lastLevel)
+                            continue;
+                        lastLevel = source.mLevel;
+                        mix(reinterpret_cast<uintptr_t>(chainStateSet(source.mLevel)));
                     }
-                    for (int stage = 0; stage < 2; ++stage)
+                    if (!onlyVolatile)
+                        mix(reinterpret_cast<uintptr_t>(&draw));
+                    auto found = mSharedBlocks.find(key);
+                    if (found == mSharedBlocks.end())
                     {
-                        stateBuffers[stage] = copy->mBuffer[stage];
-                        stateOffsets[stage] = copy->mOffset[stage];
+                        Span span = mResources.stream(bytes.size(), alignment);
+                        if (span.mData == nullptr)
+                            return false;
+                        std::memcpy(span.mData, bytes.data(), bytes.size());
+                        for (const DrawTemplate::Source& source : draw.mSources)
+                        {
+                            if (source.mStage != stage || !source.mOwner->mVolatile)
+                                continue;
+                            const osg::StateSet* stateSet = chainStateSet(source.mLevel);
+                            const osg::Uniform* uniform
+                                = stateSet ? stateSet->getUniform(source.mMember->mName) : nullptr;
+                            if (uniform != nullptr)
+                                writeUniform(span.mData, static_cast<uint32_t>(bytes.size()), *source.mMember, *uniform);
+                        }
+                        found = mSharedBlocks.emplace(key, std::make_pair(span.mBuffer, span.mOffset)).first;
                     }
+                    buffers[binding] = found->second.first;
+                    bufferOffsets[binding] = found->second.second;
                 }
-                for (int stage = 0; stage < 2; ++stage)
-                    if (!draw.mBlocks[stage].empty())
-                    {
-                        buffers[stage] = stateBuffers[stage];
-                        offsets[offsetCount++] = static_cast<uint32_t>(stateOffsets[stage]);
-                    }
 
                 // the draw's matrices: model view, projection, their product and the normal matrix (OSG's,
                 // State::applyModelViewMatrix, its columns padded to vec4)
@@ -2182,8 +2291,14 @@ void main()
                         std::memcpy(span.mData + 240 + i * 16, plane.ptr(), 16);
                     }
                     buffers[2] = span.mBuffer;
-                    offsets[offsetCount++] = static_cast<uint32_t>(span.mOffset);
+                    bufferOffsets[2] = span.mOffset;
                 }
+                // the dynamic offsets in binding order
+                uint32_t offsets[4]{};
+                uint32_t offsetCount = 0;
+                for (uint32_t binding = 0; binding < 4; ++binding)
+                    if (buffers[binding] != VK_NULL_HANDLE)
+                        offsets[offsetCount++] = static_cast<uint32_t>(bufferOffsets[binding]);
 
                 VkDescriptorSet set = descriptorSet(draw, buffers);
                 if (set == VK_NULL_HANDLE)
@@ -3013,6 +3128,10 @@ void main()
                 uint64_t mObjects = 0;
                 uint64_t mLastUse = 0;
             };
+            // kept descriptor sets of draw templates that are gone, freed at the next frame's start
+            std::shared_ptr<std::vector<VkDescriptorSet>> mFreedSets = std::make_shared<std::vector<VkDescriptorSet>>();
+            // this frame's blocks made with volatile uniforms, by what they were made of: where they were streamed
+            std::unordered_map<uint64_t, std::pair<VkBuffer, VkDeviceSize>> mSharedBlocks;
             std::unordered_map<StepKey, Step, StepHash> mSteps;
             struct GraphHash
             {

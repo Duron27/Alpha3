@@ -78,6 +78,8 @@ namespace Alpha3::Vk
     {
     public:
         uint64_t mStreamedBytes = 0; // what stream() handed out since the translator last reported it
+        // goes up each time an image (and its views) is let go: descriptor sets made before then are made again
+        uint64_t mImageGeneration = 0;
         explicit Resources(Context& context);
         ~Resources();
 

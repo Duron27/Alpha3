@@ -97,7 +97,7 @@ namespace Alpha3::Vk
                 {
                     SamplerSlot slot;
                     slot.mName = name;
-                    slot.mBinding = 3;
+                    slot.mBinding = 4; // after the blocks: the stages' (0, 1), the matrices (2), the lights (3)
                     for (const SamplerSlot& other : slots)
                         slot.mBinding = std::max(slot.mBinding, other.mBinding + other.mCount);
                     slot.mCount = count;
@@ -252,6 +252,50 @@ namespace Alpha3::Vk
             return true;
         }
 
+        // The light list's uniforms, which OpenMW sets for each object (a state set made each frame), go into a block
+        // of their own (binding 3), declared the same in both stages: a draw then sends these, shared by all the draws
+        // of the light list, instead of the stages' whole blocks again. The stages with the block (0: none).
+        VkShaderStageFlags blockLights(std::string& vertex, std::string& fragment)
+        {
+            static const char* const names[] = { "LightBuffer", "PointLightCount", "a3PointShadowSlots" };
+            static const std::regex declaration(
+                R"((^|\n)[ \t]*uniform\s+(?:(?:lowp|mediump|highp)\s+)?(\w+)\s+(LightBuffer|PointLightCount|a3PointShadowSlots)\s*(\[\s*\d+\s*\])?\s*;)");
+            std::map<std::string, std::string> members; // name: its declaration in the block
+            std::string* stages[2] = { &vertex, &fragment };
+            bool has[2] = { false, false };
+            for (int stage = 0; stage < 2; ++stage)
+                for (auto it = std::sregex_iterator(stages[stage]->begin(), stages[stage]->end(), declaration);
+                     it != std::sregex_iterator(); ++it)
+                {
+                    has[stage] = true;
+                    const std::string name = (*it)[3].str();
+                    if (!members.count(name))
+                    {
+                        std::string array = (*it)[4].str();
+                        array.erase(std::remove_if(array.begin(), array.end(), ::isspace), array.end());
+                        members[name] = (*it)[2].str() + " " + name + array + ";";
+                    }
+                }
+            if (members.empty())
+                return 0;
+            // a member both stages read must have one type: the block is one buffer
+            std::string block = "layout(std140, set = 0, binding = 3) uniform a3LightUniforms {";
+            for (const char* name : names)
+                if (members.count(name))
+                    block += " " + members[name];
+            block += " };\n";
+            VkShaderStageFlags flags = 0;
+            for (int stage = 0; stage < 2; ++stage)
+            {
+                if (!has[stage])
+                    continue;
+                *stages[stage] = std::regex_replace(*stages[stage], declaration, "$1");
+                insertAfterDirectives(*stages[stage], block);
+                flags |= stage == 0 ? VK_SHADER_STAGE_VERTEX_BIT : VK_SHADER_STAGE_FRAGMENT_BIT;
+            }
+            return flags;
+        }
+
         std::string finishVertex(const std::string& source)
         {
             static const std::regex mainFunction(R"(\bvoid\s+main\s*\(\s*(?:void)?\s*\))");
@@ -283,7 +327,7 @@ namespace Alpha3::Vk
         }
 
         bool toSpirv(const std::string& source, EShLanguage language, const char* blockName, unsigned binding,
-            std::vector<unsigned>& spirv, UniformBlock& block, const std::string& name)
+            std::vector<unsigned>& spirv, UniformBlock& block, const std::string& name, UniformBlock* lights = nullptr)
         {
             const char* text = source.c_str();
             glslang::TShader shader(language);
@@ -313,7 +357,9 @@ namespace Alpha3::Vk
                 return false;
             }
             program.buildReflection(EShReflectionAllBlockVariables | EShReflectionSeparateBuffers);
-            int blockIndex = -1;
+            // the stage's block, and the lights' (binding 3) if it is not known yet
+            int blockIndex = -1, lightIndex = -1;
+            const bool wantLights = lights != nullptr && lights->mSize == 0;
             for (int i = 0; i < program.getNumUniformBlocks(); ++i)
             {
                 const glslang::TObjectReflection& reflected = program.getUniformBlock(i);
@@ -322,19 +368,32 @@ namespace Alpha3::Vk
                     blockIndex = i;
                     block.mSize = static_cast<uint32_t>(reflected.size);
                 }
+                else if (wantLights && reflected.getBinding() == 3)
+                {
+                    lightIndex = i;
+                    lights->mSize = static_cast<uint32_t>(reflected.size);
+                }
             }
             for (int i = 0; i < program.getNumUniformVariables(); ++i)
             {
                 const glslang::TObjectReflection& uniform = program.getUniform(i);
-                if (blockIndex < 0 || uniform.index != blockIndex)
+                UniformBlock* into = nullptr;
+                if (blockIndex >= 0 && uniform.index == blockIndex)
+                    into = &block;
+                else if (lightIndex >= 0 && uniform.index == lightIndex)
+                    into = lights;
+                if (into == nullptr)
                     continue;
                 UniformMember member;
                 member.mName = stripArraySuffix(uniform.name);
+                // a member of a named block is reflected as "block.member"
+                if (into == lights && member.mName.rfind("a3LightUniforms.", 0) == 0)
+                    member.mName.erase(0, std::strlen("a3LightUniforms."));
                 member.mOffset = static_cast<uint32_t>(uniform.offset);
                 member.mGlType = uniform.glDefineType;
                 member.mArraySize = static_cast<uint32_t>(std::max(uniform.size, 1));
                 member.mArrayStride = static_cast<uint32_t>(std::max(uniform.arrayStride, 0));
-                block.mMembers.push_back(member);
+                into->mMembers.push_back(member);
             }
             glslang::SpvOptions options;
             options.disableOptimizer = false;
@@ -398,6 +457,7 @@ namespace Alpha3::Vk
         // a device without clip distances: the planes clip nothing (written to an array of no use)
         if (!mContext.device().mFeatures.shaderClipDistance && vertex.find("gl_ClipDistance") != std::string::npos)
             insertAfterDirectives(vertex, "float a3NoClipDistance[8];\n#define gl_ClipDistance a3NoClipDistance\n");
+        variant.mLightStages = blockLights(vertex, fragment);
         if (blockMatrices(vertex))
             variant.mDrawStages |= VK_SHADER_STAGE_VERTEX_BIT;
         if (blockMatrices(fragment))
@@ -407,10 +467,13 @@ namespace Alpha3::Vk
         variant.mSources[1] = fragment;
 
         std::vector<unsigned> vertexSpirv, fragmentSpirv;
-        if (!toSpirv(vertex, EShLangVertex, "a3VertexUniforms", 0, vertexSpirv, variant.mVertexUniforms, name)
-            || !toSpirv(
-                fragment, EShLangFragment, "a3FragmentUniforms", 1, fragmentSpirv, variant.mFragmentUniforms, name))
+        if (!toSpirv(vertex, EShLangVertex, "a3VertexUniforms", 0, vertexSpirv, variant.mVertexUniforms, name,
+                &variant.mLightUniforms)
+            || !toSpirv(fragment, EShLangFragment, "a3FragmentUniforms", 1, fragmentSpirv, variant.mFragmentUniforms,
+                name, &variant.mLightUniforms))
             return false;
+        if (variant.mLightUniforms.mSize == 0)
+            variant.mLightStages = 0;
         const VkDevice device = mContext.vkDevice();
         variant.mVertex = createModule(device, vertexSpirv);
         variant.mFragment = createModule(device, fragmentSpirv);
@@ -423,6 +486,8 @@ namespace Alpha3::Vk
                 { 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr });
         if (variant.mDrawStages != 0)
             bindings.push_back({ 2, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1, variant.mDrawStages, nullptr });
+        if (variant.mLightStages != 0)
+            bindings.push_back({ 3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1, variant.mLightStages, nullptr });
         for (const SamplerSlot& slot : variant.mSamplers)
             bindings.push_back(
                 { slot.mBinding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, slot.mCount, slot.mStages, nullptr });

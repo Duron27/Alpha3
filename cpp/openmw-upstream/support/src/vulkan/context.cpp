@@ -505,6 +505,60 @@ namespace Alpha3::Vk
         }
     }
 
+    VkDescriptorSet Context::allocateKeptSet(VkDescriptorSetLayout layout)
+    {
+        VkDescriptorSetAllocateInfo allocate{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+        allocate.descriptorSetCount = 1;
+        allocate.pSetLayouts = &layout;
+        // the newest pool first: the older ones are full, but for the sets freed in them
+        for (size_t i = mKeptPools.size(); i-- > 0;)
+        {
+            allocate.descriptorPool = mKeptPools[i];
+            VkDescriptorSet set = VK_NULL_HANDLE;
+            const VkResult result = vkAllocateDescriptorSets(mDevice.mDevice, &allocate, &set);
+            if (result == VK_SUCCESS)
+            {
+                mKeptOwners[set] = mKeptPools[i];
+                return set;
+            }
+            if (result != VK_ERROR_OUT_OF_POOL_MEMORY && result != VK_ERROR_FRAGMENTED_POOL)
+            {
+                Log(Debug::Error) << "Vulkan: vkAllocateDescriptorSets (kept): " << resultName(result);
+                return VK_NULL_HANDLE;
+            }
+        }
+        const VkDescriptorPoolSize sizes[] = { { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 3072 },
+            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 8192 } };
+        VkDescriptorPoolCreateInfo info{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+        info.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+        info.maxSets = 1024;
+        info.poolSizeCount = 2;
+        info.pPoolSizes = sizes;
+        VkDescriptorPool pool = VK_NULL_HANDLE;
+        if (vkCreateDescriptorPool(mDevice.mDevice, &info, nullptr, &pool) != VK_SUCCESS)
+            return VK_NULL_HANDLE;
+        mKeptPools.push_back(pool);
+        allocate.descriptorPool = pool;
+        VkDescriptorSet set = VK_NULL_HANDLE;
+        if (vkAllocateDescriptorSets(mDevice.mDevice, &allocate, &set) != VK_SUCCESS)
+            return VK_NULL_HANDLE;
+        mKeptOwners[set] = pool;
+        return set;
+    }
+
+    void Context::freeKeptSetLater(VkDescriptorSet set)
+    {
+        if (set == VK_NULL_HANDLE)
+            return;
+        releaseLater([this, set] {
+            auto found = mKeptOwners.find(set);
+            if (found == mKeptOwners.end())
+                return;
+            vkFreeDescriptorSets(mDevice.mDevice, found->second, 1, &set);
+            mKeptOwners.erase(found);
+        });
+    }
+
     void Context::endWindowPass()
     {
         if (!mInWindowPass)

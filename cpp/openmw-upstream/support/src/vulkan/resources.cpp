@@ -447,6 +447,7 @@ namespace Alpha3::Vk
     {
         if (!image)
             return;
+        ++mImageGeneration;
         // the framebuffers that hold it go with it
         for (auto it = mFramebuffers.begin(); it != mFramebuffers.end();)
         {

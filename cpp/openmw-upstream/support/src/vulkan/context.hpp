@@ -7,6 +7,7 @@
 #include <functional>
 #include <map>
 #include <tuple>
+#include <unordered_map>
 #include <vector>
 
 struct ANativeWindow;
@@ -48,6 +49,10 @@ namespace Alpha3::Vk
         VkCommandBuffer uploadCommands();
         // A descriptor set of this frame (the pools are reset when the frame's slot comes round again)
         VkDescriptorSet allocateSet(VkDescriptorSetLayout layout);
+        // A set kept from frame to frame (a draw state's, made again only when its buffers or images change); it is
+        // freed with freeKeptSetLater, once the frames in flight that may use it are done
+        VkDescriptorSet allocateKeptSet(VkDescriptorSetLayout layout);
+        void freeKeptSetLater(VkDescriptorSet set);
         bool inWindowPass() const { return mInWindowPass; }
         void endWindowPass();
         unsigned frameSlot() const { return mFrameSlot; }
@@ -120,6 +125,9 @@ namespace Alpha3::Vk
         bool mWindowReadable = false; // the swap chain's images can be copied from
 
         std::vector<std::function<void()>> mAfterFrame;
+        // the pools of the kept sets (sets freed one at a time), and which pool each set came from
+        std::vector<VkDescriptorPool> mKeptPools;
+        std::unordered_map<VkDescriptorSet, VkDescriptorPool> mKeptOwners;
         Frame mFrames[sFramesInFlight];
         unsigned mFrameSlot = 0;
         uint64_t mFrameNumber = 0;
