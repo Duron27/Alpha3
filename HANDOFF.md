@@ -254,3 +254,43 @@ Next for the creator:
   `~/.claude/plans/expressive-riding-neumann.md` and the memory note "Vulkan 1.0 renderer plan" (to-do and tablet
   restore list in it). Open items there: the view out from inside through seamless doors (grey, dark sun direction);
   pre-rotation (`preTransform` = currentTransform) is optional now.
+
+### 2026-11-09: point light shadows fixed, CPU recording work (UNCOMMITTED)
+
+- **Committed f51b08a:** with point light shadows on, many pipelines failed (VK_ERROR_UNKNOWN on Adreno), so objects and terrain lit by a shadowed light vanished about 1 s after loading.
+  - Cause: a program's defines were applied per stage. OSG applies the union of all the program's shaders' defines to every stage, so `A3_PS_ON` differed between vertex and fragment and the stage interfaces mismatched.
+  - Also in that commit: glslang preprocessing before varying planning, a varying-limit warning, and failed shaders dumped to `/storage/emulated/0/Alpha3/dump_shaders`.
+- **Uncommitted** (all in `support/src/vulkan/`, builds and runs, 0 pipeline failures, scene correct):
+  - `programs.cpp/hpp`:
+    - `blockLights()` moves `LightBuffer`, `PointLightCount` and `a3PointShadowSlots` into their own UBO `a3LightUniforms` (set 0, binding 3).
+    - Samplers now start at binding 4.
+    - `Variant::mLightUniforms`/`mLightStages` hold the light block's layout and stages.
+  - `translator.cpp`:
+    - Three state blocks (vertex, fragment, lights). Blocks with volatile uniforms (OpenMW's per-frame light-list state sets) are streamed once per frame per key and shared through `mSharedBlocks`.
+    - The key is variant + stage + the chain state sets the volatile uniforms come from (+ the template, unless the block holds only volatile uniforms). The old per-template `mCopies` is gone.
+    - `refresh()` rewrites only uniforms whose modified count changed and skips volatile ones. It used to copy and rewrite every block every frame.
+    - Kept descriptor sets per frame slot (`DrawTemplate::Kept`) are reused while buffers, images and `Resources::mImageGeneration` don't change.
+    - A float fast path in `writeUniform`.
+    - A single-pass `fingerprint()` for `step()`.
+  - `context.cpp/hpp`: `allocateKeptSet`/`freeKeptSetLater` (pools with FREE_DESCRIPTOR_SET_BIT).
+  - `resources.cpp/hpp`: `mImageGeneration`.
+  - `vk.hpp`: `vkFreeDescriptorSets`.
+- **Not measured yet:** the last change (keying shared blocks on state set pointers instead of a per-draw `getUniform` lookup) is built and installed on the tablet. Its measurement was stopped. Next: run `measure.sh vulkan`, check the screenshot, then profile.
+- **Numbers so far** (SM-T720, Balmora autosave at the door, idle camera off; point light shadows, seamless doors and seamless cells off):
+  - Vulkan: 40.2 fps, about 23 ms CPU recording per frame, GPU about 19.3 ms (SceneCam 13.3, Reflection 5.1), 559 draws.
+  - GLES: 43.3 fps.
+  - The changes above cut `templateFor` from 25% to 16% of the render thread, but fps has not moved yet.
+- **Remaining hotspots** (inclusive, render thread):
+  - `bindUniforms` 24%: before the last change, 5% of this was `StateSet::getUniform` string lookups.
+  - `templateFor` 16%
+  - `accumulate` 12% (`step` 7.5%)
+  - `vkCmdBindDescriptorSets` 7%
+  - `derive` 6%
+  - `Resources::texture` 6%
+  - `vkCmdBindVertexBuffers` 5%
+  - malloc/new 4.5%
+- **Tablet state to restore later:** `point light shadows` (was 4), seamless doors and seamless cells were turned off in the tablet's settings.cfg for these tests. The Lua position mod was removed from the tablet.
+- **Test scripts** are in the session scratchpad (they won't survive). They did the following:
+  - `vkrun.sh`: set `renderer =` in the device settings.cfg, launch with `--load-savegame saves/Duron/Autosave.omwsave`, take timestats, a screenshot and logcat.
+  - `measure.sh`: settle 50 s, then `--script-run novan.txt` (DisableVanityMode) and print the Vulkan counters.
+  - `prof.sh`: simpleperf `--call-graph dwarf` on the render thread, using the unstripped `libopenmw_upstream.so` from `.cxx` with `binary_cache_builder.py`.
