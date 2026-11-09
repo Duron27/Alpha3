@@ -30,7 +30,7 @@ diff --git a/apps/openmw/androidmain.cpp b/apps/openmw/androidmain.cpp
 index ade009ae07..0ac5c7aaf9 100644
 --- a/apps/openmw/androidmain.cpp
 +++ b/apps/openmw/androidmain.cpp
-@@ -1,65 +1,582 @@
+@@ -1,65 +1,590 @@
 -#ifndef stderr
 +#if defined(stderr) && (__ANDROID_API__ < 23)
  int stderr = 0; // Hack: fix linker error
@@ -39,6 +39,7 @@ index ade009ae07..0ac5c7aaf9 100644
  #include "SDL_main.h"
 +#include "engine.hpp"
 +#include "mwbase/environment.hpp"
++#include "mwbase/luamanager.hpp"
 +#include "mwbase/statemanager.hpp"
 +#include "mwbase/windowmanager.hpp"
 +#include "mwbase/world.hpp"
@@ -628,6 +629,13 @@ index ade009ae07..0ac5c7aaf9 100644
 +    if (!MWBase::Environment::exists())
 +      return nullptr;
 +    return MWBase::Environment::get().getResourceSystem()->getImageManager();
++  });
++
++  // the performance HUD's Inspect shows the Lua profiler's figures, as the F10 window does (asked for in a game)
++  Alpha3::setLuaProfileSource([]() -> std::string {
++    if (!MWBase::Environment::exists())
++      return {};
++    return MWBase::Environment::get().getLuaManager()->formatResourceUsageStats();
 +  });
 +
 +  return 0;

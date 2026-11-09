@@ -78,6 +78,10 @@ namespace Alpha3
     // Called from androidmain before the engine starts; [Textures] preload threads (default 3, 0 = off) is read later.
     void setImageManagerSource(Resource::ImageManager* (*source)());
 
+    // The Lua profiler's report for the performance HUD's Inspect (LuaManager::formatResourceUsageStats, as the F10
+    // window shows it): a function returning it, called on the engine's main thread. Called from androidmain.
+    void setLuaProfileSource(std::string (*source)());
+
     // .ktx textures (made ahead of time, e.g. by kram) are read in place of the .dds of the same name: adds the archive that
     // lists them under that name. Call after the data directories and archives are added, before the index is built.
     // Also adds the distant mesh archive after it (addDistantMeshes) and the experimental graphics' (generated maps,

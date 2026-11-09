@@ -105,6 +105,8 @@ namespace Alpha3
             int mSort = -1; // the column it opens sorted by (descending)
         };
 
+        std::atomic<std::string (*)()> sLuaProfileSource{ nullptr };
+
         struct Tab
         {
             std::string mTitle;
@@ -590,6 +592,19 @@ namespace Alpha3
                     mViewer = viewer;
                     if (viewer != nullptr)
                         collectStats(*viewer, true);
+                    // the Lua profiler's figures, read where the engine's own window reads them
+                    mLuaText.clear();
+                    if (auto source = sLuaProfileSource.load())
+                    {
+                        try
+                        {
+                            mLuaText = source();
+                        }
+                        catch (const std::exception& e)
+                        {
+                            mLuaText = std::string("Lua profiler: ") + e.what();
+                        }
+                    }
                     mWarmup = sWarmupFrames;
                     mState = State::Warmup;
                 }
@@ -1638,7 +1653,9 @@ namespace Alpha3
                     settings.mSections = { list };
                 }
 
-                tabs = { bandwidth, memory, textures, scene, stats, gl, settings };
+                Tab lua = luaTab();
+
+                tabs = { bandwidth, memory, textures, scene, lua, stats, gl, settings };
                 std::string json = toJson(tabs);
                 Log(Debug::Info) << "Inspector: report of " << mPasses.size() << " passes, " << mTextures.size()
                                  << " textures, " << mStages.size() << " cameras (" << json.size() / 1024 << " KB)";
@@ -1649,6 +1666,141 @@ namespace Alpha3
                 }
                 std::lock_guard lock(mReportMutex);
                 mReport = std::move(json);
+            }
+
+            // ---- Lua (the text LuaManager::formatResourceUsageStats makes, read on the main thread)
+
+            // "123 KB" and the like, as KB
+            static double luaKb(const std::string& number, const std::string& unit)
+            {
+                const double value = std::strtod(number.c_str(), nullptr);
+                if (unit == "B")
+                    return value / 1024.0;
+                if (unit == "MB")
+                    return value * 1024.0;
+                if (unit == "GB")
+                    return value * 1024.0 * 1024.0;
+                return value;
+            }
+
+            static std::string trimmed(std::string_view text)
+            {
+                const auto first = text.find_first_not_of(' ');
+                if (first == std::string_view::npos)
+                    return {};
+                const auto last = text.find_last_not_of(' ');
+                return std::string(text.substr(first, last - first + 1));
+            }
+
+            Tab luaTab() const
+            {
+                Tab tab{ "Lua", {} };
+                if (sLuaProfileSource.load() == nullptr)
+                {
+                    tab.mSections.push_back({ "Not available", "This build has no Lua profiler source.", {}, {}, {}, -1 });
+                    return tab;
+                }
+                if (mLuaText.rfind("Lua profiler is disabled", 0) == 0 || mLuaText.empty())
+                {
+                    tab.mSections.push_back({ "Lua profiler is off",
+                        "Turn on [Lua] lua profiler = true in settings.cfg and restart the game. It tracks each "
+                        "script's instructions and memory, which costs some speed, so leave it off when not looking.",
+                        {}, {}, {}, -1 });
+                    return tab;
+                }
+
+                Section summary;
+                summary.mTitle = "Lua memory";
+                Section scripts;
+                scripts.mTitle = "Scripts";
+                scripts.mNote = "Ops: Lua instructions per frame, averaged (the work a script does; there is no per "
+                                "script time). Memory: allocations larger than [Lua] small alloc max size. Active: "
+                                "instances in the scene; inactive: the rest. Selected: the object picked in the "
+                                "console. The frame's Lua time is under Engine stats.";
+                scripts.mColumns = { "Script", "Kind", "Ops", "Memory KB", "Inactive KB", "Selected ops",
+                    "Selected KB" };
+                scripts.mSort = 2;
+
+                std::istringstream in(mLuaText);
+                std::string line, pendingName;
+                bool table = false, legend = false;
+                constexpr std::size_t nameWidth = 50;
+                while (std::getline(in, line))
+                {
+                    if (!table)
+                    {
+                        if (line.find("[name]") != std::string::npos)
+                        {
+                            table = true;
+                            continue;
+                        }
+                        // the legend and the table's heading are skipped until [name]
+                        if (line.rfind("Legend", 0) == 0)
+                            legend = true;
+                        if (legend || trimmed(line).empty())
+                            continue;
+                        const auto colon = line.find(": ");
+                        if (colon != std::string::npos)
+                            summary.mLines.emplace_back(trimmed(std::string_view(line).substr(0, colon)),
+                                trimmed(std::string_view(line).substr(colon + 1)));
+                        else
+                            summary.mLines.emplace_back(trimmed(line), "");
+                        continue;
+                    }
+                    if (trimmed(line).empty())
+                        continue;
+                    std::string name;
+                    std::string rest;
+                    if (line.size() > nameWidth + 1 && trimmed(std::string_view(line).substr(0, nameWidth + 1)).empty())
+                    {
+                        name = pendingName; // the numbers of a long name, on the next line
+                        rest = line.substr(nameWidth + 1);
+                    }
+                    else if (line.size() <= nameWidth + 1 || line.find_first_not_of(' ', nameWidth + 1) == std::string::npos)
+                    {
+                        if (trimmed(line).size() > nameWidth)
+                        {
+                            pendingName = trimmed(line); // too long: its numbers follow
+                            continue;
+                        }
+                        name = trimmed(line);
+                    }
+                    else
+                    {
+                        name = trimmed(std::string_view(line).substr(0, nameWidth + 1));
+                        rest = line.substr(nameWidth + 1);
+                    }
+                    pendingName.clear();
+
+                    std::istringstream values(rest);
+                    std::string ops, memory, memoryUnit, inactive, inactiveUnit;
+                    values >> ops >> memory >> memoryUnit >> inactive >> inactiveUnit;
+                    std::string tail;
+                    std::getline(values, tail);
+                    tail = trimmed(tail);
+                    std::string kind = "local";
+                    Cell selectedOps(std::string("")), selectedKb(std::string(""));
+                    if (tail.rfind("NA", 0) == 0)
+                    {
+                        if (tail.find("global") != std::string::npos)
+                            kind = "global";
+                        else if (tail.find("menu") != std::string::npos)
+                            kind = "menu";
+                    }
+                    else if (!tail.empty())
+                    {
+                        std::istringstream selected(tail);
+                        std::string sOps, sMemory, sUnit;
+                        selected >> sOps >> sMemory >> sUnit;
+                        selectedOps = Cell(std::strtod(sOps.c_str(), nullptr));
+                        selectedKb = Cell(luaKb(sMemory, sUnit));
+                    }
+                    scripts.mRows.push_back({ name, kind, std::strtod(ops.c_str(), nullptr), luaKb(memory, memoryUnit),
+                        luaKb(inactive, inactiveUnit), selectedOps, selectedKb });
+                }
+                tab.mSections.push_back(std::move(summary));
+                tab.mSections.push_back(std::move(scripts));
+                return tab;
             }
 
             double mStatsFps() const
@@ -1691,6 +1843,7 @@ namespace Alpha3
 
             std::mutex mReportMutex;
             std::string mReport;
+            std::string mLuaText; // the Lua profiler's report, read on the main thread
 
         public:
             // the originals of what install() replaces
@@ -1938,6 +2091,11 @@ namespace Alpha3
     std::string inspectorTakeReport()
     {
         return Inspector::get().take();
+    }
+
+    void setLuaProfileSource(std::string (*source)())
+    {
+        sLuaProfileSource = source;
     }
 
     void inspectorMainThread()

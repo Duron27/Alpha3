@@ -138,6 +138,7 @@ fun InspectorDialog(report: String, onRefresh: () -> Unit, onDismiss: () -> Unit
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
     ) {
+        HideDialogSystemBars()
         // the filter field is not to take the focus (and open the keyboard) when the dialog opens
         val focusManager = LocalFocusManager.current
         val keyboard = LocalSoftwareKeyboardController.current

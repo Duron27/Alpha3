@@ -157,6 +157,10 @@ namespace Alpha3
     void textureStreamingStop(); // before the context closes
     // Reads on this thread made at full size, not streamed (texturerelease.cpp reading an image back)
     void textureStreamingBypass(bool bypass);
+    // The image's mip levels from the first one no larger than maxSize, as an image of their own; null without one
+    osg::ref_ptr<osg::Image> imageMipTail(const osg::Image& image, int maxSize);
+    // The size a texture was made small to under memory pressure (its pixels read back are cut to it), or 0
+    int textureShrunkSize(const osg::Image& image);
 
     // ---- texturerelease.cpp ([Textures] release uploaded images): a texture file's pixels are let go once they are on
     // the GPU, and read back from the file if a texture needs them again
