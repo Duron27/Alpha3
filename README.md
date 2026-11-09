@@ -30,7 +30,7 @@ OpenMW for Android and iOS, with a launcher that sets up Morrowind, downloads wh
 
 ## A tour of the launcher
 
-The bar at the top has two groups, switched with the **Mods | Settings** toggle on the left. The selected tab is outlined in gold. The icons on the right are Search, Help, and (with developer options on) Terminal and Kram.
+The bar at the top has two groups, switched with the **Mods | Settings** toggle on the left. The selected tab is outlined in gold. The icons on the right are Search, Help, Construction Set, and (with developer options on) Terminal and Kram.
 
 On tablets and in landscape the Play button floats at the bottom right. In portrait on a phone, the usual bottom navigation is used instead.
 
@@ -155,7 +155,7 @@ On a test list with 2,082 overlapping files, the scan found 1,138 overridden fil
 
 ## Construction Set (experimental)
 
-A plugin editor in the launcher, made for touch, in the spirit of the original Construction Set and OpenMW-CS. Turn on developer options, then open **Construction Set** (the arch icon) from the menu.
+A plugin editor in the launcher, made for touch, in the spirit of the original Construction Set and OpenMW-CS. Open **Construction Set** (the arch icon) from the menu.
 
 - **Open** a plugin from your load order. Its masters are read too, so every record from `Morrowind.esm`, the expansions and your other masters is listed and can be changed in your plugin.
 - **The official files are read-only.** `Morrowind.esm`, `Tribunal.esm`, `Bloodmoon.esm` and Bethesda's official plugins are never written, by the Construction Set or any other tool in the launcher. Picking one starts a new mod that has it as a master, and your changes go there.

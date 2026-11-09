@@ -122,6 +122,7 @@ fun ConstructionSet() {
     }
     val scope = rememberCoroutineScope()
     var session by remember { mutableStateOf<CsSession?>(null) }
+    var savedGames by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     val workspace = remember {
@@ -149,9 +150,11 @@ fun ConstructionSet() {
     Box(Modifier.fillMaxSize()) {
         val s = session
         when {
+            savedGames -> org.alpha3.launcher.cs.save.SaveEditorScreen(fs, onClose = { savedGames = false })
             workspace == null -> Text(error ?: "No openmw.cfg yet: set up the game files first", modifier = Modifier.padding(16.dp))
             s == null -> StartScreen(
                 workspace,
+                onSaves = { savedGames = true },
                 onOpen = { path -> run("Opening ${baseName(path)}") { workspace.openFile(path) { busy = it } } },
                 onNew = { name, author, desc, masters ->
                     run("Creating $name") { workspace.create(csPluginDir(), name, author, desc, masters) { busy = it } }
@@ -185,7 +188,7 @@ private fun RecordOrCell(s: CsSession, row: RecordRow) {
 }
 
 @Composable
-private fun StartScreen(workspace: Workspace, onOpen: (String) -> Unit, onNew: (String, String, String, List<String>) -> Unit) {
+private fun StartScreen(workspace: Workspace, onSaves: () -> Unit, onOpen: (String) -> Unit, onNew: (String, String, String, List<String>) -> Unit) {
     var creating by remember { mutableStateOf(false) }
     // an official file picked: it is never edited, so a new mod over it is offered instead
     var over by remember { mutableStateOf<LoadOrderEntry?>(null) }
@@ -193,6 +196,7 @@ private fun StartScreen(workspace: Workspace, onOpen: (String) -> Unit, onNew: (
     Column(Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Construction Set", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+            androidx.compose.material3.OutlinedButton(onClick = onSaves) { Text("Saved games") }
             Button(onClick = { creating = true }) {
                 Icon(Icons.Default.Add, null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(6.dp))

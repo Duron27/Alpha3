@@ -236,9 +236,9 @@ private fun ModTabRow(
         settingsTabs.forEach { add(SETTINGS_TAB_BASE + it.ordinal) }
         add(7)
         add(HELP_TAB)
+        if (Platform.features.supportsModTools) add(CS_TAB)
         if (newFeatureEnabledChecked) {
             if (Platform.features.supportsTerminal) add(8)
-            if (Platform.features.supportsModTools) add(CS_TAB)
             if (Platform.features.supportsKram) add(9)
         }
     }
@@ -307,16 +307,16 @@ private fun ModTabRow(
                 showHelp = true
                 selectedTabIndex = HELP_TAB
             })
+            if (Platform.features.supportsModTools) add(NavEntry(Icons.Outlined.Architecture, "Construction Set", selectedTabIndex == CS_TAB, utility = true) {
+                resetStates()
+                constructionSet = true
+                selectedTabIndex = CS_TAB
+            })
             if (newFeatureEnabledChecked) {
                 if (Platform.features.supportsTerminal) add(NavEntry(Icons.Outlined.Terminal, "Terminal", selectedTabIndex == 8, utility = true) {
                     resetStates()
                     terminal = true
                     selectedTabIndex = 8
-                })
-                if (Platform.features.supportsModTools) add(NavEntry(Icons.Outlined.Architecture, "Construction Set", selectedTabIndex == CS_TAB, utility = true) {
-                    resetStates()
-                    constructionSet = true
-                    selectedTabIndex = CS_TAB
                 })
                 if (Platform.features.supportsKram) add(NavEntry(Icons.Outlined.Memory, "Kram", selectedTabIndex == 9, utility = true) {
                     resetStates()
@@ -398,16 +398,16 @@ private fun ModTabRow(
             showHelp = true
             selectedTabIndex = HELP_TAB
         }
+        if (Platform.features.supportsModTools) NavPill(selectedTabIndex == CS_TAB, Icons.Outlined.Architecture, label = null, description = "Construction Set") {
+            resetStates()
+            constructionSet = true
+            selectedTabIndex = CS_TAB
+        }
         if (newFeatureEnabledChecked) {
             if (Platform.features.supportsTerminal) NavPill(selectedTabIndex == 8, Icons.Outlined.Terminal, label = null, description = "Terminal") {
                 resetStates()
                 terminal = true
                 selectedTabIndex = 8
-            }
-            if (Platform.features.supportsModTools) NavPill(selectedTabIndex == CS_TAB, Icons.Outlined.Architecture, label = null, description = "Construction Set") {
-                resetStates()
-                constructionSet = true
-                selectedTabIndex = CS_TAB
             }
             if (Platform.features.supportsKram) NavPill(selectedTabIndex == 9, Icons.Outlined.Memory, label = null, description = "Kram") {
                 resetStates()
@@ -1178,17 +1178,15 @@ fun ModValuesList(
                                                     )
                                                 }
 
-                                                if (newFeatureEnabledChecked) {
-                                                    Spacer(modifier = Modifier.height(8.dp))
-                                                    Button(
-                                                        onClick = { showPopup = false; showDevTools = true },
-                                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E3A8A))
-                                                    ) {
-                                                        Text(
-                                                            text = "Developer tools",
-                                                            style = MaterialTheme.typography.bodyMedium.copy(color = Color.White)
-                                                        )
-                                                    }
+                                                Spacer(modifier = Modifier.height(8.dp))
+                                                Button(
+                                                    onClick = { showPopup = false; showDevTools = true },
+                                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E3A8A))
+                                                ) {
+                                                    Text(
+                                                        text = "Developer tools",
+                                                        style = MaterialTheme.typography.bodyMedium.copy(color = Color.White)
+                                                    )
                                                 }
 
                                                 Spacer(modifier = Modifier.height(8.dp))
