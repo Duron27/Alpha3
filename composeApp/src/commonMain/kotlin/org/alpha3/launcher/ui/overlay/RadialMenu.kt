@@ -9,13 +9,12 @@ import org.alpha3.launcher.resources.options
 import org.alpha3.launcher.resources.Res
 import org.alpha3.launcher.engine.KeyCodes
 import org.alpha3.launcher.utils.PlatformContext
-import org.alpha3.launcher.utils.Log
+
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
@@ -77,6 +76,8 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -100,6 +101,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.coerceAtLeast
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -110,6 +112,7 @@ import com.composables.core.VerticalScrollbar
 import com.composables.core.rememberScrollAreaState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.alpha3.launcher.engine.Engine
 import org.alpha3.launcher.ui.controls.ButtonConfig
@@ -134,142 +137,81 @@ import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.roundToInt
 import kotlin.math.sin
+import kotlin.time.Duration.Companion.milliseconds
+
+/** How wide the open radial menu is. */
+private val RadialMenuSize = 300.dp
+
+/** How long a radial section holds its key: a down and up in the same game frame can be missed. */
+private const val KEY_HOLD_MS = 60L
 
 @Composable
 fun ExpandableCircleButton() {
-    val expandedSize = 300.dp
     var showKeyDialog by remember { mutableStateOf(false) }
-    var usedKeys by remember { mutableStateOf(listOf<Int>()) }
-    val animationDuration = 500
-    val size by animateDpAsState(
-        targetValue = if (isRadialMenuExpanded) expandedSize else 60.dp,
-        animationSpec = tween(durationMillis = animationDuration), label = ""
-    )
-
-    // Empty mutable state for sections
-    val sections = remember { mutableStateListOf<Pair<String, () -> Unit>>() }
     val allButtons = remember { mutableStateListOf<ButtonConfig>() }
-    val radialButtons = remember { derivedStateOf {
-        filterButtonsByType(allButtons, "radial")
-    } }
+    // Everything shown comes from the saved radial buttons, in their order
+    val radialButtons by remember {
+        derivedStateOf { filterButtonsByType(allButtons, "radial").sortedBy { it.position } }
+    }
+    val usedKeys by remember { derivedStateOf { radialButtons.map { it.keyCode } } }
 
-    // Function to add a radial button
-    fun addRadialButton(keyCode: Int, label: String? = null) {
-        val buttonLabel = label ?: keyCodeToChar(keyCode)
-        val newConfig = ButtonConfig(
-            type = "radial",
-            keyCode = keyCode,
-            label = buttonLabel,
-            position = radialButtons.value.size,
-            color = "#FFFFFF",
-            alpha = 0.8f,
-            uri = null
-        )
-
-        val updatedRadials = radialButtons.value + newConfig
-        ButtonConfigManager.updateMultipleButtonsByTypes(listOf("radial"), updatedRadials)
-
-        // Refresh local list
+    fun saveRadials(updated: List<ButtonConfig>) {
+        ButtonConfigManager.updateMultipleButtonsByTypes(listOf("radial"), updated)
         allButtons.clear()
         allButtons.addAll(loadAllButtons())
-
-        // Re-initialize sections to ensure they have correct lambdas
-        sections.clear()
-        radialButtons.value.sortedBy { it.position }.forEach { config ->
-            sections.add(config.label to {
-                Engine.onNativeKeyDown(config.keyCode)
-                Engine.onNativeKeyUp(config.keyCode)
-            })
-        }
-
-        usedKeys = radialButtons.value.map { it.keyCode }
     }
 
-    // Function to delete a radial button
-    fun deleteRadialButton(index: Int) {
-        if (index in radialButtons.value.indices) {
-            val configToRemove = radialButtons.value[index]
-            val updatedRadials = radialButtons.value.filter { it != configToRemove }
-                .mapIndexed { newIndex, config -> config.copy(position = newIndex) }
-
-            ButtonConfigManager.updateMultipleButtonsByTypes(listOf("radial"), updatedRadials)
-
-            // Refresh local list
-            allButtons.clear()
-            allButtons.addAll(loadAllButtons())
-
-            // Re-initialize sections
-            sections.clear()
-            radialButtons.value.sortedBy { it.position }.forEach { config ->
-                sections.add(config.label to {
-                    Engine.onNativeKeyDown(config.keyCode)
-                    Engine.onNativeKeyUp(config.keyCode)
-                })
-            }
-
-            usedKeys = radialButtons.value.map { it.keyCode }
-        }
+    fun addRadialButton(keyCode: Int) {
+        saveRadials(
+            radialButtons + ButtonConfig(
+                type = "radial",
+                keyCode = keyCode,
+                label = keyCodeToChar(keyCode),
+                position = radialButtons.size,
+                color = "#FFFFFF",
+                alpha = 0.8f,
+                uri = null
+            )
+        )
     }
 
-    LaunchedEffect(isRadialMenuExpanded) {
-        Log.d("PieChart", "🔍 Global state changed: $isRadialMenuExpanded")
-        //Thread.dumpStack()
+    fun deleteRadialButton(config: ButtonConfig) {
+        saveRadials(radialButtons.filter { it != config }.mapIndexed { i, c -> c.copy(position = i) })
+    }
+
+    // Not this composable's scope: the menu closes on the tap, and the key must still be let go
+    fun pressKey(keyCode: Int) {
+        CoroutineScope(Dispatchers.Main).launch {
+            Engine.onNativeKeyDown(keyCode)
+            delay(KEY_HOLD_MS.milliseconds)
+            Engine.onNativeKeyUp(keyCode)
+        }
     }
 
     LaunchedEffect(Unit) {
-        val loadedButtons = loadAllButtons()
-        allButtons.addAll(loadedButtons)
-
-        // Initialize sections from radial buttons with proper key event lambdas
-        radialButtons.value.sortedBy { it.position }.forEach { config ->
-            sections.add(config.label to {
-                // Create proper lambda that triggers the key event
-                Engine.onNativeKeyDown(config.keyCode)
-                Engine.onNativeKeyUp(config.keyCode)
-            })
-        }
-
-        // Update used keys
-        usedKeys = radialButtons.value.map { it.keyCode }
+        allButtons.addAll(loadAllButtons())
     }
-
-    val radius = expandedSize / 2
 
     Box(
         modifier = Modifier
-            .size(size)
+            .size(RadialMenuSize)
             .clip(CircleShape)
             .background(Color.Transparent)
-            .clickable {
-                Log.d("PieChart", "🔥 Line:212 isRadialMenuExpanded: $isRadialMenuExpanded")
-                isRadialMenuExpanded = false
-                Log.d("PieChart", "🔥 Line:214 isRadialMenuExpanded: $isRadialMenuExpanded")
-            },
+            .clickable { isRadialMenuExpanded = false },
         contentAlignment = Alignment.Center
     ) {
-        if (isRadialMenuExpanded && !editMode) {
-            Log.d("PieChart", "Rendering PieChart with ${sections.size} sections")
-            if (sections.isNotEmpty()) {
+        if (!editMode) {
+            if (radialButtons.isNotEmpty()) {
                 PieChart(
-                    sections = sections,
-                    radius = radius,
-                    onSectionClick = { index ->
-                        Log.d("PieChart", "🔥 onSectionClick: $index isRadialMenuExpanded: $isRadialMenuExpanded")
-                        if (index == sections.size) {
-                            Log.d("PieChart", "Line 223")
-                            showKeyDialog = true
-                        } else {
-                            Log.d("PieChart", "📤 Invoking key")
-                            sections[index].second.invoke()
-                            isRadialMenuExpanded = false
-                            Log.d("PieChart", "🔒 isRadialMenuExpanded: ($isRadialMenuExpanded) Expected (false) Line: 228")
-                        }
+                    sections = radialButtons,
+                    radius = RadialMenuSize / 2,
+                    onSectionClick = { config ->
+                        pressKey(config.keyCode)
+                        isRadialMenuExpanded = false
                     },
-                    onAddButtonClick = {
-                        Log.d("PieChart", "🔥 Line:232 isRadialMenuExpanded: $isRadialMenuExpanded")
-                        showKeyDialog = true
-                    },
-                    onDeleteSection = ::deleteRadialButton
+                    onAddButtonClick = { showKeyDialog = true },
+                    onDeleteSection = ::deleteRadialButton,
+                    onDismiss = { isRadialMenuExpanded = false }
                 )
             } else {
                 // Show add button when no sections exist
@@ -291,10 +233,7 @@ fun ExpandableCircleButton() {
                             modifier = Modifier.padding(bottom = 8.dp)
                         )
                         Button(
-                            onClick = {
-                                Log.d("PieChart", "🔥 Line:258 isRadialMenuExpanded: $isRadialMenuExpanded")
-                                showKeyDialog = true
-                            },
+                            onClick = { showKeyDialog = true },
                             shape = CircleShape,
                             colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent),
                             modifier = Modifier.size(60.dp)
@@ -322,7 +261,6 @@ fun ExpandableCircleButton() {
         SimpleKeySelectionDialog(
             onKeySelected = { keyCode ->
                 addRadialButton(keyCode)
-                usedKeys = usedKeys + keyCode
                 showKeyDialog = false
             },
             onDismiss = { showKeyDialog = false },
@@ -333,32 +271,39 @@ fun ExpandableCircleButton() {
 
 @Composable
 fun PieChart(
-    sections: List<Pair<String, () -> Unit>>,
+    sections: List<ButtonConfig>,
     radius: Dp,
-    onSectionClick: (Int) -> Unit,
+    onSectionClick: (ButtonConfig) -> Unit,
     onAddButtonClick: () -> Unit,
-    onDeleteSection: (Int) -> Unit
+    onDeleteSection: (ButtonConfig) -> Unit,
+    onDismiss: () -> Unit
 ) {
     val radiusPx = with(LocalDensity.current) { radius.toPx() }
 
     // Dynamically increase ring size if more than 7 sections
     val ringMultiplier = if (sections.size <= 7) 1.0f else 1.4f
-    val adjustedRadiusPx = radiusPx * ringMultiplier
+    val ringRadiusPx = radiusPx * ringMultiplier / 1.8f
     val angleStep = 360f / sections.size
 
-    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+    // The section whose ✕ is showing (long press); a tap anywhere else puts it away
+    var deleting by remember { mutableStateOf<Int?>(null) }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .pointerInput(Unit) {
+                detectTapGestures { if (deleting != null) deleting = null else onDismiss() }
+            },
+        contentAlignment = Alignment.Center
+    ) {
         // Center "+" button
         Button(
-            onClick = onAddButtonClick,
+            onClick = { if (deleting != null) deleting = null else onAddButtonClick() },
             shape = CircleShape,
             colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent),
             modifier = Modifier
                 .size(radius / 2.0f)
-                .border(
-                    2.dp,
-                    Color.Black,
-                    shape = CircleShape
-                )
+                .border(2.dp, Color.Black, shape = CircleShape)
         ) {
             Icon(
                 Icons.Default.Add,
@@ -369,65 +314,54 @@ fun PieChart(
         }
 
         // Section buttons in a single ring
-        sections.forEachIndexed { index, (label, _) ->
-            val angle = (angleStep * index - 90) * PI / 180
-            val x = cos(angle) * adjustedRadiusPx / 1.8f
-            val y = sin(angle) * adjustedRadiusPx / 1.8f
-            SectionButton(
-                x, y, radius, label,
-                onDelete = { onDeleteSection(index) },
-                onClick = {
-                    onSectionClick(index)
-                    Log.d("PieChart", "🔥 Line:344 isRadialMenuExpanded: $isRadialMenuExpanded")
-                }
-            )
+        sections.forEachIndexed { index, config ->
+            // keyed by the key, so a section's state does not pass to its neighbour when one is deleted
+            key(config.keyCode) {
+                val angle = (angleStep * index - 90) * PI / 180
+                val offset = IntOffset(
+                    (cos(angle) * ringRadiusPx).roundToInt(),
+                    (sin(angle) * ringRadiusPx).roundToInt()
+                )
+                SectionButton(
+                    offset = offset,
+                    radius = radius,
+                    label = config.label,
+                    showDelete = deleting == config.keyCode,
+                    onLongPress = { deleting = config.keyCode },
+                    onDelete = {
+                        deleting = null
+                        onDeleteSection(config)
+                    },
+                    onClick = {
+                        if (deleting != null) deleting = null else onSectionClick(config)
+                    }
+                )
+            }
         }
     }
 }
 
 @Composable
 private fun SectionButton(
-    x: Double,
-    y: Double,
+    offset: IntOffset,
     radius: Dp,
     label: String,
+    showDelete: Boolean,
+    onLongPress: () -> Unit,
     onDelete: () -> Unit,
     onClick: () -> Unit
 ) {
-    var showDelete by remember { mutableStateOf(false) }
-    if (showDelete) {
-        // Delete button
-        Box(
-            modifier = Modifier
-                .size(radius / 3f)
-                .background(Color.Red.copy(alpha = 0.9f), CircleShape)
-                .clickable {
-                    onDelete()
-                    showDelete = false
-                    Log.d("PieChart", "🔥 Line:370 isRadialMenuExpanded: $isRadialMenuExpanded")
-                },
-            contentAlignment = Alignment.Center
-        ) {
-            Text(
-                text = "✕",
-                color = White,
-                fontSize = 16.sp,
-                fontWeight = FontWeight.Bold
-            )
-        }
-    }
+    val currentOnClick by rememberUpdatedState(onClick)
+    val currentOnLongPress by rememberUpdatedState(onLongPress)
     Box(
         modifier = Modifier
-            .offset { IntOffset(x.roundToInt(), y.roundToInt()) }
+            .offset { offset }
             .size(radius / 2.5f)
             .background(Color.DarkGray.copy(alpha = 0.9f), CircleShape)
             .pointerInput(Unit) {
                 detectTapGestures(
-                    onTap = {
-                        Log.d("PieChart", "🔥 Line:386 isRadialMenuExpanded: $isRadialMenuExpanded")
-                        onClick()
-                    },
-                    onLongPress = { showDelete = true }
+                    onTap = { currentOnClick() },
+                    onLongPress = { currentOnLongPress() }
                 )
             },
         contentAlignment = Alignment.Center
@@ -440,6 +374,24 @@ private fun SectionButton(
             textAlign = TextAlign.Center,
             modifier = Modifier.padding(4.dp)
         )
+    }
+    if (showDelete) {
+        // Over the section it deletes
+        Box(
+            modifier = Modifier
+                .offset { offset }
+                .size(radius / 3f)
+                .background(Color.Red.copy(alpha = 0.9f), CircleShape)
+                .clickable { onDelete() },
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = "✕",
+                color = White,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold
+            )
+        }
     }
 }
 
@@ -475,10 +427,7 @@ fun SimpleKeySelectionDialog(
                     tabTitles.forEachIndexed { index, title ->
                         Tab(
                             selected = selectedTabIndex == index,
-                            onClick = {
-                                Log.d("PieChart", "🔥 Line:442 isRadialMenuExpanded: $isRadialMenuExpanded")
-                                selectedTabIndex = index
-                             },
+                            onClick = { selectedTabIndex = index },
                             text = { Text(title) }
                         )
                     }
@@ -502,10 +451,7 @@ fun SimpleKeySelectionDialog(
                                 item {
                                     KeyButton(
                                         label = "F$fNumber",
-                                        onClick = {
-                                            Log.d("PieChart", "🔥 Line:464 isRadialMenuExpanded: $isRadialMenuExpanded")
-                                            onKeySelected(keyCode)
-                                        }
+                                        onClick = { onKeySelected(keyCode) }
                                     )
                                 }
                             }
@@ -757,15 +703,7 @@ fun HiddenMenu(
                                     shape = CircleShape
                                 )
                                 .clickable(enabled = !editMode) {
-                                    Log.d(
-                                        "PieChart",
-                                        "Before toggle Line 729 - isRadialMenuExpanded: $isRadialMenuExpanded"
-                                    )
                                     isRadialMenuExpanded = !isRadialMenuExpanded
-                                    Log.d(
-                                        "PieChart",
-                                        "After toggle - isRadialMenuExpanded: $isRadialMenuExpanded"
-                                    )
                                 },
                             contentAlignment = Alignment.Center
                         ) {
@@ -835,7 +773,7 @@ fun HiddenMenu(
                                             )
                                             .border(
                                                 2.dp,
-                                                Color(202, 165, 96),
+                                                gold,
                                                 shape = RoundedCornerShape(8.dp)
                                             )
                                             .pointerInput(Unit) {
@@ -870,7 +808,7 @@ fun HiddenMenu(
                                                             Modifier.tabIndicatorOffset(
                                                                 tabPositions[selectedTabIndex]
                                                             ),
-                                                            color = Color(202, 165, 96)
+                                                            color = gold
                                                         )
                                                     }
                                                 ) {
@@ -921,7 +859,7 @@ fun HiddenMenu(
                                                 ) {
                                                     if (options) {
                                                         HorizontalDivider(
-                                                            color = Color(202, 165, 96),
+                                                            color = gold,
                                                             thickness = 1.dp
                                                         )
                                                         if (buttonUri.value != null) {
@@ -968,7 +906,7 @@ fun HiddenMenu(
                                                         } else {
                                                             CustomIconPickerButton(
                                                                 context = context,
-                                                                buttonId = 100,
+                                                                buttonId = 201,
                                                                 buttonUri = buttonUri,
                                                                 containerWidth = containerWidth,
                                                                 containerHeight = containerHeight
@@ -982,11 +920,7 @@ fun HiddenMenu(
                                                                 .padding(8.dp)
                                                         ) {
                                                             HorizontalDivider(
-                                                                color = Color(
-                                                                    202,
-                                                                    165,
-                                                                    96
-                                                                ), thickness = 1.dp
+                                                                color = gold, thickness = 1.dp
                                                             )
 
 
@@ -1036,9 +970,7 @@ fun HiddenMenu(
                                                                 // Decrease size button (-)
                                                                 IconButton(
                                                                     onClick = {
-                                                                        buttonSize -= 10.dp
-                                                                        if (buttonSize < 50.dp) buttonSize =
-                                                                            30.dp
+                                                                        buttonSize = (buttonSize - 10.dp).coerceAtLeast(30.dp)
                                                                         saveState()
                                                                     },
                                                                     modifier = Modifier
@@ -1084,7 +1016,7 @@ fun HiddenMenu(
                                                                     UIStateManager.saveButtonState(containerWidth, containerHeight)
                                                                 },
                                                                 colors = SwitchDefaults.colors(
-                                                                    checkedThumbColor = Color(202, 165, 96),
+                                                                    checkedThumbColor = gold,
                                                                     uncheckedThumbColor = Color.Red,
                                                                     checkedTrackColor = Color.Black.copy(alpha = 0.9f),
                                                                     uncheckedTrackColor = Color.Black.copy(alpha = 0.5f),
@@ -1093,7 +1025,7 @@ fun HiddenMenu(
                                                                 )
                                                             )
                                                         }
-                                                        HorizontalDivider(color = Color(202, 165, 96), thickness = 1.dp)
+                                                        HorizontalDivider(color = gold, thickness = 1.dp)
                                                     }
                                                     if (colors) {
                                                         Row(
@@ -1118,11 +1050,7 @@ fun HiddenMenu(
                                                                     saveState()
                                                                 },
                                                                 colors = androidx.compose.material3.SwitchDefaults.colors(
-                                                                    checkedThumbColor = Color(
-                                                                        202,
-                                                                        165,
-                                                                        96
-                                                                    ),
+                                                                    checkedThumbColor = gold,
                                                                     uncheckedThumbColor = Color.Red,
                                                                     checkedTrackColor = Color.Black.copy(
                                                                         alpha = 0.9f
@@ -1136,7 +1064,7 @@ fun HiddenMenu(
                                                             )
                                                         }
                                                         HorizontalDivider(
-                                                            color = Color(202, 165, 96),
+                                                            color = gold,
                                                             thickness = 1.dp
                                                         )
 
@@ -1148,10 +1076,6 @@ fun HiddenMenu(
                                                                     buttonAlpha = alphaValue
                                                                     buttonColor = color
                                                                     saveState()
-                                                                    Log.d(
-                                                                        "ColorWheel",
-                                                                        "Selected Color: $color, Hex: $hex, Alpha: $alphaValue"
-                                                                    )
                                                                 }
                                                             )
                                                         } else {
@@ -1176,7 +1100,7 @@ fun HiddenMenu(
                                                 ) {
                                                     Thumb(
                                                         modifier = Modifier.background(
-                                                            Color(202, 165, 96).copy(0.3f),
+                                                            gold.copy(0.3f),
                                                             RoundedCornerShape(100)
                                                         ),
                                                     )

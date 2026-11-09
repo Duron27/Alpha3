@@ -5,7 +5,9 @@ import org.alpha3.launcher.cs.model.CsDocument
 import org.alpha3.launcher.cs.model.RefKey
 import org.alpha3.launcher.cs.model.placeable
 import org.alpha3.launcher.cs.model.zstringOf
+import org.alpha3.launcher.tools.render.AnimClip
 import org.alpha3.launcher.tools.render.Bitmap
+import org.alpha3.launcher.tools.render.GuardActor
 import org.alpha3.launcher.tools.render.MwAssets
 import org.alpha3.launcher.tools.render.MwModel
 import org.alpha3.launcher.tools.render.RenderLight
@@ -25,15 +27,25 @@ internal class SceneCache(private val assets: MwAssets) {
     private val models = HashMap<String, MwModel?>()
     private val textures = HashMap<String, Bitmap?>()
     private val looks = HashMap<String, ObjectLook>()
+    private val lock = CacheLock()
 
-    fun model(path: String): MwModel? = models.getOrPut(path.lowercase()) {
+    // The cell's objects are placed on several threads: the maps are only touched under the lock, the work (reading,
+    // decoding) is done outside it, so two threads may sometimes make the same thing and the first one is kept.
+    private fun <V> memo(map: HashMap<String, V>, key: String, make: () -> V): V {
+        val (found, cached) = lock.locked { map.containsKey(key) to map[key] }
+        @Suppress("UNCHECKED_CAST") if (found) return cached as V
+        val v = make()
+        return lock.locked { if (map.containsKey(key)) @Suppress("UNCHECKED_CAST") (map[key] as V) else { map[key] = v; v } }
+    }
+
+    fun model(path: String): MwModel? = memo(models, path.lowercase()) {
         assets.read(path)?.let { runCatching { parseNif(it, includeSkinned = true) }.getOrNull() }?.takeIf { it.meshes.isNotEmpty() }
     }
 
-    fun texture(name: String): Bitmap? = textures.getOrPut(name.lowercase()) { assets.readTexture(name) }
+    fun texture(name: String): Bitmap? = memo(textures, name.lowercase()) { assets.readTexture(name) }
 
-    fun look(doc: CsDocument, id: String): ObjectLook = looks.getOrPut(id.lowercase()) {
-        val rec = runCatching { doc.placeable(id) }.getOrNull() ?: return@getOrPut ObjectLook(null, null, null)
+    fun look(doc: CsDocument, id: String): ObjectLook = memo(looks, id.lowercase()) {
+        val rec = runCatching { doc.placeable(id) }.getOrNull() ?: return@memo ObjectLook(null, null, null)
         val modl = rec.subs.firstOrNull { it.tag == "MODL" }?.let { zstringOf(it.data).trim() }?.takeIf { it.isNotEmpty() }
         val mesh = modl?.replace('\\', '/')?.let { if (it.startsWith("meshes/", true)) it else "meshes/$it" }
         // a light's radius and colour (LHDT: weight, value, time, radius, r, g, b, a, flags)
@@ -44,7 +56,41 @@ internal class SceneCache(private val assets: MwAssets) {
         ObjectLook(rec.tag, mesh, light)
     }
 
-    fun forget(id: String) { looks.remove(id.lowercase()) }
+    private val files = HashMap<String, ByteArray?>()
+    private val bodyIndex = HashMap<String, RaceBodies>()
+    private val npcs = HashMap<String, List<SceneMesh>?>()
+
+    /**
+     * NPC [id] as the game dresses it, standing in its idle pose with its race's size, in its own space (feet at the
+     * origin): null when it can't be built (no skeleton, no parts), and it keeps its marker.
+     */
+    /** A new skeleton for NPC [id], dressed and in its idle's first frame, with what it was built from. */
+    fun npcActor(doc: CsDocument, id: String): Pair<GuardActor, NpcBuild>? =
+        runCatching {
+            val rec = doc.find("NPC_", id) ?: return@runCatching null
+            val bodies = lock.locked { bodyIndex.getOrPut("") { RaceBodies(doc) } }
+            val build = npcBuild(doc, bodies, rec)
+            val read = { path: String -> memo(files, path.lowercase()) { assets.read(path) } }
+            build.skeletons.firstNotNullOfOrNull { (nif, kfs) ->
+                if (read(nif) == null) null else GuardActor.loadNpc(nif, kfs, build.parts, read, ::texture)
+            }?.let { it to build }
+        }.getOrNull()
+
+    fun npc(doc: CsDocument, id: String): List<SceneMesh>? = memo(npcs, id.lowercase()) {
+        runCatching {
+            val (actor, build) = npcActor(doc, id) ?: return@runCatching null
+            actor.meshes.map { m ->
+                val p = m.positions.copyOf()
+                for (i in p.indices step 3) { p[i] *= build.scaleXY; p[i + 1] *= build.scaleXY; p[i + 2] *= build.scaleZ }
+                SceneMesh(p, m.normals.copyOf(), m.uvs, m.colors, m.indices, m.texture, m.diffuse, m.emissive, m.alphaBlend, m.alphaTest)
+            }
+        }.getOrNull()
+    }
+
+    fun forget(id: String) = lock.locked {
+        looks.remove(id.lowercase())
+        npcs.remove(id.lowercase())
+    }
 }
 
 /** One reference drawn: its meshes in world space, a highlighted copy, and its bounds for picking. */
@@ -58,7 +104,144 @@ internal class PlacedRef(
     val light: RenderLight?,
     /** The light's flags (flicker, pulse...; LHDT), 0 for objects that give no light. */
     val lightFlags: Int = 0,
-)
+    /** For an NPC drawn as itself: its id and placement, to animate it in Live mode. */
+    val npc: NpcPlacement? = null,
+) {
+    /** The NPC playing its idle (Live mode), made in the background the first time Live is on. */
+    @kotlin.concurrent.Volatile var live: LiveNpc? = null
+}
+
+/** Where an NPC stands: its reference's position and rotation, scale, and how far it was dropped to the floor. */
+internal class NpcPlacement(val id: String, val pos: FloatArray, val scale: Float, val drop: Float = 0f)
+
+/**
+ * An NPC's own skeleton going through its idles as in the game, its meshes rewritten in place each frame where its
+ * reference stands: the plain Idle over and over, and now and then one of Idle2 to Idle9 (scratching, looking around),
+ * picked by its AI Wander idle chances as OpenMW's AiWander does.
+ */
+internal class LiveNpc(private val actor: GuardActor, private val build: NpcBuild, private val at: NpcPlacement) {
+    private val sx = build.scaleXY
+    private val sz = build.scaleZ
+    private val r = rotationMatrix(at.pos[3], at.pos[4], at.pos[5])
+    // NPCs of a crowd don't move in step
+    private val rng = kotlin.random.Random(at.id.hashCode() xor at.pos[0].toBits() xor (at.pos[1].toBits() shl 7))
+    val meshes: List<SceneMesh> = actor.meshes.map { m ->
+        SceneMesh(FloatArray(m.positions.size), FloatArray(m.normals.size), m.uvs, m.colors, m.indices, m.texture, m.diffuse, m.emissive, m.alphaBlend, m.alphaTest)
+            .also { it.version = 1 }
+    }
+    private var lastTime = Float.NaN
+    private var clip: AnimClip? = null
+    private var clipStart = 0f
+
+    /** The next idle: each fidget gets a roll against its chance (OpenMW scales them by fIdleChanceMultiplier, 0.75); the
+     *  one that beats its roll by the most is played, otherwise the plain idle. */
+    private fun next(): AnimClip? {
+        val idle = actor.clips["idle"]
+        var best: AnimClip? = null
+        var margin = 0f
+        for (i in 0 until 8) {
+            val chance = build.idleChances[i] * 0.75f
+            if (chance <= 0f) continue
+            val roll = rng.nextInt(100).toFloat()
+            val c = actor.clips["idle${i + 2}"] ?: continue
+            if (roll < chance && chance - roll > margin) { margin = chance - roll; best = c }
+        }
+        return best ?: idle
+    }
+
+    fun update(time: Float) {
+        if (time == lastTime) return
+        lastTime = time
+        var c = clip
+        if (c == null || time - clipStart > 120f || time < clipStart) {
+            c = actor.clips["idle"] ?: actor.clips.values.firstOrNull()
+            clip = c
+            clipStart = time - (c?.length ?: 0f) * rng.nextFloat()  // somewhere into its idle already
+        }
+        if (c == null) {
+            actor.updateInPlace(time, 0f)
+        } else {
+            var guard = 0
+            while (time - clipStart >= c!!.length && guard++ < 16) {
+                clipStart += c.length
+                c = next() ?: c
+                clip = c
+            }
+            actor.poseClip(c, time - clipStart)
+        }
+        val s = at.scale
+        for ((i, src) in actor.meshes.withIndex()) {
+            val out = meshes[i]
+            val sp = src.positions; val sn = src.normals
+            val op = out.positions; val on = out.normals
+            var k = 0
+            while (k < sp.size) {
+                val x = sp[k] * sx; val y = sp[k + 1] * sx; val z = sp[k + 2] * sz
+                op[k] = (r[0] * x + r[1] * y + r[2] * z) * s + at.pos[0]
+                op[k + 1] = (r[3] * x + r[4] * y + r[5] * z) * s + at.pos[1]
+                op[k + 2] = (r[6] * x + r[7] * y + r[8] * z) * s + at.pos[2] + at.drop
+                if (k + 2 < sn.size) {
+                    val nx = sn[k]; val ny = sn[k + 1]; val nz = sn[k + 2]
+                    on[k] = r[0] * nx + r[1] * ny + r[2] * nz
+                    on[k + 1] = r[3] * nx + r[4] * ny + r[5] * nz
+                    on[k + 2] = r[6] * nx + r[7] * ny + r[8] * nz
+                }
+                k += 3
+            }
+            out.version++
+        }
+    }
+}
+
+/**
+ * The NPCs of [scene] standing on what is under them, as the game drops actors onto the floor when a cell loads (the
+ * references are stored a little above it): the highest surface of another object below each one's feet (or at most
+ * [STEP] above them), within [MAX_DROP].
+ */
+internal fun dropActorsToGround(scene: List<PlacedRef>): List<PlacedRef> {
+    val solid = scene.filter { it.npc == null }
+    return scene.map { p ->
+        val at = p.npc ?: return@map p
+        if (at.drop != 0f) return@map p  // already dropped (reused from before)
+        val x = at.pos[0]; val y = at.pos[1]; val z0 = at.pos[2]
+        var best = Float.NEGATIVE_INFINITY
+        for (o in solid) {
+            if (x < o.min[0] || x > o.max[0] || y < o.min[1] || y > o.max[1] || o.min[2] > z0 + STEP) continue
+            for (m in o.meshes) {
+                if (m.alphaBlend) continue
+                val ps = m.positions; val idx = m.indices
+                var t = 0
+                while (t + 2 < idx.size) {
+                    val a = idx[t] * 3; val b = idx[t + 1] * 3; val c = idx[t + 2] * 3
+                    t += 3
+                    val ax = ps[a]; val ay = ps[a + 1]; val bx = ps[b]; val by = ps[b + 1]; val cx = ps[c]; val cy = ps[c + 1]
+                    val d = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy)
+                    if (d > -1e-6f && d < 1e-6f) continue
+                    val w0 = ((by - cy) * (x - cx) + (cx - bx) * (y - cy)) / d
+                    val w1 = ((cy - ay) * (x - cx) + (ax - cx) * (y - cy)) / d
+                    val w2 = 1f - w0 - w1
+                    if (w0 < 0f || w1 < 0f || w2 < 0f) continue
+                    val hz = w0 * ps[a + 2] + w1 * ps[b + 2] + w2 * ps[c + 2]
+                    if (hz <= z0 + STEP && hz > best) best = hz
+                }
+            }
+        }
+        val drop = best - z0
+        if (best == Float.NEGATIVE_INFINITY || drop < -MAX_DROP || drop == 0f) return@map p
+        fun shifted(m: SceneMesh) = SceneMesh(
+            m.positions.copyOf().also { a -> for (i in 2 until a.size step 3) a[i] += drop },
+            m.normals, m.uvs, m.colors, m.indices, m.texture, m.diffuse, m.emissive, m.alphaBlend, m.alphaTest
+        )
+        PlacedRef(
+            p.key, p.signature, p.meshes.map(::shifted), p.highlighted.map(::shifted),
+            floatArrayOf(p.min[0], p.min[1], p.min[2] + drop), floatArrayOf(p.max[0], p.max[1], p.max[2] + drop),
+            p.light, p.lightFlags, NpcPlacement(at.id, at.pos, at.scale, drop)
+        )
+    }
+}
+
+private const val STEP = 24f
+private const val MAX_DROP = 1500f
 
 /** A reference's model-to-world rotation as OpenMW applies it: X, then Y, then Z, each by minus the stored angle. */
 internal fun rotationMatrix(rx: Float, ry: Float, rz: Float): FloatArray {
@@ -75,7 +258,7 @@ internal fun rotationMatrix(rx: Float, ry: Float, rz: Float): FloatArray {
 
 private val HIGHLIGHT = floatArrayOf(0.30f, 0.22f, 0.02f)
 
-/** A box marker for objects without a model: NPCs, levelled lists, lights without a mesh. */
+/** A box marker for objects without a model: levelled lists, lights without a mesh, NPCs that could not be built. */
 private fun markerMesh(tag: String?): Pair<FloatArray, IntArray> {
     val (w, h) = when (tag) {
         "NPC_", "LEVC" -> 22f to 128f
@@ -106,6 +289,7 @@ internal fun placeRef(cache: SceneCache, doc: CsDocument, ref: CellRef, pos: Flo
     if (previous != null && previous.signature == signature) return previous
     val look = cache.look(doc, id)
     val model = look.mesh?.let { cache.model(it) }
+    val npc = if (look.tag == "NPC_") cache.npc(doc, id) else null
     val r = rotationMatrix(pos[3], pos[4], pos[5])
     val min = FloatArray(3) { Float.MAX_VALUE }
     val max = FloatArray(3) { -Float.MAX_VALUE }
@@ -129,7 +313,14 @@ internal fun placeRef(cache: SceneCache, doc: CsDocument, ref: CellRef, pos: Flo
     }
     val meshes = ArrayList<SceneMesh>()
     val lit = ArrayList<SceneMesh>()
-    if (model != null) {
+    if (npc != null) {
+        for (m in npc) {
+            val p = transform(m.positions, false)
+            val n = transform(m.normals, true)
+            meshes += SceneMesh(p, n, m.uvs, m.colors, m.indices, m.texture, m.diffuse, m.emissive, m.alphaBlend, m.alphaTest)
+            lit += SceneMesh(p, n, m.uvs, m.colors, m.indices, m.texture, m.diffuse, FloatArray(3) { m.emissive[it] + HIGHLIGHT[it] }, m.alphaBlend, m.alphaTest)
+        }
+    } else if (model != null) {
         for (m in model.meshes) {
             val p = transform(m.positions, false)
             val n = transform(m.normals, true)
@@ -151,7 +342,10 @@ internal fun placeRef(cache: SceneCache, doc: CsDocument, ref: CellRef, pos: Flo
         val radius = l[0].coerceIn(32f, 2048f)
         RenderLight(pos[0], pos[1], pos[2], l[1] * 1.4f, l[2] * 1.4f, l[3] * 1.4f, radius * 1.6f)
     }
-    return PlacedRef(ref.key, signature, meshes, lit, min, max, light, look.light?.get(4)?.toInt() ?: 0)
+    return PlacedRef(
+        ref.key, signature, meshes, lit, min, max, light, look.light?.get(4)?.toInt() ?: 0,
+        if (npc != null) NpcPlacement(id, pos.copyOf(), scale) else null
+    )
 }
 
 /** The camera: orbiting [target] at [dist], as the software renderer places it. */

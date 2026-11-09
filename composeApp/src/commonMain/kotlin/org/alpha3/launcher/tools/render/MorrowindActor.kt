@@ -18,7 +18,12 @@ private class SkelNode(
     val rot: FloatArray, val trans: FloatArray, val scale: Float
 )
 
-private class Track(val keys: NifKeys)
+internal class Track(val keys: NifKeys)
+
+/** One animation group (Idle, Idle2...) played from its start to its stop, with the tracks of the file it is in. */
+internal class AnimClip(val name: String, val tracks: Map<String, Track>, val start: Float, val stop: Float) {
+    val length get() = stop - start
+}
 
 internal class SkinnedSource(
     val positions: FloatArray, val normals: FloatArray,
@@ -93,7 +98,9 @@ internal class GuardActor private constructor(
     private val torchNode: Int,
     private val torchTip: FloatArray,
     private val path: WalkPath,
-    val speed: Float
+    val speed: Float,
+    /** An NPC's idle groups, by lowercase name ("idle", "idle2"...), for [poseClip]. */
+    val clips: Map<String, AnimClip> = emptyMap(),
 ) {
     private class Rigid(val node: Int, val local: MwMesh, val out: SceneMesh, val localNormals: FloatArray = local.normals)
     private class Skinned(val src: SkinnedSource, val out: SceneMesh, val boneNodes: IntArray)
@@ -112,6 +119,17 @@ internal class GuardActor private constructor(
         private set
 
     private val q = FloatArray(4)
+
+    // the animation being sampled, and the time the root's sideways drift is held at
+    private var activeTracks: Map<String, Track> = tracks
+    private var rootLock = loopStart
+
+    /** Poses an NPC [t] seconds into [clip] (held at its ends). */
+    fun poseClip(clip: AnimClip, t: Float) {
+        activeTracks = clip.tracks
+        rootLock = clip.start
+        applyPoseAt(clip.start + t.coerceIn(0f, clip.length), 0f, 0f, 0f)
+    }
 
     fun update(time: Float) {
         // position along the path
@@ -236,7 +254,7 @@ internal class GuardActor private constructor(
 
     private fun poseSkeleton(t: Float) {
         for ((i, n) in nodes.withIndex()) {
-            val tr = tracks[n.name]
+            val tr = activeTracks[n.name]
             var lr = n.rot
             var lt = n.trans
             if (tr != null) {
@@ -245,7 +263,7 @@ internal class GuardActor private constructor(
                 if (k.transTimes.isNotEmpty()) {
                     lt = sampleVec3(k, t)
                     // keep the walk in place; the actor is moved along the path instead
-                    if (n.name == "Bip01") { val base = sampleVec3(k, loopStart); lt = floatArrayOf(base[0], base[1], lt[2]) }
+                    if (n.name == "Bip01") { val base = sampleVec3(k, rootLock); lt = floatArrayOf(base[0], base[1], lt[2]) }
                 }
             }
             if (n.parent < 0) {
@@ -370,6 +388,101 @@ internal class GuardActor private constructor(
                 FloatArray(m.positions.size), FloatArray(m.normals.size), m.uvs, m.colors, m.indices, tex,
                 if (m.diffuse.all { it == 0f }) floatArrayOf(1f, 1f, 1f) else m.diffuse, m.emissive, m.alphaBlend, m.alphaTest
             )
+        }
+
+        /** A model to put on an NPC (a body part or a worn item's) at the skeleton node [bone] it hangs on. */
+        class NpcPart(val file: String, val bone: String)
+
+        /**
+         * An NPC as the game assembles it, standing in the first frame of its idle: [parts] on the skeleton [skeleton],
+         * posed by [kfPaths] (the first file with a group wins). [poseClip] then plays any of its idle [clips]. A part's rigid shapes hang on its bone, mirrored on the left side as OpenMW does; of its
+         * skinned shapes (chest, hands, cuirasses) only the ones named "Tri <bone>" are kept, as OpenMW filters them
+         * (all of them when none is so named). [read] gives a file's bytes, [texture] a texture by name.
+         */
+        fun loadNpc(
+            skeleton: String, kfPaths: List<String>, parts: List<NpcPart>,
+            read: (String) -> ByteArray?, texture: (String) -> Bitmap?
+        ): GuardActor? {
+            val skelBlocks = readBlocks(read(skeleton) ?: return null).first
+            if (skelBlocks.isEmpty()) return null
+            val nodes = ArrayList<SkelNode>(); val byName = HashMap<String, Int>()
+            flattenSkeleton(skelBlocks, nodes, byName)
+
+            // The game stacks animation files, the race's or sex's own over the base one: a group comes from the first
+            // file (in [kfPaths] order) that has it. xbase_anim_female.kf, for one, only has Idle4 and Idle5 of its own.
+            val clips = HashMap<String, AnimClip>()
+            for (kfPath in kfPaths) {
+                val kf = read(kfPath)?.let { runCatching { readBlocks(it).first }.getOrNull() }.orEmpty()
+                if (kf.isEmpty()) continue
+                val keys = kf.firstOrNull { it.type == "NiTextKeyExtraData" }?.textKeys.orEmpty()
+                val starts = HashMap<String, Float>(); val stops = HashMap<String, Float>()
+                for ((t, text) in keys) for (line in text.lines()) {
+                    val l = line.trim().lowercase()
+                    if (!l.startsWith("idle")) continue
+                    val group = l.substringBefore(':').trim()
+                    when (l.substringAfter(':').trim()) {
+                        "start" -> starts.putIfAbsent(group, t)
+                        "stop" -> stops.putIfAbsent(group, t)
+                    }
+                }
+                var fileTracks: Map<String, Track>? = null
+                for ((group, start) in starts) {
+                    if (group in clips) continue
+                    val stop = stops[group]?.takeIf { it > start } ?: continue
+                    val tr = fileTracks ?: readTracks(kf).also { fileTracks = it }
+                    clips[group] = AnimClip(group, tr, start, stop)
+                }
+            }
+            val idleClip = clips["idle"] ?: clips.values.minByOrNull { it.start }
+            val tracks = idleClip?.tracks ?: HashMap()
+            val idle = idleClip?.start ?: 0f
+            val loopStart = idle
+            val loopEnd = idleClip?.stop ?: 1f
+
+            fun sceneMesh(m: MwMesh) = SceneMesh(
+                FloatArray(m.positions.size), FloatArray(m.normals.size), m.uvs, m.colors, m.indices, m.texture?.let(texture),
+                if (m.diffuse.all { it == 0f }) floatArrayOf(1f, 1f, 1f) else m.diffuse, m.emissive, m.alphaBlend, m.alphaTest
+            )
+            // the right side's model, mirrored across its bone (winding flipped so it still faces out)
+            fun mirrored(m: MwMesh): MwMesh {
+                val p = m.positions.copyOf(); val n = m.normals.copyOf()
+                for (i in p.indices step 3) p[i] = -p[i]
+                for (i in n.indices step 3) n[i] = -n[i]
+                val idx = m.indices.copyOf()
+                for (i in 0 until idx.size - 2 step 3) { val t = idx[i + 1]; idx[i + 1] = idx[i + 2]; idx[i + 2] = t }
+                return MwMesh(p, n, m.uvs, m.colors, idx, m.texture, m.diffuse, m.emissive, m.alphaBlend, m.alphaTest, m.name)
+            }
+
+            val rigid = ArrayList<Rigid>()
+            val skinned = ArrayList<Skinned>()
+            val bytesOf = HashMap<String, ByteArray?>()
+            val allSkinnedTaken = HashSet<String>()
+            for (part in parts) {
+                val node = byName[part.bone] ?: continue
+                val bytes = bytesOf.getOrPut(part.file) { read(part.file) } ?: continue
+                val left = part.bone.startsWith("Left ", ignoreCase = true)
+                for (m in parseNif(bytes).meshes) {
+                    val local = if (left) mirrored(m) else m
+                    rigid += Rigid(node, local, sceneMesh(local))
+                }
+                val skMeshes = ArrayList<MwMesh>(); val skSources = ArrayList<SkinnedSource>()
+                parseSkinned(bytes, skMeshes, skSources)
+                if (skMeshes.isEmpty()) continue
+                val filter = "tri ${part.bone.lowercase()}"
+                var keep = skMeshes.indices.filter { skMeshes[it].name.lowercase().startsWith(filter) }
+                if (keep.isEmpty()) {
+                    if (!allSkinnedTaken.add(part.file)) continue  // a file's unnamed shapes only once
+                    keep = skMeshes.indices.toList()
+                }
+                for (i in keep) {
+                    val src = skSources[i]
+                    skinned += Skinned(src, sceneMesh(skMeshes[i]), IntArray(src.boneNames.size) { byName[src.boneNames[it]] ?: -1 })
+                }
+            }
+            if (rigid.isEmpty() && skinned.isEmpty()) return null
+            return GuardActor(
+                nodes, tracks, loopStart, loopEnd, rigid, skinned, -1, floatArrayOf(0f, 0f, 0f), WalkPath(0f, 0f, 1f, 1f), 0f, clips
+            ).also { it.updateAtAnimTime(idle, 0f) }
         }
 
         /**

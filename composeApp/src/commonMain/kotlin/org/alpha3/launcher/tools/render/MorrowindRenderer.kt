@@ -35,6 +35,9 @@ internal class SceneMesh(
     val isGround: Boolean = false
 ) {
     val vertexCount = positions.size / 3
+
+    /** Bumped when [positions] and [normals] are rewritten in place (an animated actor), so a GPU copy is refreshed. */
+    @kotlin.concurrent.Volatile var version = 0
 }
 
 internal class SceneLight(

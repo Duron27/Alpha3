@@ -66,6 +66,9 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.async
 import org.alpha3.launcher.cs.model.CellRef
 import org.alpha3.launcher.cs.model.CellView
 import org.alpha3.launcher.cs.model.FLAG_PERSISTENT
@@ -144,7 +147,14 @@ internal fun CellEditor(s: CsSession, row: RecordRow) {
         loading = true
         scene = withContext(Dispatchers.Default) {
             val live = view.refs.filter { it.state != RecordState.Deleted }
-            val next = live.map { r -> placeRef(cache, doc, r, r.position, r.scale, placed[r.key]) }
+            // every core places objects (reading and decoding models and textures is most of the wait)
+            val previous = HashMap(placed)
+            val chunk = (live.size / 32).coerceAtLeast(4)
+            val next = dropActorsToGround(coroutineScope {
+                live.chunked(chunk).map { part ->
+                    async { part.map { r -> placeRef(cache, doc, r, r.position, r.scale, previous[r.key]) } }
+                }.awaitAll().flatten()
+            })
             placed.clear(); next.forEach { placed[it.key] = it }
             next
         }
@@ -153,6 +163,19 @@ internal fun CellEditor(s: CsSession, row: RecordRow) {
             val (c, r) = sceneBounds(scene)
             target = c; dist = r * 1.7f; pitch = if (view.interior) 0.75f else 0.45f
             framed = true
+        }
+    }
+
+    // Live: each NPC gets its own skeleton playing its idle, made in the background
+    LaunchedEffect(live, scene) {
+        if (!live) return@LaunchedEffect
+        withContext(Dispatchers.Default) {
+            for (p in scene) {
+                val at = p.npc ?: continue
+                if (p.live != null) continue
+                val (actor, build) = cache.npcActor(doc, at.id) ?: continue
+                p.live = LiveNpc(actor, build, at)
+            }
         }
     }
 
@@ -329,8 +352,14 @@ private fun CellViewport(
         val t = if (live) clock.elapsedNow().inWholeMilliseconds / 1000f else 0f
         val items = ArrayList<GpuItem>()
         for (p in sc) {
-            val shown = dragCache.shown(p, v, d)
             val hl = p.key == sel
+            val npc = if (live && d?.first != p.key) p.live else null
+            if (npc != null) {
+                npc.update(t)
+                for (m in npc.meshes) items += GpuItem(m, hl)
+                continue
+            }
+            val shown = dragCache.shown(p, v, d)
             for (m in shown.meshes) items += GpuItem(m, hl)
         }
         val lights = ArrayList<RenderLight>()

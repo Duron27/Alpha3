@@ -108,6 +108,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.foundation.clickable
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.graphicsLayer
@@ -984,6 +985,13 @@ fun OverlayUI(
     }
 }
 
+/** How an info box is drawn: text alone with a soft shadow over the game, or on a dark or light glass panel. */
+private enum class BoxStyle(val text: Color, val panel: Color?) {
+    CLEAR(Color.White, null),
+    DARK(Color.White, Color(0xFF0B0F14).copy(alpha = 0.62f)),
+    LIGHT(Color(0xFF15181C), Color(0xFFF2F0EA).copy(alpha = 0.78f)),
+}
+
 @Composable
 fun DraggableBox(
     initialWidth: Float = 200f,
@@ -992,6 +1000,7 @@ fun DraggableBox(
     followBottom: Boolean = true,
     content: @Composable (Float, Color, Float, Float) -> Unit
 ) {
+    val density = androidx.compose.ui.platform.LocalDensity.current.density
     var offsetX by remember { mutableFloatStateOf(0f) }
     var offsetY by remember { mutableFloatStateOf(0f) }
     var boxWidth by remember { mutableFloatStateOf(initialWidth) }
@@ -999,9 +1008,12 @@ fun DraggableBox(
     var isDragging by remember { mutableStateOf(false) }
     var isResizing by remember { mutableStateOf(false) }
     var fontSize by remember { mutableFloatStateOf(10f) }
-    var useBlackText by remember { mutableStateOf(false) }
+    var style by remember { mutableStateOf(BoxStyle.CLEAR) }
     val scrollState = rememberScrollState()
     val coroutineScope = rememberCoroutineScope()
+    val gold = UIStateManager.gold
+    val shape = RoundedCornerShape(10.dp)
+    val active = isDragging || isResizing
 
     // Auto scroll to bottom when content changes
     LaunchedEffect(scrollState.maxValue) {
@@ -1021,23 +1033,28 @@ fun DraggableBox(
                     Modifier.pointerInput(Unit) {
                         detectDragGestures(
                             onDragStart = { isDragging = true },
-                            onDrag = { _, dragAmount ->
+                            onDrag = { change, dragAmount ->
+                                change.consume()
                                 offsetX += dragAmount.x
                                 offsetY += dragAmount.y
                             },
-                            onDragEnd = { isDragging = false }
+                            onDragEnd = { isDragging = false },
+                            onDragCancel = { isDragging = false }
                         )
                     }
                 } else Modifier
             )
-            .border(
-                2.dp, when {
-                    editMode -> Color.Gray
-                    isDragging || isResizing -> Color.Red
-                    else -> Color.Transparent
+            .clip(shape)
+            .then(style.panel?.let { Modifier.background(it, shape) } ?: Modifier)
+            .then(
+                when {
+                    active -> Modifier.border(1.5.dp, gold, shape)
+                    editMode -> Modifier.border(1.dp, gold.copy(alpha = 0.55f), shape)
+                    style.panel != null -> Modifier.border(0.5.dp, Color.White.copy(alpha = 0.12f), shape)
+                    else -> Modifier
                 }
-            ) // Added condition for editMode being gray
-            .padding(8.dp)
+            )
+            .padding(horizontal = 10.dp, vertical = 8.dp)
     ) {
         Column(
             modifier = Modifier.fillMaxSize(),
@@ -1049,73 +1066,75 @@ fun DraggableBox(
                     .verticalScroll(scrollState),
                 contentAlignment = Alignment.Center
             ) {
-                val textColor = if (useBlackText) Color.Black else Color.White
-                content(fontSize, textColor, boxWidth, boxHeight)
+                // over the bare game a soft shadow keeps the text readable on bright and dark scenes alike
+                val shadow = if (style == BoxStyle.CLEAR)
+                    androidx.compose.ui.graphics.Shadow(Color.Black.copy(alpha = 0.85f), Offset(0f, 1.5f), 4f) else null
+                androidx.compose.runtime.CompositionLocalProvider(
+                    androidx.compose.material3.LocalTextStyle provides androidx.compose.material3.LocalTextStyle.current.copy(shadow = shadow)
+                ) {
+                    content(fontSize, style.text, boxWidth, boxHeight)
+                }
             }
+            if (editMode) Spacer(Modifier.height(30.dp))  // room for the controls
         }
 
         if (editMode) {
+            // the controls: one compact pill, the corner grip beside it
             Row(
                 modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .fillMaxWidth()
-                    .background(Color.Transparent),
-                horizontalArrangement = Arrangement.SpaceBetween
+                    .align(Alignment.BottomStart)
+                    .height(26.dp)
+                    .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(13.dp))
+                    .border(0.5.dp, gold.copy(alpha = 0.4f), RoundedCornerShape(13.dp))
+                    .padding(horizontal = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                IconButton(
-                    onClick = { fontSize = (fontSize - 2f).coerceAtLeast(5f) },
-                    modifier = Modifier.alpha(if (editMode) 1f else 0f) // Adjust visibility when not in edit mode
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Remove,
-                        contentDescription = "Decrease Font Size",
-                        tint = Color.Red
-                    )
+                @Composable
+                fun pill(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, onClick: () -> Unit) {
+                    Box(
+                        Modifier
+                            .size(24.dp)
+                            .clip(androidx.compose.foundation.shape.CircleShape)
+                            .then(Modifier.clickable(onClick = onClick)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(icon, contentDescription = label, tint = gold, modifier = Modifier.size(15.dp))
+                    }
                 }
-                IconButton(
-                    onClick = { fontSize = (fontSize + 2f).coerceAtMost(30f) },
-                    modifier = Modifier.alpha(if (editMode) 1f else 0f) // Adjust visibility when not in edit mode
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Add,
-                        contentDescription = "Increase Font Size",
-                        tint = Color.Red
-                    )
-                }
-                IconButton(
-                    onClick = { useBlackText = !useBlackText },
-                    modifier = Modifier.alpha(if (editMode) 1f else 0f) // Adjust visibility when not in edit mode
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Palette,
-                        contentDescription = "Toggle Text Color",
-                        tint = if (useBlackText) Color.Black else Color.White
-                    )
-                }
-                IconButton(
-                    onClick = { /* Resize logic */ },
-                    modifier = Modifier
-                        .alpha(if (editMode) 1f else 0f) // Adjust visibility when not in edit mode
-                        .pointerInput(Unit) {
-                            detectDragGestures(
-                                onDragStart = { isResizing = true },
-                                onDrag = { _, dragAmount ->
-                                    boxWidth += dragAmount.x
-                                    boxHeight += dragAmount.y
-                                },
-                                onDragEnd = { isResizing = false }
-                            )
-                        }
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.OpenInFull,
-                        contentDescription = "Resize Handle",
-                        tint = Color.Red,
-                        modifier = Modifier
-                            .graphicsLayer {
-                                scaleX = -1f // Flip horizontally
-                            }
-                    )
+                pill(Icons.Default.Remove, "Smaller text") { fontSize = (fontSize - 1f).coerceAtLeast(5f) }
+                Text(
+                    fontSize.roundToInt().toString(),
+                    color = Color.White.copy(alpha = 0.85f),
+                    fontSize = 11.sp,
+                    modifier = Modifier.padding(horizontal = 2.dp)
+                )
+                pill(Icons.Default.Add, "Larger text") { fontSize = (fontSize + 1f).coerceAtMost(30f) }
+                Box(Modifier.padding(horizontal = 3.dp).size(1.dp, 14.dp).background(gold.copy(alpha = 0.35f)))
+                pill(Icons.Default.Palette, "Box style") { style = BoxStyle.entries[(style.ordinal + 1) % BoxStyle.entries.size] }
+            }
+            // corner grip: drag to resize
+            Canvas(
+                Modifier
+                    .align(Alignment.BottomEnd)
+                    .size(26.dp)
+                    .pointerInput(Unit) {
+                        detectDragGestures(
+                            onDragStart = { isResizing = true },
+                            onDrag = { change, dragAmount ->
+                                change.consume()
+                                boxWidth = (boxWidth + dragAmount.x / density).coerceIn(120f, 2000f)
+                                boxHeight = (boxHeight + dragAmount.y / density).coerceIn(60f, 2000f)
+                            },
+                            onDragEnd = { isResizing = false },
+                            onDragCancel = { isResizing = false }
+                        )
+                    }
+            ) {
+                val c = if (isResizing) gold else gold.copy(alpha = 0.75f)
+                val w = size.width; val h = size.height
+                for (i in 1..3) {
+                    val d = i * w / 4.2f
+                    drawLine(c, Offset(w - d, h - 2f), Offset(w - 2f, h - d), strokeWidth = 1.6.dp.toPx(), cap = androidx.compose.ui.graphics.StrokeCap.Round)
                 }
             }
         }
@@ -1190,7 +1209,6 @@ fun GridOverlay(gridSize: Int, snapX: Float?, snapY: Float?, alpha: Float) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun WebViewComponent(onClose: () -> Unit) {
-    val context = LocalPlatformContext.current
     var url by remember { mutableStateOf("https://en.uesp.net/wiki/Morrowind:Morrowind") }
     var webController by remember { mutableStateOf<WebController?>(null) }
 

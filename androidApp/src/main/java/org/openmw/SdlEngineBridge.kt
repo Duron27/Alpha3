@@ -168,8 +168,12 @@ class SdlEngineBridge(private val context: Context) : EngineBridge {
 
     private val keyCharacterMap by lazy { KeyCharacterMap.load(KeyCharacterMap.VIRTUAL_KEYBOARD) }
 
+    // The events that type [char]: for "A" or "!" that is Shift down, the key, its up, Shift up. The key itself is
+    // the first one that is not a modifier.
     override fun keyCodeForChar(char: String): Int? =
-        keyCharacterMap.getEvents(char.toCharArray())?.firstOrNull()?.keyCode
+        keyCharacterMap.getEvents(char.toCharArray())
+            ?.firstOrNull { it.action == android.view.KeyEvent.ACTION_DOWN && !android.view.KeyEvent.isModifierKey(it.keyCode) }
+            ?.keyCode
 
     // in libopenmw_upstream (support/src/benchmark.cpp), there once the game has started
     private external fun omwBenchmarkStart()

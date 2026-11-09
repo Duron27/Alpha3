@@ -48,6 +48,9 @@ object KeyCodes {
     const val KEYCODE_DPAD_UP = 19
     const val KEYCODE_ENTER = 66
     const val KEYCODE_ESCAPE = 111
+    const val KEYCODE_FORWARD_DEL = 112
+    const val KEYCODE_MOVE_HOME = 122
+    const val KEYCODE_MOVE_END = 123
     const val KEYCODE_F1 = 131
     const val KEYCODE_F10 = 140
     const val KEYCODE_F11 = 141

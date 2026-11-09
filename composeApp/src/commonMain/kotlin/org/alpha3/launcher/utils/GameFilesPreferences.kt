@@ -91,6 +91,8 @@ object GameFilesPreferences {
     val KEYBOARD_THEME = stringPreferencesKey("keyboard_theme")
     val KEYBOARD_WIDTH = floatPreferencesKey("keyboard_width")
     val KEYBOARD_HEIGHT = floatPreferencesKey("keyboard_height")
+    val KEYBOARD_X = floatPreferencesKey("keyboard_x")
+    val KEYBOARD_Y = floatPreferencesKey("keyboard_y")
 
     // Android 15 bug where game files not detected when launching
     val BYPASS_GAME_FILES_KEY = booleanPreferencesKey("bypass_game_files_check")

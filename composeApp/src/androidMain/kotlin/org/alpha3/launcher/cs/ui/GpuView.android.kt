@@ -111,7 +111,7 @@ void main() {
 }
 """
 
-private class GlMesh(val vao: Int, val vbo: Int, val ibo: Int, val count: Int, val center: FloatArray)
+private class GlMesh(val vao: Int, val vbo: Int, val ibo: Int, val count: Int, val center: FloatArray, var version: Int)
 
 /** Draws [GpuFrame]s; GL objects are made per mesh and texture the first time they are drawn and freed when unused. */
 private class CellGlRenderer(private val source: () -> GpuFrame?) : GLSurfaceView.Renderer {
@@ -180,6 +180,7 @@ private class CellGlRenderer(private val source: () -> GpuFrame?) : GLSurfaceVie
         for (item in f.items) {
             val m = item.mesh
             val g = meshes.getOrPut(m) { upload(m) }
+            if (g.version != m.version) refill(m, g)  // an animated actor rewrote its vertices
             used += m
             m.texture?.let { usedTex += it }
             if (m.alphaBlend) { blended += item to g; continue }
@@ -278,7 +279,8 @@ private class CellGlRenderer(private val source: () -> GpuFrame?) : GLSurfaceVie
             r[2], up[2], -fw[2], 0f,
             -(r[0] * e[0] + r[1] * e[1] + r[2] * e[2]), -(up[0] * e[0] + up[1] * e[1] + up[2] * e[2]), fw[0] * e[0] + fw[1] * e[1] + fw[2] * e[2], 1f,
         )
-        val near = 4f; val far = 200000f
+        // close to a small model (a ring, a key) the near plane comes in with the camera, so it is not cut off
+        val near = (c.dist * 0.02f).coerceIn(0.05f, 4f); val far = 200000f
         val fy = 1f / tan(PI / 6).toFloat()
         val aspect = width.toFloat() / height.coerceAtLeast(1)
         val proj = floatArrayOf(
@@ -290,6 +292,29 @@ private class CellGlRenderer(private val source: () -> GpuFrame?) : GLSurfaceVie
         val out = FloatArray(16)
         android.opengl.Matrix.multiplyMM(out, 0, proj, 0, view, 0)
         return out
+    }
+
+    private fun refill(m: SceneMesh, g: GlMesh) {
+        g.version = m.version
+        val n = m.positions.size / 3
+        glBindBuffer(GL_ARRAY_BUFFER, g.vbo)
+        glBufferSubData(GL_ARRAY_BUFFER, 0, n * 48, vertexData(m))
+        glBindBuffer(GL_ARRAY_BUFFER, 0)
+    }
+
+    private fun vertexData(m: SceneMesh): java.nio.FloatBuffer {
+        val n = m.positions.size / 3
+        val data = ByteBuffer.allocateDirect(n * 12 * 4).order(ByteOrder.nativeOrder()).asFloatBuffer()
+        val uv = m.uvs; val col = m.colors
+        for (i in 0 until n) {
+            data.put(m.positions[i * 3]).put(m.positions[i * 3 + 1]).put(m.positions[i * 3 + 2])
+            data.put(m.normals[i * 3]).put(m.normals[i * 3 + 1]).put(m.normals[i * 3 + 2])
+            if (uv != null && uv.size >= i * 2 + 2) data.put(uv[i * 2]).put(uv[i * 2 + 1]) else data.put(0f).put(0f)
+            if (col != null && col.size >= i * 4 + 4) data.put(col[i * 4]).put(col[i * 4 + 1]).put(col[i * 4 + 2]).put(col[i * 4 + 3])
+            else data.put(1f).put(1f).put(1f).put(1f)
+        }
+        data.position(0)
+        return data
     }
 
     private fun upload(m: SceneMesh): GlMesh {
@@ -313,7 +338,7 @@ private class CellGlRenderer(private val source: () -> GpuFrame?) : GLSurfaceVie
         glGenBuffers(2, ids, 1)
         glBindVertexArray(ids[0])
         glBindBuffer(GL_ARRAY_BUFFER, ids[1])
-        glBufferData(GL_ARRAY_BUFFER, n * 48, data, GL_STATIC_DRAW)
+        glBufferData(GL_ARRAY_BUFFER, n * 48, data, if (m.version != 0) GL_DYNAMIC_DRAW else GL_STATIC_DRAW)
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ids[2])
         glBufferData(GL_ELEMENT_ARRAY_BUFFER, m.indices.size * 4, idx, GL_STATIC_DRAW)
         glEnableVertexAttribArray(0); glVertexAttribPointer(0, 3, GL_FLOAT, false, 48, 0)
@@ -322,7 +347,7 @@ private class CellGlRenderer(private val source: () -> GpuFrame?) : GLSurfaceVie
         glEnableVertexAttribArray(3); glVertexAttribPointer(3, 4, GL_FLOAT, false, 48, 32)
         glBindVertexArray(0)
         val k = 1f / n.coerceAtLeast(1)
-        return GlMesh(ids[0], ids[1], ids[2], m.indices.size, floatArrayOf(cx * k, cy * k, cz * k))
+        return GlMesh(ids[0], ids[1], ids[2], m.indices.size, floatArrayOf(cx * k, cy * k, cz * k), m.version)
     }
 
     private fun uploadTexture(b: Bitmap): Int {

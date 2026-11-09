@@ -1,5 +1,11 @@
 package org.alpha3.launcher.tools.render
 
+import org.alpha3.launcher.cs.ui.GpuCellView
+import org.alpha3.launcher.cs.ui.GpuFrame
+import org.alpha3.launcher.cs.ui.GpuItem
+import org.alpha3.launcher.cs.ui.OrbitCamera
+import org.alpha3.launcher.cs.ui.gpuCellViewAvailable
+
 import androidx.compose.foundation.Image
 import kotlinx.coroutines.IO
 import androidx.compose.foundation.background
@@ -175,6 +181,44 @@ internal fun AssetViewerCore(
     // Per mesh: shown?  Per texture file: used?  Both start on, and take effect on the next frame.
     val shown = remember(file) { mutableStateListOf<Boolean>() }
     val textureOff = remember(file) { mutableStateMapOf<String, Boolean>() }
+    // On the GPU (the cell view's GLES renderer) where the platform has it, else the software renderer
+    val gpu = isMesh && gpuCellViewAvailable
+
+    /** The lights, riding just behind the camera, and the parts to draw now, for either renderer. */
+    fun scene(m: ViewModel, y: Float, p: Float, z: Float, b: Float, target: FloatArray): Pair<List<RenderLight>, List<SceneMesh>> {
+        val r = m.radius
+        val sy = sin(y); val cy = cos(y); val sp = sin(p); val cp = cos(p)
+        val d = r * 2.3f / z
+        val camX = target[0] + d * cp * sy; val camY = target[1] - d * cp * cy; val camZ = target[2] + d * sp
+        val ox = cp * sy; val oy = -cp * cy; val oz = sp          // from the model toward the camera
+        val rx = cy; val ry = sy                                   // screen right
+        val ux = -sy * sp; val uy = cy * sp; val uz = cp           // screen up
+        val back = r * 0.4f
+        val lit = listOf(
+            RenderLight(camX + ox * back - rx * r * 0.7f + ux * r * 0.6f, camY + oy * back - ry * r * 0.7f + uy * r * 0.6f, camZ + oz * back + uz * r * 0.6f, 1.25f * b, 1.15f * b, 1.0f * b, r * 14f),
+            RenderLight(camX + ox * back + rx * r * 0.9f - ux * r * 0.2f, camY + oy * back + ry * r * 0.9f - uy * r * 0.2f, camZ + oz * back - uz * r * 0.2f, 0.35f * b, 0.4f * b, 0.55f * b, r * 14f),
+        )
+        val globalTex = texturedAll
+        val meshes = m.parts.indices.filter { shown.getOrElse(it) { true } }.map { i ->
+            val part = m.parts[i]
+            val useTexture = globalTex && part.texture?.let { name -> textureOff[name.lowercase()] != true } != false
+            if (useTexture) part.textured else part.plain
+        }
+        return lit to meshes
+    }
+
+    /** One frame for the GPU view (called on its render thread). */
+    fun gpuFrame(): GpuFrame? {
+        val m = model ?: return null
+        val y = yaw; val p = pitch; val z = zoom; val b = brightness
+        val target = floatArrayOf(m.center[0] + panX, m.center[1] + panY, m.center[2] + panZ)
+        val (lit, meshes) = scene(m, y, p, z, b, target)
+        return GpuFrame(
+            meshes.map { GpuItem(it, false) }, OrbitCamera(y, p, m.radius * 2.3f / z, target), lit,
+            floatArrayOf(0.45f * b, 0.45f * b, 0.5f * b), floatArrayOf(0.047f, 0.055f, 0.07f), null,
+            FloatArray(4) to 0f, 0f,
+        )
+    }
 
     LaunchedEffect(file) {
         withContext(Dispatchers.IO) {
@@ -198,6 +242,16 @@ internal fun AssetViewerCore(
     LaunchedEffect(model, size) {
         val m = model ?: return@LaunchedEffect
         if (size.width < 16 || size.height < 16) return@LaunchedEffect
+        if (gpu) {
+            // the GPU view draws itself whenever the view changes; only the spin moves on here
+            var last = TimeSource.Monotonic.markNow()
+            while (true) {
+                withFrameNanos { }
+                val now = TimeSource.Monotonic.markNow()
+                if (spin) yaw += ((now - last).inWholeMicroseconds / 1e6f).coerceAtMost(0.1f) * 0.5f
+                last = now
+            }
+        }
         val scale = minOf(1f, 640f / maxOf(size.width, size.height))
         val w = (size.width * scale).toInt().coerceAtLeast(64)
         val h = (size.height * scale).toInt().coerceAtLeast(64)
@@ -214,26 +268,7 @@ internal fun AssetViewerCore(
             if (spin) yaw += dt * 0.5f
             val y = yaw; val p = pitch; val z = zoom; val b = brightness
             val target = floatArrayOf(m.center[0] + panX, m.center[1] + panY, m.center[2] + panZ)
-            // Lights ride just behind the camera, so the model is lit from the side you are looking at and
-            // the lights themselves (which the renderer draws as glare) stay out of the picture.
-            val sy = sin(y); val cy = cos(y); val sp = sin(p); val cp = cos(p)
-            val d = r * 2.3f / z
-            val camX = target[0] + d * cp * sy; val camY = target[1] - d * cp * cy; val camZ = target[2] + d * sp
-            val ox = cp * sy; val oy = -cp * cy; val oz = sp          // from the model toward the camera
-            val rx = cy; val ry = sy                                   // screen right
-            val ux = -sy * sp; val uy = cy * sp; val uz = cp           // screen up
-            val back = r * 0.4f
-            val lit = listOf(
-                RenderLight(camX + ox * back - rx * r * 0.7f + ux * r * 0.6f, camY + oy * back - ry * r * 0.7f + uy * r * 0.6f, camZ + oz * back + uz * r * 0.6f, 1.25f * b, 1.15f * b, 1.0f * b, r * 14f),
-                RenderLight(camX + ox * back + rx * r * 0.9f - ux * r * 0.2f, camY + oy * back + ry * r * 0.9f - uy * r * 0.2f, camZ + oz * back - uz * r * 0.2f, 0.35f * b, 0.4f * b, 0.55f * b, r * 14f),
-            )
-            // the parts to draw right now, with or without their textures
-            val globalTex = texturedAll
-            val meshes = m.parts.indices.filter { shown.getOrElse(it) { true } }.map { i ->
-                val part = m.parts[i]
-                val useTexture = globalTex && part.texture?.let { name -> textureOff[name.lowercase()] != true } != false
-                if (useTexture) part.textured else part.plain
-            }
+            val (lit, meshes) = scene(m, y, p, z, b, target)
             frame = withContext(Dispatchers.Default) {
                 val params = RenderParams(
                     t, y, p, r * 2.3f / z, target, lit, floatArrayOf(0.45f * b, 0.45f * b, 0.5f * b),
@@ -328,6 +363,11 @@ internal fun AssetViewerCore(
                             val img = image
                             when {
                                 e != null -> Text("Cannot show this file: $e", color = Red, fontSize = 12.sp, modifier = Modifier.padding(16.dp))
+                                gpu && model != null -> GpuCellView(
+                                    frame = ::gpuFrame, continuous = false,
+                                    dirty = listOf(yaw, pitch, zoom, panX, panY, panZ, brightness, texturedAll, shown.toList(), textureOff.toMap()),
+                                    modifier = Modifier.fillMaxSize(),
+                                )
                                 isMesh && f != null -> Image(f, title, contentScale = ContentScale.FillBounds, filterQuality = FilterQuality.Medium, modifier = Modifier.fillMaxSize())
                                 !isMesh && img != null -> Image(img, title, contentScale = ContentScale.Fit, filterQuality = FilterQuality.None, modifier = Modifier.fillMaxSize().padding(8.dp))
                                 else -> Text("Loading...", color = Color.Gray, fontSize = 12.sp)
