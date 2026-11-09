@@ -113,6 +113,8 @@ namespace Alpha3::Vk
         std::unordered_map<std::string, VkPipeline> mPipelines;
         bool mUsesBuiltins = false;
         VkShaderStageFlags mDrawStages = 0; // the stages with the block of OSG's matrices (binding 2)
+        uint32_t mVaryingEnd = 0; // one past the highest varying location
+        std::string mSources[2]; // the GLSL given to glslang, kept for a pipeline the driver refuses (dumped once)
     };
 
     class Programs

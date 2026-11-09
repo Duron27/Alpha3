@@ -173,6 +173,28 @@ namespace Alpha3::Vk
             return out;
         }
 
+        // The stage after the preprocessor (#if, #ifdef and macros resolved; #version, #extension and #pragma kept): the
+        // passes below find declarations by their text, and those in a branch left out must not take locations or
+        // bindings. Counted from the raw text, the objects shader's varyings in all its branches (point light shadows'
+        // under A3_PS_ON among them) went past what the Adreno 615's driver takes, and its draws came out of the wrong
+        // place. The source is kept as it is if the preprocessor fails (the compile then says why).
+        void preprocess(std::string& source, EShLanguage language)
+        {
+            const char* text = source.c_str();
+            glslang::TShader shader(language);
+            shader.setStrings(&text, 1);
+            shader.setEnvInput(glslang::EShSourceGlsl, language, glslang::EShClientVulkan, 100);
+            shader.setEnvClient(glslang::EShClientVulkan, glslang::EShTargetVulkan_1_0);
+            shader.setEnvTarget(glslang::EShTargetSpv, glslang::EShTargetSpv_1_0);
+            shader.setEnvInputVulkanRulesRelaxed();
+            glslang::TShader::ForbidIncluder includer;
+            std::string out;
+            const EShMessages messages = static_cast<EShMessages>(EShMsgSpvRules | EShMsgVulkanRules);
+            if (shader.preprocess(GetDefaultResources(), 450, ENoProfile, false, false, messages, &out, includer)
+                && out.find("void main") != std::string::npos)
+                source = std::move(out);
+        }
+
         // The varyings of the vertex stage in declaration order, given consecutive locations with the room each takes
         void planVaryings(const std::string& vertex, std::map<std::string, uint32_t>& varyings)
         {
@@ -354,6 +376,8 @@ namespace Alpha3::Vk
             else
                 *source = std::regex_replace(*source, version, "#version 450", std::regex_constants::format_first_only);
         }
+        preprocess(vertex, EShLangVertex);
+        preprocess(fragment, EShLangFragment);
         // the same varyings get the same locations in both stages
         std::map<std::string, uint32_t> varyings;
         planVaryings(vertex, varyings);
@@ -361,6 +385,16 @@ namespace Alpha3::Vk
         fragment = bindSamplers(fragment, VK_SHADER_STAGE_FRAGMENT_BIT, variant.mSamplers);
         vertex = locateVaryings(vertex, true, varyings, &variant.mInputs);
         fragment = locateVaryings(fragment, false, varyings, nullptr);
+        {
+            uint32_t end = 0;
+            for (const auto& [varying, location] : varyings)
+                end = std::max(end, location + 1);
+            variant.mVaryingEnd = end;
+            const uint32_t limit = mContext.device().mProperties.limits.maxVertexOutputComponents / 4;
+            if (end > limit)
+                Log(Debug::Warning) << "Vulkan: " << name << " uses varying locations up to " << end - 1
+                                    << ", the device takes " << limit;
+        }
         // a device without clip distances: the planes clip nothing (written to an array of no use)
         if (!mContext.device().mFeatures.shaderClipDistance && vertex.find("gl_ClipDistance") != std::string::npos)
             insertAfterDirectives(vertex, "float a3NoClipDistance[8];\n#define gl_ClipDistance a3NoClipDistance\n");
@@ -369,6 +403,8 @@ namespace Alpha3::Vk
         if (blockMatrices(fragment))
             variant.mDrawStages |= VK_SHADER_STAGE_FRAGMENT_BIT;
         vertex = finishVertex(vertex);
+        variant.mSources[0] = vertex;
+        variant.mSources[1] = fragment;
 
         std::vector<unsigned> vertexSpirv, fragmentSpirv;
         if (!toSpirv(vertex, EShLangVertex, "a3VertexUniforms", 0, vertexSpirv, variant.mVertexUniforms, name)
@@ -417,12 +453,17 @@ namespace Alpha3::Vk
             else if (shader->getType() == osg::Shader::FRAGMENT)
                 stages[1].push_back(shader);
         }
+        // As OSG does (Program::addShader gathers them, PerContextProgram puts them in every shader): the defines any
+        // of the program's shaders imports go into both stages. A define only the fragment shader imports (point light
+        // shadows' A3_PS_ON) still shapes the vertex shader's outputs; without it the fragment stage read varyings
+        // no vertex output wrote, and the driver refused the pipeline.
+        std::set<std::string> wanted;
+        for (const auto& shaders : stages)
+            for (const osg::Shader* shader : shaders)
+                wanted.insert(shader->getShaderDefines().begin(), shader->getShaderDefines().end());
         std::string defineStrings[2];
         for (int stage = 0; stage < 2; ++stage)
         {
-            std::set<std::string> wanted;
-            for (const osg::Shader* shader : stages[stage])
-                wanted.insert(shader->getShaderDefines().begin(), shader->getShaderDefines().end());
             for (const std::string& define : wanted)
             {
                 auto found = defines.find(define);
@@ -615,7 +656,25 @@ namespace Alpha3::Vk
         const VkResult result = vkCreateGraphicsPipelines(
             mContext.vkDevice(), mContext.device().mPipelineCache, 1, &info, nullptr, &pipeline);
         if (result != VK_SUCCESS)
-            Log(Debug::Error) << "Vulkan: a pipeline of " << variant.mName << ": " << resultName(result);
+        {
+            Log(Debug::Error) << "Vulkan: a pipeline of " << variant.mName << ": " << resultName(result) << " ("
+                              << static_cast<int>(result) << "), varyings to location " << variant.mVaryingEnd
+                              << " of " << mContext.device().mProperties.limits.maxVertexOutputComponents / 4
+                              << ", " << variant.mSamplers.size() << " sampler bindings";
+            if (!variant.mSources[0].empty())
+            {
+                dumpFailure(variant.mName + ".pipeline.vert", variant.mSources[0], resultName(result));
+                dumpFailure(variant.mName + ".pipeline.frag", variant.mSources[1], resultName(result));
+                variant.mSources[0].clear();
+                variant.mSources[1].clear();
+            }
+        }
+        else if (!variant.mSources[0].empty())
+        {
+            // the driver takes it: the text is not needed again
+            std::string().swap(variant.mSources[0]);
+            std::string().swap(variant.mSources[1]);
+        }
         variant.mPipelines[key] = pipeline;
         return pipeline;
     }
