@@ -1,0 +1,13 @@
+---
+-- Functions the multiplayer build adds to openmw.animation that its documentation does not cover
+-- (apps/openmw/mwlua/animationbindings.cpp in patches/multiplayer). Read by lua_api_catalog.py.
+-- @context local
+-- @module animation
+
+---
+-- Moves the actor at exactly this horizontal velocity (world space, units per second) instead of by its walk/run
+-- animation; collisions, gravity and jumps stay the physics'. The movement controls still choose and pace the
+-- animation. Pass nil to restore the default behaviour. Only on self in local scripts.
+-- @function [parent=#animation] setMovementOverride
+-- @param openmw.core#GameObject actor
+-- @param openmw.util#Vector3 velocity (optional) nil restores the default

@@ -1,0 +1,12 @@
+---
+-- Functions the multiplayer build adds to openmw.ui that its documentation does not cover
+-- (apps/openmw/mwlua/uibindings.cpp in patches/multiplayer). Read by lua_api_catalog.py.
+-- @context menu|player
+-- @module ui
+
+---
+-- Adds a button to the main menu. Clicking it calls onMainMenuButton(id) of the menu scripts.
+-- The options table holds `id` (not a built-in button's), `normal`, `highlighted` and `pushed` (texture paths;
+-- the last two default to `normal`) and `after` (the id of the button it goes after). Only available in menu scripts.
+-- @function [parent=#ui] addMainMenuButton
+-- @param #table options
