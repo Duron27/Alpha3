@@ -113,6 +113,10 @@ namespace Alpha3::Vk
         VmaAllocation_T* mDepthMemory = nullptr;
         VkImageView mDepthView = VK_NULL_HANDLE;
         bool mRecreate = false;
+        // the window as it was when the swap chain was made: a present that is only suboptimal because the picture is
+        // not pre-rotated (Android, with the display turned from its natural way) keeps it, otherwise it was remade each frame
+        VkSurfaceTransformFlagBitsKHR mSurfaceTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+        VkExtent2D mSurfaceExtent{};
         bool mWindowReadable = false; // the swap chain's images can be copied from
 
         std::vector<std::function<void()>> mAfterFrame;

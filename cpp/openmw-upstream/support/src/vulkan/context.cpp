@@ -246,6 +246,8 @@ namespace Alpha3::Vk
             vkCreateFramebuffer(mDevice.mDevice, &framebuffer, nullptr, &handle);
             mFramebuffers.push_back(handle);
         }
+        mSurfaceTransform = caps.currentTransform;
+        mSurfaceExtent = caps.currentExtent;
         Log(Debug::Info) << "Vulkan: swap chain " << mExtent.width << "x" << mExtent.height << ", " << count
                          << " images, format " << mFormat;
         mRecreate = false;
@@ -618,8 +620,17 @@ namespace Alpha3::Vk
             present.pSwapchains = &mSwapchain;
             present.pImageIndices = &mImage;
             result = vkQueuePresentKHR(mDevice.mQueue, &present);
-            if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR)
+            if (result == VK_ERROR_OUT_OF_DATE_KHR)
                 mRecreate = true;
+            else if (result == VK_SUBOPTIMAL_KHR)
+            {
+                // Android says suboptimal for every frame that is not pre-rotated; only a changed window is remade
+                VkSurfaceCapabilitiesKHR caps{};
+                vkGetPhysicalDeviceSurfaceCapabilitiesKHR(mDevice.mPhysical, mSurface, &caps);
+                mRecreate = caps.currentTransform != mSurfaceTransform
+                    || caps.currentExtent.width != mSurfaceExtent.width
+                    || caps.currentExtent.height != mSurfaceExtent.height;
+            }
             else if (result != VK_SUCCESS)
                 Log(Debug::Error) << "Vulkan: vkQueuePresentKHR: " << resultName(result);
         }
