@@ -255,12 +255,12 @@ Next for the creator:
   restore list in it). Open items there: the view out from inside through seamless doors (grey, dark sun direction);
   pre-rotation (`preTransform` = currentTransform) is optional now.
 
-### 2026-11-09: point light shadows fixed, CPU recording work (UNCOMMITTED)
+### 2026-11-09: point light shadows fixed (f51b08a), CPU recording work (4544076)
 
 - **Committed f51b08a:** with point light shadows on, many pipelines failed (VK_ERROR_UNKNOWN on Adreno), so objects and terrain lit by a shadowed light vanished about 1 s after loading.
   - Cause: a program's defines were applied per stage. OSG applies the union of all the program's shaders' defines to every stage, so `A3_PS_ON` differed between vertex and fragment and the stage interfaces mismatched.
   - Also in that commit: glslang preprocessing before varying planning, a varying-limit warning, and failed shaders dumped to `/storage/emulated/0/Alpha3/dump_shaders`.
-- **Uncommitted** (all in `support/src/vulkan/`, builds and runs, 0 pipeline failures, scene correct):
+- **Committed 4544076** (all in `support/src/vulkan/`, builds and runs, 0 pipeline failures, scene correct):
   - `programs.cpp/hpp`:
     - `blockLights()` moves `LightBuffer`, `PointLightCount` and `a3PointShadowSlots` into their own UBO `a3LightUniforms` (set 0, binding 3).
     - Samplers now start at binding 4.
