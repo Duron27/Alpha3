@@ -84,7 +84,7 @@ class SdlEngineBridge(private val context: Context) : EngineBridge {
 
     private fun accelerate(dx: Float, dy: Float): Float {
         if (UIStateManager.isCursorVisible == 0) return 1f
-        val now = SystemClock.uptimeNanos()
+        val now = System.nanoTime() // SystemClock.uptimeNanos() is Android 15+
         val dt = if (lastInputNs == 0L) FRAME_S else ((now - lastInputNs) / 1e9f).coerceIn(0.004f, 0.1f)
         lastInputNs = now
         val v = hypot(dx, dy) / dt
