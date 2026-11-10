@@ -26,6 +26,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <map>
 #include <mutex>
@@ -2100,6 +2101,18 @@ namespace Alpha3
 
     void inspectorMainThread()
     {
+        // a request from off the device (adb): the file inspect.request beside the report, looked for now and then
+        static unsigned frames = 0;
+        if (++frames % 120 == 0)
+        {
+            std::error_code error;
+            const std::filesystem::path request = cacheDirectory() / "inspect.request";
+            if (std::filesystem::exists(request, error) && std::filesystem::remove(request, error))
+            {
+                Log(Debug::Info) << "Inspector: asked for by " << request.string();
+                Inspector::get().request();
+            }
+        }
         Inspector::get().mainThread();
     }
 
