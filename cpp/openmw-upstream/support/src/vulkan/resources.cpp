@@ -950,9 +950,35 @@ namespace Alpha3::Vk
         return image;
     }
 
+    Image* Resources::texture(const osg::Texture& texture, bool shadow, VkSampler& sampler)
+    {
+        Image* image = this->texture(texture);
+        if (image == nullptr)
+            return nullptr;
+        TextureEntry& entry = mTextures[&texture];
+        const int which = shadow ? 1 : 0;
+        if (entry.mSamplerFrame[which] != mFrame)
+        {
+            entry.mSampler[which] = this->sampler(&texture, shadow);
+            entry.mSamplerFrame[which] = mFrame;
+        }
+        sampler = entry.mSampler[which];
+        return image;
+    }
+
     Image* Resources::texture(const osg::Texture& texture)
     {
         TextureEntry& entry = mTextures[&texture];
+        // checked already this frame: the scene holds the texture for the frame, so it is the same one
+        if (entry.mChecked == mFrame && entry.mImage != nullptr)
+            return entry.mImage;
+        Image* image = textureChecked(texture, entry);
+        entry.mChecked = image != nullptr ? mFrame : ~0ull;
+        return image;
+    }
+
+    Image* Resources::textureChecked(const osg::Texture& texture, TextureEntry& entry)
+    {
         osg::ref_ptr<const osg::Texture> alive;
         const bool same = entry.mImage != nullptr && entry.mTexture.lock(alive) && alive.get() == &texture;
         if (!same)
@@ -1045,6 +1071,7 @@ namespace Alpha3::Vk
         entry.mImage = image;
         entry.mTexture = &texture;
         entry.mTarget = true;
+        entry.mChecked = ~0ull;
         return image;
     }
 
@@ -1242,6 +1269,7 @@ namespace Alpha3::Vk
                     {
                         entry.mImage = nullptr;
                         entry.mTarget = false;
+                        entry.mChecked = ~0ull;
                     }
                 destroyLater(it->second.mImage);
                 it = mTargets.erase(it);

@@ -362,8 +362,9 @@ namespace Alpha3::Vk
                 if (unit >= mTextures.size())
                     return nullptr;
                 auto found = mTextures[unit].find({ osg::StateAttribute::TEXTURE, 0 });
+                // a TEXTURE attribute is an osg::Texture
                 return found == mTextures[unit].end() ? nullptr
-                                                      : dynamic_cast<const osg::Texture*>(found->second.first);
+                                                      : static_cast<const osg::Texture*>(found->second.first);
             }
 
             const osg::Uniform* uniform(const std::string& name) const
@@ -473,13 +474,13 @@ namespace Alpha3::Vk
             state.mClipModes = (state.mode(0x3000, false) ? 1u : 0u) | (state.mode(0x3001, false) ? 2u : 0u);
             for (float& constant : state.mBlendConstants)
                 constant = 0.f;
-            state.mProgram = dynamic_cast<const osg::Program*>(state.attribute(osg::StateAttribute::PROGRAM));
+            state.mProgram = static_cast<const osg::Program*>(state.attribute(osg::StateAttribute::PROGRAM));
             PipelineState& fixed = state.mFixed;
 
             fixed.mDepthTest = state.mode(0x0B71, false); // GL_DEPTH_TEST
             fixed.mDepthWrite = 1;
             fixed.mDepthCompare = VK_COMPARE_OP_LESS;
-            if (auto* depth = dynamic_cast<const osg::Depth*>(state.attribute(osg::StateAttribute::DEPTH)))
+            if (auto* depth = static_cast<const osg::Depth*>(state.attribute(osg::StateAttribute::DEPTH)))
             {
                 fixed.mDepthCompare = compare(depth->getFunction());
                 fixed.mDepthWrite = depth->getWriteMask() ? 1 : 0;
@@ -494,7 +495,7 @@ namespace Alpha3::Vk
             }
 
             fixed.mBlend = state.mode(0x0BE2, false); // GL_BLEND
-            if (auto* func = dynamic_cast<const osg::BlendFunc*>(state.attribute(osg::StateAttribute::BLENDFUNC)))
+            if (auto* func = static_cast<const osg::BlendFunc*>(state.attribute(osg::StateAttribute::BLENDFUNC)))
             {
                 fixed.mSrcColor = blendFactor(func->getSourceRGB());
                 fixed.mDstColor = blendFactor(func->getDestinationRGB());
@@ -502,12 +503,12 @@ namespace Alpha3::Vk
                 fixed.mDstAlpha = blendFactor(func->getDestinationAlpha());
             }
             if (auto* equation
-                = dynamic_cast<const osg::BlendEquation*>(state.attribute(osg::StateAttribute::BLENDEQUATION)))
+                = static_cast<const osg::BlendEquation*>(state.attribute(osg::StateAttribute::BLENDEQUATION)))
             {
                 fixed.mColorOp = blendOp(equation->getEquationRGB());
                 fixed.mAlphaOp = blendOp(equation->getEquationAlpha());
             }
-            if (auto* color = dynamic_cast<const osg::BlendColor*>(state.attribute(osg::StateAttribute::BLENDCOLOR)))
+            if (auto* color = static_cast<const osg::BlendColor*>(state.attribute(osg::StateAttribute::BLENDCOLOR)))
                 for (int i = 0; i < 4; ++i)
                     state.mBlendConstants[i] = color->getConstantColor()[i];
             if (!fixed.mBlend)
@@ -517,7 +518,7 @@ namespace Alpha3::Vk
                 fixed.mColorOp = fixed.mAlphaOp = VK_BLEND_OP_ADD;
             }
 
-            if (auto* mask = dynamic_cast<const osg::ColorMask*>(state.attribute(osg::StateAttribute::COLORMASK)))
+            if (auto* mask = static_cast<const osg::ColorMask*>(state.attribute(osg::StateAttribute::COLORMASK)))
                 fixed.mWriteMask = (mask->getRedMask() ? 1 : 0) | (mask->getGreenMask() ? 2 : 0)
                     | (mask->getBlueMask() ? 4 : 0) | (mask->getAlphaMask() ? 8 : 0);
 
@@ -525,17 +526,17 @@ namespace Alpha3::Vk
             if (state.mode(0x0B44, false)) // GL_CULL_FACE
             {
                 fixed.mCullMode = VK_CULL_MODE_BACK_BIT;
-                if (auto* cull = dynamic_cast<const osg::CullFace*>(state.attribute(osg::StateAttribute::CULLFACE)))
+                if (auto* cull = static_cast<const osg::CullFace*>(state.attribute(osg::StateAttribute::CULLFACE)))
                     fixed.mCullMode = cull->getMode() == osg::CullFace::FRONT ? VK_CULL_MODE_FRONT_BIT
                         : cull->getMode() == osg::CullFace::FRONT_AND_BACK    ? VK_CULL_MODE_FRONT_AND_BACK
                                                                               : VK_CULL_MODE_BACK_BIT;
             }
-            if (auto* front = dynamic_cast<const osg::FrontFace*>(state.attribute(osg::StateAttribute::FRONTFACE)))
+            if (auto* front = static_cast<const osg::FrontFace*>(state.attribute(osg::StateAttribute::FRONTFACE)))
                 state.mGlCounterClockwise = front->getMode() == osg::FrontFace::COUNTER_CLOCKWISE;
 
             if (state.mode(0x8037, false)) // GL_POLYGON_OFFSET_FILL
                 if (auto* offset
-                    = dynamic_cast<const osg::PolygonOffset*>(state.attribute(osg::StateAttribute::POLYGONOFFSET)))
+                    = static_cast<const osg::PolygonOffset*>(state.attribute(osg::StateAttribute::POLYGONOFFSET)))
                 {
                     fixed.mDepthBias = 1;
                     fixed.mBiasConstant = offset->getUnits();
@@ -543,7 +544,7 @@ namespace Alpha3::Vk
                 }
 
             if (state.mode(0x0B90, false)) // GL_STENCIL_TEST
-                if (auto* stencil = dynamic_cast<const osg::Stencil*>(state.attribute(osg::StateAttribute::STENCIL)))
+                if (auto* stencil = static_cast<const osg::Stencil*>(state.attribute(osg::StateAttribute::STENCIL)))
                 {
                     fixed.mStencil = 1;
                     fixed.mStencilCompare = compare(stencil->getFunction());
@@ -687,6 +688,15 @@ namespace Alpha3::Vk
                     const uint32_t columnBytes = shape.mRows * 4;
                     const float* data = floats->empty() ? nullptr : &floats->front();
                     const size_t available = floats->size();
+                    // vec4s and mat4s (and arrays of them) are laid out as OSG holds them: one copy
+                    if (shape.mRows == 4 && stride == shape.mColumns * 16)
+                    {
+                        const size_t count = std::min<size_t>(static_cast<size_t>(elements) * components, available);
+                        const size_t bytes = std::min<size_t>(count * 4, blockSize > member.mOffset ? blockSize - member.mOffset : 0);
+                        if (data != nullptr && bytes > 0)
+                            std::memcpy(block + member.mOffset, data, bytes / 16 * 16);
+                        return;
+                    }
                     for (uint32_t e = 0; e < elements; ++e)
                         for (uint32_t c = 0; c < shape.mColumns; ++c)
                         {
@@ -910,12 +920,24 @@ void main()
                 for (VkDescriptorSet set : *mFreedSets)
                     mContext.freeKeptSetLater(set);
                 mFreedSets->clear();
-                mSharedBlocks.clear();
                 mResources.beginFrame();
                 mState = sceneView.getState();
                 mFrameNumber = sceneView.getFrameStamp() ? sceneView.getFrameStamp()->getFrameNumber() : 0;
                 ++mFrameCounter;
-                mAccumulated.clear();
+                // the leaves' states and shared blocks are found by frame stamp; the ones not used for a while go
+                if (mFrameCounter % 300 == 0)
+                {
+                    for (auto it = mAccumulated.begin(); it != mAccumulated.end();)
+                        if (mFrameCounter - it->second.mFrame > 60)
+                            it = mAccumulated.erase(it);
+                        else
+                            ++it;
+                    for (auto it = mSharedBlocks.begin(); it != mSharedBlocks.end();)
+                        if (mFrameCounter - it->second.mFrame > 60)
+                            it = mSharedBlocks.erase(it);
+                        else
+                            ++it;
+                }
                 mKeep.clear();
                 forgetBindings();
                 // the geometries let go of or not drawn for a while
@@ -973,7 +995,14 @@ void main()
                                      << mStepsNew / 300 << " new and " << mStepsChanged / 300
                                      << " made volatile a frame; " << mResources.mStreamedBytes / 300 / 1024
                                      << " KiB streamed a frame; " << mClippedDraws / 300 << " clipped draws a frame; "
-                                     << mOpaqueCopies << " opaque copies";
+                                     << mOpaqueCopies << " opaque copies; binds a frame: " << mPipelineBinds / 300
+                                     << " pipelines (" << mPipelineCount << " made), " << mVertexBinds / 300 << " vertex, "
+                                     << mSetBinds / 300 << " descriptor sets (" << mSameImageBinds / 300
+                                     << " with the last one's images), " << mUniformBytes / 300 / 1024
+                                     << " KiB of uniforms bound; " << mVertices / 300 / 3
+                                     << " triangles (vertices / 3) a frame";
+                    mVertices = 0;
+                    mPipelineBinds = mVertexBinds = mSetBinds = mUniformBytes = mSameImageBinds = 0;
                     mClippedDraws = 0;
                     mOpaqueCopies = 0;
                     mStepsNew = mStepsChanged = 0;
@@ -1026,6 +1055,8 @@ void main()
                 VkCommandBuffer commands = mContext.commands();
                 vkCmdEndRenderPass(commands);
                 ++mOpaqueCopies;
+                static const std::string copyLabel = "(opaque copy)";
+                gpuTimestamp(copyLabel);
                 if (color != nullptr)
                     blit(*mTarget.mColor, *color);
                 if (depth != nullptr && mTarget.mDepth != nullptr)
@@ -1056,6 +1087,7 @@ void main()
                     views.push_back(mTarget.mDepth->mAttachmentView);
                 }
                 VkRenderPass pass = mContext.renderPass(colorUse, depthUse);
+                gpuTimestamp(std::string());
                 VkRenderPassBeginInfo begin{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
                 begin.renderPass = pass;
                 begin.framebuffer = mResources.framebuffer(pass, views, mTarget.mWidth, mTarget.mHeight);
@@ -1784,9 +1816,11 @@ void main()
             Accumulated* accumulate(const osgUtil::StateGraph* graph, const std::vector<const osgUtil::RenderBin*>& bins)
             {
                 const auto key = std::make_pair(graph, bins.empty() ? nullptr : bins.back());
-                auto found = mAccumulated.find(key);
-                if (found != mAccumulated.end())
-                    return found->second;
+                // kept from frame to frame (no allocation once seen); valid only in the frame it was made in
+                // (unordered_map's elements stay where they are as others are added)
+                AccumulatedSlot& slot = mAccumulated[key];
+                if (slot.mFrame == mFrameCounter)
+                    return slot.mState;
                 Accumulated* state;
                 if (graph->_parent == nullptr)
                 {
@@ -1796,7 +1830,8 @@ void main()
                 }
                 else
                     state = step(accumulate(graph->_parent, bins), graph->getStateSet());
-                mAccumulated.emplace(key, state);
+                slot.mState = state;
+                slot.mFrame = mFrameCounter;
                 return state;
             }
 
@@ -1824,12 +1859,25 @@ void main()
                     {
                         const double period = mContext.device().mProperties.limits.timestampPeriod * 1e-6;
                         const std::vector<std::string>& labels = mGpuLabels[slot];
+                        // a label begins a part, "" ends the last one begun (parts may hold parts: the opaque copy
+                        // in the scene's pass); the outermost are what the passes add up to
                         double inPasses = 0;
-                        for (uint32_t i = 1; i + 1 < mGpuUsed[slot]; i += 2)
+                        std::vector<uint32_t> open;
+                        for (uint32_t i = 1; i + 1 < mGpuUsed[slot]; ++i)
                         {
-                            const double ms = (ticks[i + 1] - ticks[i]) * period;
-                            mGpuSums[labels[i]] += ms;
-                            inPasses += ms;
+                            if (!labels[i].empty())
+                            {
+                                open.push_back(i);
+                                continue;
+                            }
+                            if (open.empty())
+                                continue;
+                            const uint32_t begun = open.back();
+                            open.pop_back();
+                            const double ms = (ticks[i] - ticks[begun]) * period;
+                            mGpuSums[labels[begun]] += ms;
+                            if (open.empty())
+                                inPasses += ms;
                         }
                         const double total = (ticks[mGpuUsed[slot] - 1] - ticks[0]) * period;
                         mGpuSums["frame"] += total;
@@ -1865,9 +1913,10 @@ void main()
             // The state's program with its defines (looked up once for the state)
             Variant* variantOf(Accumulated& state)
             {
-                if (state.mVariant == nullptr || state.mVariantProgram != state.mProgram)
+                const bool clip = state.mClipModes != 0;
+                if (state.mVariant == nullptr || state.mVariantProgram != state.mProgram || state.mVariant->mClips != clip)
                 {
-                    state.mVariant = mPrograms.variant(*state.mProgram, state.mDefines, *mState);
+                    state.mVariant = mPrograms.variant(*state.mProgram, state.mDefines, *mState, clip);
                     state.mVariantProgram = state.mProgram;
                 }
                 return state.mVariant;
@@ -1891,52 +1940,85 @@ void main()
                     mState->decrementDynamicObjectCount();
             }
 
+            enum class DrawableKind
+            {
+                MyGui,
+                CompositeMaps,
+                Particles,
+                Canvas,
+                Plain, // an osg::Drawable itself: a ReadImageFromFramebufferCallback's, else unknown
+                Geometry,
+                Unknown,
+            };
+
+            // What a drawable's class is drawn as (found once for each class)
+            DrawableKind kindOf(const osg::Drawable& drawable)
+            {
+                const std::type_info& info = typeid(drawable);
+                auto found = mDrawableKinds.find(&info);
+                if (found != mDrawableKinds.end())
+                    return found->second;
+                const std::string type = info.name();
+                DrawableKind kind = DrawableKind::Unknown;
+                if (std::strcmp(drawable.libraryName(), "osgMyGUI") == 0
+                    && std::strcmp(drawable.className(), "Drawable") == 0)
+                    kind = DrawableKind::MyGui;
+                else if (std::strcmp(drawable.className(), "CompositeMapRenderer") == 0
+                    || type.find("CompositeMapRenderer") != std::string::npos)
+                    kind = DrawableKind::CompositeMaps;
+                else if (dynamic_cast<const osgParticle::ParticleSystem*>(&drawable) != nullptr)
+                    kind = DrawableKind::Particles;
+                else if (type.find("PingPongCanvas") != std::string::npos)
+                    kind = DrawableKind::Canvas;
+                else if (type == "N3osg8DrawableE")
+                    kind = DrawableKind::Plain;
+                else if (drawable.asGeometry() != nullptr && type.find("RipplesSurface") == std::string::npos)
+                    kind = DrawableKind::Geometry;
+                mDrawableKinds.emplace(&info, kind);
+                return kind;
+            }
+
             void drawLeafItself(const osgUtil::RenderLeaf& leaf, const std::vector<const osgUtil::RenderBin*>& bins)
             {
                 const osg::Drawable* drawable = leaf.getDrawable();
                 if (drawable == nullptr || leaf._parent == nullptr)
                     return;
-                const std::string type = typeid(*drawable).name();
-                if (std::strcmp(drawable->libraryName(), "osgMyGUI") == 0
-                    && std::strcmp(drawable->className(), "Drawable") == 0)
+                switch (kindOf(*drawable))
                 {
-                    drawMyGui(static_cast<const MyGuiDrawable&>(*drawable), leaf, bins);
-                    return;
-                }
-                if (std::strcmp(drawable->className(), "CompositeMapRenderer") == 0
-                    || type.find("CompositeMapRenderer") != std::string::npos)
-                {
-                    mCompositeRenderer = static_cast<const CompositeMapQueues*>(drawable);
-                    return;
-                }
-                if (auto* particles = dynamic_cast<const osgParticle::ParticleSystem*>(drawable))
-                {
-                    drawParticles(*particles, leaf, bins);
-                    return;
-                }
-                if (type.find("PingPongCanvas") != std::string::npos)
-                {
-                    drawCanvas();
-                    return;
-                }
-                if (const osg::Drawable::DrawCallback* callback = drawable->getDrawCallback();
-                    callback != nullptr && type == "N3osg8DrawableE"
-                    && std::strstr(typeid(*callback).name(), "ReadImageFromFramebufferCallback") != nullptr)
-                {
-                    const auto& read = static_cast<const ReadImageCallback&>(*callback);
-                    if (read.mImage)
-                        mReads.push_back({ read.mImage, read.mWidth, read.mHeight });
-                    return;
-                }
-                const osg::Geometry* geometry = drawable->asGeometry();
-                if (geometry == nullptr || type.find("RipplesSurface") != std::string::npos)
-                {
-                    noteUnknown(*drawable);
-                    return;
+                    case DrawableKind::MyGui:
+                        drawMyGui(static_cast<const MyGuiDrawable&>(*drawable), leaf, bins);
+                        return;
+                    case DrawableKind::CompositeMaps:
+                        mCompositeRenderer = static_cast<const CompositeMapQueues*>(drawable);
+                        return;
+                    case DrawableKind::Particles:
+                        drawParticles(static_cast<const osgParticle::ParticleSystem&>(*drawable), leaf, bins);
+                        return;
+                    case DrawableKind::Canvas:
+                        drawCanvas();
+                        return;
+                    case DrawableKind::Plain:
+                        if (const osg::Drawable::DrawCallback* callback = drawable->getDrawCallback();
+                            callback != nullptr
+                            && std::strstr(typeid(*callback).name(), "ReadImageFromFramebufferCallback") != nullptr)
+                        {
+                            const auto& read = static_cast<const ReadImageCallback&>(*callback);
+                            if (read.mImage)
+                                mReads.push_back({ read.mImage, read.mWidth, read.mHeight });
+                            return;
+                        }
+                        noteUnknown(*drawable);
+                        return;
+                    case DrawableKind::Unknown:
+                        noteUnknown(*drawable);
+                        return;
+                    case DrawableKind::Geometry:
+                        break;
                 }
                 Accumulated* state = accumulate(leaf._parent, bins);
                 setChain(leaf._parent, &bins, state);
-                drawGeometry(*geometry, *state, leaf._modelview.get(), leaf._projection.get());
+                drawGeometry(static_cast<const osg::Geometry&>(*drawable), *state, leaf._modelview.get(),
+                    leaf._projection.get());
                 setChain(nullptr, nullptr, nullptr);
             }
 
@@ -2061,7 +2143,8 @@ void main()
                 for (const DrawTemplate::ImageSource& source : draw.mImageSources)
                 {
                     const osg::Texture* texture = source.mTexture;
-                    Image* image = texture ? mResources.texture(*texture) : nullptr;
+                    VkSampler sampler = VK_NULL_HANDLE;
+                    Image* image = texture ? mResources.texture(*texture, source.mShadow, sampler) : nullptr;
                     // a texture the pass draws into is not read in it
                     if (image != nullptr && (image == mTarget.mColor || image == mTarget.mDepth))
                         image = nullptr;
@@ -2085,7 +2168,7 @@ void main()
                     if (dummy)
                         image = mResources.dummy(source.mShadow);
                     VkDescriptorImageInfo info{};
-                    info.sampler = mResources.sampler(dummy ? nullptr : texture, source.mShadow);
+                    info.sampler = dummy ? mResources.sampler(nullptr, source.mShadow) : sampler;
                     info.imageView = image ? mResources.view(*image, source.mViewType) : VK_NULL_HANDLE;
                     info.imageLayout = image ? image->readLayout() : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
                     draw.mImages.push_back(info);
@@ -2244,8 +2327,8 @@ void main()
                     }
                     if (!onlyVolatile)
                         mix(reinterpret_cast<uintptr_t>(&draw));
-                    auto found = mSharedBlocks.find(key);
-                    if (found == mSharedBlocks.end())
+                    SharedBlock& shared = mSharedBlocks[key];
+                    if (shared.mFrame != mFrameCounter)
                     {
                         Span span = mResources.stream(bytes.size(), alignment);
                         if (span.mData == nullptr)
@@ -2261,10 +2344,10 @@ void main()
                             if (uniform != nullptr)
                                 writeUniform(span.mData, static_cast<uint32_t>(bytes.size()), *source.mMember, *uniform);
                         }
-                        found = mSharedBlocks.emplace(key, std::make_pair(span.mBuffer, span.mOffset)).first;
+                        shared = { span.mBuffer, span.mOffset, mFrameCounter };
                     }
-                    buffers[binding] = found->second.first;
-                    bufferOffsets[binding] = found->second.second;
+                    buffers[binding] = shared.mBuffer;
+                    bufferOffsets[binding] = shared.mOffset;
                 }
 
                 // the draw's matrices: model view, projection, their product and the normal matrix (OSG's,
@@ -2279,14 +2362,27 @@ void main()
                     const osg::Matrixf matrices[3] = { osg::Matrixf(modelViewMatrix), osg::Matrixf(projectionMatrix),
                         osg::Matrixf(modelViewMatrix * projectionMatrix) };
                     std::memcpy(span.mData, matrices, sizeof(matrices));
-                    osg::Matrix rotation = modelViewMatrix;
-                    rotation.setTrans(0.0, 0.0, 0.0);
-                    osg::Matrix inverse;
-                    inverse.invert(rotation);
+                    // the inverse of the upper 3x3 (what inverting the matrix without its translation gives there)
+                    const osg::Matrix& m = modelViewMatrix;
+                    const double c00 = m(1, 1) * m(2, 2) - m(1, 2) * m(2, 1);
+                    const double c01 = m(1, 2) * m(2, 0) - m(1, 0) * m(2, 2);
+                    const double c02 = m(1, 0) * m(2, 1) - m(1, 1) * m(2, 0);
+                    const double det = m(0, 0) * c00 + m(0, 1) * c01 + m(0, 2) * c02;
+                    const double invDet = std::abs(det) > 1e-30 ? 1.0 / det : 0.0;
+                    double inverse[3][3];
+                    inverse[0][0] = c00 * invDet;
+                    inverse[0][1] = (m(0, 2) * m(2, 1) - m(0, 1) * m(2, 2)) * invDet;
+                    inverse[0][2] = (m(0, 1) * m(1, 2) - m(0, 2) * m(1, 1)) * invDet;
+                    inverse[1][0] = c01 * invDet;
+                    inverse[1][1] = (m(0, 0) * m(2, 2) - m(0, 2) * m(2, 0)) * invDet;
+                    inverse[1][2] = (m(0, 2) * m(1, 0) - m(0, 0) * m(1, 2)) * invDet;
+                    inverse[2][0] = c02 * invDet;
+                    inverse[2][1] = (m(0, 1) * m(2, 0) - m(0, 0) * m(2, 1)) * invDet;
+                    inverse[2][2] = (m(0, 0) * m(1, 1) - m(0, 1) * m(1, 0)) * invDet;
                     float normal[12]{};
                     for (int c = 0; c < 3; ++c)
                         for (int r = 0; r < 3; ++r)
-                            normal[c * 4 + r] = static_cast<float>(inverse(c, r));
+                            normal[c * 4 + r] = static_cast<float>(inverse[c][r]);
                     std::memcpy(span.mData + 192, normal, sizeof(normal));
                     if (clipModes != 0)
                         ++mClippedDraws;
@@ -2312,6 +2408,16 @@ void main()
                     return false;
                 vkCmdBindDescriptorSets(mContext.commands(), VK_PIPELINE_BIND_POINT_GRAPHICS, variant.mLayout, 0, 1,
                     &set, offsetCount, offsets);
+                ++mSetBinds;
+                if (sameImages(draw.mImages, mLastImages) && draw.mVariant->mSetLayout == mLastSetLayout)
+                    ++mSameImageBinds;
+                else
+                {
+                    mLastImages = draw.mImages;
+                    mLastSetLayout = draw.mVariant->mSetLayout;
+                }
+                mUniformBytes += variant.mVertexUniforms.mSize + variant.mFragmentUniforms.mSize
+                    + (variant.mLightStages ? variant.mLightUniforms.mSize : 0) + (variant.mDrawStages ? sDrawBlockSize : 0);
                 return true;
             }
 
@@ -2378,23 +2484,29 @@ void main()
             static const osg::Array* inputArray(const osg::Geometry& geometry, const VertexInput& input,
                 const osg::Program::AttribBindingList& bindings)
             {
-                const std::string& name = input.mName;
-                if (name.compare(0, 4, "osg_") == 0)
+                switch (input.mKind)
                 {
-                    if (name == "osg_Vertex")
+                    case VertexInput::Vertex:
                         return geometry.getVertexArray();
-                    if (name == "osg_Normal")
+                    case VertexInput::Normal:
                         return geometry.getNormalArray();
-                    if (name == "osg_Color")
+                    case VertexInput::Color:
                         return geometry.getColorArray();
-                    if (name == "osg_SecondaryColor")
+                    case VertexInput::SecondaryColor:
                         return geometry.getSecondaryColorArray();
-                    if (name == "osg_FogCoord")
+                    case VertexInput::FogCoord:
                         return geometry.getFogCoordArray();
-                    if (name.rfind("osg_MultiTexCoord", 0) == 0)
-                        return geometry.getTexCoordArray(std::atoi(name.c_str() + 17));
+                    case VertexInput::TexCoord:
+                        return geometry.getTexCoordArray(input.mUnit);
+                    case VertexInput::Unknown:
+                        break;
+                    case VertexInput::Generic:
+                    {
+                        auto found = bindings.find(input.mName);
+                        return found != bindings.end() ? geometry.getVertexAttribArray(found->second) : nullptr;
+                    }
                 }
-                auto found = bindings.find(name);
+                auto found = bindings.find(input.mName);
                 return found != bindings.end() ? geometry.getVertexAttribArray(found->second) : nullptr;
             }
 
@@ -2600,6 +2712,7 @@ void main()
                         withTopology.mTopology = primitive.mTopology;
                         pipelines->mPerPrimitive.push_back(
                             mPrograms.pipeline(*variant, withTopology, entry->mLayout, mPass));
+                        mPipelineCount = mPrograms.pipelineCount();
                     }
                 }
 
@@ -2624,6 +2737,7 @@ void main()
                             if (!entry->mBuffers.empty())
                                 vkCmdBindVertexBuffers(commands, 0, static_cast<uint32_t>(entry->mBuffers.size()),
                                     entry->mBuffers.data(), entry->mOffsets.data());
+                            ++mVertexBinds;
                             mBoundVertices = entry;
                             mBoundVerticesVersion = entry->mVersion;
                         }
@@ -2638,6 +2752,7 @@ void main()
                     {
                         vkCmdBindPipeline(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
                         mBoundPipeline = pipeline;
+                        ++mPipelineBinds;
                     }
                     const uint32_t instances = std::max(1u, static_cast<unsigned>(primitives.getNumInstances()));
                     if (indexed)
@@ -2654,6 +2769,7 @@ void main()
                         const uint32_t count = primitive.mConverted ? primitive.mIndexCount
                                                                     : primitives.getDrawElements()->getNumIndices();
                         vkCmdDrawIndexed(commands, count, instances, 0, 0, 0);
+                        mVertices += static_cast<uint64_t>(count) * instances;
                     }
                     else if (primitives.getType() == osg::PrimitiveSet::DrawArrayLengthsPrimitiveType)
                     {
@@ -2662,6 +2778,7 @@ void main()
                         for (GLsizei length : lengths)
                         {
                             vkCmdDraw(commands, static_cast<uint32_t>(length), instances, first, 0);
+                            mVertices += static_cast<uint64_t>(length) * instances;
                             first += static_cast<uint32_t>(length);
                         }
                     }
@@ -2670,6 +2787,7 @@ void main()
                         const auto& arrays = static_cast<const osg::DrawArrays&>(primitives);
                         vkCmdDraw(commands, static_cast<uint32_t>(arrays.getCount()), instances,
                             static_cast<uint32_t>(arrays.getFirst()), 0);
+                        mVertices += static_cast<uint64_t>(arrays.getCount()) * instances;
                     }
                     else
                         continue;
@@ -3138,8 +3256,15 @@ void main()
             // kept descriptor sets of draw templates that are gone, freed at the next frame's start
             std::shared_ptr<std::vector<VkDescriptorSet>> mFreedSets = std::make_shared<std::vector<VkDescriptorSet>>();
             // this frame's blocks made with volatile uniforms, by what they were made of: where they were streamed
-            std::unordered_map<uint64_t, std::pair<VkBuffer, VkDeviceSize>> mSharedBlocks;
+            struct SharedBlock
+            {
+                VkBuffer mBuffer = VK_NULL_HANDLE;
+                VkDeviceSize mOffset = 0;
+                uint64_t mFrame = ~0ull;
+            };
+            std::unordered_map<uint64_t, SharedBlock> mSharedBlocks;
             std::unordered_map<StepKey, Step, StepHash> mSteps;
+            std::unordered_map<const std::type_info*, DrawableKind> mDrawableKinds;
             struct GraphHash
             {
                 size_t operator()(const std::pair<const osgUtil::StateGraph*, const osgUtil::RenderBin*>& key) const
@@ -3147,7 +3272,13 @@ void main()
                     return std::hash<const void*>()(key.first) * 31 + std::hash<const void*>()(key.second);
                 }
             };
-            std::unordered_map<std::pair<const osgUtil::StateGraph*, const osgUtil::RenderBin*>, Accumulated*, GraphHash>
+            struct AccumulatedSlot
+            {
+                Accumulated* mState = nullptr;
+                uint64_t mFrame = ~0ull;
+            };
+            std::unordered_map<std::pair<const osgUtil::StateGraph*, const osgUtil::RenderBin*>, AccumulatedSlot,
+                GraphHash>
                 mAccumulated;
             struct GeometryKeyHash
             {

@@ -142,7 +142,10 @@ namespace Alpha3::Vk
                     location = nextAttribute;
                     nextAttribute += size;
                     if (attributes != nullptr)
+                    {
                         attributes->push_back({ name, location, componentsOf(type), integerType(type) });
+                        attributes->back().classify();
+                    }
                 }
                 else if (!vertex && !in)
                 {
@@ -418,7 +421,8 @@ namespace Alpha3::Vk
         std::call_once(sGlslang, [] { glslang::InitializeProcess(); });
     }
 
-    bool Programs::compile(Variant& variant, std::string vertex, std::string fragment, const std::string& name)
+    bool Programs::compile(
+        Variant& variant, std::string vertex, std::string fragment, const std::string& name, bool clip)
     {
         variant.mName = name;
         // Vulkan GLSL 4.50: the ES profile has no gl_ClipDistance in glslang (GL_EXT_clip_cull_distance), and older
@@ -437,6 +441,13 @@ namespace Alpha3::Vk
         }
         preprocess(vertex, EShLangVertex);
         preprocess(fragment, EShLangFragment);
+        {
+            // every pass is one sample a pixel, where centroid is the pixel's centre anyway; the Adreno 615's driver
+            // charged the scene pass 3.2 ms of its 26 for it (the objects shader's centroid varyings)
+            static const std::regex centroid(R"(\bcentroid\s+)");
+            vertex = std::regex_replace(vertex, centroid, "");
+            fragment = std::regex_replace(fragment, centroid, "");
+        }
         // the same varyings get the same locations in both stages
         std::map<std::string, uint32_t> varyings;
         planVaryings(vertex, varyings);
@@ -454,8 +465,11 @@ namespace Alpha3::Vk
                 Log(Debug::Warning) << "Vulkan: " << name << " uses varying locations up to " << end - 1
                                     << ", the device takes " << limit;
         }
-        // a device without clip distances: the planes clip nothing (written to an array of no use)
-        if (!mContext.device().mFeatures.shaderClipDistance && vertex.find("gl_ClipDistance") != std::string::npos)
+        // the clip distances are written only for draws with a clip plane on (OpenGL clips only where
+        // GL_CLIP_DISTANCEi is enabled; Vulkan clips by every distance written, which cost the SM-T720 1.6 ms of its
+        // 6.8 ms reflection pass and 1.2 ms of the scene's when every draw wrote them), and not on a device without
+        // them (written to an array of no use)
+        if ((!mContext.device().mFeatures.shaderClipDistance || !clip) && vertex.find("gl_ClipDistance") != std::string::npos)
             insertAfterDirectives(vertex, "float a3NoClipDistance[8];\n#define gl_ClipDistance a3NoClipDistance\n");
         variant.mLightStages = blockLights(vertex, fragment);
         if (blockMatrices(vertex))
@@ -506,7 +520,7 @@ namespace Alpha3::Vk
     }
 
     Variant* Programs::variant(
-        const osg::Program& program, const osg::StateSet::DefineList& defines, osg::State& state)
+        const osg::Program& program, const osg::StateSet::DefineList& defines, osg::State& state, bool clip)
     {
         // the defines each stage asks for that the state has, as OSG puts them in (State::getDefineString)
         std::vector<const osg::Shader*> stages[2];
@@ -545,7 +559,7 @@ namespace Alpha3::Vk
             }
         }
 
-        const auto key = std::make_pair(&program, defineStrings[0] + "\x01" + defineStrings[1]);
+        const auto key = std::make_pair(&program, defineStrings[0] + "\x01" + defineStrings[1] + (clip ? "\x02" : ""));
         Entry& entry = mVariants[key];
         osg::ref_ptr<const osg::Program> alive;
         if (entry.mVariant && entry.mProgram.lock(alive) && alive.get() == &program)
@@ -556,6 +570,7 @@ namespace Alpha3::Vk
             mRetired.push_back(std::move(entry.mVariant));
         entry.mVariant = std::make_unique<Variant>();
         Variant& variant = *entry.mVariant;
+        variant.mClips = clip;
 
         std::string sources[2];
         std::string name = program.getName();
@@ -601,7 +616,7 @@ namespace Alpha3::Vk
             insertAfterVersion(source, defineStrings[stage]);
             sources[stage] = std::move(source);
         }
-        if (compile(variant, sources[0], sources[1], name))
+        if (compile(variant, sources[0], sources[1], name, clip))
             Log(Debug::Verbose) << "Vulkan: program " << name;
         return &variant;
     }
@@ -741,6 +756,7 @@ namespace Alpha3::Vk
             std::string().swap(variant.mSources[1]);
         }
         variant.mPipelines[key] = pipeline;
+        ++mPipelineCount;
         return pipeline;
     }
 }

@@ -103,6 +103,8 @@ namespace Alpha3::Vk
         // The image of a texture: its osg::Image uploaded (with mip levels), or what a camera drew into it. Null when
         // it has neither yet, or when its upload waits for a later frame (this frame's upload budget is used up).
         Image* texture(const osg::Texture& texture);
+        // texture() and its sampler, both looked up once a frame (the texture's entry keeps them for the frame)
+        Image* texture(const osg::Texture& texture, bool shadow, VkSampler& sampler);
         VkSampler sampler(const osg::Texture* texture, bool shadow);
         // A 1x1 image to bind where a shader samples nothing: white, or a depth of 1 for shadow samplers
         Image* dummy(bool depth);
@@ -157,7 +159,11 @@ namespace Alpha3::Vk
             const osg::Image* mSource = nullptr;
             unsigned mSourceModified = 0;
             bool mTarget = false;
+            uint64_t mChecked = ~0ull; // the frame it was last checked in
+            VkSampler mSampler[2]{}; // plain and shadow, made from the texture's parameters in that frame
+            uint64_t mSamplerFrame[2]{ ~0ull, ~0ull };
         };
+        Image* textureChecked(const osg::Texture& texture, TextureEntry& entry);
         struct TargetEntry
         {
             std::unique_ptr<Image> mImage;

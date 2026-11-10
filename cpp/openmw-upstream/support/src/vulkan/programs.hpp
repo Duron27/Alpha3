@@ -14,6 +14,7 @@
 
 #include <map>
 #include <memory>
+#include <cstdlib>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -61,6 +62,43 @@ namespace Alpha3::Vk
         uint32_t mLocation = 0;
         uint32_t mComponents = 4;
         bool mInteger = false;
+        // which of a geometry's arrays it reads: an osg_ built in (Kind), else the program's attribute binding
+        enum Kind : uint8_t
+        {
+            Generic,
+            Vertex,
+            Normal,
+            Color,
+            SecondaryColor,
+            FogCoord,
+            TexCoord,
+            Unknown, // an osg_ name that is none of these: reads nothing
+        };
+        Kind mKind = Generic;
+        uint32_t mUnit = 0; // TexCoord's
+
+        void classify()
+        {
+            mKind = Generic;
+            if (mName.compare(0, 4, "osg_") != 0)
+                return;
+            mKind = Unknown;
+            if (mName == "osg_Vertex")
+                mKind = Vertex;
+            else if (mName == "osg_Normal")
+                mKind = Normal;
+            else if (mName == "osg_Color")
+                mKind = Color;
+            else if (mName == "osg_SecondaryColor")
+                mKind = SecondaryColor;
+            else if (mName == "osg_FogCoord")
+                mKind = FogCoord;
+            else if (mName.rfind("osg_MultiTexCoord", 0) == 0)
+            {
+                mKind = TexCoord;
+                mUnit = static_cast<uint32_t>(std::atoi(mName.c_str() + 17));
+            }
+        }
     };
 
     // The fixed function state a pipeline is made with, besides its program and vertex layout
@@ -112,6 +150,7 @@ namespace Alpha3::Vk
         std::map<std::string, UniformInitializer> mInitializers;
         std::unordered_map<std::string, VkPipeline> mPipelines;
         bool mUsesBuiltins = false;
+        bool mClips = false; // writes the clip distances
         VkShaderStageFlags mDrawStages = 0; // the stages with the block of OSG's matrices (binding 2)
         // the light list's uniforms (OpenMW's LightBuffer and PointLightCount, point light shadows' slots), in a block of
         // their own (binding 3, the same in both stages): a draw with another light list sends only these
@@ -127,15 +166,20 @@ namespace Alpha3::Vk
         explicit Programs(Context& context);
 
         // The program made with these defines (compiled now if it is new; mOk false if it could not be)
-        Variant* variant(const osg::Program& program, const osg::StateSet::DefineList& defines, osg::State& state);
+        // clip: the variant that writes the clip distances (for draws with a clip plane on)
+        Variant* variant(
+            const osg::Program& program, const osg::StateSet::DefineList& defines, osg::State& state, bool clip);
 
         // A program of the translator's own from GLSL sources ("#version 320 es")
         Variant* builtin(const std::string& name, const std::string& vertex, const std::string& fragment);
 
         VkPipeline pipeline(Variant& variant, const PipelineState& state, const VertexLayout& layout, VkRenderPass pass);
+        uint64_t pipelineCount() const { return mPipelineCount; }
 
     private:
-        bool compile(Variant& variant, std::string vertex, std::string fragment, const std::string& name);
+        uint64_t mPipelineCount = 0;
+        bool compile(
+            Variant& variant, std::string vertex, std::string fragment, const std::string& name, bool clip = false);
 
         Context& mContext;
         struct Entry
