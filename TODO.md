@@ -5,6 +5,25 @@
 Recommended starting with screen-space contact shadows for point lights, which are cheap. Real cube-map shadows are
 much heavier. Waiting on the user's go-ahead.
 
+## ASTC block size chosen per texture by SSIMULACRA2 (user's idea, 2026-11-09, not started)
+
+Today `support/src/textureconversion.cpp` converts every DXT texture to one ASTC block size (6x6 default, quality
+`ASTCENC_PRE_FAST`). Idea: pick each texture's block size automatically by a perceptual score instead, as
+https://github.com/keaukraine/astc-compression does (MIT): encode with astcenc at a large block, score the result against
+the source with SSIMULACRA2 (https://github.com/cloudinary/ssimulacra2, BSD-3-Clause + PATENTS file; 70 = "high
+quality", 90 = "visually lossless", 100 = lossless), and step down toward 4x4 until a target score is reached (that
+tool's default target is 70; it falls back to 4x4 with the best score when the target can't be reached, and gives a
+texture's mip levels mip 0's settings).
+- Where: in the conversion step, before the result goes into `astc_cache.bin` (the score is paid once per texture; the
+  cache key would need the chosen block size or the target score in it).
+- Things to settle: a quality setting (target score, e.g. `[Textures] astc quality = 70`) instead of the fixed block
+  size; the cost on a phone (each try is an astcenc encode plus a SSIMULACRA2 pass: maybe try only 8x8 / 6x6 / 4x4, or
+  do it on a PC tool over the data files); normal maps and alpha (the score is for colour pictures: normal maps may need
+  a fixed block or a different metric, alpha-tested textures a check on the alpha channel too); SSIMULACRA2 depends on
+  libjxl's code and highway, check the size it adds to the APK.
+- Gain: smaller textures where 8x8 (2 bits/texel) holds up, sharper ones where 6x6 smears detail; both the GLES and
+  the Vulkan renderer read the same cache.
+
 ## Not yet seen on the phone
 
 Storm lean of the grass, grass antialiasing, yellow bushels, fireflies at night, the enlarged bugs.
