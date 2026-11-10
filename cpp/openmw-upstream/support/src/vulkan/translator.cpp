@@ -17,12 +17,15 @@
 #include "programs.hpp"
 #include "resources.hpp"
 
+#include "../framegenlock.hpp"
 #include "../support.hpp"
 
 #include <alpha3/upstream.hpp>
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <cmath>
 #include <map>
@@ -46,6 +49,7 @@
 #include <osg/Image>
 #include <osg/PolygonOffset>
 #include <osg/Program>
+#include <osg/Quat>
 #include <osg/Stencil>
 #include <osg/Texture>
 #include <osg/Texture2D>
@@ -894,6 +898,73 @@ void main()
 }
 )";
 
+
+        // Frame generation (OPENMW_FRAMEGEN, the launcher's switch): the last rendered frame seen from another camera,
+        // as the OpenGL ES path's reprojection (framegen.cpp) does it. Each pixel's depth gives its place in view space,
+        // the camera's motion where it is seen from the new view; the pixel is looked up again from there, so the
+        // depth is the point's and not whatever was in front of it. The first person model (in the opaque depth, not
+        // the scene's) moves with the camera, and the GUI (where the window differs from the scene) stays put.
+        // amount: how far along the motion (1: the whole way to the view the matrix goes to).
+        const char* sWarpFragment = R"(#version 320 es
+precision highp float;
+precision highp sampler2D;
+in highp vec2 uv;
+uniform sampler2D uCur;
+uniform sampler2D uFinal;
+uniform sampler2D uDepth;
+uniform sampler2D uOpaqueDepth;
+uniform mat4 uCurToPrev;
+uniform vec4 uProj;
+uniform float uReversed;
+uniform float uAmount;
+uniform float uTint;
+layout(location = 0) out vec4 color;
+float viewZ(float d)
+{
+    float n = uProj.z;
+    float f = uProj.w;
+    if (uReversed > 0.5)
+        return -n * f / (d * (f - n) + n);
+    return 2.0 * f * n / ((d * 2.0 - 1.0) * (f - n) - (f + n));
+}
+vec2 motionAt(vec2 at)
+{
+    float z = viewZ(texture(uDepth, at).r);
+    if (-viewZ(texture(uOpaqueDepth, at).r) < -z * 0.9)
+        return vec2(0.0);
+    vec2 ndc = at * 2.0 - 1.0;
+    vec4 p = uCurToPrev * vec4(ndc.x * -z / uProj.x, ndc.y * -z / uProj.y, z, 1.0);
+    if (p.z > -0.001)
+        return vec2(0.0);
+    vec2 prev = vec2(p.x * uProj.x, p.y * uProj.y) / -p.z;
+    return (prev * 0.5 + 0.5) - at;
+}
+void main()
+{
+    vec3 final = texture(uFinal, uv).rgb;
+    if (any(greaterThan(abs(final - texture(uCur, uv).rgb), vec3(0.02))))
+    {
+        color = vec4(final, 1.0);
+        return;
+    }
+    vec2 motion = motionAt(uv);
+    motion = motionAt(clamp(uv - uAmount * motion, vec2(0.0), vec2(1.0)));
+    vec2 inCur = clamp(uv - uAmount * motion, vec2(0.0), vec2(1.0));
+    color = vec4(texture(uCur, inCur).rgb + vec3(0.25, 0.0, 0.0) * uTint, 1.0);
+}
+)";
+
+        // The view part way (fraction) from one camera to another: positions in a line, rotations along the shortest arc
+        osg::Matrixd viewBetween(const osg::Matrixd& from, const osg::Matrixd& to, double fraction)
+        {
+            const osg::Matrixd a = osg::Matrixd::inverse(from);
+            const osg::Matrixd b = osg::Matrixd::inverse(to);
+            osg::Quat rotation;
+            rotation.slerp(fraction, a.getRotate(), b.getRotate());
+            const osg::Vec3d position = a.getTrans() * (1.0 - fraction) + b.getTrans() * fraction;
+            return osg::Matrixd::inverse(osg::Matrixd::rotate(rotation) * osg::Matrixd::translate(position));
+        }
+
         class Translator
         {
         public:
@@ -910,6 +981,7 @@ void main()
                 // as SceneView::draw: the state carries the frame's stamp (draw callbacks read it)
                 if (osg::State* state = sceneView.getState())
                     state->setFrameStamp(sceneView.getFrameStamp());
+                generateFrames(sceneView);
                 if (!mContext.beginFrame())
                 {
                     runFinalDrawCallbacks(sceneView, false);
@@ -976,6 +1048,7 @@ void main()
                 keepLoadingWindow(sceneView);
                 readImages();
                 runFinalDrawCallbacks(sceneView, true);
+                captureForFrameGen();
                 gpuTimestamp(nullptr);
                 if (mSceneColor != nullptr)
                 {
@@ -983,11 +1056,11 @@ void main()
                     mLastSceneFrame = mFrameCounter;
                 }
                 mRecordSeconds += osg::Timer::instance()->delta_s(begun, osg::Timer::instance()->tick());
-                if (mContext.frameNumber() % 300 == 30)
+                if (mFrameCounter % 300 == 30)
                 {
                     const osg::Timer_t now = osg::Timer::instance()->tick();
                     const double seconds = mLastReport ? osg::Timer::instance()->delta_s(mLastReport, now) : 0.0;
-                    Log(Debug::Info) << "Vulkan: frame " << mContext.frameNumber() << ": " << mDraws << " draws, "
+                    Log(Debug::Info) << "Vulkan: frame " << mFrameCounter << ": " << mDraws << " draws, "
                                      << mSkipped << " left out, "
                                      << (seconds > 0 ? 300.0 / seconds : 0.0) << " fps; per frame "
                                      << mRecordSeconds / 300 * 1000 << " ms recording, " << mWaitSeconds / 300 * 1000
@@ -1000,8 +1073,10 @@ void main()
                                      << mSetBinds / 300 << " descriptor sets (" << mSameImageBinds / 300
                                      << " with the last one's images), " << mUniformBytes / 300 / 1024
                                      << " KiB of uniforms bound; " << mVertices / 300 / 3
-                                     << " triangles (vertices / 3) a frame";
+                                     << " triangles (vertices / 3) a frame; " << mGenerated
+                                     << " generated frames";
                     mVertices = 0;
+                    mGenerated = 0;
                     mPipelineBinds = mVertexBinds = mSetBinds = mUniformBytes = mSameImageBinds = 0;
                     mClippedDraws = 0;
                     mOpaqueCopies = 0;
@@ -3170,6 +3245,194 @@ void main()
                 vkCmdPipelineBarrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT,
                     shaders | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
             }
+
+            // ---- frame generation ----
+
+            // After a rendered frame: what the generated frames are made from (the window as it is now, with the GUI;
+            // the scene's colour and depths stay as they are until the frame after next draws into them again)
+            void captureForFrameGen()
+            {
+                mGen.mValid = false;
+                if (!frameGenWanted())
+                    return;
+                const FrameGenClock::time_point now = FrameGenClock::now();
+                // the pattern of rendered and generated frames, from how fast the rendered ones come (60 Hz assumed:
+                // the display's period is not known here)
+                mGenLock.frame(now, 1000.0 / 60.0, std::min(mGenMaxFrames + 1, FrameGenLock::sStepCount - 1));
+                if (mGenLock.generated() == 0 || mSceneColor == nullptr || mSceneColor->mDepthAspect)
+                    return;
+                FrameGenView view;
+                if (!frameGenFindView(mFrameNumber, view) || !view.depth || !view.opaqueDepth)
+                    return;
+                Image* depth = mResources.renderTarget(*view.depth);
+                Image* opaque = mResources.renderTarget(*view.opaqueDepth);
+                if (depth == nullptr || opaque == nullptr || !depth->mDepthAspect || !opaque->mDepthAspect)
+                    return;
+                const VkExtent2D extent = mContext.windowExtent();
+                Image* final = mResources.renderTarget(&mGen, extent.width, extent.height, 0x8058 /* GL_RGBA8 */);
+                if (final == nullptr || !mContext.blitWindow(final->mImage, extent.width, extent.height, final->readLayout()))
+                    return;
+                mGen.mValid = true;
+                mGen.mView = view;
+                mGen.mScene = mSceneColor;
+                mGen.mDepth = depth;
+                mGen.mOpaqueDepth = opaque;
+                mGen.mFinal = final;
+                mGen.mHavePrev = frameGenFindView(mFrameNumber - 1, mGen.mPrev);
+            }
+
+            // Before the next rendered frame is drawn (its camera known by now): the generated frames, each shown
+            // from a camera part way to the new one, presented ahead of it (each takes a refresh of its own)
+            void generateFrames(osgUtil::SceneView& sceneView)
+            {
+                if (!mGen.mValid)
+                    return;
+                mGen.mValid = false;
+                const FrameGenView& cur = mGen.mView;
+                double fovy = 0, aspect = 0, zNear = 0, zFar = 0;
+                if (!cur.projection.getPerspective(fovy, aspect, zNear, zFar) || zNear <= 0.0 || zFar <= zNear)
+                    return;
+                FrameGenView next;
+                const unsigned nextFrame
+                    = sceneView.getFrameStamp() ? sceneView.getFrameStamp()->getFrameNumber() : cur.frame;
+                const bool known = frameGenFindView(nextFrame, next) && next.frame > cur.frame;
+                if (!known && !mGen.mHavePrev)
+                    return;
+                Variant* variant = mPrograms.builtin("a3 frame generation", sBlitVertex, sWarpFragment);
+                if (variant == nullptr || !variant->mOk || variant->mSamplers.size() != 4)
+                    return;
+                const int count = mGenLock.generated();
+                const int span = mGenLock.lastGap();
+                for (int i = 1; i <= count; ++i)
+                {
+                    float amount = 1.f;
+                    osg::Matrixd curToTarget;
+                    if (known)
+                        curToTarget
+                            = osg::Matrixd::inverse(cur.view) * viewBetween(cur.view, next.view, double(i) / (count + 1));
+                    else
+                    {
+                        // keeping on as the camera went from the previous frame to this one
+                        curToTarget = osg::Matrixd::inverse(osg::Matrixd::inverse(cur.view) * mGen.mPrev.view);
+                        amount = static_cast<float>(i) / span;
+                    }
+                    if (!drawGenerated(*variant, cur, osg::Matrixf(curToTarget), zNear, zFar, amount))
+                        return;
+                }
+            }
+
+            bool drawGenerated(Variant& variant, const FrameGenView& cur, const osg::Matrixf& curToTarget, double zNear,
+                double zFar, float amount)
+            {
+                if (!mContext.beginFrame())
+                    return false;
+                mResources.resetStream();
+                const float black[4] = { 0.f, 0.f, 0.f, 1.f };
+                if (!mContext.beginWindowPass(false, black, false, 1.f, 0))
+                    return false;
+                VkRenderPass pass = mContext.windowCompatiblePass();
+                PipelineState fixed;
+                fixed.mFlipY = 1;
+                fixed.mColorAttachments = 1;
+                fixed.mColorFormat = mContext.windowFormat();
+                fixed.mDepthFormat = mContext.windowDepthFormat();
+                VkPipeline pipeline = mPrograms.pipeline(variant, fixed, VertexLayout{}, pass);
+                VkDescriptorSet set = mContext.allocateSet(variant.mSetLayout);
+                const UniformBlock& block = variant.mFragmentUniforms;
+                Span span = block.mSize > 0 ? mResources.stream(block.mSize, 256) : Span{};
+                if (pipeline == VK_NULL_HANDLE || set == VK_NULL_HANDLE || span.mData == nullptr)
+                {
+                    mContext.endWindowPass();
+                    mContext.present(0, 0);
+                    return false;
+                }
+                const float proj[4] = { static_cast<float>(cur.projection(0, 0)),
+                    static_cast<float>(cur.projection(1, 1)), static_cast<float>(zNear), static_cast<float>(zFar) };
+                static const bool tint = std::getenv("OPENMW_FRAMEGEN_TINT") != nullptr;
+                for (const UniformMember& member : block.mMembers)
+                {
+                    uint8_t* at = span.mData + member.mOffset;
+                    if (member.mName == "uCurToPrev")
+                        std::memcpy(at, curToTarget.ptr(), 64);
+                    else if (member.mName == "uProj")
+                        std::memcpy(at, proj, 16);
+                    else
+                    {
+                        const float value = member.mName == "uReversed" ? (cur.reversedDepth ? 1.f : 0.f)
+                            : member.mName == "uAmount"                 ? amount
+                            : member.mName == "uTint"                   ? (tint ? 1.f : 0.f)
+                                                                        : 0.f;
+                        std::memcpy(at, &value, 4);
+                    }
+                }
+                VkDescriptorImageInfo images[4];
+                VkWriteDescriptorSet writes[5];
+                uint32_t writeCount = 0;
+                for (size_t i = 0; i < 4; ++i)
+                {
+                    const SamplerSlot& slot = variant.mSamplers[i];
+                    Image* image = slot.mName == "uCur" ? mGen.mScene
+                        : slot.mName == "uFinal"        ? mGen.mFinal
+                        : slot.mName == "uDepth"        ? mGen.mDepth
+                                                        : mGen.mOpaqueDepth;
+                    const bool depth = image->mDepthAspect;
+                    images[i] = { depth ? mResources.nearestSampler() : mResources.linearSampler(),
+                        mResources.view(*image, VK_IMAGE_VIEW_TYPE_2D), image->readLayout() };
+                    VkWriteDescriptorSet& write = writes[writeCount++];
+                    write = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+                    write.dstSet = set;
+                    write.dstBinding = slot.mBinding;
+                    write.descriptorCount = 1;
+                    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                    write.pImageInfo = &images[i];
+                }
+                VkDescriptorBufferInfo buffer{ span.mBuffer, 0, block.mSize };
+                {
+                    VkWriteDescriptorSet& write = writes[writeCount++];
+                    write = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+                    write.dstSet = set;
+                    write.dstBinding = 1;
+                    write.descriptorCount = 1;
+                    write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+                    write.pBufferInfo = &buffer;
+                }
+                vkUpdateDescriptorSets(mContext.vkDevice(), writeCount, writes, 0, nullptr);
+                VkCommandBuffer commands = mContext.commands();
+                const uint32_t offset = static_cast<uint32_t>(span.mOffset);
+                vkCmdBindPipeline(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+                vkCmdBindDescriptorSets(
+                    commands, VK_PIPELINE_BIND_POINT_GRAPHICS, variant.mLayout, 0, 1, &set, 1, &offset);
+                const VkExtent2D extent = mContext.windowExtent();
+                const VkViewport viewport{ 0.f, 0.f, float(extent.width), float(extent.height), 0.f, 1.f };
+                const VkRect2D scissor{ { 0, 0 }, extent };
+                vkCmdSetViewport(commands, 0, 1, &viewport);
+                vkCmdSetScissor(commands, 0, 1, &scissor);
+                const float constants[4] = { 0.f, 0.f, 0.f, 0.f };
+                vkCmdSetBlendConstants(commands, constants);
+                vkCmdSetStencilReference(commands, VK_STENCIL_FACE_FRONT_AND_BACK, 0);
+                vkCmdDraw(commands, 3, 1, 0, 0);
+                mContext.endWindowPass();
+                mContext.present(0, 0);
+                ++mGenerated;
+                return true;
+            }
+
+            struct GeneratedFrom
+            {
+                bool mValid = false;
+                FrameGenView mView, mPrev;
+                bool mHavePrev = false;
+                Image* mScene = nullptr;
+                Image* mDepth = nullptr;
+                Image* mOpaqueDepth = nullptr;
+                Image* mFinal = nullptr;
+            } mGen;
+            FrameGenLock mGenLock;
+            int mGenMaxFrames = [] {
+                const char* count = std::getenv("OPENMW_FRAMEGEN_FRAMES");
+                return count ? std::clamp(std::atoi(count), 1, 3) : 1;
+            }();
+            uint64_t mGenerated = 0;
 
             // The post-processing canvas: for now the scene's texture as it is
             void drawCanvas()

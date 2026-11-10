@@ -11,6 +11,7 @@
 #define VMA_VULKAN_VERSION 1000000
 #include <vk_mem_alloc.h>
 
+#include <alpha3/upstream.hpp>
 #include <components/debug/debuglog.hpp>
 #include <components/settings/settings.hpp>
 
@@ -86,6 +87,13 @@ namespace Alpha3::Vk
         auto* context = new Context(*device);
         context->mWindow = window;
         context->mWanted = { static_cast<uint32_t>(std::max(width, 1)), static_cast<uint32_t>(std::max(height, 1)) };
+        // with frame generation, two rendered frames in flight as without it: each is followed by its generated ones
+        if (frameGenWanted())
+        {
+            const char* count = std::getenv("OPENMW_FRAMEGEN_FRAMES");
+            const unsigned generated = count ? static_cast<unsigned>(std::clamp(std::atoi(count), 1, 3)) : 1;
+            context->mInFlight = std::min(sFramesInFlight, 2 * (1 + generated));
+        }
         if (!context->createSurface() || !context->createSwapchain())
         {
             delete context;
@@ -197,7 +205,9 @@ namespace Alpha3::Vk
         }
         // four: one shown, one waiting to be, one the GPU draws and one the next frame is recorded for (two frames are
         // in flight). With three the next frame's acquire waited on the display, and the GPU with it.
-        uint32_t images = std::max(caps.minImageCount, 4u);
+        // With frame generation, the generated frames queued after a rendered one take an image each too: without
+        // more, the next frame's recording waited for the display to let go of one.
+        uint32_t images = std::max(caps.minImageCount, 2u + mInFlight);
         if (caps.maxImageCount > 0)
             images = std::min(images, caps.maxImageCount);
 
@@ -768,7 +778,7 @@ namespace Alpha3::Vk
 
         mBegun = false;
         mAcquired = false;
-        mFrameSlot = (mFrameSlot + 1) % sFramesInFlight;
+        mFrameSlot = (mFrameSlot + 1) % mInFlight;
         ++mFrameNumber;
     }
 }

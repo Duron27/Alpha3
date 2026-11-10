@@ -14,7 +14,9 @@ struct ANativeWindow;
 
 namespace Alpha3::Vk
 {
-    constexpr unsigned sFramesInFlight = 2;
+    // the most frames in flight (frame generation's frames count too: 2 rendered frames and the generated ones after
+    // each); 2 otherwise
+    constexpr unsigned sFramesInFlight = 8;
 
     // How a render pass treats one attachment
     struct AttachmentUse
@@ -136,6 +138,7 @@ namespace Alpha3::Vk
         std::unordered_map<VkDescriptorSet, VkDescriptorPool> mKeptOwners;
         Frame mFrames[sFramesInFlight];
         unsigned mFrameSlot = 0;
+        unsigned mInFlight = 2;
         unsigned mPart = 0; // which of the frame's command buffers is being recorded
         uint64_t mCommandsGeneration = 0;
         uint64_t mFrameNumber = 0;

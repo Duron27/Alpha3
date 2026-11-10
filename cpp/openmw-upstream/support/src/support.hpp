@@ -108,6 +108,9 @@ namespace Alpha3
     // present (and generated ones between, each through present too); false when frame generation is off, and the caller
     // swaps as it would. desktop: the Zink context (desktop GLSL, no Swappy).
     bool frameGenRequested();
+    // The camera and textures the engine handed over for a frame (frameGenSubmitView), for Vulkan's frame generation
+    struct FrameGenView;
+    bool frameGenFindView(unsigned frame, FrameGenView& out);
     // present(presentAt): presentAt is when the frame is to be shown (CLOCK_MONOTONIC nanoseconds), 0 as soon as it can.
     // periodNs: the display's refresh period, 0 when unknown (generated frames are then never rested).
     bool frameGenSwap(osg::GraphicsContext& gc, int width, int height, bool desktop, int64_t periodNs,

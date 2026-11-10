@@ -478,8 +478,17 @@ namespace Alpha3::Vk
 
     void Resources::beginFrame()
     {
-        mFrame = mContext.frameNumber();
+        // the translator's frames: frame generation's frames between them (more of the context's) do not count, or
+        // what the translator keeps for a number of its frames would outlive what is kept here
+        ++mFrame;
         mUploadedThisFrame = 0;
+        resetStream();
+        if (mFrame % 300 == 0)
+            purge();
+    }
+
+    void Resources::resetStream()
+    {
         std::vector<Chunk>& chunks = mChunks[mContext.frameSlot()];
         // the chunks beyond the first that this slot did not need last time are let go
         while (chunks.size() > 1 && chunks.back().mUsed == 0)
@@ -489,8 +498,6 @@ namespace Alpha3::Vk
         }
         for (Chunk& chunk : chunks)
             chunk.mUsed = 0;
-        if (mFrame % 300 == 0)
-            purge();
     }
 
     Span Resources::stream(VkDeviceSize size, VkDeviceSize alignment)

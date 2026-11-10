@@ -86,6 +86,9 @@ namespace Alpha3::Vk
         // At the start of a frame (its command buffer begun): the ring's part for this frame is free again, and what
         // was let go of long enough ago is destroyed
         void beginFrame();
+        // At the start of a frame of the context's that is not the translator's (frame generation): only the ring's
+        // part for it is free again
+        void resetStream();
 
         // Mapped memory for this frame only
         Span stream(VkDeviceSize size, VkDeviceSize alignment);
