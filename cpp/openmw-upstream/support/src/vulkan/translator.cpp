@@ -1448,6 +1448,13 @@ void main()
                             depthValue, stencilValue))
                         return;
                     mPass = mContext.windowCompatiblePass();
+                    // the first window pass starts the frame's second command buffer: nothing is bound on it
+                    commands = mContext.commands();
+                    if (mContext.commandsGeneration() != mBoundGeneration)
+                    {
+                        forgetBindings();
+                        mBoundGeneration = mContext.commandsGeneration();
+                    }
                 }
                 else
                 {
@@ -3155,6 +3162,12 @@ void main()
             osg::ref_ptr<osg::Vec4Array> mConstants[3];
             // what is bound in the command buffer (forgotten at each render pass and other binds)
             VkPipeline mBoundPipeline = VK_NULL_HANDLE;
+            uint64_t mBoundGeneration = 0;
+            std::vector<VkDescriptorImageInfo> mLastImages;
+            VkDescriptorSetLayout mLastSetLayout = VK_NULL_HANDLE;
+            uint64_t mSameImageBinds = 0;
+            uint64_t mVertices = 0;
+            uint64_t mPipelineBinds = 0, mVertexBinds = 0, mSetBinds = 0, mUniformBytes = 0, mPipelineCount = 0;
             const GeometryEntry* mBoundVertices = nullptr;
             uint64_t mBoundVerticesVersion = 0;
             VkBuffer mBoundIndexBuffer = VK_NULL_HANDLE;

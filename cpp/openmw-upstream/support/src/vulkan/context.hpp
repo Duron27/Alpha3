@@ -43,7 +43,9 @@ namespace Alpha3::Vk
         // ago, then lets go of what it used. False when there is nothing to draw on (no window).
         bool beginFrame();
         bool frameBegun() const { return mBegun; }
-        VkCommandBuffer commands() const { return mFrames[mFrameSlot].mCommands; }
+        VkCommandBuffer commands() const { return mFrames[mFrameSlot].mCommands[mPart]; }
+        // Counts the command buffers begun: state bound on an earlier one (pipelines, buffers) is gone
+        uint64_t commandsGeneration() const { return mCommandsGeneration; }
         // Commands that go before the frame's (uploads, an image's first layout): submitted ahead of them, so they may
         // be recorded while a render pass is open on the frame's commands
         VkCommandBuffer uploadCommands();
@@ -89,13 +91,17 @@ namespace Alpha3::Vk
         bool createSwapchain();
         void destroySwapchain();
         bool acquire();
+        // Submits the frame's first part (before the swap chain image is acquired) and begins the second
+        void submitFirstPart();
 
         struct Frame
         {
             VkCommandPool mPool = VK_NULL_HANDLE;
-            VkCommandBuffer mCommands = VK_NULL_HANDLE;
-            VkCommandBuffer mUploads = VK_NULL_HANDLE;
-            bool mUploadsBegun = false;
+            // a frame is submitted in two parts: what is drawn before the window's first pass (render targets) at
+            // once, so the GPU starts on it while the swap chain image is waited for, and the rest with the image
+            VkCommandBuffer mCommands[2]{};
+            VkCommandBuffer mUploads[2]{};
+            bool mUploadsBegun[2]{};
             std::vector<VkDescriptorPool> mDescriptorPools;
             size_t mDescriptorPool = 0; // the first that may have room
             VkFence mFence = VK_NULL_HANDLE;
@@ -130,6 +136,8 @@ namespace Alpha3::Vk
         std::unordered_map<VkDescriptorSet, VkDescriptorPool> mKeptOwners;
         Frame mFrames[sFramesInFlight];
         unsigned mFrameSlot = 0;
+        unsigned mPart = 0; // which of the frame's command buffers is being recorded
+        uint64_t mCommandsGeneration = 0;
         uint64_t mFrameNumber = 0;
         bool mBegun = false;
         bool mAcquired = false;

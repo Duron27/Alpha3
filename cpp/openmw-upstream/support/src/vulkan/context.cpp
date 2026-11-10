@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 
 #include <android/native_window.h>
 
@@ -11,6 +12,7 @@
 #include <vk_mem_alloc.h>
 
 #include <components/debug/debuglog.hpp>
+#include <components/settings/settings.hpp>
 
 namespace Alpha3::Vk
 {
@@ -99,8 +101,9 @@ namespace Alpha3::Vk
             allocate.commandPool = frame.mPool;
             allocate.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
             allocate.commandBufferCount = 1;
-            vkAllocateCommandBuffers(device->mDevice, &allocate, &frame.mCommands);
-            vkAllocateCommandBuffers(device->mDevice, &allocate, &frame.mUploads);
+            allocate.commandBufferCount = 2;
+            vkAllocateCommandBuffers(device->mDevice, &allocate, frame.mCommands);
+            vkAllocateCommandBuffers(device->mDevice, &allocate, frame.mUploads);
             VkFenceCreateInfo fence{ VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
             fence.flags = VK_FENCE_CREATE_SIGNALED_BIT;
             vkCreateFence(device->mDevice, &fence, nullptr, &frame.mFence);
@@ -162,7 +165,39 @@ namespace Alpha3::Vk
         // the size the engine draws at (the compositor scales it to the screen, as with OpenGL ES)
         mExtent.width = std::clamp(mWanted.width, caps.minImageExtent.width, std::max(caps.maxImageExtent.width, 1u));
         mExtent.height = std::clamp(mWanted.height, caps.minImageExtent.height, std::max(caps.maxImageExtent.height, 1u));
-        uint32_t images = std::max(caps.minImageCount, 3u);
+        // the present modes, logged; FIFO is used
+        int vsyncMode = 1;
+        try
+        {
+            vsyncMode = Settings::Manager::getInt("vsync mode", "Video");
+        }
+        catch (const std::exception&)
+        {
+        }
+        VkPresentModeKHR presentMode = VK_PRESENT_MODE_FIFO_KHR;
+        {
+            uint32_t count = 0;
+            vkGetPhysicalDeviceSurfacePresentModesKHR(mDevice.mPhysical, mSurface, &count, nullptr);
+            std::vector<VkPresentModeKHR> modes(count);
+            vkGetPhysicalDeviceSurfacePresentModesKHR(mDevice.mPhysical, mSurface, &count, modes.data());
+            std::string names;
+            for (VkPresentModeKHR mode : modes)
+                names += " " + std::to_string(static_cast<int>(mode));
+            // mailbox only on asking: on Android it lets frames replace one another before they are shown (at 51
+            // frames a second drawn, 39 reached the screen on the SM-T720, against 51 with FIFO and four images)
+            if (vsyncMode == 0 && std::getenv("A3_VK_MAILBOX") != nullptr)
+                for (VkPresentModeKHR wanted : { VK_PRESENT_MODE_MAILBOX_KHR, VK_PRESENT_MODE_IMMEDIATE_KHR })
+                    if (std::find(modes.begin(), modes.end(), wanted) != modes.end())
+                    {
+                        presentMode = wanted;
+                        break;
+                    }
+            Log(Debug::Info) << "Vulkan: present modes" << names << "; vsync mode " << vsyncMode << ", using "
+                             << static_cast<int>(presentMode);
+        }
+        // four: one shown, one waiting to be, one the GPU draws and one the next frame is recorded for (two frames are
+        // in flight). With three the next frame's acquire waited on the display, and the GPU with it.
+        uint32_t images = std::max(caps.minImageCount, 4u);
         if (caps.maxImageCount > 0)
             images = std::min(images, caps.maxImageCount);
 
@@ -184,7 +219,7 @@ namespace Alpha3::Vk
         info.compositeAlpha = (caps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR)
             ? VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR
             : VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
-        info.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+        info.presentMode = presentMode;
         info.clipped = VK_TRUE;
         VkSwapchainKHR old = mSwapchain;
         info.oldSwapchain = old;
@@ -379,13 +414,15 @@ namespace Alpha3::Vk
             release();
         frame.mReleases.clear();
         vkResetCommandPool(mDevice.mDevice, frame.mPool, 0);
-        frame.mUploadsBegun = false;
+        frame.mUploadsBegun[0] = frame.mUploadsBegun[1] = false;
         for (VkDescriptorPool pool : frame.mDescriptorPools)
             vkResetDescriptorPool(mDevice.mDevice, pool, 0);
         frame.mDescriptorPool = 0;
         VkCommandBufferBeginInfo begin{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
         begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        vkBeginCommandBuffer(frame.mCommands, &begin);
+        vkBeginCommandBuffer(frame.mCommands[0], &begin);
+        mPart = 0;
+        ++mCommandsGeneration;
         mBegun = true;
         mAcquired = false;
         mWindowDrawn = false;
@@ -423,9 +460,41 @@ namespace Alpha3::Vk
         return true;
     }
 
+    void Context::submitFirstPart()
+    {
+        Frame& frame = mFrames[mFrameSlot];
+        if (mPart != 0 || mInWindowPass)
+            return;
+        vkEndCommandBuffer(frame.mCommands[0]);
+        VkCommandBuffer buffers[2];
+        uint32_t bufferCount = 0;
+        if (frame.mUploadsBegun[0])
+        {
+            vkEndCommandBuffer(frame.mUploads[0]);
+            buffers[bufferCount++] = frame.mUploads[0];
+        }
+        buffers[bufferCount++] = frame.mCommands[0];
+        VkSubmitInfo submit{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+        submit.commandBufferCount = bufferCount;
+        submit.pCommandBuffers = buffers;
+        const VkResult result = vkQueueSubmit(mDevice.mQueue, 1, &submit, VK_NULL_HANDLE);
+        if (result != VK_SUCCESS)
+            Log(Debug::Error) << "Vulkan: vkQueueSubmit (first part): " << resultName(result);
+        mPart = 1;
+        ++mCommandsGeneration;
+        VkCommandBufferBeginInfo begin{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(frame.mCommands[1], &begin);
+    }
+
     bool Context::beginWindowPass(bool clearColor, const float color[4], bool clearDepth, float depth, uint32_t stencil)
     {
-        if (!beginFrame() || !acquire())
+        if (!beginFrame())
+            return false;
+        // the render targets drawn so far go to the GPU before the image is waited for
+        if (!mAcquired)
+            submitFirstPart();
+        if (!acquire())
             return false;
         AttachmentUse colorUse;
         colorUse.mFormat = mFormat;
@@ -460,14 +529,14 @@ namespace Alpha3::Vk
     VkCommandBuffer Context::uploadCommands()
     {
         Frame& frame = mFrames[mFrameSlot];
-        if (!frame.mUploadsBegun)
+        if (!frame.mUploadsBegun[mPart])
         {
             VkCommandBufferBeginInfo begin{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
             begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-            vkBeginCommandBuffer(frame.mUploads, &begin);
-            frame.mUploadsBegun = true;
+            vkBeginCommandBuffer(frame.mUploads[mPart], &begin);
+            frame.mUploadsBegun[mPart] = true;
         }
-        return frame.mUploads;
+        return frame.mUploads[mPart];
     }
 
     VkDescriptorSet Context::allocateSet(VkDescriptorSetLayout layout)
@@ -637,15 +706,15 @@ namespace Alpha3::Vk
                 endWindowPass();
         }
         endWindowPass();
-        vkEndCommandBuffer(frame.mCommands);
+        vkEndCommandBuffer(frame.mCommands[mPart]);
         VkCommandBuffer buffers[2];
         uint32_t bufferCount = 0;
-        if (frame.mUploadsBegun)
+        if (frame.mUploadsBegun[mPart])
         {
-            vkEndCommandBuffer(frame.mUploads);
-            buffers[bufferCount++] = frame.mUploads;
+            vkEndCommandBuffer(frame.mUploads[mPart]);
+            buffers[bufferCount++] = frame.mUploads[mPart];
         }
-        buffers[bufferCount++] = frame.mCommands;
+        buffers[bufferCount++] = frame.mCommands[mPart];
 
         const VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
         VkSubmitInfo submit{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
