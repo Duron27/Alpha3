@@ -294,3 +294,120 @@ Next for the creator:
   - `vkrun.sh`: set `renderer =` in the device settings.cfg, launch with `--load-savegame saves/Duron/Autosave.omwsave`, take timestats, a screenshot and logcat.
   - `measure.sh`: settle 50 s, then `--script-run novan.txt` (DisableVanityMode) and print the Vulkan counters.
   - `prof.sh`: simpleperf `--call-graph dwarf` on the render thread, using the unstripped `libopenmw_upstream.so` from `.cxx` with `binary_cache_builder.py`.
+
+### 2026-11-09 (later): GPU and CPU work, UNCOMMITTED (all in `support/src/`)
+
+**Test view:** use `saves/Duron/Quicksave.omwsave` from now on. It shows the canal: water, bridges, town, about 1270 draws and 375k triangles.
+
+**Two tablets are attached now. Always pass `-s R52M40E147K` (the SM-T720).**
+- R52NA12J8FW is an SM-T867U Galaxy Tab S6 (Snapdragon 855, Adreno 640, 6 GB, Vulkan 1.1.128). It is not tested yet.
+
+**Results on the Quicksave view (SM-T720, system driver, 1280x800):**
+- GLES: 31.2–31.8 fps, CPU-bound. Vulkan before: 28.9 fps. **Vulkan now: 33.0 fps.**
+- Vulkan GPU now: SceneCam 22.7 ms (was 27), Reflection 6.56 ms (was 6.75), opaque copy 1.0 ms.
+- GL timer queries (the inspector) for the same view: Reflection 2.95 ms, SceneCam 12.4 + 6.2 ms.
+
+**Changes:**
+- `vulkan/programs.cpp`:
+  - `centroid` is stripped. Every pass is single-sampled, and the Adreno 615 Vulkan driver charged ~3.2 ms of SceneCam for it.
+  - Clip distances are written only by the clip variants (`variant(..., clip)`). Writing them on every draw cost 1.2 ms of scene time.
+- `vulkan/context.cpp`:
+  - Two-part submit: render-target work goes before acquire.
+  - FIFO with 4 images. Mailbox only with `vsync mode = 0` and the env var `A3_VK_MAILBOX`.
+  - Most of the old "23 ms recording" was time blocked in `vkAcquireNextImageKHR`.
+- `vulkan/translator.cpp` and `vulkan/resources.cpp`: CPU caches:
+  - kind per typeid; static_cast in `derive`
+  - accumulated state and shared blocks kept across frames
+  - textures and samplers checked once per frame
+  - cofactor normal matrix; memcpy for uniform arrays
+  - recording now takes 11–15 ms
+- `vulkan/translator.cpp`:
+  - nested GPU timestamps
+  - more counters in the 300-frame log line
+- `inspector.cpp`: create `/storage/emulated/0/Alpha3/cache/inspect.request` to start the GL inspector. It writes `cache/inspector.json`.
+
+**Measuring switches, debug only (drop or keep before committing):** `/storage/emulated/0/Alpha3/vkexp.txt` holds a bit mask, read once.
+- 1: skip descriptor rebinds
+- 2: draw everything twice
+- 4: no point lights
+- 16: flat objects/terrain fragment
+- 32: same, running the real main
+- 64: diffuse only
+- 128: keep `centroid`
+- 256: flat water too
+
+**GPU breakdown of SceneCam (before the centroid fix, 26 ms):**
+- flat objects/terrain fragment: 14.7 ms
+- with the diffuse texture: 17.4 ms
+- with water flat too: 9.8 ms (water is about 5 ms)
+
+**Ruled out:**
+- uniform block size: objects' fragment block is 336 bytes, and pruning unread uniforms changed nothing
+- varying count (objects 11 locations, terrain 13)
+- light block size, light loop, spirv-opt, mipmaps, samplers, ASTC, SurfaceFlinger, GPU clock, render target formats (RGBA8 + D24S8, same as GL)
+
+**Open:**
+- Reflection is still 2.2× GL's time. It is vertex or per-draw bound (drawing everything twice adds 5.4 ms).
+- Ideas: mediump/RelaxedPrecision; per-draw descriptor cost (4 dynamic UBOs); the vertex attribute formats.
+- Descriptor binds cost the GPU nothing measurable: binding every set a second time, with a draw in between, changed no pass time. So push constants for the matrices are not worth doing.
+- The S6 (R52NA12J8FW) was unplugged when its test was due, so it is still untested.
+
+### 2026-11-10 (overnight, UNCOMMITTED for review): shadows, frame generation, hitches, local map
+The user asked for no commits. Everything below is in the working tree. Test saves: `saves/Duron/Autosave.omwsave` (sunny forest path) and `Quicksave.omwsave`.
+
+**Shadows on Vulkan (they match GLES now):**
+- `vulkan/translator.cpp`: the draw block's normal matrix was transposed. It is now `normal[c*4+r] = inverse[r][c]`, because OSG builds its Matrix3 from columns of the inverse. This was why the sun's diffuse light was missing.
+- `vulkan/programs.cpp` `fixShortCircuits()`: SPIRV-Cross writes `a && b` as `bool t; if (a) t = b; else t = a;`. The Adreno 615 Vulkan driver gets `t` wrong when `a` is a uniform-block bool, and leaves cast solid shadows because of it. The else branch is rewritten to `false` (and the then branch of `||` to `true`).
+- `PipelineState::mDepthClamp` follows GL_DEPTH_CLAMP.
+- Depth-only targets fall back to a format that filters linearly.
+- Color, SecondaryColor and Normal inputs are always normalized.
+
+**Frame generation on Vulkan (the "glitchy when looking around quickly" report):**
+- **Main bug:** the warp moved nothing behind the first-person model.
+  - The translator clears the scene depth for the first-person bin (`DepthClearCallback`). GL draws that bin against a proxy depth instead, so in GL the scene depth stays world-only.
+  - On Vulkan the scene depth therefore held only the bow, and every world pixel failed the "opaque nearer than scene" test, so it got zero motion. Generated frames repeated the last frame (shown with the tint: shift 0 every time).
+  - **Fix:** `mFirstPersonCleared` → uniform `uFirstPerson`. When it is set, the world depth comes from the opaque copy, and a scene depth below 1 marks the first-person model (no motion).
+  - The opaque copy is now forced on frames that generate.
+- **Placement:** generated frames are placed where they are shown. `FrameGenLock::shownAt(i, period)` = i × refresh ÷ measured interval (capped at the even split). At ~21 fps rendered the 1:1 pattern runs as real = 1 refresh, generated = 2. Before, the motion went 0.5 in 16.7 ms and then 0.5 in 33 ms; now its speed is even.
+- **Screen edges:** what comes into view past the edge is mirrored instead of clamped (no streaks). This is in both the Vulkan warp and GLES `framegen.cpp`.
+- **Program compiles off the draw thread:** `Programs::prepare(Job&)` (merge stages, uniform initializers, cache key, cache read) now runs on the worker too. Before, it cost the draw thread 90–180 ms per new program mid-turn.
+  - Worker threads run at nice 10.
+- **Periodic hitch:** a 70–95 ms frame every 300 frames came from the `mAccumulated` sweep (~40k entries). `sweepSlice()` now does 1/300 of the buckets each frame.
+- **Measured** with `turnrec.sh` (5 s screenrecord while swiping the look joystick):
+  - largest gap mid-turn: 0.23 s → 0.10 s cold, 0.07–0.1 warm
+  - generated frames sit between their real frames in proportion to time
+  - screenrecord drops frames shown for only one refresh, so judge by SurfaceFlinger timestats: 42 fps shown = 21 + 21
+- **Answers to the user's frame-gen questions:**
+  - At ~21 fps rendered, 1:1 is the only pattern that reaches 60 shown frames. A 2-rendered/1-generated pattern needs at least 40 fps rendered.
+  - "the lighter pattern did not hold" means the periodic half-second try of fewer generated frames failed, so it went back.
+
+**Features checked under Vulkan:**
+- **Texture conversion (ASTC 6x6):** on. The GL pbuffer answers the capability check, and Vulkan reports BC no / ETC2 yes / ASTC yes.
+- **Impostors and distant meshes:** listed and drawn as ordinary NIFs.
+- **Texture streaming:** `Resources::upload` now also calls `texturePreloadTextureLoading` and `textureStreamingTextureLoading`, as GL's upload hook does. Before, textures the scene camera never draws were not made full size, and the preload list was not kept.
+  - By design, streaming does nothing for what the main thread loads (save load, coc). It shows while walking into new cells.
+- **Occlusion culling:** works. It culls 70–90 of ~700 tested objects and keeps itself on (45.4 ms with vs 46.0 ms without).
+  - The tablet's settings.cfg had it off, so it was turned back on. Backup: `settings.cfg.before-occl2`.
+- **Local map (minimap) was black on Vulkan (fixed):** its camera draws once per cell, and its programs were still compiling then, so its draws were left out for good.
+  - **Fix:** an unnamed render-to-texture camera that was not drawn the frame before waits for its programs and pipelines (`mCamerasDrawn`), as the composite maps do.
+- The "drawn as the dummy" log line now includes the texture's own size.
+
+**Performance at Autosave (SM-T720, 1280x800, shadows on, frame gen on):**
+- Vulkan: 41.9 fps shown (21 rendered). GLES: 30.1 shown (15 rendered).
+- GPU per frame:
+
+  | Pass | Vulkan | GLES (inspector) |
+  |---|---|---|
+  | SceneCam | 28.2 ms | 38.7 ms |
+  | Shadows | 7.5–9 ms | 5.3 ms |
+  | Reflection | 6.3 ms | 3.6 ms |
+  | **Total** | **44 ms** | **53 ms** |
+
+- Vulkan's remaining gap is in the draw-heavy small passes (shadow cascades, reflection).
+- GLES frame generation holds the draw thread ~17.6 ms per generated swap ("generated swaps 17.6" in its timing log). That is a likely cause of GLES rendering only ~15 fps here, and is worth a look.
+
+**Tablet state:**
+- `renderer = vulkan`, shadows on, occlusion culling on.
+- Still to restore: point light shadows 4, seamless doors and cells.
+- `dump_shaders` was removed.
+- **Tried and reverted:** pipelines without a fragment stage for shadow casters that cannot discard (`shadowcasting.frag` with alpha function ALWAYS and `alphaTestShadows` false). They were used, but the shadow pass time did not change (8.1–8.4 ms), so the cascades are not limited by fragment work.

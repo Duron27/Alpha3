@@ -1,6 +1,9 @@
 #include "device.hpp"
 
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -12,8 +15,38 @@
 
 #include <components/debug/debuglog.hpp>
 
+#include "../support.hpp"
+
 namespace Alpha3::Vk
 {
+    std::filesystem::path pipelineCacheFile()
+    {
+        return cacheDirectory() / "vulkan" / "pipelines.bin";
+    }
+
+    void savePipelineCache(const Device& device)
+    {
+        if (device.mPipelineCache == VK_NULL_HANDLE)
+            return;
+        size_t size = 0;
+        if (vkGetPipelineCacheData(device.mDevice, device.mPipelineCache, &size, nullptr) != VK_SUCCESS || size == 0)
+            return;
+        std::vector<char> data(size);
+        if (vkGetPipelineCacheData(device.mDevice, device.mPipelineCache, &size, data.data()) != VK_SUCCESS)
+            return;
+        const std::filesystem::path file = pipelineCacheFile();
+        std::error_code ec;
+        std::filesystem::create_directories(file.parent_path(), ec);
+        const std::filesystem::path temporary = file.string() + ".tmp";
+        {
+            std::ofstream out(temporary, std::ios::binary);
+            out.write(data.data(), static_cast<std::streamsize>(size));
+            if (!out)
+                return;
+        }
+        std::filesystem::rename(temporary, file, ec);
+    }
+
     namespace
     {
         bool hasExtension(const std::vector<VkExtensionProperties>& list, const char* name)
@@ -174,8 +207,25 @@ namespace Alpha3::Vk
                 return nullptr;
             }
 
+            // the pipelines the driver made in earlier runs (Programs saves it); the driver checks the data is its own
             VkPipelineCacheCreateInfo cacheInfo{ VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO };
-            vkCreatePipelineCache(device->mDevice, &cacheInfo, nullptr, &device->mPipelineCache);
+            std::string cached;
+            {
+                std::ifstream in(pipelineCacheFile(), std::ios::binary);
+                if (in)
+                    cached.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+            }
+            cacheInfo.initialDataSize = cached.size();
+            cacheInfo.pInitialData = cached.empty() ? nullptr : cached.data();
+            if (vkCreatePipelineCache(device->mDevice, &cacheInfo, nullptr, &device->mPipelineCache) != VK_SUCCESS
+                && !cached.empty())
+            {
+                cacheInfo.initialDataSize = 0;
+                cacheInfo.pInitialData = nullptr;
+                vkCreatePipelineCache(device->mDevice, &cacheInfo, nullptr, &device->mPipelineCache);
+            }
+            else if (!cached.empty())
+                Log(Debug::Info) << "Vulkan: pipeline cache of " << cached.size() / 1024 << " KiB loaded";
 
             device->mBcTextures = enabled.textureCompressionBC && sampledFormat(device->mPhysical, VK_FORMAT_BC1_RGBA_UNORM_BLOCK)
                 && sampledFormat(device->mPhysical, VK_FORMAT_BC3_UNORM_BLOCK);

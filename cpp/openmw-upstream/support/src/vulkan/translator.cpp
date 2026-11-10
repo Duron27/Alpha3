@@ -35,6 +35,7 @@
 #include <sstream>
 #include <typeinfo>
 #include <unordered_map>
+#include <unordered_set>
 
 #include <osg/BlendColor>
 #include <osg/BlendEquation>
@@ -538,6 +539,8 @@ namespace Alpha3::Vk
             if (auto* front = static_cast<const osg::FrontFace*>(state.attribute(osg::StateAttribute::FRONTFACE)))
                 state.mGlCounterClockwise = front->getMode() == osg::FrontFace::COUNTER_CLOCKWISE;
 
+            // the shadow casters: in front of the shadow camera's near plane they are drawn at it, not cut away
+            fixed.mDepthClamp = state.mode(0x864F, false); // GL_DEPTH_CLAMP
             if (state.mode(0x8037, false)) // GL_POLYGON_OFFSET_FILL
                 if (auto* offset
                     = static_cast<const osg::PolygonOffset*>(state.attribute(osg::StateAttribute::POLYGONOFFSET)))
@@ -796,12 +799,13 @@ namespace Alpha3::Vk
                 out = in;
         }
 
-        VkFormat vertexFormat(const osg::Array& array, bool integer)
+        // normalized: OSG's State passes GL_TRUE for the colours and normals whatever the array says
+        VkFormat vertexFormat(const osg::Array& array, bool integer, bool normalized)
         {
             const unsigned size = array.getDataSize();
             if (size < 1 || size > 4)
                 return VK_FORMAT_UNDEFINED;
-            const bool normalize = array.getNormalize();
+            const bool normalize = normalized || array.getNormalize();
             switch (array.getDataType())
             {
                 case 0x1406: // GL_FLOAT
@@ -918,6 +922,7 @@ uniform vec4 uProj;
 uniform float uReversed;
 uniform float uAmount;
 uniform float uTint;
+uniform float uFirstPerson;
 layout(location = 0) out vec4 color;
 float viewZ(float d)
 {
@@ -929,9 +934,21 @@ float viewZ(float d)
 }
 vec2 motionAt(vec2 at)
 {
-    float z = viewZ(texture(uDepth, at).r);
-    if (-viewZ(texture(uOpaqueDepth, at).r) < -z * 0.9)
-        return vec2(0.0);
+    float z;
+    if (uFirstPerson > 0.5)
+    {
+        // the scene's depth was cleared for the first person model, so it holds only that model (which moves with
+        // the camera); the world's depth is the opaque copy's, from before the clear
+        if (texture(uDepth, at).r < 1.0)
+            return vec2(0.0);
+        z = viewZ(texture(uOpaqueDepth, at).r);
+    }
+    else
+    {
+        z = viewZ(texture(uDepth, at).r);
+        if (-viewZ(texture(uOpaqueDepth, at).r) < -z * 0.9)
+            return vec2(0.0);
+    }
     vec2 ndc = at * 2.0 - 1.0;
     vec4 p = uCurToPrev * vec4(ndc.x * -z / uProj.x, ndc.y * -z / uProj.y, z, 1.0);
     if (p.z > -0.001)
@@ -949,7 +966,9 @@ void main()
     }
     vec2 motion = motionAt(uv);
     motion = motionAt(clamp(uv - uAmount * motion, vec2(0.0), vec2(1.0)));
-    vec2 inCur = clamp(uv - uAmount * motion, vec2(0.0), vec2(1.0));
+    // what comes into view past the screen's edge is mirrored from what is inside it (clamping it would stretch the
+    // edge's pixels into streaks across a band as wide as the turn)
+    vec2 inCur = 1.0 - abs(1.0 - mod(uv - uAmount * motion, 2.0));
     color = vec4(texture(uCur, inCur).rgb + vec3(0.25, 0.0, 0.0) * uTint, 1.0);
 }
 )";
@@ -963,6 +982,27 @@ void main()
             rotation.slerp(fraction, a.getRotate(), b.getRotate());
             const osg::Vec3d position = a.getTrans() * (1.0 - fraction) + b.getTrans() * fraction;
             return osg::Matrixd::inverse(osg::Matrixd::rotate(rotation) * osg::Matrixd::translate(position));
+        }
+
+        // The entries of a map that are stale in 1/300 of its buckets (the next ones from [next]): all of them every 300
+        // frames, a few hundred a frame
+        template <class Map, class Stale>
+        void sweepSlice(Map& map, size_t& next, const Stale& stale)
+        {
+            const size_t buckets = map.bucket_count();
+            if (buckets == 0)
+                return;
+            if (next >= buckets)
+                next = 0;
+            const size_t end = std::min(buckets, next + buckets / 300 + 1);
+            std::vector<typename Map::key_type> gone;
+            for (size_t bucket = next; bucket < end; ++bucket)
+                for (auto it = map.begin(bucket); it != map.end(bucket); ++it)
+                    if (stale(it->second))
+                        gone.push_back(it->first);
+            next = end;
+            for (const auto& key : gone)
+                map.erase(key);
         }
 
         class Translator
@@ -982,6 +1022,7 @@ void main()
                 if (osg::State* state = sceneView.getState())
                     state->setFrameStamp(sceneView.getFrameStamp());
                 generateFrames(sceneView);
+                mPrograms.poll();
                 if (!mContext.beginFrame())
                 {
                     runFinalDrawCallbacks(sceneView, false);
@@ -996,20 +1037,12 @@ void main()
                 mState = sceneView.getState();
                 mFrameNumber = sceneView.getFrameStamp() ? sceneView.getFrameStamp()->getFrameNumber() : 0;
                 ++mFrameCounter;
-                // the leaves' states and shared blocks are found by frame stamp; the ones not used for a while go
-                if (mFrameCounter % 300 == 0)
-                {
-                    for (auto it = mAccumulated.begin(); it != mAccumulated.end();)
-                        if (mFrameCounter - it->second.mFrame > 60)
-                            it = mAccumulated.erase(it);
-                        else
-                            ++it;
-                    for (auto it = mSharedBlocks.begin(); it != mSharedBlocks.end();)
-                        if (mFrameCounter - it->second.mFrame > 60)
-                            it = mSharedBlocks.erase(it);
-                        else
-                            ++it;
-                }
+                // the leaves' states and shared blocks are found by frame stamp; the ones not used for a while go. A
+                // slice of them a frame: there are tens of thousands, and walking them all at once took 75 ms on the
+                // SM-T720
+                const auto stale = [this](const auto& entry) { return mFrameCounter - entry.mFrame > 60; };
+                sweepSlice(mAccumulated, mAccumulatedSweep, stale);
+                sweepSlice(mSharedBlocks, mSharedSweep, stale);
                 mKeep.clear();
                 forgetBindings();
                 // the geometries let go of or not drawn for a while
@@ -1028,6 +1061,8 @@ void main()
                         else
                             ++it;
                 mSceneColor = nullptr;
+                mFirstPersonCleared = false;
+                mCamerasDrawn[mFrameCounter % 2].clear();
                 if (mFrameNumber % 300 == 0)
                     for (auto it = mParticles.begin(); it != mParticles.end();)
                     {
@@ -1113,7 +1148,8 @@ void main()
                 {
                     osg::RenderInfo info(mState, nullptr);
                     info.pushCamera(const_cast<osg::Camera*>(stage->getCamera()));
-                    if (!Alpha3::opaqueCopyWanted(bin, info))
+                    // frame generation reads the world's depth from it when the first person model clears the depth
+                    if (!Alpha3::opaqueCopyWanted(bin, info) && !(frameGenWanted() && mGenLock.generated() > 0))
                         return;
                 }
                 const osg::Texture* colorTexture
@@ -1519,6 +1555,23 @@ void main()
                     return;
                 if (!target.mWindow && stage.getFrameBufferObject() != nullptr && target.mColor != nullptr)
                     mSceneColor = target.mColor;
+                // A camera without a name drawn into a texture that was not drawn the frame before (the local map's,
+                // drawn once for a cell): its programs and pipelines are made now rather than its draws left out
+                // while they are made, which would leave its texture without them for good. The cameras drawn every
+                // frame (scene, shadows, reflection) have names.
+                const osg::Camera* stageCamera = stage.getCamera();
+                const bool oneShot = !target.mWindow && stageCamera != nullptr && stageCamera->getName().empty()
+                    && mCamerasDrawn[(mFrameCounter + 1) % 2].count(stageCamera) == 0;
+                if (stageCamera != nullptr)
+                    mCamerasDrawn[mFrameCounter % 2].insert(stageCamera);
+                const bool waitedBefore = mWaitForPrograms;
+                mWaitForPrograms = waitedBefore || oneShot;
+                struct RestoreWait
+                {
+                    bool& mWait;
+                    bool mBefore;
+                    ~RestoreWait() { mWait = mBefore; }
+                } restoreWait{ mWaitForPrograms, waitedBefore };
 
                 // the stage's viewport, which bounds its clears too (OSG sets the scissor to it)
                 const osg::Viewport* viewport = stage.getViewport();
@@ -1746,6 +1799,7 @@ void main()
                         attachment.clearValue.depthStencil = { 1.f, 0 };
                         VkClearRect rect{ scissorOf(mArea), 0, 1 };
                         vkCmdClearAttachments(mContext.commands(), 1, &attachment, 1, &rect);
+                        mFirstPersonCleared = true;
                     }
                 }
                 auto child = bin.getRenderBinList().begin();
@@ -1991,7 +2045,8 @@ void main()
                 const bool clip = state.mClipModes != 0;
                 if (state.mVariant == nullptr || state.mVariantProgram != state.mProgram || state.mVariant->mClips != clip)
                 {
-                    state.mVariant = mPrograms.variant(*state.mProgram, state.mDefines, *mState, clip);
+                    state.mVariant
+                        = mPrograms.variant(*state.mProgram, state.mDefines, *mState, clip, mWaitForPrograms);
                     state.mVariantProgram = state.mProgram;
                 }
                 return state.mVariant;
@@ -2238,7 +2293,8 @@ void main()
                                             << (first ? first->s() : 0) << "x" << (first ? first->t() : 0)
                                             << " format 0x" << std::hex << (first ? first->getPixelFormat() : 0)
                                             << std::dec << " data " << (first && first->data() ? "yes" : "no")
-                                            << " shadow " << source.mShadow;
+                                            << " shadow " << source.mShadow << " texture " << texture->getTextureWidth()
+                                            << "x" << texture->getTextureHeight() << " (" << texture << ")";
                     }
                     if (dummy)
                         image = mResources.dummy(source.mShadow);
@@ -2437,7 +2493,7 @@ void main()
                     const osg::Matrixf matrices[3] = { osg::Matrixf(modelViewMatrix), osg::Matrixf(projectionMatrix),
                         osg::Matrixf(modelViewMatrix * projectionMatrix) };
                     std::memcpy(span.mData, matrices, sizeof(matrices));
-                    // the inverse of the upper 3x3 (what inverting the matrix without its translation gives there)
+                    // the inverse of the upper 3x3, column c of the inverse as column c (OSG builds its Matrix3 that way)
                     const osg::Matrix& m = modelViewMatrix;
                     const double c00 = m(1, 1) * m(2, 2) - m(1, 2) * m(2, 1);
                     const double c01 = m(1, 2) * m(2, 0) - m(1, 0) * m(2, 2);
@@ -2457,7 +2513,7 @@ void main()
                     float normal[12]{};
                     for (int c = 0; c < 3; ++c)
                         for (int r = 0; r < 3; ++r)
-                            normal[c * 4 + r] = static_cast<float>(inverse[c][r]);
+                            normal[c * 4 + r] = static_cast<float>(inverse[r][c]);
                     std::memcpy(span.mData + 192, normal, sizeof(normal));
                     if (clipModes != 0)
                         ++mClippedDraws;
@@ -2550,6 +2606,8 @@ void main()
                     VkRenderPass mPass = VK_NULL_HANDLE;
                     PipelineState mFixed;
                     std::vector<VkPipeline> mPerPrimitive;
+                    uint64_t mGeneration = 0; // Programs::pipelineGeneration when one still being made was asked for
+                    bool mWaiting = false; // one of them is still being made
                 };
                 std::array<Pipelines, 4> mPipelines;
                 unsigned mNextPipelines = 0;
@@ -2656,7 +2714,9 @@ void main()
                     if (array != nullptr && array->getBinding() != osg::Array::BIND_OFF
                         && array->getNumElements() > 0)
                     {
-                        format = vertexFormat(*array, input.mInteger);
+                        format = vertexFormat(*array, input.mInteger,
+                            input.mKind == VertexInput::Color || input.mKind == VertexInput::SecondaryColor
+                                || input.mKind == VertexInput::Normal);
                         if (format != VK_FORMAT_UNDEFINED
                             && mResources.buffer(*array, buffer, offset, &entry.mStreamed))
                             stride = array->getBinding() == osg::Array::BIND_PER_VERTEX
@@ -2733,7 +2793,7 @@ void main()
                 const uint64_t keep = 1000 + (reinterpret_cast<uintptr_t>(&geometry) >> 4) % 1024;
                 if (!stillValid(entry, geometry, variant, bindings) || mFrameCounter - entry.mMade > keep)
                 {
-                    buildEntry(entry, geometry, variant, bindings);
+                                        buildEntry(entry, geometry, variant, bindings);
                     entry.mMade = mFrameCounter;
                 }
                 entry.mBuilt = mFrameCounter;
@@ -2780,15 +2840,27 @@ void main()
                     pipelines = &entry->mPipelines[entry->mNextPipelines++ % entry->mPipelines.size()];
                     pipelines->mPass = mPass;
                     pipelines->mFixed = fixed;
-                    pipelines->mPerPrimitive.clear();
-                    for (const GeometryEntry::Primitive& primitive : entry->mPrimitives)
+                    pipelines->mPerPrimitive.assign(entry->mPrimitives.size(), VK_NULL_HANDLE);
+                    pipelines->mWaiting = true;
+                    pipelines->mGeneration = ~0ull;
+                }
+                // asked for again while one is being made, once the programs have put new ones in
+                if (pipelines->mWaiting && pipelines->mGeneration != mPrograms.pipelineGeneration())
+                {
+                    pipelines->mGeneration = mPrograms.pipelineGeneration();
+                    pipelines->mWaiting = false;
+                    for (size_t i = 0; i < entry->mPrimitives.size(); ++i)
                     {
+                        if (pipelines->mPerPrimitive[i] != VK_NULL_HANDLE)
+                            continue;
                         PipelineState withTopology = fixed;
-                        withTopology.mTopology = primitive.mTopology;
-                        pipelines->mPerPrimitive.push_back(
-                            mPrograms.pipeline(*variant, withTopology, entry->mLayout, mPass));
-                        mPipelineCount = mPrograms.pipelineCount();
+                        withTopology.mTopology = entry->mPrimitives[i].mTopology;
+                        pipelines->mPerPrimitive[i]
+                            = mPrograms.pipeline(*variant, withTopology, entry->mLayout, mPass, mWaitForPrograms);
+                        if (pipelines->mPerPrimitive[i] == VK_NULL_HANDLE)
+                            pipelines->mWaiting = true;
                     }
+                    mPipelineCount = mPrograms.pipelineCount();
                 }
 
                 DrawTemplate* draw = templateFor(state, *variant);
@@ -3070,6 +3142,8 @@ void main()
                 }
                 if (maps.empty())
                     return;
+                // drawn once and read from then on: their programs are compiled first, not left out meanwhile
+                mWaitForPrograms = true;
                 const osg::ref_ptr<osg::RefMatrix> identity = new osg::RefMatrix;
                 for (const auto& map : maps)
                 {
@@ -3121,6 +3195,7 @@ void main()
                     map->mCompiled = map->mDrawables.size();
                     map->mDrawables.clear();
                 }
+                mWaitForPrograms = false;
             }
 
             // The water's ripples, as RipplesSurface::drawImplementation does with its fragment shaders: new ripples
@@ -3274,7 +3349,11 @@ void main()
                     return;
                 mGen.mValid = true;
                 mGen.mView = view;
+                // the scene's colour: the window has it as it is (drawCanvas) with the GUI over it. Once the post
+                // processing chain is drawn here, the window before the GUI is what to take instead (OpenGL ES takes it
+                // in the HUD camera's callback, frameGenPreGuiCapture)
                 mGen.mScene = mSceneColor;
+                mGen.mFirstPerson = mFirstPersonCleared;
                 mGen.mDepth = depth;
                 mGen.mOpaqueDepth = opaque;
                 mGen.mFinal = final;
@@ -3307,14 +3386,15 @@ void main()
                 {
                     float amount = 1.f;
                     osg::Matrixd curToTarget;
+                    // shown a refresh after the one before it (FIFO): placed where the camera is by then
+                    const double at = mGenLock.shownAt(i, 1000.0 / 60.0);
                     if (known)
-                        curToTarget
-                            = osg::Matrixd::inverse(cur.view) * viewBetween(cur.view, next.view, double(i) / (count + 1));
+                        curToTarget = osg::Matrixd::inverse(cur.view) * viewBetween(cur.view, next.view, at);
                     else
                     {
                         // keeping on as the camera went from the previous frame to this one
                         curToTarget = osg::Matrixd::inverse(osg::Matrixd::inverse(cur.view) * mGen.mPrev.view);
-                        amount = static_cast<float>(i) / span;
+                        amount = static_cast<float>(at * (count + 1) / span);
                     }
                     if (!drawGenerated(*variant, cur, osg::Matrixf(curToTarget), zNear, zFar, amount))
                         return;
@@ -3361,6 +3441,7 @@ void main()
                         const float value = member.mName == "uReversed" ? (cur.reversedDepth ? 1.f : 0.f)
                             : member.mName == "uAmount"                 ? amount
                             : member.mName == "uTint"                   ? (tint ? 1.f : 0.f)
+                            : member.mName == "uFirstPerson"            ? (mGen.mFirstPerson ? 1.f : 0.f)
                                                                         : 0.f;
                         std::memcpy(at, &value, 4);
                     }
@@ -3426,6 +3507,7 @@ void main()
                 Image* mDepth = nullptr;
                 Image* mOpaqueDepth = nullptr;
                 Image* mFinal = nullptr;
+                bool mFirstPerson = false; // the scene's depth was cleared for the first person model
             } mGen;
             FrameGenLock mGenLock;
             int mGenMaxFrames = [] {
@@ -3433,6 +3515,8 @@ void main()
                 return count ? std::clamp(std::atoi(count), 1, 3) : 1;
             }();
             uint64_t mGenerated = 0;
+            bool mWaitForPrograms = false; // programs compiled at once, not on their thread (variantOf)
+            std::unordered_set<const osg::Camera*> mCamerasDrawn[2]; // by frame counter parity (drawStageItself)
 
             // The post-processing canvas: for now the scene's texture as it is
             void drawCanvas()
@@ -3543,6 +3627,7 @@ void main()
             std::unordered_map<std::pair<const osgUtil::StateGraph*, const osgUtil::RenderBin*>, AccumulatedSlot,
                 GraphHash>
                 mAccumulated;
+            size_t mAccumulatedSweep = 0, mSharedSweep = 0; // the next bucket sweepSlice looks at
             struct GeometryKeyHash
             {
                 size_t operator()(const std::pair<const osg::Geometry*, const Variant*>& key) const
@@ -3570,6 +3655,7 @@ void main()
             std::vector<std::shared_ptr<Accumulated>> mKeep;
             std::set<std::string> mUnknown;
             Image* mSceneColor = nullptr;
+            bool mFirstPersonCleared = false; // this frame's scene depth was cleared for the first person model
             // the scene image of the last frame that drew one, for the loading screen's copy of the window
             Image* mLastSceneColor = nullptr;
             // the water's ripples (renderRipples)

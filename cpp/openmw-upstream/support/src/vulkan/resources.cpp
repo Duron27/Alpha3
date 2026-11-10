@@ -751,11 +751,16 @@ namespace Alpha3::Vk
     {
         auto& mutableTexture = const_cast<osg::Texture&>(texture);
         const unsigned images = mutableTexture.getNumImages();
-        // as OpenGL's upload does (the OSG hook): a texture file's pixels let go after an earlier upload are read
-        // back, and let go again after this frame (texturerelease.cpp)
+        // as OpenGL's upload does (the OSG hook, textureImageLoading): a texture file's pixels let go after an earlier
+        // upload are read back, and let go again after this frame (texturerelease.cpp); the preload notes the file and
+        // streaming notes the upload (a texture the scene camera never draws is made full size a few seconds after)
         for (unsigned i = 0; i < images; ++i)
             if (const osg::Image* image = mutableTexture.getImage(i))
+            {
                 textureReleaseLoading(*image);
+                texturePreloadTextureLoading(*image);
+                textureStreamingTextureLoading(*image);
+            }
         const osg::Image* first = images > 0 ? mutableTexture.getImage(0) : nullptr;
         if (first == nullptr || first->data() == nullptr || first->s() <= 0 || first->t() <= 0)
             return nullptr;
@@ -813,8 +818,9 @@ namespace Alpha3::Vk
             format = layout.mFormat;
             if (format == VK_FORMAT_UNDEFINED)
             {
+                // a depth image (the shadows' 1x1 fallback map, a depth of 1) is drawn as the depth dummy, which is that
                 static int warned = 0;
-                if (warned++ < 10)
+                if (first->getPixelFormat() != 0x1902 /* GL_DEPTH_COMPONENT */ && warned++ < 10)
                     Log(Debug::Warning) << "Vulkan: texture pixel format 0x" << std::hex << first->getPixelFormat()
                                         << " type 0x" << first->getDataType() << std::dec << " is not supported";
                 return nullptr;
@@ -1042,6 +1048,18 @@ namespace Alpha3::Vk
             format = VK_FORMAT_R8G8B8A8_UNORM;
         }
         const bool depth = isDepthFormat(format);
+        // A depth texture is sampled with linear filtering (the shadow maps' comparisons, four texels each): one the
+        // device does not filter (D32_SFLOAT on the Adreno 615) gave every comparison as shadowed
+        if (depth && !hasStencil(format)
+            && !formatSupports(mContext.device().mPhysical, format,
+                VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT))
+            for (VkFormat other : { VK_FORMAT_X8_D24_UNORM_PACK32, VK_FORMAT_D16_UNORM, mContext.device().mDepthFormat })
+                if (formatSupports(mContext.device().mPhysical, other,
+                        VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT))
+                {
+                    format = other;
+                    break;
+                }
         const VkFormatFeatureFlags needs = depth ? VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT
                                                  : VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
         if (!formatSupports(mContext.device().mPhysical, format, needs | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT))

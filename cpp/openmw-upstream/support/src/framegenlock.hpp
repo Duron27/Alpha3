@@ -3,6 +3,7 @@
 
 // How many generated frames go between rendered ones, from how fast the rendered frames come: shared by the OpenGL
 // ES frame generation (framegen.cpp) and Vulkan's (vulkan/translator.cpp)
+#include <algorithm>
 #include <chrono>
 #include <iomanip>
 #include <string>
@@ -39,6 +40,7 @@ namespace Alpha3
         std::chrono::seconds mProbeWait{ 10 };
         int mWindowFrames = 0;
         bool mProbing = false;
+        double mIntervalMs = 0.0; // between rendered frames, over the last window (0 until there is one)
 
         const Step& step() const { return sSteps[mStep]; }
         int rendered() const { return step().mRendered; }
@@ -46,6 +48,16 @@ namespace Alpha3
         /// Refreshes between the last two rendered frames before the generated ones (what one rendered frame's motion
         /// spans)
         int lastGap() const { return step().mRendered == 1 ? step().mRefreshes : 1; }
+        /// How far (0 to 1) from one rendered frame to the next the [index]th generated frame after it is shown, when
+        /// each is shown one refresh after the one before: slower rendered frames than the pattern's leave the next one
+        /// later, so the generated ones are placed nearer the last (the motion keeps an even speed)
+        double shownAt(int index, double periodMs) const
+        {
+            const double even = static_cast<double>(index) / (generated() + 1);
+            if (mIntervalMs <= 0.0)
+                return even;
+            return std::clamp(index * periodMs / mIntervalMs, 0.05, even);
+        }
 
         void set(int index, FrameGenClock::time_point now, double intervalMs, const char* why)
         {
@@ -67,6 +79,7 @@ namespace Alpha3
             if (windowMs < (mProbing ? 500.0 : 1000.0))
                 return;
             const double interval = windowMs / mWindowFrames;
+            mIntervalMs = interval;
             mWindowStart = now;
             mWindowFrames = 0;
             const double budget = periodMs * step().mRefreshes / step().mRendered;

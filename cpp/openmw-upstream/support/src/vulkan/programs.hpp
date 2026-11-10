@@ -9,11 +9,19 @@
 // the window, turning y over (OpenGL's rows go up, so render targets are drawn the OpenGL way up and the window turned).
 #include "vk.hpp"
 
+#include <osg/Shader>
 #include <osg/StateSet>
 #include <osg/observer_ptr>
 
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
+#include <thread>
 #include <cstdlib>
 #include <string>
 #include <unordered_map>
@@ -111,6 +119,7 @@ namespace Alpha3::Vk
         uint32_t mDepthWrite = 0;
         uint32_t mDepthCompare = VK_COMPARE_OP_LESS;
         uint32_t mDepthBias = 0;
+        uint32_t mDepthClamp = 0; // GL_DEPTH_CLAMP (the shadow casters)
         float mBiasConstant = 0.f;
         float mBiasSlope = 0.f;
         uint32_t mBlend = 0;
@@ -158,6 +167,12 @@ namespace Alpha3::Vk
         VkShaderStageFlags mLightStages = 0;
         uint32_t mVaryingEnd = 0; // one past the highest varying location
         std::string mSources[2]; // the GLSL given to glslang, kept for a pipeline the driver refuses (dumped once)
+        // Made away from the draw thread: the SPIR-V and the reflection above, then the Vulkan objects on the draw
+        // thread (Programs::poll). Until then mOk is false and the variant's draws are left out.
+        std::vector<unsigned> mSpirv[2];
+        std::atomic<int> mStage{ 0 }; // 0 nothing pending, 1 compiling, 2 compiled (objects to make)
+        bool mCompiled = false; // the SPIR-V was made (else the program cannot be compiled)
+        bool mBuiltin = false; // the translator's own: its pipelines are made at once
     };
 
     class Programs
@@ -165,21 +180,79 @@ namespace Alpha3::Vk
     public:
         explicit Programs(Context& context);
 
-        // The program made with these defines (compiled now if it is new; mOk false if it could not be)
+        ~Programs();
+
+        // The program made with these defines; mOk false if it could not be made, or (a new one) while it is compiled
+        // on a thread of its own, unless wait: then it is compiled before this returns. Compiled programs are kept on
+        // disk (the cache directory's vulkan/), by their shaders' sources, and loaded from there the next time.
         // clip: the variant that writes the clip distances (for draws with a clip plane on)
-        Variant* variant(
-            const osg::Program& program, const osg::StateSet::DefineList& defines, osg::State& state, bool clip);
+        Variant* variant(const osg::Program& program, const osg::StateSet::DefineList& defines, osg::State& state,
+            bool clip, bool wait = false);
+
+        // On the draw thread, each frame: the Vulkan objects of the programs compiled since (their draws come in)
+        void poll();
+        // Programs still being compiled
+        size_t compiling() const { return mCompiling; }
 
         // A program of the translator's own from GLSL sources ("#version 320 es")
         Variant* builtin(const std::string& name, const std::string& vertex, const std::string& fragment);
 
-        VkPipeline pipeline(Variant& variant, const PipelineState& state, const VertexLayout& layout, VkRenderPass pass);
+        // The pipeline; a new one is made on a thread of its own (null until then: Programs::poll puts it in, and
+        // pipelineGeneration changes), unless wait or the variant is a builtin
+        VkPipeline pipeline(Variant& variant, const PipelineState& state, const VertexLayout& layout, VkRenderPass pass,
+            bool wait = false);
         uint64_t pipelineCount() const { return mPipelineCount; }
+        // Changes when poll has put in pipelines made on their thread
+        uint64_t pipelineGeneration() const { return mPipelineGeneration; }
 
     private:
         uint64_t mPipelineCount = 0;
         bool compile(
             Variant& variant, std::string vertex, std::string fragment, const std::string& name, bool clip = false);
+        // compile's part without the device's objects (any thread)
+        bool compileSpirv(Variant& variant, std::string vertex, std::string fragment, const std::string& name, bool clip);
+        // and its part with them (the draw thread)
+        bool createObjects(Variant& variant);
+
+        // What the compiling thread does for a variant: the stages' sources as OpenMW made them, translated there
+        struct Job
+        {
+            Variant* mVariant = nullptr;
+            std::string mSources[2];
+            std::string mDefines[2];
+            osg::ref_ptr<const osg::Shader> mShaders[2];
+            std::string mName;
+            std::string mCacheKey;
+            bool mClip = false;
+            osg::State* mState = nullptr;
+            std::string mProgramName;
+            std::string mSalt;
+            std::vector<osg::ref_ptr<const osg::Shader>> mStageShaders[2]; // the program's shaders, by stage
+        };
+        bool prepare(Job& job);
+        void run(Job& job);
+        VkPipeline createPipeline(Variant& variant, const PipelineState& state, const VertexLayout& layout, VkRenderPass pass);
+        // the threads that compile programs and make pipelines
+        void post(std::function<void()> task);
+        void work();
+        std::mutex mJobsMutex;
+        std::condition_variable mJobsReady;
+        std::deque<std::function<void()>> mJobs;
+        std::vector<Variant*> mCompiled; // compiled, waiting for poll (under mJobsMutex)
+        struct MadePipeline
+        {
+            Variant* mVariant;
+            std::string mKey;
+            VkPipeline mPipeline;
+        };
+        std::vector<MadePipeline> mMadePipelines; // likewise
+        std::vector<std::thread> mWorkers;
+        bool mStopping = false;
+        size_t mCompiling = 0;
+        uint64_t mPipelineGeneration = 0;
+        std::string mSalt; // what the disk cache's keys begin with (cacheSalt)
+        uint64_t mSavedPipelines = 0;
+        std::chrono::steady_clock::time_point mLastSave{};
 
         Context& mContext;
         struct Entry

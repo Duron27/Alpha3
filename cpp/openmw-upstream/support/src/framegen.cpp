@@ -313,7 +313,8 @@ void main()
     motion = motionAt(clamp(vUV - (1.0 - uTime) * motion, vec2(0.0), vec2(1.0)));
     vec2 inCur = vUV - (1.0 - uTime) * motion;
     vec2 inPrev = vUV + uTime * motion;
-    vec3 cur = texture(uCur, clamp(inCur, vec2(0.0), vec2(1.0))).rgb;
+    // past the screen's edge: mirrored from inside it, not the edge's pixels stretched into streaks
+    vec3 cur = texture(uCur, 1.0 - abs(1.0 - mod(inCur, 2.0))).rgb;
     vec3 prev = texture(uPrev, clamp(inPrev, vec2(0.0), vec2(1.0))).rgb;
     vec3 d = abs(cur - prev);
     float weight = (1.0 - uExtrapolate) * (1.0 - uTime) * (1.0 - smoothstep(0.06, 0.15, max(d.r, max(d.g, d.b))));
@@ -352,7 +353,8 @@ void main()
     vec2 motion = texture(uMotionField, vUV).rg;
     motion = texture(uMotionField, clamp(vUV - (1.0 - uTime) * motion, vec2(0.0), vec2(1.0))).rg;
     vec2 inCur = vUV - (1.0 - uTime) * motion;
-    vec3 cur = texture(uCur, clamp(inCur, vec2(0.0), vec2(1.0))).rgb;
+    // past the screen's edge: mirrored from inside it, not the edge's pixels stretched into streaks
+    vec3 cur = texture(uCur, 1.0 - abs(1.0 - mod(inCur, 2.0))).rgb;
     vec3 tint = vec3(0.25, 0.0, 0.0) * uTint;
     if (uExtrapolate > 0.5)
     {

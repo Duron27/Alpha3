@@ -4,6 +4,7 @@
 #include "vk.hpp"
 
 #include <cstdint>
+#include <filesystem>
 
 struct VmaAllocator_T;
 struct VmaAllocation_T;
@@ -33,6 +34,11 @@ namespace Alpha3::Vk
 
     // The device, made on the first call (null when Vulkan cannot start; the reason is logged)
     Device* device();
+
+    // The pipeline cache on disk (the cache directory's vulkan/pipelines.bin): loaded with the device, saved by
+    // savePipelineCache (the process is killed, not closed, so it is saved as it grows)
+    std::filesystem::path pipelineCacheFile();
+    void savePipelineCache(const Device& device);
 
     // Whether this phone can run the renderer at all (an instance and a GPU with a graphics queue), before the window
     // is made: false means OpenGL ES. Leaves nothing behind.
