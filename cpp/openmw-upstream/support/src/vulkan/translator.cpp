@@ -28,6 +28,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
+#include <fstream>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -38,10 +39,14 @@
 #include <unordered_set>
 
 #include <osg/BlendColor>
+#include <osg/BufferIndexBinding>
+#include <osg/DispatchCompute>
 #include <osg/BlendEquation>
 #include <osg/BlendFunc>
+#include <osg/ClipControl>
 #include <osg/ClipPlane>
 #include <osg/ColorMask>
+#include <osg/ColorMaski>
 #include <osg/CullFace>
 #include <osg/Depth>
 #include <osg/FrameBufferObject>
@@ -51,6 +56,7 @@
 #include <osg/PolygonOffset>
 #include <osg/Program>
 #include <osg/Quat>
+#include <osg/Stats>
 #include <osg/Stencil>
 #include <osg/Texture>
 #include <osg/Texture2D>
@@ -58,8 +64,11 @@
 #include <osgUtil/RenderStage>
 #include <osgUtil/SceneView>
 #include <osgUtil/StateGraph>
+#include <osgViewer/View>
 #include <osgViewer/ViewerBase>
+#include <osgViewer/ViewerEventHandlers>
 #include <osgParticle/ParticleSystem>
+#include <osgText/Text>
 
 #include <components/resource/resourcesystem.hpp>
 #include <components/resource/scenemanager.hpp>
@@ -67,6 +76,9 @@
 #include <components/terrain/compositemaprenderer.hpp>
 
 #include <components/debug/debuglog.hpp>
+#include <components/fx/technique.hpp>
+#include <components/fx/types.hpp>
+#include <components/sceneutil/depth.hpp>
 
 namespace Alpha3::Vk
 {
@@ -170,6 +182,27 @@ namespace Alpha3::Vk
             mutable std::set<std::shared_ptr<Terrain::CompositeMap>> mImmediateCompileSet;
             mutable std::mutex mMutex;
             osg::ref_ptr<osg::FrameBufferObject> mFBO;
+        };
+
+        // apps/openmw/mwrender/pingpongcanvas.hpp: the post processing chain, which its draw runs (the techniques'
+        // passes between three textures, the last into the window)
+        class PingPongCanvasMirror : public osg::Geometry
+        {
+        public:
+            bool mAvgLum;
+            bool mPostprocessing;
+            Fx::DispatchArray mPasses;
+            Fx::FlagsType mMask;
+            osg::ref_ptr<osg::Program> mFallbackProgram;
+            osg::ref_ptr<osg::Program> mMultiviewResolveProgram;
+            osg::ref_ptr<osg::StateSet> mFallbackStateSet;
+            osg::ref_ptr<osg::StateSet> mMultiviewResolveStateSet;
+            osg::ref_ptr<osg::Texture> mTextureScene;
+            osg::ref_ptr<osg::Texture> mTextureDepth;
+            osg::ref_ptr<osg::Texture> mTextureNormals;
+            osg::ref_ptr<osg::Texture> mTextureDistortion;
+            mutable bool mDirty;
+            mutable std::vector<Fx::Types::RenderTarget> mDirtyAttachments;
         };
 
         // osgParticle's frame bookkeeping, which its updaters read to tell whether a system was drawn lately
@@ -282,6 +315,7 @@ namespace Alpha3::Vk
             const osg::Program* mProgram = nullptr;
             const osg::Program* mVariantProgram = nullptr;
             Variant* mVariant = nullptr;
+            uint64_t mVariantGeneration = 0; // Programs::sourceGeneration when it was looked up
             PipelineState mFixed;
             bool mGlCounterClockwise = true;
             float mMinDepth = 0.f, mMaxDepth = 1.f;
@@ -440,6 +474,24 @@ namespace Alpha3::Vk
             return gl >= 0x200 && gl <= 0x207 ? static_cast<VkCompareOp>(gl - 0x200) : VK_COMPARE_OP_ALWAYS;
         }
 
+        // as SceneUtil::AutoDepth::getReversedDepthFunction
+        uint32_t reversedCompare(uint32_t op)
+        {
+            switch (op)
+            {
+                case VK_COMPARE_OP_LESS:
+                    return VK_COMPARE_OP_GREATER;
+                case VK_COMPARE_OP_LESS_OR_EQUAL:
+                    return VK_COMPARE_OP_GREATER_OR_EQUAL;
+                case VK_COMPARE_OP_GREATER:
+                    return VK_COMPARE_OP_LESS;
+                case VK_COMPARE_OP_GREATER_OR_EQUAL:
+                    return VK_COMPARE_OP_LESS_OR_EQUAL;
+                default:
+                    return op;
+            }
+        }
+
         VkStencilOp stencilOp(unsigned gl)
         {
             switch (gl)
@@ -488,6 +540,9 @@ namespace Alpha3::Vk
             if (auto* depth = static_cast<const osg::Depth*>(state.attribute(osg::StateAttribute::DEPTH)))
             {
                 fixed.mDepthCompare = compare(depth->getFunction());
+                // OpenMW's AutoDepth applies the reversed function when the depth is reversed
+                if (SceneUtil::AutoDepth::isReversed() && dynamic_cast<const SceneUtil::AutoDepth*>(depth) != nullptr)
+                    fixed.mDepthCompare = reversedCompare(fixed.mDepthCompare);
                 fixed.mDepthWrite = depth->getWriteMask() ? 1 : 0;
                 state.mMinDepth = static_cast<float>(depth->getZNear());
                 state.mMaxDepth = static_cast<float>(depth->getZFar());
@@ -526,6 +581,12 @@ namespace Alpha3::Vk
             if (auto* mask = static_cast<const osg::ColorMask*>(state.attribute(osg::StateAttribute::COLORMASK)))
                 fixed.mWriteMask = (mask->getRedMask() ? 1 : 0) | (mask->getGreenMask() ? 2 : 0)
                     | (mask->getBlueMask() ? 4 : 0) | (mask->getAlphaMask() ? 8 : 0);
+            // glColorMask is every draw buffer's; glColorMaski(1) the second's (OpenMW's normals: left unwritten by
+            // what has none)
+            fixed.mWriteMask1 = fixed.mWriteMask;
+            if (auto* mask = static_cast<const osg::ColorMaski*>(state.attribute(osg::StateAttribute::COLORMASK, 1)))
+                fixed.mWriteMask1 = (mask->getRedMask() ? 1 : 0) | (mask->getGreenMask() ? 2 : 0)
+                    | (mask->getBlueMask() ? 4 : 0) | (mask->getAlphaMask() ? 8 : 0);
 
             fixed.mCullMode = VK_CULL_MODE_NONE;
             if (state.mode(0x0B44, false)) // GL_CULL_FACE
@@ -541,6 +602,8 @@ namespace Alpha3::Vk
 
             // the shadow casters: in front of the shadow camera's near plane they are drawn at it, not cut away
             fixed.mDepthClamp = state.mode(0x864F, false); // GL_DEPTH_CLAMP
+            if (auto* clip = static_cast<const osg::ClipControl*>(state.attribute(osg::StateAttribute::CLIPCONTROL)))
+                fixed.mClipZeroToOne = clip->getDepthMode() == osg::ClipControl::ZERO_TO_ONE ? 1 : 0;
             if (state.mode(0x8037, false)) // GL_POLYGON_OFFSET_FILL
                 if (auto* offset
                     = static_cast<const osg::PolygonOffset*>(state.attribute(osg::StateAttribute::POLYGONOFFSET)))
@@ -876,6 +939,7 @@ namespace Alpha3::Vk
         {
             bool mWindow = true;
             Image* mColor = nullptr;
+            Image* mColor1 = nullptr; // COLOR_BUFFER1 (the scene's normals)
             Image* mDepth = nullptr;
             uint32_t mWidth = 0, mHeight = 0;
             VkFormat mColorFormat = VK_FORMAT_UNDEFINED;
@@ -902,6 +966,21 @@ void main()
 }
 )";
 
+        // osgViewer::StatsHandler's page (what F3 steps through: 0 none, then FRAME_RATE, VIEWER_STATS,
+        // CAMERA_SCENE_STATS, VIEWER_SCENE_STATS), which it keeps to itself
+        struct StatsPage : osgViewer::StatsHandler
+        {
+            static int of(const osgViewer::StatsHandler& handler) { return handler.*(&StatsPage::_statsType); }
+        };
+
+        // osgText::Text's arrays, which its draw binds itself (kept to itself)
+        struct TextArrays : osgText::Text
+        {
+            static const Coords& coords(const osgText::Text& text) { return text.*(&TextArrays::_coords); }
+            static const ColorCoords& colors(const osgText::Text& text) { return text.*(&TextArrays::_colorCoords); }
+            static const TexCoords& texCoords(const osgText::Text& text) { return text.*(&TextArrays::_texcoords); }
+        };
+
 
         // Frame generation (OPENMW_FRAMEGEN, the launcher's switch): the last rendered frame seen from another camera,
         // as the OpenGL ES path's reprojection (framegen.cpp) does it. Each pixel's depth gives its place in view space,
@@ -919,6 +998,8 @@ uniform sampler2D uDepth;
 uniform sampler2D uOpaqueDepth;
 uniform mat4 uCurToPrev;
 uniform vec4 uProj;
+uniform vec4 uPlayerFeet; // third person: the player's feet in view space, w the radius around the line to its head
+uniform vec4 uPlayerHead; // its head, w 1 when there is a player to keep
 uniform float uReversed;
 uniform float uAmount;
 uniform float uTint;
@@ -932,25 +1013,60 @@ float viewZ(float d)
         return -n * f / (d * (f - n) + n);
     return 2.0 * f * n / ((d * 2.0 - 1.0) * (f - n) - (f + n));
 }
+vec3 viewPosition(vec2 at, float z)
+{
+    vec2 ndc = at * 2.0 - 1.0;
+    return vec3(ndc.x * -z / uProj.x, ndc.y * -z / uProj.y, z);
+}
+// The model that goes with the camera (its pixels stay where they are). First person: the scene's depth was cleared
+// for the model, so it holds only that model. Third person: what stands where the player does.
+bool modelAt(vec2 at)
+{
+    float d = texture(uDepth, at).r;
+    if (uFirstPerson > 0.5)
+        return uReversed > 0.5 ? d > 0.0 : d < 1.0;
+    if (uPlayerHead.w < 0.5)
+        return false;
+    vec3 fromFeet = viewPosition(at, viewZ(d)) - uPlayerFeet.xyz;
+    vec3 up = uPlayerHead.xyz - uPlayerFeet.xyz;
+    float along = dot(fromFeet, up) / dot(up, up);
+    vec3 aside = fromFeet - up * along;
+    return along > 0.0 && along < 1.0 && dot(aside, aside) < uPlayerFeet.w * uPlayerFeet.w;
+}
+// the model at or next to a pixel (its blended edges are drawn a little past its depth)
+bool nearModel(vec2 at)
+{
+    vec2 texel = 1.0 / vec2(textureSize(uDepth, 0));
+    if (uFirstPerson < 0.5)
+        return modelAt(at) || modelAt(at + texel * vec2(-2.0, -2.0)) || modelAt(at + texel * vec2(2.0, -2.0))
+            || modelAt(at + texel * vec2(-2.0, 2.0)) || modelAt(at + texel * vec2(2.0, 2.0));
+    vec4 a = textureGather(uDepth, at);
+    vec4 b = textureGather(uDepth, at + texel * vec2(-2.0, -2.0));
+    vec4 c = textureGather(uDepth, at + texel * vec2(2.0, -2.0));
+    vec4 d = textureGather(uDepth, at + texel * vec2(-2.0, 2.0));
+    vec4 e = textureGather(uDepth, at + texel * vec2(2.0, 2.0));
+    if (uReversed > 0.5)
+    {
+        a = max(max(max(a, b), max(c, d)), e);
+        return max(max(a.x, a.y), max(a.z, a.w)) > 0.0;
+    }
+    a = min(min(min(a, b), min(c, d)), e);
+    return min(min(a.x, a.y), min(a.z, a.w)) < 1.0;
+}
+// how the world at a pixel moves on the screen
 vec2 motionAt(vec2 at)
 {
     float z;
     if (uFirstPerson > 0.5)
-    {
-        // the scene's depth was cleared for the first person model, so it holds only that model (which moves with
-        // the camera); the world's depth is the opaque copy's, from before the clear
-        if (texture(uDepth, at).r < 1.0)
-            return vec2(0.0);
+        // the world's depth is the opaque copy's, from before the clear
         z = viewZ(texture(uOpaqueDepth, at).r);
-    }
     else
     {
         z = viewZ(texture(uDepth, at).r);
         if (-viewZ(texture(uOpaqueDepth, at).r) < -z * 0.9)
             return vec2(0.0);
     }
-    vec2 ndc = at * 2.0 - 1.0;
-    vec4 p = uCurToPrev * vec4(ndc.x * -z / uProj.x, ndc.y * -z / uProj.y, z, 1.0);
+    vec4 p = uCurToPrev * vec4(viewPosition(at, z), 1.0);
     if (p.z > -0.001)
         return vec2(0.0);
     vec2 prev = vec2(p.x * uProj.x, p.y * uProj.y) / -p.z;
@@ -964,11 +1080,49 @@ void main()
         color = vec4(final, 1.0);
         return;
     }
-    vec2 motion = motionAt(uv);
-    motion = motionAt(clamp(uv - uAmount * motion, vec2(0.0), vec2(1.0)));
+    vec2 motion = vec2(0.0);
+    if (!modelAt(uv))
+    {
+        // the motion of what is seen here: looked up again where it comes from, unless the model is in front of it
+        // there (the world behind the model was not drawn: it is filled in below, with the motion found here)
+        motion = motionAt(uv);
+        vec2 from = clamp(uv - uAmount * motion, vec2(0.0), vec2(1.0));
+        if (!modelAt(from))
+            motion = motionAt(from);
+    }
     // what comes into view past the screen's edge is mirrored from what is inside it (clamping it would stretch the
     // edge's pixels into streaks across a band as wide as the turn)
     vec2 inCur = 1.0 - abs(1.0 - mod(uv - uAmount * motion, 2.0));
+    // the world seen where the model was in front of it (the model's pixels are where they were, motion 0): the world
+    // behind the model was never drawn, so the world at the model's edge stands in (the model's own colour would be a
+    // copy of the model moved with the world). The edge along the motion first: what is past it is what is drawn
+    // beside these pixels, and the other end of them is against the model itself.
+    if ((uFirstPerson > 0.5 || uPlayerHead.w > 0.5) && motion != vec2(0.0) && nearModel(inCur))
+    {
+        vec2 step = normalize(motion) / vec2(textureSize(uCur, 0));
+        float edge = 0.0;
+        for (int i = 1; i <= 32 && edge == 0.0; ++i)
+            if (!nearModel(clamp(inCur + step * float(i) * 8.0, vec2(0.0), vec2(1.0))))
+                edge = float(i) * 8.0;
+        for (int i = 1; i <= 32 && edge == 0.0; ++i)
+            if (!nearModel(clamp(inCur - step * float(i) * 8.0, vec2(0.0), vec2(1.0))))
+                edge = float(i) * -8.0;
+        if (edge != 0.0)
+        {
+            // the edge to a texel: between the last step in the model and the first past it
+            float inside = abs(edge) - 8.0;
+            float outside = abs(edge);
+            for (int i = 0; i < 3; ++i)
+            {
+                float middle = (inside + outside) * 0.5;
+                if (nearModel(clamp(inCur + step * sign(edge) * middle, vec2(0.0), vec2(1.0))))
+                    inside = middle;
+                else
+                    outside = middle;
+            }
+            inCur = clamp(inCur + step * sign(edge) * outside, vec2(0.0), vec2(1.0));
+        }
+    }
     color = vec4(texture(uCur, inCur).rgb + vec3(0.25, 0.0, 0.0) * uTint, 1.0);
 }
 )";
@@ -1023,6 +1177,7 @@ void main()
                     state->setFrameStamp(sceneView.getFrameStamp());
                 generateFrames(sceneView);
                 mPrograms.poll();
+                mPrograms.checkSources();
                 if (!mContext.beginFrame())
                 {
                     runFinalDrawCallbacks(sceneView, false);
@@ -1036,6 +1191,7 @@ void main()
                 mResources.beginFrame();
                 mState = sceneView.getState();
                 mFrameNumber = sceneView.getFrameStamp() ? sceneView.getFrameStamp()->getFrameNumber() : 0;
+                mCameraStats = sceneView.getCamera() ? sceneView.getCamera()->getStats() : nullptr;
                 ++mFrameCounter;
                 // the leaves' states and shared blocks are found by frame stamp; the ones not used for a while go. A
                 // slice of them a frame: there are tens of thousands, and walking them all at once took 75 ms on the
@@ -1061,7 +1217,10 @@ void main()
                         else
                             ++it;
                 mSceneColor = nullptr;
+                mPostColor = nullptr;
                 mFirstPersonCleared = false;
+                mSceneDepth = nullptr;
+                mSceneOpaqueDepth = nullptr;
                 mCamerasDrawn[mFrameCounter % 2].clear();
                 if (mFrameNumber % 300 == 0)
                     for (auto it = mParticles.begin(); it != mParticles.end();)
@@ -1079,6 +1238,7 @@ void main()
                 renderRipples();
                 if (osgUtil::RenderStage* stage = sceneView.getRenderStage())
                     drawStage(*stage);
+                drawStatistics(sceneView);
                 mContext.endWindowPass();
                 keepLoadingWindow(sceneView);
                 readImages();
@@ -1109,7 +1269,8 @@ void main()
                                      << " with the last one's images), " << mUniformBytes / 300 / 1024
                                      << " KiB of uniforms bound; " << mVertices / 300 / 3
                                      << " triangles (vertices / 3) a frame; " << mGenerated
-                                     << " generated frames";
+                                     << " generated frames; " << mDispatches << " compute dispatches";
+                    mDispatches = 0;
                     mVertices = 0;
                     mGenerated = 0;
                     mPipelineBinds = mVertexBinds = mSetBinds = mUniformBytes = mSameImageBinds = 0;
@@ -1174,7 +1335,10 @@ void main()
                 {
                     if (depth->mFormat == mTarget.mDepth->mFormat && depth->mWidth == mTarget.mDepth->mWidth
                         && depth->mHeight == mTarget.mDepth->mHeight)
+                    {
                         copyDepth(*mTarget.mDepth, *depth);
+                        mSceneOpaqueDepth = depth;
+                    }
                     else if (!mOpaqueDepthWarned)
                     {
                         mOpaqueDepthWarned = true;
@@ -1190,6 +1354,14 @@ void main()
                 colorUse.mLoad = VK_ATTACHMENT_LOAD_OP_LOAD;
                 colorUse.mInitial = colorUse.mFinal = mTarget.mColor->readLayout();
                 views.push_back(mTarget.mColor->mAttachmentView);
+                AttachmentUse color1Use;
+                if (mTarget.mColor1)
+                {
+                    color1Use.mFormat = mTarget.mColor1->mFormat;
+                    color1Use.mLoad = VK_ATTACHMENT_LOAD_OP_LOAD;
+                    color1Use.mInitial = color1Use.mFinal = mTarget.mColor1->readLayout();
+                    views.push_back(mTarget.mColor1->mAttachmentView);
+                }
                 if (mTarget.mDepth)
                 {
                     depthUse.mFormat = mTarget.mDepth->mFormat;
@@ -1197,7 +1369,7 @@ void main()
                     depthUse.mInitial = depthUse.mFinal = mTarget.mDepth->readLayout();
                     views.push_back(mTarget.mDepth->mAttachmentView);
                 }
-                VkRenderPass pass = mContext.renderPass(colorUse, depthUse);
+                VkRenderPass pass = mContext.renderPass(colorUse, depthUse, color1Use);
                 gpuTimestamp(std::string());
                 VkRenderPassBeginInfo begin{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
                 begin.renderPass = pass;
@@ -1482,6 +1654,9 @@ void main()
                     else if ((component == osg::Camera::COLOR_BUFFER || component == osg::Camera::COLOR_BUFFER0)
                         && !image->mDepthAspect && target.mColor == nullptr)
                         target.mColor = image;
+                    else if (component == osg::Camera::COLOR_BUFFER1 && !image->mDepthAspect
+                        && target.mColor1 == nullptr)
+                        target.mColor1 = image;
                 };
                 if (fbo != nullptr)
                 {
@@ -1530,6 +1705,10 @@ void main()
                 if (target.mColor && target.mDepth
                     && (target.mDepth->mWidth != target.mWidth || target.mDepth->mHeight != target.mHeight))
                     target.mDepth = nullptr;
+                if (target.mColor1 != nullptr
+                    && (target.mColor == nullptr || target.mColor1->mWidth != target.mWidth
+                        || target.mColor1->mHeight != target.mHeight))
+                    target.mColor1 = nullptr;
                 target.mColorFormat = target.mColor ? target.mColor->mFormat : VK_FORMAT_UNDEFINED;
                 target.mDepthFormat = target.mDepth ? target.mDepth->mFormat : VK_FORMAT_UNDEFINED;
                 return true;
@@ -1599,9 +1778,12 @@ void main()
                 const float clearValues[4] = { color.r(), color.g(), color.b(), color.a() };
                 const float depthValue = static_cast<float>(stage.getClearDepth());
                 const uint32_t stencilValue = static_cast<uint32_t>(stage.getClearStencil());
+                mContext.endWindowPass();
+                // compute shaders (clustered lighting's), before the draws that read what they write (recorded on the
+                // commands submitted ahead of the frame's)
+                runCompute(stage);
                 VkCommandBuffer commands = mContext.commands();
 
-                mContext.endWindowPass();
                 if (target.mWindow)
                 {
                     if (!mContext.beginWindowPass(clearColor && whole, clearValues, (clearDepth || clearStencil) && whole,
@@ -1631,6 +1813,15 @@ void main()
                         value.color = { { clearValues[0], clearValues[1], clearValues[2], clearValues[3] } };
                         clears.push_back(value);
                     }
+                    AttachmentUse color1Use;
+                    if (target.mColor1)
+                    {
+                        color1Use.mFormat = target.mColor1->mFormat;
+                        color1Use.mLoad = colorUse.mLoad;
+                        color1Use.mInitial = color1Use.mFinal = target.mColor1->readLayout();
+                        views.push_back(target.mColor1->mAttachmentView);
+                        clears.push_back(clears.back());
+                    }
                     if (target.mDepth)
                     {
                         depthUse.mFormat = target.mDepth->mFormat;
@@ -1642,7 +1833,7 @@ void main()
                         value.depthStencil = { depthValue, stencilValue };
                         clears.push_back(value);
                     }
-                    VkRenderPass pass = mContext.renderPass(colorUse, depthUse);
+                    VkRenderPass pass = mContext.renderPass(colorUse, depthUse, color1Use);
                     VkRenderPassBeginInfo begin{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
                     begin.renderPass = pass;
                     begin.framebuffer = mResources.framebuffer(pass, views, target.mWidth, target.mHeight);
@@ -1779,6 +1970,7 @@ void main()
             void drawBin(const osgUtil::RenderBin& bin, std::vector<const osgUtil::RenderBin*>& bins)
             {
                 bins.push_back(&bin);
+                bool firstPerson = false;
                 if (const osgUtil::RenderBin::DrawCallback* callback = bin.getDrawCallback())
                 {
                     const std::string type = typeid(*callback).name();
@@ -1796,12 +1988,18 @@ void main()
                         && (mTarget.mWindow || mTarget.mDepth))
                     {
                         VkClearAttachment attachment{ VK_IMAGE_ASPECT_DEPTH_BIT, 0, {} };
-                        attachment.clearValue.depthStencil = { 1.f, 0 };
+                        // glClear with the camera's clear depth: 0 when the depth is reversed
+                        attachment.clearValue.depthStencil = { SceneUtil::AutoDepth::isReversed() ? 0.f : 1.f, 0 };
                         VkClearRect rect{ scissorOf(mArea), 0, 1 };
                         vkCmdClearAttachments(mContext.commands(), 1, &attachment, 1, &rect);
                         mFirstPersonCleared = true;
+                        mSceneDepth = mTarget.mDepth;
+                        firstPerson = true;
                     }
                 }
+                // what this bin holds is the first person model (drawGeometry)
+                const bool wasFirstPerson = mInFirstPersonBin;
+                mInFirstPersonBin = mInFirstPersonBin || firstPerson;
                 auto child = bin.getRenderBinList().begin();
                 for (; child != bin.getRenderBinList().end() && child->first < 0; ++child)
                     drawBin(*child->second, bins);
@@ -1812,6 +2010,7 @@ void main()
                         drawLeaf(*leaf, bins);
                 for (; child != bin.getRenderBinList().end(); ++child)
                     drawBin(*child->second, bins);
+                mInFirstPersonBin = wasFirstPerson;
                 bins.pop_back();
             }
 
@@ -2011,10 +2210,22 @@ void main()
                         const double total = (ticks[mGpuUsed[slot] - 1] - ticks[0]) * period;
                         mGpuSums["frame"] += total;
                         mGpuSums["window+rest"] += total - inPasses;
+                        // the statistics' GPU line (F3), as osgViewer's Renderer gives it from OpenGL's timer
+                        // queries: on the main camera's statistics, for the frame measured, begun with its draw
+                        osg::Stats* stats = mCameraStats.get();
+                        if (stats != nullptr && stats->collectStats("gpu"))
+                        {
+                            double begin = 0.0;
+                            stats->getAttribute(mGpuFrame[slot], "Draw traversal begin time", begin);
+                            stats->setAttribute(mGpuFrame[slot], "GPU draw begin time", begin);
+                            stats->setAttribute(mGpuFrame[slot], "GPU draw end time", begin + total / 1000.0);
+                            stats->setAttribute(mGpuFrame[slot], "GPU draw time taken", total / 1000.0);
+                        }
                     }
                 }
                 mGpuUsed[slot] = 0;
                 mGpuLabels[slot].clear();
+                mGpuFrame[slot] = mFrameNumber;
                 vkCmdResetQueryPool(mContext.commands(), mGpuPools[slot], 0, sGpuQueries);
                 gpuTimestamp("start");
             }
@@ -2043,11 +2254,13 @@ void main()
             Variant* variantOf(Accumulated& state)
             {
                 const bool clip = state.mClipModes != 0;
-                if (state.mVariant == nullptr || state.mVariantProgram != state.mProgram || state.mVariant->mClips != clip)
+                if (state.mVariant == nullptr || state.mVariantProgram != state.mProgram || state.mVariant->mClips != clip
+                    || state.mVariantGeneration != mPrograms.sourceGeneration())
                 {
                     state.mVariant
                         = mPrograms.variant(*state.mProgram, state.mDefines, *mState, clip, mWaitForPrograms);
                     state.mVariantProgram = state.mProgram;
+                    state.mVariantGeneration = mPrograms.sourceGeneration();
                 }
                 return state.mVariant;
             }
@@ -2076,6 +2289,8 @@ void main()
                 CompositeMaps,
                 Particles,
                 Canvas,
+                Compute, // run before the stage's pass (runCompute)
+                Text, // osgText::Text (the statistics' text)
                 Plain, // an osg::Drawable itself: a ReadImageFromFramebufferCallback's, else unknown
                 Geometry,
                 Unknown,
@@ -2100,6 +2315,10 @@ void main()
                     kind = DrawableKind::Particles;
                 else if (type.find("PingPongCanvas") != std::string::npos)
                     kind = DrawableKind::Canvas;
+                else if (dynamic_cast<const osg::DispatchCompute*>(&drawable) != nullptr)
+                    kind = DrawableKind::Compute;
+                else if (dynamic_cast<const osgText::Text*>(&drawable) != nullptr)
+                    kind = DrawableKind::Text;
                 else if (type == "N3osg8DrawableE")
                     kind = DrawableKind::Plain;
                 else if (drawable.asGeometry() != nullptr && type.find("RipplesSurface") == std::string::npos)
@@ -2125,7 +2344,12 @@ void main()
                         drawParticles(static_cast<const osgParticle::ParticleSystem&>(*drawable), leaf, bins);
                         return;
                     case DrawableKind::Canvas:
-                        drawCanvas();
+                        drawCanvas(leaf, bins);
+                        return;
+                    case DrawableKind::Compute:
+                        return;
+                    case DrawableKind::Text:
+                        drawText(static_cast<const osgText::Text&>(*drawable), leaf, bins);
                         return;
                     case DrawableKind::Plain:
                         if (const osg::Drawable::DrawCallback* callback = drawable->getDrawCallback();
@@ -2540,6 +2764,8 @@ void main()
                 vkCmdBindDescriptorSets(mContext.commands(), VK_PIPELINE_BIND_POINT_GRAPHICS, variant.mLayout, 0, 1,
                     &set, offsetCount, offsets);
                 ++mSetBinds;
+                if (variant.mStorageLayout != VK_NULL_HANDLE && !bindStorage(variant))
+                    return false;
                 if (sameImages(draw.mImages, mLastImages) && draw.mVariant->mSetLayout == mLastSetLayout)
                     ++mSameImageBinds;
                 else
@@ -2560,8 +2786,9 @@ void main()
                 fixed.mFlipY = mFlip ? 1 : 0;
                 fixed.mFrontFace
                     = (state.mGlCounterClockwise != mFlip) ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE;
-                fixed.mColorAttachments = (mTarget.mWindow || mTarget.mColor) ? 1 : 0;
+                fixed.mColorAttachments = (mTarget.mWindow || mTarget.mColor) ? (mTarget.mColor1 ? 2 : 1) : 0;
                 fixed.mColorFormat = mTarget.mColorFormat;
+                fixed.mColorFormat1 = mTarget.mColor1 ? mTarget.mColor1->mFormat : VK_FORMAT_UNDEFINED;
                 fixed.mDepthFormat = mTarget.mDepthFormat;
                 if (!mTarget.mWindow && mTarget.mDepth == nullptr)
                 {
@@ -2802,6 +3029,7 @@ void main()
 
             void forgetBindings()
             {
+                mBoundStorageSet = VK_NULL_HANDLE;
                 mBoundPipeline = VK_NULL_HANDLE;
                 mBoundVertices = nullptr;
                 mBoundIndexBuffer = VK_NULL_HANDLE;
@@ -2811,6 +3039,22 @@ void main()
                 const osg::RefMatrix* projection, bool noDepthWrite = false)
             {
                 derive(state, mFrameCounter);
+                // the statistics' geometry has no program of its own (OSG gives it one only for some shader hints):
+                // OSG's own for it, its vertices' colours
+                if (mDrawingStatistics)
+                {
+                    if (state.mProgram == nullptr)
+                        state.mProgram = statisticsProgram();
+                    // blending without a function of its own: under OpenGL the one the GUI left set (alpha), as
+                    // its translucent backgrounds are drawn there
+                    if (state.mFixed.mBlend && state.attribute(osg::StateAttribute::BLENDFUNC) == nullptr)
+                    {
+                        state.mFixed.mSrcColor = VK_BLEND_FACTOR_SRC_ALPHA;
+                        state.mFixed.mDstColor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+                        state.mFixed.mSrcAlpha = VK_BLEND_FACTOR_ONE;
+                        state.mFixed.mDstAlpha = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+                    }
+                }
                 if (state.mProgram == nullptr || state.mProgram->getNumShaders() == 0)
                 {
                     ++mSkipped;
@@ -2831,6 +3075,16 @@ void main()
                 PipelineState fixed = pipelineState(state, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
                 if (noDepthWrite)
                     fixed.mDepthWrite = 0;
+                // Frame generation tells the first person model's pixels (they move with the camera) by the depth they
+                // have after its depth clear. Its parts that write none (a bow's blended string, effects drawn without
+                // the test) would move with the world behind them: a second string beside the real one in the generated
+                // frames, and gaps in it. With frame generation on, they write depth too (into the model's own depth,
+                // after its opaque parts).
+                else if (mInFirstPersonBin && !fixed.mDepthWrite && frameGenerationOn())
+                {
+                    fixed.mDepthWrite = 1;
+                    fixed.mDepthTest = 1;
+                }
                 GeometryEntry::Pipelines* pipelines = nullptr;
                 for (auto& candidate : entry->mPipelines)
                     if (candidate.mPass == mPass && std::memcmp(&candidate.mFixed, &fixed, sizeof(fixed)) == 0)
@@ -2952,6 +3206,17 @@ void main()
                     return;
                 Accumulated* base = step(accumulate(leaf._parent, bins), gui.mStateSet.get());
                 VkCommandBuffer commands = mContext.commands();
+                // the GUI's programs and pipelines made at once, as OpenGL does: left out while a thread makes them,
+                // a screen of it is missing for a frame (the window's clear colour, OSG's purple, between the
+                // loading screens at the start)
+                const bool waitedBefore = mWaitForPrograms;
+                mWaitForPrograms = true;
+                struct RestoreWait
+                {
+                    bool& mWait;
+                    bool mBefore;
+                    ~RestoreWait() { mWait = mBefore; }
+                } restoreWait{ mWaitForPrograms, waitedBefore };
                 for (const MyGuiBatch& batch : batches)
                 {
                     if (!batch.mArray || batch.mVertexCount == 0)
@@ -2996,7 +3261,7 @@ void main()
                         offsets.push_back(span.mOffset);
                     }
                     const PipelineState fixed = pipelineState(*textured, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
-                    VkPipeline pipeline = mPrograms.pipeline(*variant, fixed, layout, mPass);
+                    VkPipeline pipeline = mPrograms.pipeline(*variant, fixed, layout, mPass, true);
                     if (pipeline == VK_NULL_HANDLE)
                         continue;
                     DrawTemplate* draw = templateFor(*textured, *variant);
@@ -3011,6 +3276,198 @@ void main()
                     vkCmdDraw(commands, static_cast<uint32_t>(batch.mVertexCount), 1, 0, 0);
                     ++mDraws;
                 }
+            }
+
+            // osgText::Text as its draw draws it: its arrays, each glyph texture's quads with that texture on unit 0.
+            // The glyph textures are loaded glyph by glyph into OpenGL (subloads); their image (GlyphTexture's own,
+            // which each glyph is copied into) is drawn through a texture of the translator's.
+            void drawText(const osgText::Text& text, const osgUtil::RenderLeaf& leaf,
+                const std::vector<const osgUtil::RenderBin*>& bins)
+            {
+                const auto& coords = TextArrays::coords(text);
+                if (!coords || coords->empty())
+                    return;
+                TextEntry& entry = mTexts[&text];
+                entry.mText = &text;
+                entry.mLastUse = mFrameNumber;
+                Accumulated* base = accumulate(leaf._parent, bins);
+                // as its draw: its place (the matrix computePositions keeps: position, rotation, offset) before the
+                // modelview (text sized in screen coordinates, which needs the matrix of each view, is not done)
+                osg::ref_ptr<osg::RefMatrix> modelView = new osg::RefMatrix(text.getMatrix());
+                if (leaf._modelview.valid())
+                    modelView->postMult(*leaf._modelview);
+                for (const auto& [glyphTexture, quads] : text.getTextureGlyphQuadMap())
+                {
+                    if (!glyphTexture || !quads._primitives || quads._primitives->getNumIndices() == 0)
+                        continue;
+                    GlyphProxy& proxy = mGlyphTextures[glyphTexture.get()];
+                    if (!proxy.mTexture)
+                    {
+                        proxy.mSource = const_cast<osgText::GlyphTexture&>(*glyphTexture).createImage();
+                        proxy.mTexture = new osg::Texture2D;
+                        proxy.mTexture->setFilter(osg::Texture::MIN_FILTER, osg::Texture::LINEAR);
+                        proxy.mTexture->setFilter(osg::Texture::MAG_FILTER, osg::Texture::LINEAR);
+                        proxy.mTexture->setWrap(osg::Texture::WRAP_S, osg::Texture::CLAMP_TO_EDGE);
+                        proxy.mTexture->setWrap(osg::Texture::WRAP_T, osg::Texture::CLAMP_TO_EDGE);
+                        proxy.mTexture->setResizeNonPowerOfTwoHint(false);
+                    }
+                    // the glyphs as the shader reads them compiled as desktop GLSL (its ALPHA is .r and SDF .g, not
+                    // OpenGL ES's .a and .r): the OpenGL ES image (alpha, or luminance the distance and alpha the
+                    // glyph) copied with its channels so, again when glyphs are added
+                    if (proxy.mSource && proxy.mSource->getModifiedCount() != proxy.mModified)
+                    {
+                        proxy.mModified = proxy.mSource->getModifiedCount();
+                        const osg::Image& source = *proxy.mSource;
+                        const bool sdf = source.getPixelFormat() == GL_LUMINANCE_ALPHA;
+                        osg::ref_ptr<osg::Image> image = new osg::Image;
+                        image->allocateImage(source.s(), source.t(), 1, sdf ? 0x8227 /* GL_RG */ : 0x1903 /* GL_RED */,
+                            GL_UNSIGNED_BYTE);
+                        const unsigned char* from = source.data();
+                        unsigned char* to = image->data();
+                        const size_t pixels = static_cast<size_t>(source.s()) * source.t();
+                        if (sdf)
+                            for (size_t i = 0; i < pixels; ++i)
+                            {
+                                to[i * 2] = from[i * 2 + 1];
+                                to[i * 2 + 1] = from[i * 2];
+                            }
+                        else
+                            std::memcpy(to, from, pixels);
+                        proxy.mTexture->setImage(image);
+                    }
+                    osg::ref_ptr<osg::Geometry>& geometry = entry.mGeometries[glyphTexture.get()];
+                    if (!geometry)
+                    {
+                        geometry = new osg::Geometry;
+                        geometry->setUseVertexBufferObjects(true);
+                    }
+                    if (geometry->getVertexArray() != coords.get())
+                        geometry->setVertexArray(coords.get());
+                    // its colour: one (SOLID, given to OpenGL as the current colour), else a gradient's per vertex
+                    const auto& colors = TextArrays::colors(text);
+                    if (text.getColorGradientMode() == osgText::Text::SOLID || !colors)
+                    {
+                        auto* color = dynamic_cast<osg::Vec4Array*>(geometry->getColorArray());
+                        if (color == nullptr || color->getBinding() != osg::Array::BIND_OVERALL)
+                        {
+                            color = new osg::Vec4Array(1);
+                            geometry->setColorArray(color, osg::Array::BIND_OVERALL);
+                        }
+                        if ((*color)[0] != text.getColor())
+                        {
+                            (*color)[0] = text.getColor();
+                            color->dirty();
+                        }
+                    }
+                    else if (geometry->getColorArray() != colors.get())
+                        geometry->setColorArray(colors.get(), osg::Array::BIND_PER_VERTEX);
+                    const auto& texCoords = TextArrays::texCoords(text);
+                    if (texCoords && geometry->getTexCoordArray(0) != texCoords.get())
+                        geometry->setTexCoordArray(0, texCoords.get(), osg::Array::BIND_PER_VERTEX);
+                    if (geometry->getNumPrimitiveSets() != 1 || geometry->getPrimitiveSet(0) != quads._primitives.get())
+                    {
+                        geometry->removePrimitiveSet(0, geometry->getNumPrimitiveSets());
+                        geometry->addPrimitiveSet(quads._primitives.get());
+                    }
+                    Accumulated* state = step(base, nullptr, proxy.mTexture.get());
+                    setChain(leaf._parent, &bins, state);
+                    drawGeometry(*geometry, *state, modelView.get(), leaf._projection.get());
+                    setChain(nullptr, nullptr, nullptr);
+                }
+            }
+
+            struct TextEntry
+            {
+                osg::observer_ptr<const osgText::Text> mText;
+                std::map<const osgText::GlyphTexture*, osg::ref_ptr<osg::Geometry>> mGeometries;
+                unsigned mLastUse = 0;
+            };
+            std::map<const osgText::Text*, TextEntry> mTexts;
+            struct GlyphProxy
+            {
+                osg::ref_ptr<osg::Image> mSource; // the glyph texture's own image
+                unsigned mModified = ~0u;
+                osg::ref_ptr<osg::Texture2D> mTexture;
+            };
+            std::map<const osgText::GlyphTexture*, GlyphProxy> mGlyphTextures;
+
+            // osgViewer's statistics (F3, OpenMW's profiler): its camera (drawn by OSG's own renderer into the OpenGL
+            // ES pbuffer, whose draw callbacks keep its text and graphs up to date) culled again and drawn over the
+            // window, the last thing in it
+            void drawStatistics(osgUtil::SceneView& sceneView)
+            {
+                osg::Camera* mainCamera = sceneView.getCamera();
+                auto* view = mainCamera != nullptr ? dynamic_cast<osgViewer::View*>(mainCamera->getView()) : nullptr;
+                if (view == nullptr)
+                    return;
+                for (const auto& handler : view->getEventHandlers())
+                {
+                    auto* stats = dynamic_cast<osgViewer::StatsHandler*>(handler.get());
+                    if (stats == nullptr || StatsPage::of(*stats) == 0)
+                        continue;
+                    osg::Camera* camera = stats->getCamera();
+                    if (camera == nullptr || camera->getNodeMask() == 0 || camera->getViewport() == nullptr)
+                        continue;
+                    if (!mStatsView)
+                    {
+                        mStatsView = new osgUtil::SceneView;
+                        mStatsView->setDefaults(osgUtil::SceneView::NO_SCENEVIEW_LIGHT);
+                        mStatsView->setComputeNearFarMode(osg::CullSettings::DO_NOT_COMPUTE_NEAR_FAR);
+                    }
+                    mStatsView->setCamera(camera, false);
+                    mStatsView->setState(mState);
+                    mStatsView->setFrameStamp(const_cast<osg::FrameStamp*>(sceneView.getFrameStamp()));
+                    mStatsView->inheritCullSettings(*camera);
+                    mStatsView->cull();
+                    mDrawingStatistics = true;
+                    if (osgUtil::RenderStage* stage = mStatsView->getRenderStage())
+                        drawStage(*stage);
+                    mDrawingStatistics = false;
+                }
+                // the text not drawn for a while
+                if (mFrameNumber % 300 == 0)
+                    for (auto it = mTexts.begin(); it != mTexts.end();)
+                    {
+                        osg::ref_ptr<const osgText::Text> text;
+                        if (!it->second.mText.lock(text) || mFrameNumber - it->second.mLastUse > 600)
+                            it = mTexts.erase(it);
+                        else
+                            ++it;
+                    }
+            }
+            osg::ref_ptr<osgUtil::SceneView> mStatsView;
+            bool mDrawingStatistics = false;
+            osg::ref_ptr<osg::Program> mStatisticsProgram;
+
+            const osg::Program* statisticsProgram()
+            {
+                if (!mStatisticsProgram)
+                {
+                    mStatisticsProgram = new osg::Program;
+                    mStatisticsProgram->setName("a3 statistics");
+                    mStatisticsProgram->addShader(new osg::Shader(osg::Shader::VERTEX,
+                        "#version 300 es\n"
+                        "precision highp float;\n"
+                        "in vec4 osg_Vertex;\n"
+                        "in vec4 osg_Color;\n"
+                        "uniform mat4 osg_ModelViewProjectionMatrix;\n"
+                        "out vec4 vertexColor;\n"
+                        "void main()\n"
+                        "{\n"
+                        "    gl_Position = osg_ModelViewProjectionMatrix * osg_Vertex;\n"
+                        "    vertexColor = osg_Color;\n"
+                        "}\n"));
+                    mStatisticsProgram->addShader(new osg::Shader(osg::Shader::FRAGMENT,
+                        "#version 300 es\n"
+                        "precision highp float;\n"
+                        "in vec4 vertexColor;\n"
+                        "out vec4 color;\n"
+                        "void main()\n"
+                        "{\n"
+                        "    color = vertexColor;\n"
+                        "}\n"));
+                }
+                return mStatisticsProgram.get();
             }
 
             // osgParticle's quads, made as its draw makes them (ParticleSystem::drawImplementation, the path without
@@ -3339,8 +3796,10 @@ void main()
                 FrameGenView view;
                 if (!frameGenFindView(mFrameNumber, view) || !view.depth || !view.opaqueDepth)
                     return;
-                Image* depth = mResources.renderTarget(*view.depth);
-                Image* opaque = mResources.renderTarget(*view.opaqueDepth);
+                // the depths the scene was drawn with this frame (the engine's textures of the frame number's parity can
+                // be the other pair: the first person model's depth from a frame before, its colour moved with the world)
+                Image* depth = mSceneDepth != nullptr ? mSceneDepth : mResources.renderTarget(*view.depth);
+                Image* opaque = mSceneOpaqueDepth != nullptr ? mSceneOpaqueDepth : mResources.renderTarget(*view.opaqueDepth);
                 if (depth == nullptr || opaque == nullptr || !depth->mDepthAspect || !opaque->mDepthAspect)
                     return;
                 const VkExtent2D extent = mContext.windowExtent();
@@ -3352,7 +3811,7 @@ void main()
                 // the scene's colour: the window has it as it is (drawCanvas) with the GUI over it. Once the post
                 // processing chain is drawn here, the window before the GUI is what to take instead (OpenGL ES takes it
                 // in the HUD camera's callback, frameGenPreGuiCapture)
-                mGen.mScene = mSceneColor;
+                mGen.mScene = mPostColor != nullptr ? mPostColor : mSceneColor;
                 mGen.mFirstPerson = mFirstPersonCleared;
                 mGen.mDepth = depth;
                 mGen.mOpaqueDepth = opaque;
@@ -3429,6 +3888,18 @@ void main()
                 const float proj[4] = { static_cast<float>(cur.projection(0, 0)),
                     static_cast<float>(cur.projection(1, 1)), static_cast<float>(zNear), static_cast<float>(zFar) };
                 static const bool tint = std::getenv("OPENMW_FRAMEGEN_TINT") != nullptr;
+                // third person: the line from the player's feet (a little above the ground, which is the world's) to
+                // above its head, in this frame's view; the radius takes in its arms and what it holds
+                float playerFeet[4] = { 0.f, 0.f, 0.f, 0.f }, playerHead[4] = { 0.f, 0.f, 0.f, 0.f };
+                if (cur.player && !mGen.mFirstPerson)
+                {
+                    const osg::Vec3f feet = (cur.playerFeet + osg::Vec3d(0.0, 0.0, cur.playerHeight * 0.06)) * cur.view;
+                    const osg::Vec3f head = (cur.playerFeet + osg::Vec3d(0.0, 0.0, cur.playerHeight * 1.15)) * cur.view;
+                    playerFeet[0] = feet.x(), playerFeet[1] = feet.y(), playerFeet[2] = feet.z();
+                    playerFeet[3] = static_cast<float>(cur.playerRadius * 2.5);
+                    playerHead[0] = head.x(), playerHead[1] = head.y(), playerHead[2] = head.z();
+                    playerHead[3] = 1.f;
+                }
                 for (const UniformMember& member : block.mMembers)
                 {
                     uint8_t* at = span.mData + member.mOffset;
@@ -3436,6 +3907,10 @@ void main()
                         std::memcpy(at, curToTarget.ptr(), 64);
                     else if (member.mName == "uProj")
                         std::memcpy(at, proj, 16);
+                    else if (member.mName == "uPlayerFeet")
+                        std::memcpy(at, playerFeet, 16);
+                    else if (member.mName == "uPlayerHead")
+                        std::memcpy(at, playerHead, 16);
                     else
                     {
                         const float value = member.mName == "uReversed" ? (cur.reversedDepth ? 1.f : 0.f)
@@ -3494,6 +3969,7 @@ void main()
                 vkCmdDraw(commands, 3, 1, 0, 0);
                 mContext.endWindowPass();
                 mContext.present(0, 0);
+                Alpha3::noteShownFrame();
                 ++mGenerated;
                 return true;
             }
@@ -3518,18 +3994,232 @@ void main()
             bool mWaitForPrograms = false; // programs compiled at once, not on their thread (variantOf)
             std::unordered_set<const osg::Camera*> mCamerasDrawn[2]; // by frame counter parity (drawStageItself)
 
-            // The post-processing canvas: for now the scene's texture as it is
-            void drawCanvas()
+            // An attribute as the state sets of a leaf's chain have it, the leaf's own first (the bins' after the root's)
+            static const osg::StateAttribute* chainAttribute(const osgUtil::StateGraph* graph,
+                const std::vector<const osgUtil::RenderBin*>* bins, osg::StateAttribute::Type type, unsigned member)
             {
-                if (mSceneColor == nullptr)
+                for (; graph != nullptr; graph = graph->_parent)
+                    if (const osg::StateSet* stateSet = graph->getStateSet())
+                        if (const osg::StateAttribute* attribute = stateSet->getAttribute(type, member))
+                            return attribute;
+                if (bins != nullptr)
+                    for (auto bin = bins->rbegin(); bin != bins->rend(); ++bin)
+                        if (const osg::StateSet* stateSet = (*bin)->getStateSet())
+                            if (const osg::StateAttribute* attribute = stateSet->getAttribute(type, member))
+                                return attribute;
+                return nullptr;
+            }
+
+            static const osg::Uniform* chainUniform(const osgUtil::StateGraph* graph, const std::string& name)
+            {
+                for (; graph != nullptr; graph = graph->_parent)
+                    if (const osg::StateSet* stateSet = graph->getStateSet())
+                        if (const osg::Uniform* uniform = stateSet->getUniform(name))
+                            return uniform;
+                return nullptr;
+            }
+
+            // The buffer of the storage binding at a binding of a chain (a dummy without one)
+            VkDescriptorBufferInfo storageInfo(const osgUtil::StateGraph* graph,
+                const std::vector<const osgUtil::RenderBin*>* bins, const StorageSlot& slot)
+            {
+                const auto* binding = static_cast<const osg::BufferIndexBinding*>(chainAttribute(graph, bins,
+                    slot.mUniform ? osg::StateAttribute::UNIFORMBUFFERBINDING
+                                  : osg::StateAttribute::SHADERSTORAGEBUFFERBINDING,
+                    slot.index()));
+                // copied on the commands that go ahead of the frame's, so at any time
+                const bool copy = true;
+                const osg::BufferData* data = binding != nullptr ? binding->getBufferData() : nullptr;
+                const VkBuffer buffer = data != nullptr ? mResources.storage(*data, copy) : VK_NULL_HANDLE;
+                if (buffer == VK_NULL_HANDLE)
+                    return { mResources.dummyStorage(), 0, VK_WHOLE_SIZE };
+                const VkDeviceSize total = data->getTotalDataSize();
+                const VkDeviceSize offset = std::min<VkDeviceSize>(static_cast<VkDeviceSize>(binding->getOffset()), total);
+                VkDeviceSize size = binding->getSize() > 0 ? static_cast<VkDeviceSize>(binding->getSize()) : total;
+                size = std::min(size, total - offset);
+                return { buffer, offset, size > 0 ? size : VK_WHOLE_SIZE };
+            }
+
+            // The storage blocks of the draw's program (set 1), from the leaf's chain: one set for each set of buffers
+            // in the frame
+            bool bindStorage(const Variant& variant)
+            {
+                VkDescriptorBufferInfo infos[8];
+                const size_t count = std::min<size_t>(variant.mStorage.size(), 8);
+                uint64_t key = 0xcbf29ce484222325ull;
+                const auto mix = [&](uint64_t value) { key = (key ^ value) * 0x100000001b3ull; };
+                mix(reinterpret_cast<uintptr_t>(variant.mStorageLayout));
+                for (size_t i = 0; i < count; ++i)
+                {
+                    infos[i] = storageInfo(mChainGraph, mChainBins, variant.mStorage[i]);
+                    mix(reinterpret_cast<uintptr_t>(infos[i].buffer));
+                    mix(infos[i].offset);
+                    mix(infos[i].range);
+                }
+                if (mStorageSetsFrame != mFrameCounter)
+                {
+                    mStorageSets.clear();
+                    mStorageSetsFrame = mFrameCounter;
+                }
+                VkDescriptorSet& set = mStorageSets[key];
+                if (set == VK_NULL_HANDLE)
+                {
+                    set = mContext.allocateSet(variant.mStorageLayout);
+                    if (set == VK_NULL_HANDLE)
+                        return false;
+                    VkWriteDescriptorSet writes[8];
+                    for (size_t i = 0; i < count; ++i)
+                    {
+                        writes[i] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+                        writes[i].dstSet = set;
+                        writes[i].dstBinding = variant.mStorage[i].mBinding;
+                        writes[i].descriptorCount = 1;
+                        writes[i].descriptorType = variant.mStorage[i].mUniform ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
+                                                                                : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                        writes[i].pBufferInfo = &infos[i];
+                    }
+                    vkUpdateDescriptorSets(mContext.vkDevice(), static_cast<uint32_t>(count), writes, 0, nullptr);
+                }
+                if (set != mBoundStorageSet)
+                {
+                    vkCmdBindDescriptorSets(mContext.commands(), VK_PIPELINE_BIND_POINT_GRAPHICS, variant.mLayout, 1, 1,
+                        &set, 0, nullptr);
+                    mBoundStorageSet = set;
+                }
+                return true;
+            }
+
+            // The stage's osg::DispatchCompute leaves (its own bins', not its pre and post stages'), in the order
+            // they are in, each before the draws: GL draws them where they are in the bins, between draws
+            void runCompute(const osgUtil::RenderBin& bin)
+            {
+                for (const auto& [number, child] : bin.getRenderBinList())
+                    if (number < 0)
+                        runCompute(*child);
+                const auto run = [&](const osgUtil::RenderLeaf* leaf) {
+                    if (leaf->getDrawable() != nullptr && kindOf(*leaf->getDrawable()) == DrawableKind::Compute)
+                        dispatchCompute(*leaf);
+                };
+                for (const osgUtil::RenderLeaf* leaf : bin.getRenderLeafList())
+                    run(leaf);
+                for (const osgUtil::StateGraph* graph : bin.getStateGraphList())
+                    for (const auto& leaf : graph->_leaves)
+                        run(leaf.get());
+                for (const auto& [number, child] : bin.getRenderBinList())
+                    if (number >= 0)
+                        runCompute(*child);
+            }
+
+            void dispatchCompute(const osgUtil::RenderLeaf& leaf)
+            {
+                const auto& dispatch = static_cast<const osg::DispatchCompute&>(*leaf.getDrawable());
+                const osgUtil::StateGraph* graph = leaf._parent;
+                const auto* program
+                    = static_cast<const osg::Program*>(chainAttribute(graph, nullptr, osg::StateAttribute::PROGRAM, 0));
+                if (program == nullptr)
                     return;
+                ComputeVariant* variant = mPrograms.compute(*program);
+                if (variant == nullptr || !variant->mOk)
+                    return;
+                GLint x = 0, y = 0, z = 0;
+                dispatch.getComputeGroups(x, y, z);
+                if (x <= 0 || y <= 0 || z <= 0)
+                    return;
+                // on the command buffer submitted ahead of the frame's (with the storage buffers' copies): the
+                // SM-T720's driver crashed on a dispatch recorded on the frame's own
+                VkCommandBuffer commands = mContext.uploadCommands();
+                // the buffers (their data copied in first, when it changed)
+                VkDescriptorBufferInfo infos[8];
+                const size_t count = std::min<size_t>(variant->mStorage.size(), 8);
+                for (size_t i = 0; i < count; ++i)
+                    infos[i] = storageInfo(graph, nullptr, variant->mStorage[i]);
+                // the uniforms
+                Span span;
+                const UniformBlock& block = variant->mUniforms;
+                if (block.mSize > 0)
+                {
+                    const VkDeviceSize alignment = std::max<VkDeviceSize>(
+                        mContext.device().mProperties.limits.minUniformBufferOffsetAlignment, 16);
+                    span = mResources.stream(block.mSize, alignment);
+                    if (span.mData == nullptr)
+                        return;
+                    std::memset(span.mData, 0, block.mSize);
+                    for (const UniformMember& member : block.mMembers)
+                        if (const osg::Uniform* uniform = chainUniform(graph, member.mName))
+                            writeUniform(span.mData, block.mSize, member, *uniform);
+                }
+                VkDescriptorSet sets[2]{ mContext.allocateSet(variant->mSetLayout), VK_NULL_HANDLE };
+                if (sets[0] == VK_NULL_HANDLE)
+                    return;
+                uint32_t setCount = 1;
+                VkWriteDescriptorSet writes[9];
+                uint32_t writeCount = 0;
+                VkDescriptorBufferInfo uniformInfo{ span.mBuffer, span.mOffset, block.mSize };
+                if (block.mSize > 0)
+                {
+                    VkWriteDescriptorSet& write = writes[writeCount++];
+                    write = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+                    write.dstSet = sets[0];
+                    write.dstBinding = 0;
+                    write.descriptorCount = 1;
+                    write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+                    write.pBufferInfo = &uniformInfo;
+                }
+                if (variant->mStorageLayout != VK_NULL_HANDLE)
+                {
+                    sets[1] = mContext.allocateSet(variant->mStorageLayout);
+                    if (sets[1] == VK_NULL_HANDLE)
+                        return;
+                    setCount = 2;
+                    for (size_t i = 0; i < count; ++i)
+                    {
+                        VkWriteDescriptorSet& write = writes[writeCount++];
+                        write = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+                        write.dstSet = sets[1];
+                        write.dstBinding = variant->mStorage[i].mBinding;
+                        write.descriptorCount = 1;
+                        write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                        write.pBufferInfo = &infos[i];
+                    }
+                }
+                vkUpdateDescriptorSets(mContext.vkDevice(), writeCount, writes, 0, nullptr);
+                const VkPipelineStageFlags shaderStages = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT
+                    | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+                // after the shaders before that read or wrote the buffers (memoryBarrier's work, both ways)
+                VkMemoryBarrier before{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+                before.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+                before.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+                vkCmdPipelineBarrier(commands, shaderStages, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &before, 0,
+                    nullptr, 0, nullptr);
+                vkCmdBindPipeline(commands, VK_PIPELINE_BIND_POINT_COMPUTE, variant->mPipeline);
+                vkCmdBindDescriptorSets(
+                    commands, VK_PIPELINE_BIND_POINT_COMPUTE, variant->mLayout, 0, setCount, sets, 0, nullptr);
+                vkCmdDispatch(commands, static_cast<uint32_t>(x), static_cast<uint32_t>(y), static_cast<uint32_t>(z));
+                VkMemoryBarrier after{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+                after.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+                after.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+                vkCmdPipelineBarrier(
+                    commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, shaderStages, 0, 1, &after, 0, nullptr, 0, nullptr);
+                ++mDispatches;
+            }
+
+            std::unordered_map<uint64_t, VkDescriptorSet> mStorageSets; // this frame's, by their buffers
+            uint64_t mStorageSetsFrame = ~0ull;
+            VkDescriptorSet mBoundStorageSet = VK_NULL_HANDLE;
+            uint64_t mDispatches = 0;
+
+            // The scene (or another image) as it is, onto the current target
+            void blitImage(Image& source)
+            {
                 Variant* variant = mPrograms.builtin("a3 blit", sBlitVertex, sBlitFragment);
                 if (variant == nullptr || !variant->mOk)
                     return;
                 PipelineState fixed;
                 fixed.mFlipY = mFlip ? 1 : 0;
-                fixed.mColorAttachments = (mTarget.mWindow || mTarget.mColor) ? 1 : 0;
+                fixed.mColorAttachments = (mTarget.mWindow || mTarget.mColor) ? (mTarget.mColor1 ? 2 : 1) : 0;
                 fixed.mColorFormat = mTarget.mColorFormat;
+                fixed.mColorFormat1 = mTarget.mColor1 ? mTarget.mColor1->mFormat : VK_FORMAT_UNDEFINED;
+                fixed.mWriteMask1 = 0; // writes no normals
                 fixed.mDepthFormat = mTarget.mDepthFormat;
                 VkPipeline pipeline = mPrograms.pipeline(*variant, fixed, VertexLayout{}, mPass);
                 if (pipeline == VK_NULL_HANDLE)
@@ -3538,7 +4228,7 @@ void main()
                 if (set == VK_NULL_HANDLE || variant->mSamplers.empty())
                     return;
                 VkDescriptorImageInfo image{ mResources.linearSampler(),
-                    mResources.view(*mSceneColor, VK_IMAGE_VIEW_TYPE_2D), mSceneColor->readLayout() };
+                    mResources.view(source, VK_IMAGE_VIEW_TYPE_2D), source.readLayout() };
                 VkWriteDescriptorSet write{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
                 write.dstSet = set;
                 write.dstBinding = variant->mSamplers.front().mBinding;
@@ -3556,6 +4246,226 @@ void main()
                 ++mDraws;
             }
 
+            // A render pass into an image of the post processing chain, which becomes the target (loaded, or cleared)
+            bool beginImagePass(Image& image, const osg::Vec4f* clear)
+            {
+                AttachmentUse colorUse;
+                colorUse.mFormat = image.mFormat;
+                colorUse.mLoad = clear != nullptr ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+                colorUse.mInitial = colorUse.mFinal = image.readLayout();
+                VkRenderPass pass = mContext.renderPass(colorUse, AttachmentUse{});
+                VkClearValue value{};
+                if (clear != nullptr)
+                    value.color = { { clear->r(), clear->g(), clear->b(), clear->a() } };
+                VkRenderPassBeginInfo begin{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+                begin.renderPass = pass;
+                begin.framebuffer
+                    = mResources.framebuffer(pass, { image.mAttachmentView }, image.mWidth, image.mHeight);
+                if (begin.framebuffer == VK_NULL_HANDLE)
+                    return false;
+                begin.renderArea = { { 0, 0 }, { image.mWidth, image.mHeight } };
+                begin.clearValueCount = 1;
+                begin.pClearValues = &value;
+                VkCommandBuffer commands = mContext.commands();
+                vkCmdBeginRenderPass(commands, &begin, VK_SUBPASS_CONTENTS_INLINE);
+                forgetBindings();
+                mPass = pass;
+                mTarget = Target{};
+                mTarget.mWindow = false;
+                mTarget.mColor = &image;
+                mTarget.mWidth = image.mWidth;
+                mTarget.mHeight = image.mHeight;
+                mTarget.mColorFormat = image.mFormat;
+                mArea = begin.renderArea;
+                mFlip = false;
+                mViewportDepth[0] = -1.f;
+                vkCmdSetScissor(commands, 0, 1, &mArea);
+                setViewport(0.f, 1.f);
+                return true;
+            }
+
+            void endImagePass()
+            {
+                vkCmdEndRenderPass(mContext.commands());
+                mPass = VK_NULL_HANDLE;
+            }
+
+            // The window pass again (what is in it kept), as the stage had it
+            bool resumeWindowPass(const Target& target, const VkRect2D& area)
+            {
+                const float black[4] = { 0.f, 0.f, 0.f, 1.f };
+                if (!mContext.beginWindowPass(false, black, false, 1.f, 0))
+                    return false;
+                mPass = mContext.windowCompatiblePass();
+                forgetBindings();
+                mBoundGeneration = mContext.commandsGeneration();
+                mTarget = target;
+                mArea = area;
+                mFlip = true;
+                mViewportDepth[0] = -1.f;
+                VkRect2D scissor = scissorOf(area);
+                vkCmdSetScissor(mContext.commands(), 0, 1, &scissor);
+                setViewport(0.f, 1.f);
+                return true;
+            }
+
+            // The post processing canvas, as PingPongCanvas::drawImplementation draws it: without techniques the scene
+            // as it is; else each technique's passes (with their state sets over the canvas's) into three textures in
+            // turn or a pass's own target, the last technique's resolve pass into an image of the window's size, which
+            // is drawn into the window (and is what frame generation warps). Not done: the eye adaptation (HDR) and
+            // the mipmaps of the passes' targets.
+            void drawCanvas(const osgUtil::RenderLeaf& leaf, const std::vector<const osgUtil::RenderBin*>& bins)
+            {
+                const auto& canvas = static_cast<const PingPongCanvasMirror&>(*leaf.getDrawable());
+                Image* scene = canvas.mTextureScene ? mResources.texture(*canvas.mTextureScene) : nullptr;
+                if (scene == nullptr)
+                    scene = mSceneColor;
+                if (scene == nullptr)
+                    return;
+                std::vector<size_t> filtered;
+                for (size_t i = 0; i < canvas.mPasses.size(); ++i)
+                    if (!(canvas.mMask & canvas.mPasses[i].mFlags))
+                        filtered.push_back(i);
+                if (!canvas.mPostprocessing || filtered.empty() || !mTarget.mWindow || !canvas.mTextureScene)
+                {
+                    blitImage(*scene);
+                    return;
+                }
+
+                const osg::Texture& sceneTexture = *canvas.mTextureScene;
+                const int sceneWidth = sceneTexture.getTextureWidth() > 0 ? sceneTexture.getTextureWidth()
+                                                                          : static_cast<int>(scene->mWidth);
+                const int sceneHeight = sceneTexture.getTextureHeight() > 0 ? sceneTexture.getTextureHeight()
+                                                                            : static_cast<int>(scene->mHeight);
+                // the three textures the passes draw into in turn (the canvas's mFbos' copies of the scene texture)
+                CanvasTargets& own = mCanvasTargets[&canvas];
+                own.mLastUse = mFrameCounter;
+                if (own.mSource != &sceneTexture || own.mWidth != sceneWidth || own.mHeight != sceneHeight)
+                {
+                    for (auto& texture : own.mTextures)
+                        texture = static_cast<osg::Texture*>(sceneTexture.clone(osg::CopyOp::SHALLOW_COPY));
+                    own.mSource = &sceneTexture;
+                    own.mWidth = sceneWidth;
+                    own.mHeight = sceneHeight;
+                }
+                Image* images[3];
+                for (int i = 0; i < 3; ++i)
+                {
+                    images[i] = mResources.renderTarget(
+                        *own.mTextures[i], sceneWidth, sceneHeight, sceneTexture.getInternalFormat());
+                    if (images[i] == nullptr)
+                    {
+                        blitImage(*scene);
+                        return;
+                    }
+                }
+                const VkExtent2D extent = mContext.windowExtent();
+                Image* output = mResources.renderTarget(&own, extent.width, extent.height, 0x8058 /* GL_RGBA8 */);
+                if (output == nullptr)
+                {
+                    blitImage(*scene);
+                    return;
+                }
+
+                const Target windowTarget = mTarget;
+                const VkRect2D windowArea = mArea;
+                mContext.endWindowPass();
+                mPass = VK_NULL_HANDLE;
+
+                // targets made or resized: cleared to their clear colour (made at the size they ask for now)
+                for (const Fx::Types::RenderTarget& attachment : canvas.mDirtyAttachments)
+                {
+                    if (!attachment.mTarget)
+                        continue;
+                    const auto [width, height] = attachment.mSize.get(sceneWidth, sceneHeight);
+                    attachment.mTarget->setTextureSize(width, height);
+                    if (Image* image = mResources.renderTarget(*attachment.mTarget))
+                        if (beginImagePass(*image, &attachment.mClearColor))
+                            endImagePass();
+                }
+                canvas.mDirtyAttachments.clear();
+
+                static constexpr std::array<std::array<int, 2>, 3> sBuffers = { { { 1, 2 }, { 0, 2 }, { 0, 1 } } };
+                std::array<int, 2> buffer = sBuffers[0];
+                int lastDraw = -1; // -1: the scene
+                int lastShader = -1;
+                bool resolved = false;
+                const auto textureOf = [&](int which) -> osg::Texture* {
+                    return which < 0 ? canvas.mTextureScene.get() : own.mTextures[which].get();
+                };
+                for (const size_t index : filtered)
+                {
+                    const Fx::DispatchNode& node = canvas.mPasses[index];
+                    if (!node.mRootStateSet)
+                        continue;
+                    // the units of apps/openmw/mwrender/postprocessor.hpp (TextureUnits)
+                    node.mRootStateSet->setTextureAttribute(2, canvas.mTextureDepth);
+                    if (canvas.mTextureNormals)
+                        node.mRootStateSet->setTextureAttribute(4, canvas.mTextureNormals);
+                    if (canvas.mTextureDistortion)
+                        node.mRootStateSet->setTextureAttribute(5, canvas.mTextureDistortion);
+                    for (size_t passIndex = 0; passIndex < node.mPasses.size(); ++passIndex)
+                    {
+                        const Fx::DispatchNode::SubPass& pass = node.mPasses[passIndex];
+                        const bool lastPass = passIndex == node.mPasses.size() - 1;
+                        pass.mStateSet->setTextureAttribute(0, textureOf(lastShader));
+                        pass.mStateSet->setTextureAttribute(1, textureOf(lastDraw));
+                        Image* into = nullptr;
+                        if (pass.mRenderTarget)
+                        {
+                            const osg::FrameBufferAttachment& attachment
+                                = pass.mRenderTarget->getAttachment(osg::Camera::COLOR_BUFFER0);
+                            if (attachment.getTexture() != nullptr)
+                                into = mResources.renderTarget(*attachment.getTexture());
+                        }
+                        else if (pass.mResolve && index == filtered.back())
+                        {
+                            into = output;
+                            resolved = true;
+                        }
+                        else if (lastPass)
+                        {
+                            lastDraw = lastShader = buffer[0];
+                            into = images[buffer[0]];
+                            buffer = sBuffers[lastShader];
+                        }
+                        else
+                        {
+                            into = images[buffer[0]];
+                            lastDraw = buffer[0];
+                            std::swap(buffer[0], buffer[1]);
+                        }
+                        if (into == nullptr || !beginImagePass(*into, nullptr))
+                            continue;
+                        Accumulated* state = accumulate(leaf._parent, bins);
+                        state = step(state, node.mRootStateSet.get());
+                        state = step(state, pass.mStateSet.get());
+                        setChain(leaf._parent, &bins, state);
+                        drawGeometry(canvas, *state, leaf._modelview.get(), leaf._projection.get());
+                        setChain(nullptr, nullptr, nullptr);
+                        endImagePass();
+                    }
+                }
+
+                if (!resumeWindowPass(windowTarget, windowArea))
+                    return;
+                // without a resolve pass (every pass has a target of its own) the last one drawn, as GL leaves it
+                Image* result = resolved ? output : (lastShader >= 0 ? images[lastShader] : scene);
+                blitImage(*result);
+                if (resolved)
+                    mPostColor = output;
+            }
+
+            struct CanvasTargets
+            {
+                const osg::Texture* mSource = nullptr;
+                int mWidth = 0, mHeight = 0;
+                std::array<osg::ref_ptr<osg::Texture>, 3> mTextures;
+                uint64_t mLastUse = 0;
+            };
+            std::map<const void*, CanvasTargets> mCanvasTargets;
+            Image* mPostColor = nullptr; // this frame's post processed scene (before the GUI), for frame generation
+
             Context& mContext;
             Resources mResources;
             Programs mPrograms;
@@ -3570,6 +4480,8 @@ void main()
             VkQueryPool mGpuPools[sFramesInFlight]{};
             uint32_t mGpuUsed[sFramesInFlight]{};
             std::vector<std::string> mGpuLabels[sFramesInFlight];
+            unsigned mGpuFrame[sFramesInFlight] = {}; // the frame (OSG's number) each slot's queries measure
+            osg::observer_ptr<osg::Stats> mCameraStats; // the main camera's (for the GPU's time)
             std::map<std::string, double> mGpuSums;
             // the leaf being drawn, for the uniforms of volatile states
             const osgUtil::StateGraph* mChainGraph = nullptr;
@@ -3656,6 +4568,17 @@ void main()
             std::set<std::string> mUnknown;
             Image* mSceneColor = nullptr;
             bool mFirstPersonCleared = false; // this frame's scene depth was cleared for the first person model
+            Image* mSceneDepth = nullptr; // the depth it was cleared in
+            Image* mSceneOpaqueDepth = nullptr; // the copy of the scene's depth before the clear
+            bool mInFirstPersonBin = false; // drawing the bin of the first person model (after its depth clear)
+            static bool frameGenerationOn()
+            {
+                static const bool on = [] {
+                    const char* request = std::getenv("OPENMW_FRAMEGEN");
+                    return request != nullptr && *request != '\0' && std::string_view(request) != "0";
+                }();
+                return on;
+            }
             // the scene image of the last frame that drew one, for the loading screen's copy of the window
             Image* mLastSceneColor = nullptr;
             // the water's ripples (renderRipples)

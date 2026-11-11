@@ -334,33 +334,35 @@ namespace Alpha3::Vk
             createSwapchain();
     }
 
-    VkRenderPass Context::renderPass(const AttachmentUse& color, const AttachmentUse& depth)
+    VkRenderPass Context::renderPass(const AttachmentUse& color, const AttachmentUse& depth, const AttachmentUse& color1)
     {
-        const auto key = std::make_tuple(color.key(), depth.key());
+        const auto key = std::make_tuple(color.key(), depth.key(), color1.key());
         auto found = mPasses.find(key);
         if (found != mPasses.end())
             return found->second;
 
-        VkAttachmentDescription attachments[2]{};
-        VkAttachmentReference colorRef{ 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
+        VkAttachmentDescription attachments[3]{};
+        VkAttachmentReference colorRefs[2]{ { 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL },
+            { 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL } };
         VkAttachmentReference depthRef{ 0, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL };
         uint32_t count = 0;
         VkSubpassDescription subpass{};
         subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-        if (color.mFormat != VK_FORMAT_UNDEFINED)
+        for (const AttachmentUse* use : { &color, &color1 })
         {
+            if (use->mFormat == VK_FORMAT_UNDEFINED || (use == &color1 && color.mFormat == VK_FORMAT_UNDEFINED))
+                continue;
             VkAttachmentDescription& a = attachments[count];
-            a.format = color.mFormat;
+            a.format = use->mFormat;
             a.samples = VK_SAMPLE_COUNT_1_BIT;
-            a.loadOp = color.mLoad;
-            a.storeOp = color.mStore;
+            a.loadOp = use->mLoad;
+            a.storeOp = use->mStore;
             a.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
             a.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-            a.initialLayout = color.mInitial;
-            a.finalLayout = color.mFinal;
-            colorRef.attachment = count++;
-            subpass.colorAttachmentCount = 1;
-            subpass.pColorAttachments = &colorRef;
+            a.initialLayout = use->mInitial;
+            a.finalLayout = use->mFinal;
+            colorRefs[subpass.colorAttachmentCount++].attachment = count++;
+            subpass.pColorAttachments = colorRefs;
         }
         if (depth.mFormat != VK_FORMAT_UNDEFINED)
         {
@@ -557,10 +559,11 @@ namespace Alpha3::Vk
             if (frame.mDescriptorPool == frame.mDescriptorPools.size())
             {
                 const VkDescriptorPoolSize sizes[] = { { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 3072 },
-                    { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 8192 } };
+                    { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 8192 }, { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 512 },
+                    { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 64 } };
                 VkDescriptorPoolCreateInfo info{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
                 info.maxSets = 1024;
-                info.poolSizeCount = 2;
+                info.poolSizeCount = 4;
                 info.pPoolSizes = sizes;
                 VkDescriptorPool pool = VK_NULL_HANDLE;
                 if (vkCreateDescriptorPool(mDevice.mDevice, &info, nullptr, &pool) != VK_SUCCESS)

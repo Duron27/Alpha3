@@ -103,6 +103,15 @@ namespace Alpha3::Vk
             const std::function<void(std::vector<uint32_t>&)>& converter, VkBuffer& buffer, VkDeviceSize& offset,
             uint32_t& count);
 
+        // The buffer of a shader storage or uniform buffer binding's data (OpenMW's clustered lighting, the post
+        // processor's uniforms): kept from frame to frame, as
+        // compute shaders write into it. Its data is copied in when its modified count changes, by a copy in the
+        // command buffer (in order with the GPU's use of it), only when copy is set (outside a render pass); else the
+        // buffer keeps what it had (a new one gets the data at once). Null without data.
+        VkBuffer storage(const osg::BufferData& data, bool copy);
+        // A small zeroed storage buffer for a binding with nothing bound
+        VkBuffer dummyStorage();
+
         // The image of a texture: its osg::Image uploaded (with mip levels), or what a camera drew into it. Null when
         // it has neither yet, or when its upload waits for a later frame (this frame's upload budget is used up).
         Image* texture(const osg::Texture& texture);
@@ -144,6 +153,13 @@ namespace Alpha3::Vk
             Span mStreamed;
             uint64_t mLastUse = 0;
             uint64_t mCheckedFrame = ~0ull; // the frame the object was last checked to be the one the entry is for
+        };
+        struct StorageEntry
+        {
+            osg::ref_ptr<const osg::BufferData> mData;
+            Buffer mBuffer;
+            unsigned mModified = 0;
+            uint64_t mLastUse = 0;
         };
         struct ConvertedEntry
         {
@@ -192,6 +208,8 @@ namespace Alpha3::Vk
         std::array<std::vector<Chunk>, 8> mChunks; // by frame slot
         std::unordered_map<const osg::BufferData*, BufferEntry> mBuffers;
         std::map<std::pair<const osg::BufferData*, uint32_t>, ConvertedEntry> mConverted;
+        std::unordered_map<const osg::BufferData*, StorageEntry> mStorage;
+        Buffer mDummyStorage;
         std::unordered_map<const osg::Texture*, TextureEntry> mTextures;
         std::map<const void*, TargetEntry> mTargets;
         std::map<std::array<uint32_t, 12>, VkSampler> mSamplers;

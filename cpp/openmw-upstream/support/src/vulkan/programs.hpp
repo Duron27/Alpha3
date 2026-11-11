@@ -64,6 +64,21 @@ namespace Alpha3::Vk
         VkShaderStageFlags mStages = 0;
     };
 
+    // A shader storage block (layout(std430, binding = N) buffer): set 1 at OpenGL's binding, which is the index of the
+    // osg::ShaderStorageBufferBinding it reads (OpenMW's clustered lighting)
+    struct StorageSlot
+    {
+        uint32_t mBinding = 0;
+        VkShaderStageFlags mStages = 0;
+        // a uniform block the program binds to an index (osg::Program::addBindUniformBlock: the post processor's
+        // _data), read from the osg::UniformBufferBinding at that index; else a storage block
+        bool mUniform = false;
+        // a uniform block is at this binding plus its index, apart from the stages' own blocks (0 to 3)
+        static constexpr uint32_t sUniformBlockBase = 16;
+        // the index of the osg::BufferIndexBinding it reads
+        uint32_t index() const { return mUniform ? mBinding - sUniformBlockBase : mBinding; }
+    };
+
     struct VertexInput
     {
         std::string mName;
@@ -127,14 +142,17 @@ namespace Alpha3::Vk
         uint32_t mSrcAlpha = VK_BLEND_FACTOR_ONE, mDstAlpha = VK_BLEND_FACTOR_ZERO;
         uint32_t mColorOp = VK_BLEND_OP_ADD, mAlphaOp = VK_BLEND_OP_ADD;
         uint32_t mWriteMask = 0xF;
+        uint32_t mWriteMask1 = 0xF; // the second colour attachment's (osg::ColorMaski 1: the normals)
         uint32_t mStencil = 0;
         uint32_t mStencilCompare = VK_COMPARE_OP_ALWAYS;
         uint32_t mStencilFail = VK_STENCIL_OP_KEEP, mStencilDepthFail = VK_STENCIL_OP_KEEP,
                  mStencilPass = VK_STENCIL_OP_KEEP;
         uint32_t mStencilReadMask = 0xFF, mStencilWriteMask = 0xFF;
         uint32_t mFlipY = 0;
+        uint32_t mClipZeroToOne = 0; // osg::ClipControl ZERO_TO_ONE (reverse z): clip z is not remapped from -1..1
         uint32_t mColorAttachments = 1;
         uint32_t mColorFormat = 0;
+        uint32_t mColorFormat1 = 0;
         uint32_t mDepthFormat = 0;
     };
 
@@ -173,6 +191,23 @@ namespace Alpha3::Vk
         std::atomic<int> mStage{ 0 }; // 0 nothing pending, 1 compiling, 2 compiled (objects to make)
         bool mCompiled = false; // the SPIR-V was made (else the program cannot be compiled)
         bool mBuiltin = false; // the translator's own: its pipelines are made at once
+        // the storage blocks the stages read (set 1, read only in these stages)
+        std::vector<StorageSlot> mStorage;
+        VkDescriptorSetLayout mStorageLayout = VK_NULL_HANDLE;
+    };
+
+    // A compute program (osg::DispatchCompute's): its uniforms in a block at set 0 binding 0, its storage blocks at set 1
+    struct ComputeVariant
+    {
+        bool mOk = false;
+        std::string mName;
+        VkShaderModule mModule = VK_NULL_HANDLE;
+        VkDescriptorSetLayout mSetLayout = VK_NULL_HANDLE;
+        VkDescriptorSetLayout mStorageLayout = VK_NULL_HANDLE;
+        VkPipelineLayout mLayout = VK_NULL_HANDLE;
+        VkPipeline mPipeline = VK_NULL_HANDLE;
+        UniformBlock mUniforms;
+        std::vector<StorageSlot> mStorage;
     };
 
     class Programs
@@ -194,6 +229,10 @@ namespace Alpha3::Vk
         // Programs still being compiled
         size_t compiling() const { return mCompiling; }
 
+        // The compute program of a program with a compute shader, compiled at once the first time (null when it has none,
+        // mOk false when it could not be made)
+        ComputeVariant* compute(const osg::Program& program);
+
         // A program of the translator's own from GLSL sources ("#version 320 es")
         Variant* builtin(const std::string& name, const std::string& vertex, const std::string& fragment);
 
@@ -204,13 +243,19 @@ namespace Alpha3::Vk
         uint64_t pipelineCount() const { return mPipelineCount; }
         // Changes when poll has put in pipelines made on their thread
         uint64_t pipelineGeneration() const { return mPipelineGeneration; }
+        // Once a second, whether a shader's source was changed in place (OpenMW's ShaderManager::setGlobalDefines,
+        // when a post processing shader asks for the scene's normals): its programs are made again on their next use
+        void checkSources();
+        // goes up when one was: a variant looked up before is looked up again
+        uint64_t sourceGeneration() const { return mSourceGeneration; }
 
     private:
         uint64_t mPipelineCount = 0;
         bool compile(
             Variant& variant, std::string vertex, std::string fragment, const std::string& name, bool clip = false);
         // compile's part without the device's objects (any thread)
-        bool compileSpirv(Variant& variant, std::string vertex, std::string fragment, const std::string& name, bool clip);
+        bool compileSpirv(Variant& variant, std::string vertex, std::string fragment, const std::string& name, bool clip,
+            const std::map<std::string, uint32_t>& blockBindings = {});
         // and its part with them (the draw thread)
         bool createObjects(Variant& variant);
 
@@ -227,6 +272,8 @@ namespace Alpha3::Vk
             osg::State* mState = nullptr;
             std::string mProgramName;
             std::string mSalt;
+            std::map<std::string, uint32_t> mBlockBindings; // the program's uniform blocks' indices, by name
+            std::map<std::string, uint32_t> mAttribBindings; // its attributes' locations (addBindAttribLocation)
             std::vector<osg::ref_ptr<const osg::Shader>> mStageShaders[2]; // the program's shaders, by stage
         };
         bool prepare(Job& job);
@@ -259,9 +306,23 @@ namespace Alpha3::Vk
         {
             osg::observer_ptr<const osg::Program> mProgram;
             std::unique_ptr<Variant> mVariant;
+            size_t mSourceHash = 0; // of its shaders' sources when it was made
+            uint64_t mGeneration = 0; // the source generation it was last found current in
         };
         std::map<std::pair<const osg::Program*, std::string>, Entry> mVariants;
+        // a program's shaders' sources hashed, each shader noted for checkSources
+        size_t sourceHash(const osg::Program& program);
+        std::map<const osg::Shader*, std::pair<osg::observer_ptr<const osg::Shader>, size_t>> mShaderHashes;
+        uint64_t mSourceGeneration = 0;
+        uint32_t mSourceChecks = 0;
         std::map<std::string, std::unique_ptr<Variant>> mBuiltins;
+        struct ComputeEntry
+        {
+            osg::observer_ptr<const osg::Program> mProgram;
+            std::unique_ptr<ComputeVariant> mVariant;
+        };
+        std::map<const osg::Program*, ComputeEntry> mComputes;
+        bool makeCompute(ComputeVariant& variant, std::string source);
         std::vector<std::unique_ptr<Variant>> mRetired;
     };
 }

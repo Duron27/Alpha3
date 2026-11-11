@@ -79,6 +79,7 @@
     X(vkDestroyPipelineCache)                                                                                          \
     X(vkGetPipelineCacheData)                                                                                          \
     X(vkCreateGraphicsPipelines)                                                                                       \
+    X(vkCreateComputePipelines)                                                                                        \
     X(vkDestroyPipeline)                                                                                               \
     X(vkCreatePipelineLayout)                                                                                          \
     X(vkDestroyPipelineLayout)                                                                                         \
@@ -115,6 +116,7 @@
     X(vkCmdBindIndexBuffer)                                                                                            \
     X(vkCmdBindVertexBuffers)                                                                                          \
     X(vkCmdDraw)                                                                                                       \
+    X(vkCmdDispatch)                                                                                                   \
     X(vkCmdDrawIndexed)                                                                                                \
     X(vkCmdCopyBuffer)                                                                                                 \
     X(vkCmdCopyImage)                                                                                                  \

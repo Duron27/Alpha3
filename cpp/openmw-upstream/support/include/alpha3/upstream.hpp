@@ -269,6 +269,12 @@ namespace Alpha3
         osg::ref_ptr<osg::Texture> scene; // what the scene was drawn into, before post processing and the GUI
         osg::ref_ptr<osg::Texture> depth;
         osg::ref_ptr<osg::Texture> opaqueDepth; // with the first person model's depth, which the depth above has not
+        // Third person: where the player's model stands (it goes with the camera, so its pixels are not moved as the
+        // world's are). Its feet in the world, and its size.
+        bool player = false;
+        osg::Vec3d playerFeet;
+        double playerHeight = 0.0;
+        double playerRadius = 0.0;
     };
     bool frameGenWanted();
     void frameGenSubmitView(FrameGenView view);

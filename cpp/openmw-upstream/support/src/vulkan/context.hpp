@@ -85,7 +85,9 @@ namespace Alpha3::Vk
         // The window was replaced (the app went to the background and came back)
         void setWindow(ANativeWindow* window);
 
-        VkRenderPass renderPass(const AttachmentUse& color, const AttachmentUse& depth);
+        // color1: a second colour attachment (the scene's normals), after the first
+        VkRenderPass renderPass(
+            const AttachmentUse& color, const AttachmentUse& depth, const AttachmentUse& color1 = AttachmentUse{});
 
     private:
         explicit Context(Device& device);
@@ -148,7 +150,10 @@ namespace Alpha3::Vk
         bool mInWindowPass = false;
         uint32_t mImage = 0;
 
-        std::map<std::tuple<decltype(AttachmentUse().key()), decltype(AttachmentUse().key())>, VkRenderPass> mPasses;
+        std::map<std::tuple<decltype(AttachmentUse().key()), decltype(AttachmentUse().key()),
+                     decltype(AttachmentUse().key())>,
+            VkRenderPass>
+            mPasses;
     };
 }
 

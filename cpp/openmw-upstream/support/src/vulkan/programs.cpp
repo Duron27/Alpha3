@@ -11,6 +11,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <chrono>
+#include <cstddef>
 #include <iomanip>
 #include <cstring>
 #include <filesystem>
@@ -121,6 +122,95 @@ namespace Alpha3::Vk
             }
             out.append(source, last, std::string::npos);
             return out;
+        }
+
+        // Puts the stage's storage blocks in set 1 at their OpenGL binding (the ShaderStorageBufferBinding's index),
+        // read only unless the stage writes them (compute). The slots are the blocks glslang finds in use (toSpirv).
+        std::string bindStorage(
+            const std::string& source, bool readOnly, const std::map<std::string, uint32_t>& blockBindings = {})
+        {
+            static const std::regex declaration(
+                R"(\blayout\s*\(([^)]*)\)\s*((?:(?:restrict|readonly|writeonly|coherent|volatile)\s+)*)buffer\s+(\w+))");
+            static const std::regex hasBinding(R"(\bbinding\s*=)");
+            std::string out;
+            std::size_t last = 0;
+            for (auto it = std::sregex_iterator(source.begin(), source.end(), declaration); it != std::sregex_iterator();
+                 ++it)
+            {
+                const std::smatch& match = *it;
+                const std::string args = match[1].str();
+                if (!std::regex_search(args, hasBinding))
+                    continue;
+                std::string qualifiers = match[2].str();
+                if (readOnly)
+                {
+                    static const std::regex access(R"(\b(readonly|writeonly)\s+)");
+                    qualifiers = "readonly " + std::regex_replace(qualifiers, access, "");
+                }
+                out.append(source, last, match.position(0) - last);
+                out += "layout(set = 1, " + args + ") " + qualifiers + "buffer " + match[3].str();
+                last = match.position(0) + match.length(0);
+            }
+            out.append(source, last, std::string::npos);
+            if (blockBindings.empty())
+                return out;
+            // the uniform blocks the program binds by name, at their index in set 1
+            static const std::regex uniformBlock(R"((?:\blayout\s*\(([^)]*)\)\s*)?\buniform\s+(\w+)\s*\{)");
+            std::string blocks;
+            last = 0;
+            for (auto it = std::sregex_iterator(out.begin(), out.end(), uniformBlock); it != std::sregex_iterator(); ++it)
+            {
+                const std::smatch& match = *it;
+                auto found = blockBindings.find(match[2].str());
+                if (found == blockBindings.end())
+                    continue;
+                static const std::regex binding(R"(\s*,?\s*\bbinding\s*=\s*\d+\s*,?)");
+                std::string args = match[1].matched ? std::regex_replace(match[1].str(), binding, "")
+                                                    : std::string("std140");
+                if (args.empty())
+                    args = "std140";
+                blocks.append(out, last, match.position(0) - last);
+                blocks += "layout(" + args + ", set = 1, binding = " + std::to_string(StorageSlot::sUniformBlockBase + found->second)
+                    + ") uniform "
+                    + match[2].str() + " {";
+                last = match.position(0) + match.length(0);
+            }
+            blocks.append(out, last, std::string::npos);
+            return blocks;
+        }
+
+        // the bindings of the storage blocks the stage uses, into slots
+        void addStorage(const glslang::TProgram& program, VkShaderStageFlags stage, std::vector<StorageSlot>& slots)
+        {
+            for (int i = 0; i < program.getNumBufferBlocks(); ++i)
+            {
+                const int binding = program.getBufferBlock(i).getBinding();
+                if (binding < 0)
+                    continue;
+                auto found = std::find_if(slots.begin(), slots.end(),
+                    [&](const StorageSlot& slot) { return slot.mBinding == static_cast<uint32_t>(binding); });
+                if (found == slots.end())
+                {
+                    slots.push_back({ static_cast<uint32_t>(binding), 0 });
+                    found = slots.end() - 1;
+                }
+                found->mStages |= stage;
+            }
+            for (int i = 0; i < program.getNumUniformBlocks(); ++i)
+            {
+                const glslang::TObjectReflection& reflected = program.getUniformBlock(i);
+                if (reflected.getBinding() < static_cast<int>(StorageSlot::sUniformBlockBase))
+                    continue;
+                const uint32_t binding = static_cast<uint32_t>(reflected.getBinding());
+                auto found = std::find_if(slots.begin(), slots.end(),
+                    [&](const StorageSlot& slot) { return slot.mBinding == binding; });
+                if (found == slots.end())
+                {
+                    slots.push_back({ binding, 0, true });
+                    found = slots.end() - 1;
+                }
+                found->mStages |= stage;
+            }
         }
 
         // Gives the stage's inputs and outputs locations: varyings by name (the vertex stage's outputs and the fragment
@@ -327,9 +417,11 @@ namespace Alpha3::Vk
         {
             static const std::regex mainFunction(R"(\bvoid\s+main\s*\(\s*(?:void)?\s*\))");
             std::string out = std::regex_replace(source, mainFunction, "void a3_main()");
-            out += "\nlayout(constant_id = 0) const float a3FlipY = 1.0;\nvoid main()\n{\n    a3_main();\n";
-            if (!SceneUtil::AutoDepth::isReversed())
-                out += "    gl_Position.z = (gl_Position.z + gl_Position.w) * 0.5;\n";
+            // OpenGL's clip z is -1..1 unless the state's ClipControl says ZERO_TO_ONE (reverse z; not the shadow casters,
+            // which set NEGATIVE_ONE_TO_ONE): chosen per pipeline (PipelineState::mClipZeroToOne)
+            out += "\nlayout(constant_id = 0) const float a3FlipY = 1.0;\nlayout(constant_id = 1) const bool a3HalfZ = "
+                   "true;\nvoid main()\n{\n    a3_main();\n";
+            out += "    if (a3HalfZ)\n        gl_Position.z = (gl_Position.z + gl_Position.w) * 0.5;\n";
             out += "    gl_Position.y = gl_Position.y * a3FlipY;\n}\n";
             return out;
         }
@@ -354,7 +446,8 @@ namespace Alpha3::Vk
         }
 
         bool toSpirv(const std::string& source, EShLanguage language, const char* blockName, unsigned binding,
-            std::vector<unsigned>& spirv, UniformBlock& block, const std::string& name, UniformBlock* lights = nullptr)
+            std::vector<unsigned>& spirv, UniformBlock& block, const std::string& name, UniformBlock* lights = nullptr,
+            std::vector<StorageSlot>* storage = nullptr)
         {
             const char* text = source.c_str();
             glslang::TShader shader(language);
@@ -372,7 +465,8 @@ namespace Alpha3::Vk
             if (!shader.parse(GetDefaultResources(), 320, false, messages))
             {
                 Log(Debug::Error) << "Vulkan: " << name << " (" << blockName << "): " << shader.getInfoLog();
-                dumpFailure(name + (language == EShLangVertex ? ".vert" : ".frag"), source, shader.getInfoLog());
+                dumpFailure(name + (language == EShLangVertex ? ".vert" : language == EShLangCompute ? ".comp" : ".frag"),
+                    source, shader.getInfoLog());
                 return false;
             }
             glslang::TProgram program;
@@ -384,6 +478,12 @@ namespace Alpha3::Vk
                 return false;
             }
             program.buildReflection(EShReflectionAllBlockVariables | EShReflectionSeparateBuffers);
+            if (storage != nullptr)
+                addStorage(program,
+                    language == EShLangVertex     ? VK_SHADER_STAGE_VERTEX_BIT
+                        : language == EShLangCompute ? VK_SHADER_STAGE_COMPUTE_BIT
+                                                     : VK_SHADER_STAGE_FRAGMENT_BIT,
+                    *storage);
             // the stage's block, and the lights' (binding 3) if it is not known yet
             int blockIndex = -1, lightIndex = -1;
             const bool wantLights = lights != nullptr && lights->mSize == 0;
@@ -426,6 +526,24 @@ namespace Alpha3::Vk
             options.disableOptimizer = false;
             glslang::GlslangToSpv(*program.getIntermediate(language), spirv, &options);
             return !spirv.empty();
+        }
+
+        // set 1: the storage blocks (null without any)
+        VkDescriptorSetLayout createStorageLayout(VkDevice device, const std::vector<StorageSlot>& slots)
+        {
+            if (slots.empty())
+                return VK_NULL_HANDLE;
+            std::vector<VkDescriptorSetLayoutBinding> bindings;
+            for (const StorageSlot& slot : slots)
+                bindings.push_back({ slot.mBinding,
+                    slot.mUniform ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, slot.mStages,
+                    nullptr });
+            VkDescriptorSetLayoutCreateInfo info{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+            info.bindingCount = static_cast<uint32_t>(bindings.size());
+            info.pBindings = bindings.data();
+            VkDescriptorSetLayout layout = VK_NULL_HANDLE;
+            vkCreateDescriptorSetLayout(device, &info, nullptr, &layout);
+            return layout;
         }
 
         VkShaderModule createModule(VkDevice device, const std::vector<unsigned>& spirv)
@@ -557,7 +675,7 @@ namespace Alpha3::Vk
             }
         };
 
-        const uint32_t sCacheMagic = 0x6b763361; // "a3vk"
+        const uint32_t sCacheMagic = 0x6b763363; // "a3vk" + format version
 
         void saveCompiled(const Variant& variant, const std::string& key)
         {
@@ -588,6 +706,13 @@ namespace Alpha3::Vk
             w.u32(variant.mDrawStages);
             w.u32(variant.mLightStages);
             w.u32(variant.mVaryingEnd);
+            w.u32(static_cast<uint32_t>(variant.mStorage.size()));
+            for (const StorageSlot& slot : variant.mStorage)
+            {
+                w.u32(slot.mBinding);
+                w.u32(slot.mStages);
+                w.u32(slot.mUniform ? 1 : 0);
+            }
             w.words(variant.mSpirv[0]);
             w.words(variant.mSpirv[1]);
             std::error_code ec;
@@ -643,6 +768,15 @@ namespace Alpha3::Vk
             loaded.mDrawStages = r.u32();
             loaded.mLightStages = r.u32();
             loaded.mVaryingEnd = r.u32();
+            const uint32_t storage = r.u32();
+            for (uint32_t i = 0; r.mOk && i < storage && i < 64; ++i)
+            {
+                StorageSlot slot;
+                slot.mBinding = r.u32();
+                slot.mStages = r.u32();
+                slot.mUniform = r.u32() != 0;
+                loaded.mStorage.push_back(slot);
+            }
             r.words(loaded.mSpirv[0]);
             r.words(loaded.mSpirv[1]);
             if (!r.mOk || loaded.mSpirv[0].empty() || loaded.mSpirv[1].empty())
@@ -655,6 +789,7 @@ namespace Alpha3::Vk
             variant.mDrawStages = loaded.mDrawStages;
             variant.mLightStages = loaded.mLightStages;
             variant.mVaryingEnd = loaded.mVaryingEnd;
+            variant.mStorage = std::move(loaded.mStorage);
             variant.mSpirv[0] = std::move(loaded.mSpirv[0]);
             variant.mSpirv[1] = std::move(loaded.mSpirv[1]);
             variant.mCompiled = true;
@@ -687,8 +822,8 @@ namespace Alpha3::Vk
         return compileSpirv(variant, std::move(vertex), std::move(fragment), name, clip) && createObjects(variant);
     }
 
-    bool Programs::compileSpirv(
-        Variant& variant, std::string vertex, std::string fragment, const std::string& name, bool clip)
+    bool Programs::compileSpirv(Variant& variant, std::string vertex, std::string fragment, const std::string& name,
+        bool clip, const std::map<std::string, uint32_t>& blockBindings)
     {
         variant.mName = name;
         // Vulkan GLSL 4.50: the ES profile has no gl_ClipDistance in glslang (GL_EXT_clip_cull_distance), and older
@@ -744,14 +879,17 @@ namespace Alpha3::Vk
             variant.mDrawStages |= VK_SHADER_STAGE_VERTEX_BIT;
         if (blockMatrices(fragment))
             variant.mDrawStages |= VK_SHADER_STAGE_FRAGMENT_BIT;
+        vertex = bindStorage(vertex, true, blockBindings);
+        fragment = bindStorage(fragment, true, blockBindings);
         vertex = finishVertex(vertex);
         variant.mSources[0] = vertex;
         variant.mSources[1] = fragment;
 
+        variant.mStorage.clear();
         if (!toSpirv(vertex, EShLangVertex, "a3VertexUniforms", 0, variant.mSpirv[0], variant.mVertexUniforms, name,
-                &variant.mLightUniforms)
+                &variant.mLightUniforms, &variant.mStorage)
             || !toSpirv(fragment, EShLangFragment, "a3FragmentUniforms", 1, variant.mSpirv[1], variant.mFragmentUniforms,
-                name, &variant.mLightUniforms))
+                name, &variant.mLightUniforms, &variant.mStorage))
             return false;
         if (variant.mLightUniforms.mSize == 0)
             variant.mLightStages = 0;
@@ -786,14 +924,54 @@ namespace Alpha3::Vk
         setInfo.bindingCount = static_cast<uint32_t>(bindings.size());
         setInfo.pBindings = bindings.data();
         vkCreateDescriptorSetLayout(device, &setInfo, nullptr, &variant.mSetLayout);
+        variant.mStorageLayout = createStorageLayout(device, variant.mStorage);
+        const VkDescriptorSetLayout setLayouts[2] = { variant.mSetLayout, variant.mStorageLayout };
         VkPipelineLayoutCreateInfo layoutInfo{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
-        layoutInfo.setLayoutCount = 1;
-        layoutInfo.pSetLayouts = &variant.mSetLayout;
+        layoutInfo.setLayoutCount = variant.mStorageLayout != VK_NULL_HANDLE ? 2 : 1;
+        layoutInfo.pSetLayouts = setLayouts;
         vkCreatePipelineLayout(device, &layoutInfo, nullptr, &variant.mLayout);
 
         variant.mUsesBuiltins = variant.mDrawStages != 0;
         variant.mOk = variant.mVertex != VK_NULL_HANDLE && variant.mFragment != VK_NULL_HANDLE;
         return variant.mOk;
+    }
+
+    size_t Programs::sourceHash(const osg::Program& program)
+    {
+        size_t hash = 0;
+        for (unsigned i = 0; i < program.getNumShaders(); ++i)
+        {
+            const osg::Shader* shader = program.getShader(i);
+            const size_t own = std::hash<std::string>()(shader->getShaderSource());
+            mShaderHashes[shader] = { shader, own };
+            hash = hash * 1000003u ^ own;
+        }
+        return hash;
+    }
+
+    void Programs::checkSources()
+    {
+        if (++mSourceChecks % 60 != 0)
+            return;
+        bool changed = false;
+        for (auto it = mShaderHashes.begin(); it != mShaderHashes.end();)
+        {
+            osg::ref_ptr<const osg::Shader> shader;
+            if (!it->second.first.lock(shader) || shader.get() != it->first)
+            {
+                it = mShaderHashes.erase(it);
+                continue;
+            }
+            const size_t hash = std::hash<std::string>()(shader->getShaderSource());
+            if (hash != it->second.second)
+            {
+                it->second.second = hash;
+                changed = true;
+            }
+            ++it;
+        }
+        if (changed)
+            ++mSourceGeneration;
     }
 
     Variant* Programs::variant(const osg::Program& program, const osg::StateSet::DefineList& defines,
@@ -840,8 +1018,17 @@ namespace Alpha3::Vk
         Entry& entry = mVariants[key];
         osg::ref_ptr<const osg::Program> alive;
         if (entry.mVariant && entry.mProgram.lock(alive) && alive.get() == &program)
-            return entry.mVariant.get();
+        {
+            if (entry.mGeneration == mSourceGeneration)
+                return entry.mVariant.get();
+            entry.mGeneration = mSourceGeneration;
+            if (sourceHash(program) == entry.mSourceHash)
+                return entry.mVariant.get();
+            Log(Debug::Verbose) << "Vulkan: program '" << program.getName() << "' made again: its sources changed";
+        }
         entry.mProgram = &program;
+        entry.mSourceHash = sourceHash(program);
+        entry.mGeneration = mSourceGeneration;
         // a variant the translator may still point at (a program made where a released one was) is kept
         if (entry.mVariant)
             mRetired.push_back(std::move(entry.mVariant));
@@ -854,6 +1041,10 @@ namespace Alpha3::Vk
         job.mClip = clip;
         job.mState = &state;
         job.mProgramName = program.getName();
+        for (const auto& [blockName, index] : program.getUniformBlockBindingList())
+            job.mBlockBindings[blockName] = index;
+        for (const auto& [attribute, location] : program.getAttribBindingList())
+            job.mAttribBindings[attribute] = location;
         for (int stage = 0; stage < 2; ++stage)
         {
             if (stages[stage].empty())
@@ -938,12 +1129,21 @@ namespace Alpha3::Vk
                 for (UniformInitializer& initializer : uniformInitializers(original->getShaderSource()))
                     variant.mInitializers[initializer.name] = initializer;
             job.mSources[stage] = shader->getShaderSource();
+            // OSG's $OSG_ variables (osgText's shaders begin with $OSG_GLSL_VERSION: their #version is one), before
+            // the defines go after the #version
+            if (job.mSources[stage].find("$OSG_") != std::string::npos)
+                job.mState->substituteShaderVariables(job.mSources[stage]);
             insertAfterVersion(job.mSources[stage], job.mDefines[stage]);
             job.mShaders[stage] = shader;
         }
         job.mName = name;
         variant.mName = name;
-        job.mCacheKey = job.mSalt + "\x01" + std::string(job.mClip ? "clip" : "") + "\x01" + job.mShaders[0]->getName()
+        std::string blocks;
+        for (const auto& [blockName, index] : job.mBlockBindings)
+            blocks += blockName + "=" + std::to_string(index) + ";";
+        for (const auto& [attribute, location] : job.mAttribBindings)
+            blocks += attribute + "@" + std::to_string(location) + ";";
+        job.mCacheKey = job.mSalt + "\x01" + blocks + std::string(job.mClip ? "clip" : "") + "\x01" + job.mShaders[0]->getName()
             + "\x01" + job.mShaders[1]->getName() + "\x01" + job.mSources[0] + "\x01" + job.mSources[1];
         return true;
     }
@@ -973,7 +1173,11 @@ namespace Alpha3::Vk
             const std::size_t versionAt = source.find("#version ");
             const bool es = versionAt != std::string::npos
                 && source.substr(versionAt, source.find('\n', versionAt) - versionAt).find(" es") != std::string::npos;
-            if (stage == 0 && !es)
+            // and an ES one with OpenGL's built ins (osgText's: gl_Vertex, gl_ModelViewProjectionMatrix)
+            const bool builtIns = source.find("gl_Vertex") != std::string::npos
+                || source.find("gl_ModelViewProjectionMatrix") != std::string::npos
+                || source.find("gl_MultiTexCoord") != std::string::npos || source.find("gl_Color") != std::string::npos;
+            if (stage == 0 && (!es || builtIns))
                 job.mState->convertVertexShaderSourceToOsgBuiltIns(source);
             else
                 job.mState->substituteShaderVariables(source);
@@ -981,8 +1185,28 @@ namespace Alpha3::Vk
             sources[stage] = std::move(source);
         }
         const auto translated = std::chrono::steady_clock::now();
-        if (!compileSpirv(*job.mVariant, sources[0], sources[1], job.mName, job.mClip))
+        if (!compileSpirv(*job.mVariant, sources[0], sources[1], job.mName, job.mClip, job.mBlockBindings))
             return;
+        // attributes of names of their own bound to the locations of OSG's aliases (the post processor's
+        // _omw_Vertex at osg_Vertex's): read from the arrays of those
+        for (VertexInput& input : job.mVariant->mInputs)
+        {
+            auto bound = job.mAttribBindings.find(input.mName);
+            if (bound == job.mAttribBindings.end())
+                continue;
+            osg::State& state = *job.mState;
+            std::vector<const osg::VertexAttribAlias*> aliases = { &state.getVertexAlias(), &state.getNormalAlias(),
+                &state.getColorAlias(), &state.getSecondaryColorAlias(), &state.getFogCoordAlias() };
+            for (const osg::VertexAttribAlias& alias : state.getTexCoordAliasList())
+                aliases.push_back(&alias);
+            for (const osg::VertexAttribAlias* alias : aliases)
+                if (alias->_location == bound->second)
+                {
+                    input.mName = alias->_osgName;
+                    input.classify();
+                    break;
+                }
+        }
         saveCompiled(*job.mVariant, job.mCacheKey);
         Log(Debug::Verbose) << "Vulkan: program " << job.mName << " compiled (" << std::fixed << std::setprecision(1)
                             << std::chrono::duration<double, std::milli>(translated - start).count()
@@ -1056,6 +1280,95 @@ namespace Alpha3::Vk
         return variant.get();
     }
 
+    ComputeVariant* Programs::compute(const osg::Program& program)
+    {
+        ComputeEntry& entry = mComputes[&program];
+        osg::ref_ptr<const osg::Program> alive;
+        if (entry.mVariant && entry.mProgram.lock(alive) && alive.get() == &program)
+            return entry.mVariant.get();
+        // a program made where a released one was: the old objects stay (a frame may still use them)
+        entry.mVariant.release();
+        entry.mProgram = &program;
+        entry.mVariant = std::make_unique<ComputeVariant>();
+        ComputeVariant& variant = *entry.mVariant;
+        const osg::Shader* shader = nullptr;
+        for (unsigned i = 0; i < program.getNumShaders(); ++i)
+            if (program.getShader(i)->getType() == osg::Shader::COMPUTE)
+                shader = program.getShader(i);
+        if (shader == nullptr)
+            return nullptr;
+        variant.mName = shader->getName().empty() ? program.getName() : shader->getName();
+        makeCompute(variant, shader->getShaderSource());
+        return &variant;
+    }
+
+    bool Programs::makeCompute(ComputeVariant& variant, std::string source)
+    {
+        static const std::regex version(R"(#version[ \t]+[0-9]+[ \t]*(es|core|compatibility)?[^\n]*)");
+        if (source.find("#version") == std::string::npos)
+            source = "#version 450\n" + source;
+        else
+            source = std::regex_replace(source, version, "#version 450", std::regex_constants::format_first_only);
+        preprocess(source, EShLangCompute);
+        source = bindStorage(source, false);
+        {
+            // kept for a look (as dumpFailure's, only when the folder is there)
+            static const std::filesystem::path dumpDir("/storage/emulated/0/Alpha3/dump_shaders");
+            std::error_code ec;
+            if (std::filesystem::is_directory(dumpDir, ec))
+            {
+                std::string file = "vulkan_compute_" + variant.mName;
+                std::replace(file.begin(), file.end(), '/', '_');
+                std::ofstream(dumpDir / file, std::ios::binary) << source;
+            }
+        }
+        std::vector<unsigned> spirv;
+        if (!toSpirv(source, EShLangCompute, "a3ComputeUniforms", 0, spirv, variant.mUniforms, variant.mName, nullptr,
+                &variant.mStorage))
+            return false;
+        const VkDevice device = mContext.vkDevice();
+        variant.mModule = createModule(device, spirv);
+        if (variant.mUniforms.mSize > 0)
+        {
+            const VkDescriptorSetLayoutBinding binding{ 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
+                VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+            VkDescriptorSetLayoutCreateInfo info{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+            info.bindingCount = 1;
+            info.pBindings = &binding;
+            vkCreateDescriptorSetLayout(device, &info, nullptr, &variant.mSetLayout);
+        }
+        else
+        {
+            VkDescriptorSetLayoutCreateInfo info{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+            vkCreateDescriptorSetLayout(device, &info, nullptr, &variant.mSetLayout);
+        }
+        variant.mStorageLayout = createStorageLayout(device, variant.mStorage);
+        const VkDescriptorSetLayout setLayouts[2] = { variant.mSetLayout, variant.mStorageLayout };
+        VkPipelineLayoutCreateInfo layoutInfo{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+        layoutInfo.setLayoutCount = variant.mStorageLayout != VK_NULL_HANDLE ? 2 : 1;
+        layoutInfo.pSetLayouts = setLayouts;
+        vkCreatePipelineLayout(device, &layoutInfo, nullptr, &variant.mLayout);
+        if (variant.mModule == VK_NULL_HANDLE || variant.mLayout == VK_NULL_HANDLE)
+            return false;
+        VkComputePipelineCreateInfo info{ VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
+        info.stage = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO };
+        info.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        info.stage.module = variant.mModule;
+        info.stage.pName = "main";
+        info.layout = variant.mLayout;
+        const VkResult result = vkCreateComputePipelines(
+            device, mContext.device().mPipelineCache, 1, &info, nullptr, &variant.mPipeline);
+        if (result != VK_SUCCESS)
+        {
+            Log(Debug::Error) << "Vulkan: the compute pipeline of " << variant.mName << ": " << resultName(result);
+            return false;
+        }
+        variant.mOk = true;
+        Log(Debug::Verbose) << "Vulkan: compute program " << variant.mName << " (" << variant.mStorage.size()
+                            << " storage blocks, " << variant.mUniforms.mSize << " bytes of uniforms)";
+        return true;
+    }
+
     VkPipeline Programs::pipeline(
         Variant& variant, const PipelineState& state, const VertexLayout& layout, VkRenderPass pass, bool wait)
     {
@@ -1092,9 +1405,14 @@ namespace Alpha3::Vk
         Variant& variant, const PipelineState& state, const VertexLayout& layout, VkRenderPass pass)
     {
 
-        const float flip = state.mFlipY ? -1.f : 1.f;
-        VkSpecializationMapEntry entry{ 0, 0, sizeof(float) };
-        VkSpecializationInfo specialization{ 1, &entry, sizeof(float), &flip };
+        struct
+        {
+            float mFlip;
+            VkBool32 mHalfZ;
+        } constants{ state.mFlipY ? -1.f : 1.f, state.mClipZeroToOne ? VK_FALSE : VK_TRUE };
+        const VkSpecializationMapEntry entries[2]{ { 0, offsetof(decltype(constants), mFlip), sizeof(float) },
+            { 1, offsetof(decltype(constants), mHalfZ), sizeof(VkBool32) } };
+        VkSpecializationInfo specialization{ 2, entries, sizeof(constants), &constants };
         VkPipelineShaderStageCreateInfo stages[2]{};
         stages[0].sType = stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
         stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
@@ -1156,8 +1474,11 @@ namespace Alpha3::Vk
         attachment.alphaBlendOp = static_cast<VkBlendOp>(state.mAlphaOp);
         attachment.colorWriteMask = state.mWriteMask;
         VkPipelineColorBlendStateCreateInfo blend{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
-        blend.attachmentCount = state.mColorAttachments;
-        blend.pAttachments = &attachment;
+        // OpenGL's blend state is every draw buffer's; the second's mask is its own (the normals')
+        VkPipelineColorBlendAttachmentState attachments[2] = { attachment, attachment };
+        attachments[1].colorWriteMask = state.mWriteMask1;
+        blend.attachmentCount = std::min(state.mColorAttachments, 2u);
+        blend.pAttachments = attachments;
 
         const VkDynamicState dynamics[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR,
             VK_DYNAMIC_STATE_STENCIL_REFERENCE, VK_DYNAMIC_STATE_BLEND_CONSTANTS };

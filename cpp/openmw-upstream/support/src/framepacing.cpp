@@ -638,6 +638,11 @@ namespace Alpha3
 
 namespace Alpha3
 {
+    void noteShownFrame()
+    {
+        ::noteShownFrame();
+    }
+
     void paceZinkPost()
     {
         if (ZinkPacing* pacing = zinkPacing())

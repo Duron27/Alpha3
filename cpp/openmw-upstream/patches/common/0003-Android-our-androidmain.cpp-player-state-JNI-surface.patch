@@ -30,7 +30,7 @@ diff --git a/apps/openmw/androidmain.cpp b/apps/openmw/androidmain.cpp
 index ade009ae07..0ac5c7aaf9 100644
 --- a/apps/openmw/androidmain.cpp
 +++ b/apps/openmw/androidmain.cpp
-@@ -1,65 +1,590 @@
+@@ -1,65 +1,604 @@
 -#ifndef stderr
 +#if defined(stderr) && (__ANDROID_API__ < 23)
  int stderr = 0; // Hack: fix linker error
@@ -59,6 +59,7 @@ index ade009ae07..0ac5c7aaf9 100644
  #include <SDL_mouse.h>
 +#include <components/resource/resourcesystem.hpp>
 +#include <components/sceneutil/depth.hpp>
++#include <components/sceneutil/positionattitudetransform.hpp>
 +#include <components/vfs/pathutil.hpp>
 +
 +#include <alpha3/upstream.hpp>
@@ -371,6 +372,19 @@ index ade009ae07..0ac5c7aaf9 100644
 +    view.scene = postProcessor->getTexture(MWRender::PostProcessor::Tex_Scene, frameId);
 +    view.depth = postProcessor->getTexture(MWRender::PostProcessor::Tex_Depth, frameId);
 +    view.opaqueDepth = postProcessor->getTexture(MWRender::PostProcessor::Tex_OpaqueDepth, frameId);
++    // third person: the player's model goes with the camera, not with the world the camera passes
++    if (!world->isFirstPerson())
++    {
++      const MWWorld::Ptr player = world->getPlayerPtr();
++      if (!player.isEmpty() && player.getRefData().getBaseNode() != nullptr)
++      {
++        const osg::Vec3f halfExtents = world->getHalfExtents(player, true);
++        view.player = halfExtents.z() > 0.f;
++        view.playerFeet = player.getRefData().getBaseNode()->getPosition();
++        view.playerHeight = halfExtents.z() * 2.0;
++        view.playerRadius = std::max(halfExtents.x(), halfExtents.y());
++      }
++    }
 +    Alpha3::frameGenSubmitView(std::move(view));
 +  }
 +  catch (...)

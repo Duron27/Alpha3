@@ -103,6 +103,8 @@ namespace Alpha3
     // Zink presents by copying into the window: called just before the copy is posted, holds it to a steady number of display
     // periods
     void paceZinkPost();
+    // a frame sent to the screen that the swap above did not send (Vulkan's generated frames), for the overlay's rate
+    void noteShownFrame();
 
     // ---- framegen.cpp: frame generation (OPENMW_FRAMEGEN, the launcher's switch), in the swap. Shows the drawn frame through
     // present (and generated ones between, each through present too); false when frame generation is off, and the caller

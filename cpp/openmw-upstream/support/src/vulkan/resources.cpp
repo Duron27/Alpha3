@@ -524,6 +524,70 @@ namespace Alpha3::Vk
         return { chunk.mBuffer.mBuffer, 0, chunk.mBuffer.mMapped };
     }
 
+    VkBuffer Resources::storage(const osg::BufferData& data, bool copy)
+    {
+        const unsigned size = data.getTotalDataSize();
+        if (size == 0 || data.getDataPointer() == nullptr)
+            return VK_NULL_HANDLE;
+        StorageEntry& entry = mStorage[&data];
+        entry.mLastUse = mFrame;
+        const bool same = entry.mBuffer.mBuffer != VK_NULL_HANDLE && entry.mData.get() == &data;
+        if (same && entry.mBuffer.mSize >= size)
+        {
+            if (entry.mModified == data.getModifiedCount() || !copy)
+                return entry.mBuffer.mBuffer;
+            Span span = stream(size, 16);
+            if (span.mData == nullptr)
+                return entry.mBuffer.mBuffer;
+            std::memcpy(span.mData, data.getDataPointer(), size);
+            // with the compute dispatches that use it (Translator::dispatchCompute), ahead of the frame's commands
+            VkCommandBuffer commands = mContext.uploadCommands();
+            // after the shaders that used it before (earlier in this frame or in frames before), before those after
+            VkMemoryBarrier before{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+            before.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+            before.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            vkCmdPipelineBarrier(commands,
+                VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+                    | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &before, 0, nullptr, 0, nullptr);
+            const VkBufferCopy region{ span.mOffset, 0, size };
+            vkCmdCopyBuffer(commands, span.mBuffer, entry.mBuffer.mBuffer, 1, &region);
+            VkMemoryBarrier after{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+            after.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            after.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+            vkCmdPipelineBarrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+                    | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                0, 1, &after, 0, nullptr, 0, nullptr);
+            entry.mModified = data.getModifiedCount();
+            return entry.mBuffer.mBuffer;
+        }
+        // new, or grown (the point lights' list): a new buffer, room to grow, written in place (no GPU use yet)
+        destroyLater(entry.mBuffer);
+        entry.mData = &data;
+        entry.mBuffer = createBuffer(same ? size + size / 2 : size,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+        if (entry.mBuffer.mBuffer == VK_NULL_HANDLE)
+            return VK_NULL_HANDLE;
+        std::memcpy(entry.mBuffer.mMapped, data.getDataPointer(), size);
+        vmaFlushAllocation(mContext.device().mAllocator, entry.mBuffer.mMemory, 0, VK_WHOLE_SIZE);
+        entry.mModified = data.getModifiedCount();
+        return entry.mBuffer.mBuffer;
+    }
+
+    VkBuffer Resources::dummyStorage()
+    {
+        if (mDummyStorage.mBuffer == VK_NULL_HANDLE)
+        {
+            mDummyStorage = createBuffer(4096, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+            if (mDummyStorage.mBuffer == VK_NULL_HANDLE)
+                return VK_NULL_HANDLE;
+            std::memset(mDummyStorage.mMapped, 0, 4096);
+            vmaFlushAllocation(mContext.device().mAllocator, mDummyStorage.mMemory, 0, VK_WHOLE_SIZE);
+        }
+        return mDummyStorage.mBuffer;
+    }
+
     bool Resources::buffer(const osg::BufferData& data, VkBuffer& buffer, VkDeviceSize& offset, bool* streamed)
     {
         const unsigned size = data.getTotalDataSize();
@@ -1259,6 +1323,16 @@ namespace Alpha3::Vk
             {
                 destroyLater(it->second.mBuffer);
                 it = mBuffers.erase(it);
+            }
+            else
+                ++it;
+        }
+        for (auto it = mStorage.begin(); it != mStorage.end();)
+        {
+            if (!it->second.mData || it->second.mData->referenceCount() <= 1 || mFrame - it->second.mLastUse > 600)
+            {
+                destroyLater(it->second.mBuffer);
+                it = mStorage.erase(it);
             }
             else
                 ++it;
