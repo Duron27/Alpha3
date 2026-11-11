@@ -18,6 +18,7 @@
 #include <alpha3/upstream.hpp>
 
 #include <map>
+#include <mutex>
 #include <string>
 
 #include <osg/BlendFunc>
@@ -84,7 +85,7 @@ namespace Alpha3
               "{\n"
               "    vec3 dir = normalize(a3ViewPos);\n"
               "    float up = dot(dir, normalize(a3ViewUp));\n"
-              "    vec3 sky = mix(a3PortalFill.rgb, a3PortalSky.rgb, smoothstep(0.0, 0.35, up));\n"
+              "    vec3 sky = mix(a3PortalFill.rgb, a3PortalSky.rgb, smoothstep(0.0, 0.6, up));\n"
               "    if (a3PortalCloudState.x > 0.5 && up > 0.0)\n"
               "    {\n"
               "        vec2 across = vec2(dot(dir, normalize(a3ViewX)), dot(dir, normalize(a3ViewY)));\n"
@@ -230,6 +231,53 @@ namespace Alpha3
 
         constexpr const char* sOtherName = "Alpha3 door portal: the other side";
 
+        // The other side's sunlight comes from where it does there (turned as the other side is placed here), not from
+        // where this side's does: the shaders take it in view space, so it is set for each camera that draws the portal
+        class OtherSunCallback : public osg::NodeCallback
+        {
+        public:
+            explicit OtherSunCallback(const osg::Matrixd& otherToWorld)
+                : mOtherToWorld(otherToWorld)
+            {
+            }
+
+            void setPosition(const osg::Vec4f& position)
+            {
+                std::lock_guard<std::mutex> lock(mMutex);
+                mPosition = position;
+            }
+
+            void operator()(osg::Node* node, osg::NodeVisitor* nv) override
+            {
+                osg::Vec4f position;
+                {
+                    std::lock_guard<std::mutex> lock(mMutex);
+                    position = mPosition;
+                }
+                osgUtil::CullVisitor* cv = nv->asCullVisitor();
+                if (cv == nullptr || position == osg::Vec4f() || cv->getCurrentRenderStage() == nullptr
+                    || cv->getCurrentRenderStage()->getInitialViewMatrix() == nullptr)
+                {
+                    traverse(node, nv);
+                    return;
+                }
+                const osg::Vec3d here
+                    = osg::Matrixd::transform3x3(osg::Vec3d(position.x(), position.y(), position.z()), mOtherToWorld);
+                const osg::Vec4d inView
+                    = osg::Vec4d(here, 0.0) * (*cv->getCurrentRenderStage()->getInitialViewMatrix());
+                osg::ref_ptr<osg::StateSet> state = new osg::StateSet;
+                state->addUniform(new osg::Uniform("sun.position", osg::Vec4f(inView)));
+                cv->pushStateSet(state);
+                traverse(node, nv);
+                cv->popStateSet();
+            }
+
+        private:
+            osg::Matrixd mOtherToWorld;
+            std::mutex mMutex;
+            osg::Vec4f mPosition;
+        };
+
         void applyLight(osg::StateSet& other, osg::StateSet& clear, const DoorPortalLight& light)
         {
             other.getOrCreateUniform("sun.diffuse", osg::Uniform::FLOAT_VEC4)->set(light.mSun);
@@ -351,6 +399,9 @@ namespace Alpha3
         // its light set again as the weather changes
         place->getStateSet()->setDataVariance(osg::Object::DYNAMIC);
         applyLight(*place->getStateSet(), *clearState, light);
+        osg::ref_ptr<OtherSunCallback> sun = new OtherSunCallback(otherToWorld);
+        sun->setPosition(light.mSunPosition);
+        place->setCullCallback(sun);
         root->setUserData(clearState);
         // bin 7: the stencil cleared
         osg::ref_ptr<osg::StateSet> resetState = new osg::StateSet;
@@ -374,5 +425,8 @@ namespace Alpha3
         auto* clear = dynamic_cast<osg::StateSet*>(portal.getUserData());
         if (other && clear)
             applyLight(*other, *clear, light);
+        for (unsigned int i = 0; i < portal.getNumChildren(); ++i)
+            if (auto* sun = dynamic_cast<OtherSunCallback*>(portal.getChild(i)->getCullCallback()))
+                sun->setPosition(light.mSunPosition);
     }
 }

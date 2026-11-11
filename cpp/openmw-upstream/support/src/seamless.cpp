@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <mutex>
 
@@ -112,6 +113,103 @@ namespace Alpha3
         sOutsideSky = sky;
         sOutsideAmbient = ambient;
         sOutsideSun = sun;
+    }
+
+    namespace
+    {
+        bool sOutsideSunKnown = false;
+        osg::Vec3f sOutsideSunDirection;
+
+        // the light going from one side of a door to the other (startLightBlend)
+        struct LightBlend
+        {
+            std::mutex mMutex;
+            bool mActive = false;
+            std::chrono::steady_clock::time_point mStart;
+            float mSeconds = 0.f;
+            // sunlight: position, diffuse, ambient, specular; fog: colour, (start, end)
+            bool mHaveSun = false, mHaveFog = false;
+            osg::Vec4f mSun[4], mSunFrom[4];
+            osg::Vec4f mFog[2], mFogFrom[2];
+
+            // how far along (1: done); smooth at both ends
+            float amount()
+            {
+                if (!mActive)
+                    return 1.f;
+                const float t = std::chrono::duration<float>(std::chrono::steady_clock::now() - mStart).count() / mSeconds;
+                if (t >= 1.f)
+                {
+                    mActive = false;
+                    return 1.f;
+                }
+                return t * t * (3.f - 2.f * t);
+            }
+        };
+        LightBlend sLightBlend;
+    }
+
+    void setOutsideSunDirection(const osg::Vec3f& direction)
+    {
+        std::lock_guard<std::mutex> lock(sOutsideMutex);
+        sOutsideSunKnown = true;
+        sOutsideSunDirection = direction;
+    }
+
+    bool outsideSunDirection(osg::Vec3f& direction)
+    {
+        std::lock_guard<std::mutex> lock(sOutsideMutex);
+        if (sOutsideSunKnown)
+            direction = sOutsideSunDirection;
+        return sOutsideSunKnown;
+    }
+
+    void startLightBlend()
+    {
+        static const float seconds = std::clamp(settingFloat("Cells", "seamless light blend", 1.f), 0.f, 10.f);
+        LightBlend& blend = sLightBlend;
+        std::lock_guard<std::mutex> lock(blend.mMutex);
+        if (seconds <= 0.f || !blend.mHaveSun)
+            return;
+        // from what is shown now (part way, when the last one has not finished)
+        for (int i = 0; i < 4; ++i)
+            blend.mSunFrom[i] = blend.mSun[i];
+        for (int i = 0; i < 2; ++i)
+            blend.mFogFrom[i] = blend.mFog[i];
+        blend.mActive = true;
+        blend.mSeconds = seconds;
+        blend.mStart = std::chrono::steady_clock::now();
+    }
+
+    void blendSunlight(osg::Vec4f& position, osg::Vec4f& diffuse, osg::Vec4f& ambient, osg::Vec4f& specular)
+    {
+        LightBlend& blend = sLightBlend;
+        std::lock_guard<std::mutex> lock(blend.mMutex);
+        osg::Vec4f* const values[4] = { &position, &diffuse, &ambient, &specular };
+        const float amount = blend.amount();
+        if (amount < 1.f)
+            for (int i = 0; i < 4; ++i)
+                *values[i] = blend.mSunFrom[i] + (*values[i] - blend.mSunFrom[i]) * amount;
+        // what is shown, for the next blend to start from
+        for (int i = 0; i < 4; ++i)
+            blend.mSun[i] = *values[i];
+        blend.mHaveSun = true;
+    }
+
+    void blendFog(osg::Vec4f& color, float& start, float& end)
+    {
+        LightBlend& blend = sLightBlend;
+        std::lock_guard<std::mutex> lock(blend.mMutex);
+        const float amount = blend.amount();
+        if (amount < 1.f && blend.mHaveFog)
+        {
+            color = blend.mFogFrom[0] + (color - blend.mFogFrom[0]) * amount;
+            start = blend.mFogFrom[1].x() + (start - blend.mFogFrom[1].x()) * amount;
+            end = blend.mFogFrom[1].y() + (end - blend.mFogFrom[1].y()) * amount;
+        }
+        blend.mFog[0] = color;
+        blend.mFog[1] = osg::Vec4f(start, end, 0.f, 0.f);
+        blend.mHaveFog = true;
     }
 
     bool outsideLight(osg::Vec4f& fog, osg::Vec4f& sky, osg::Vec4f& ambient, osg::Vec4f& sun)

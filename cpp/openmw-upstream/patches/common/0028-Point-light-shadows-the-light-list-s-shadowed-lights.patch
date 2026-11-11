@@ -14,7 +14,7 @@ diff --git a/components/sceneutil/lightmanager.cpp b/components/sceneutil/lightm
 index 986de7abf3..c95f279c88 100644
 --- a/components/sceneutil/lightmanager.cpp
 +++ b/components/sceneutil/lightmanager.cpp
-@@ -560,6 +560,8 @@ namespace SceneUtil
+@@ -564,6 +564,8 @@ namespace SceneUtil
  
          stateset->addUniform(data);
          stateset->addUniform(new osg::Uniform("PointLightCount", static_cast<int>(lightList.size())));

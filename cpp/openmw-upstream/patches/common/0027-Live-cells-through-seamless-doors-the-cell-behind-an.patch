@@ -32,18 +32,20 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  .../mwmechanics/mechanicsmanagerimp.cpp       |  45 +-
  apps/openmw/mwmechanics/pathfinding.cpp       |   7 +-
  .../mwphysics/projectileconvexcallback.cpp    |  17 +
- apps/openmw/mwrender/objects.cpp              |  60 ++-
+ apps/openmw/mwrender/objects.cpp              |  60 +-
  apps/openmw/mwrender/objects.hpp              |   6 +
- apps/openmw/mwrender/renderingmanager.cpp     |  21 +
+ apps/openmw/mwrender/renderingmanager.cpp     |  23 +
  apps/openmw/mwrender/renderingmanager.hpp     |   5 +
  apps/openmw/mwsound/soundmanagerimp.cpp       |  27 +-
  apps/openmw/mwworld/projectilemanager.cpp     |  33 ++
- apps/openmw/mwworld/scene.cpp                 | 299 +++++++++-
- apps/openmw/mwworld/scene.hpp                 |  30 ++
- apps/openmw/mwworld/seamlessdoors.cpp         | 510 +++++++++++++++++-
- apps/openmw/mwworld/seamlessdoors.hpp         |  68 ++-
+ apps/openmw/mwworld/scene.cpp                 | 321 ++++++++++-
+ apps/openmw/mwworld/scene.hpp                 |  35 ++
+ apps/openmw/mwworld/seamlessdoors.cpp         | 541 +++++++++++++++++-
+ apps/openmw/mwworld/seamlessdoors.hpp         |  71 ++-
+ apps/openmw/mwworld/weather.cpp               |  13 +
  apps/openmw/mwworld/worldimp.cpp              |  45 +-
- 22 files changed, 1179 insertions(+), 117 deletions(-)
+ components/sceneutil/lightmanager.cpp         |  12 +-
+ 24 files changed, 1263 insertions(+), 121 deletions(-)
 
 diff --git a/apps/openmw/mwmechanics/actors.cpp b/apps/openmw/mwmechanics/actors.cpp
 index 7776a159f5..c305323a2d 100644
@@ -686,7 +688,7 @@ index f67c1b1906..9f721f4a38 100644
          void updatePtr(const MWWorld::Ptr& old, const MWWorld::Ptr& cur);
  
 diff --git a/apps/openmw/mwrender/renderingmanager.cpp b/apps/openmw/mwrender/renderingmanager.cpp
-index 106b4df3bd..ba781111bc 100644
+index 106b4df3bd..1ba8475969 100644
 --- a/apps/openmw/mwrender/renderingmanager.cpp
 +++ b/apps/openmw/mwrender/renderingmanager.cpp
 @@ -621,6 +621,27 @@ namespace MWRender
@@ -717,6 +719,15 @@ index 106b4df3bd..ba781111bc 100644
      void RenderingManager::removeCell(const MWWorld::CellStore* store)
      {
          mPathgrid->removeCell(store);
+@@ -766,6 +787,8 @@ namespace MWRender
+         float fogStart = mFog->getFogStart(false);
+         float fogEnd = mFog->getFogEnd(false);
+         osg::Vec4f fogColor = mFog->getFogColor(false);
++        // Alpha3: going through a seamless door the fog goes over to the other side's, not at once
++        Alpha3::blendFog(fogColor, fogStart, fogEnd);
+ 
+         float fogUnderwaterStart = mFog->getFogStart(true);
+         float fogUnderwaterEnd = mFog->getFogEnd(true);
 diff --git a/apps/openmw/mwrender/renderingmanager.hpp b/apps/openmw/mwrender/renderingmanager.hpp
 index fe76a39137..a3b31820ed 100644
 --- a/apps/openmw/mwrender/renderingmanager.hpp
@@ -872,7 +883,7 @@ index f653184aa1..c272c1886d 100644
              projectile->setVelocity(projectileState.mVelocity);
  
 diff --git a/apps/openmw/mwworld/scene.cpp b/apps/openmw/mwworld/scene.cpp
-index 8d08420872..25a99a770e 100644
+index 8d08420872..90fc8bcfd1 100644
 --- a/apps/openmw/mwworld/scene.cpp
 +++ b/apps/openmw/mwworld/scene.cpp
 @@ -382,6 +382,11 @@ namespace MWWorld
@@ -955,7 +966,7 @@ index 8d08420872..25a99a770e 100644
          MWBase::Environment::get().getWindowManager()->addCell(&cell);
          bool waterEnabled = cellVariant.hasWater() || cell.isExterior();
          float waterLevel = cell.getWaterLevel();
-@@ -547,12 +568,180 @@ namespace MWWorld
+@@ -547,12 +568,202 @@ namespace MWWorld
  
          if (!cell.isExterior() && !cellVariant.isQuasiExterior())
              mRendering.configureAmbient(cellVariant);
@@ -1078,7 +1089,13 @@ index 8d08420872..25a99a770e 100644
 +        mLoadingSecondary = true;
 +        for (CellStore* cell : cells)
 +        {
-+            if (mActiveCells.contains(cell) || mSecondaryCells.contains(cell))
++            if (mSecondaryCells.contains(cell))
++            {
++                // held since a door shut on it: drawn through this one now
++                mRendering.setCellSecondary(cell, parent);
++                continue;
++            }
++            if (mActiveCells.contains(cell))
 +                continue;
 +            mRendering.setCellSecondary(cell, parent);
 +            try
@@ -1097,6 +1114,22 @@ index 8d08420872..25a99a770e 100644
 +    {
 +        while (!mSecondaryCells.empty())
 +            unloadSecondaryCell(*mSecondaryCells.begin());
++    }
++
++    void Scene::unloadSecondaryCellsBut(const std::vector<CellStore*>& keep)
++    {
++        for (auto iter = mSecondaryCells.begin(); iter != mSecondaryCells.end();)
++        {
++            CellStore* cell = *iter++;
++            if (std::find(keep.begin(), keep.end(), cell) == keep.end())
++                unloadSecondaryCell(cell);
++        }
++    }
++
++    void Scene::holdSecondaryCells(osg::Group* parent)
++    {
++        for (CellStore* cell : mSecondaryCells)
++            mRendering.setCellSecondary(cell, parent);
 +    }
 +
 +    void Scene::unloadSecondaryCell(CellStore* cell)
@@ -1137,7 +1170,7 @@ index 8d08420872..25a99a770e 100644
          auto navigatorUpdateGuard = mNavigator.makeUpdateGuard();
          for (auto iter = mActiveCells.begin(); iter != mActiveCells.end();)
          {
-@@ -642,6 +831,24 @@ namespace MWWorld
+@@ -642,6 +853,24 @@ namespace MWWorld
          const int playerCellX = playerCellIndex.mX;
          const int playerCellY = playerCellIndex.mY;
  
@@ -1162,7 +1195,7 @@ index 8d08420872..25a99a770e 100644
          for (auto iter = mActiveCells.begin(); iter != mActiveCells.end();)
          {
              auto* cell = *iter++;
-@@ -652,9 +859,11 @@ namespace MWWorld
+@@ -652,9 +881,11 @@ namespace MWWorld
                  if (dx > halfGridSize || dy > halfGridSize)
                      unloadCell(cell, navigatorUpdateGuard.get());
              }
@@ -1175,7 +1208,7 @@ index 8d08420872..25a99a770e 100644
  
          const DetourNavigator::CellGridBounds cellGridBounds{
              .mCenter = osg::Vec2i(playerCellX, playerCellY),
-@@ -681,6 +890,27 @@ namespace MWWorld
+@@ -681,6 +912,27 @@ namespace MWWorld
  
          addPostponedPhysicsObjects();
  
@@ -1203,7 +1236,7 @@ index 8d08420872..25a99a770e 100644
          std::size_t refsToLoad = 0;
          std::vector<std::pair<int, int>> cellsPositionsToLoad;
          iterateOverCellsAround(playerCellX, playerCellY, mHalfGridSize, [&](int x, int y) {
-@@ -977,12 +1207,23 @@ namespace MWWorld
+@@ -977,12 +1229,23 @@ namespace MWWorld
  
          auto navigatorUpdateGuard = mNavigator.makeUpdateGuard();
  
@@ -1229,7 +1262,7 @@ index 8d08420872..25a99a770e 100644
          assert(mActiveCells.empty());
  
          loadingListener->setProgressRange(cell.count());
-@@ -992,7 +1233,10 @@ namespace MWWorld
+@@ -992,7 +1255,10 @@ namespace MWWorld
  
          // Load cell.
          mPagedRefs.clear();
@@ -1241,7 +1274,7 @@ index 8d08420872..25a99a770e 100644
  
          navigatorUpdateGuard.reset();
  
-@@ -1071,11 +1315,16 @@ namespace MWWorld
+@@ -1071,11 +1337,16 @@ namespace MWWorld
                      < (b.second.getRefData().getPosition().asVec3() - centre).length2();
              });
          }
@@ -1262,7 +1295,7 @@ index 8d08420872..25a99a770e 100644
      }
  
      void Scene::insertDeferredObjects()
-@@ -1091,13 +1340,17 @@ namespace MWWorld
+@@ -1091,13 +1362,17 @@ namespace MWWorld
          {
              auto& [cell, ptr] = mDeferredObjects[done++];
              // gone, hidden, or put in the scene meanwhile (a script enabling it)
@@ -1283,7 +1316,7 @@ index 8d08420872..25a99a770e 100644
              }
              catch (const std::exception& e)
              {
-@@ -1165,7 +1418,7 @@ namespace MWWorld
+@@ -1165,7 +1440,7 @@ namespace MWWorld
  
      bool Scene::isCellActive(const CellStore& cell)
      {
@@ -1293,7 +1326,7 @@ index 8d08420872..25a99a770e 100644
  
      class PreloadMeshItem : public SceneUtil::WorkItem
 diff --git a/apps/openmw/mwworld/scene.hpp b/apps/openmw/mwworld/scene.hpp
-index 65d5c548b4..ccc6cb2417 100644
+index 65d5c548b4..cd43286f09 100644
 --- a/apps/openmw/mwworld/scene.hpp
 +++ b/apps/openmw/mwworld/scene.hpp
 @@ -3,6 +3,7 @@
@@ -1330,13 +1363,18 @@ index 65d5c548b4..ccc6cb2417 100644
      public:
          Scene(MWWorld::World& world, MWRender::RenderingManager& rendering, MWPhysics::PhysicsSystem* physics,
              DetourNavigator::Navigator& navigator);
-@@ -207,6 +227,16 @@ namespace MWWorld
+@@ -207,6 +227,21 @@ namespace MWWorld
  
          bool isCellActive(const CellStore& cell);
  
 +        // Alpha3 live cells (see mSecondaryCells)
 +        void loadSecondaryCells(const std::vector<CellStore*>& cells, osg::Group* parent, const osg::Vec3f& position);
 +        void unloadSecondaryCells();
++        // those not among keep unloaded
++        void unloadSecondaryCellsBut(const std::vector<CellStore*>& keep);
++        // kept in the scene with nothing drawing them (parent: a group that is not in the scene), until a door opens
++        // onto them again (loadSecondaryCells puts them under its group)
++        void holdSecondaryCells(osg::Group* parent);
 +        const CellStoreCollection& getSecondaryCells() const { return mSecondaryCells; }
 +        bool isSecondaryCell(const CellStore& cell) const { return mSecondaryCells.contains(&cell); }
 +        // the next change of cells (the player through the door) keeps these as the secondary cells, under parent
@@ -1348,7 +1386,7 @@ index 65d5c548b4..ccc6cb2417 100644
  
          void testExteriorCells();
 diff --git a/apps/openmw/mwworld/seamlessdoors.cpp b/apps/openmw/mwworld/seamlessdoors.cpp
-index c227d98388..a95a5a2b9c 100644
+index c227d98388..ddba881f82 100644
 --- a/apps/openmw/mwworld/seamlessdoors.cpp
 +++ b/apps/openmw/mwworld/seamlessdoors.cpp
 @@ -13,7 +13,15 @@
@@ -1562,7 +1600,31 @@ index c227d98388..a95a5a2b9c 100644
                          if (!chunk)
                              continue;
                          osg::ref_ptr<SceneUtil::PositionAttitudeTransform> place
-@@ -584,18 +697,50 @@ namespace MWWorld
+@@ -423,6 +536,14 @@ namespace MWWorld
+             Alpha3::outsideLight(fog, sky, ambient, sun);
+             light.mAmbient = ambient;
+             light.mSun = sun;
++            // where the sunlight comes from out there (as RenderingManager::setSunDirection has it)
++            if (osg::Vec3f direction; Alpha3::outsideSunDirection(direction))
++            {
++                osg::Vec3f position = -direction;
++                position.z() = 400.f - std::abs(position.x());
++                light.mSunPosition
++                    = osg::Vec4f(Settings::shaders().mMatchSunlightToSun ? position : -direction, 0.f);
++            }
+             light.mFill = fog;
+             light.mSky = sky;
+             light.mFog = true;
+@@ -437,6 +558,8 @@ namespace MWWorld
+             Alpha3::DoorPortalLight light;
+             light.mAmbient = SceneUtil::colourFromRGB(cell.getMood().mAmbiantColor);
+             light.mSun = SceneUtil::colourFromRGB(cell.getMood().mDirectionalColor);
++            // (as RenderingManager::configureAmbient has it)
++            light.mSunPosition = osg::Vec4f(-1.f, osg::DegreesToRadians(45.f), osg::DegreesToRadians(45.f), 0.f);
+             light.mFill = osg::Vec4f(0.f, 0.f, 0.f, 1.f);
+             light.mSky = light.mFill;
+             return light;
+@@ -584,18 +707,54 @@ namespace MWWorld
          // What is seen through it, built a little each frame, the door there first: from an exterior this door swings
          // into the interior (a copy of it there, seen through the doorway), from an interior this one swings in. Its people
          // and creatures are not built ahead (they are in the scene until the player is through).
@@ -1576,7 +1638,11 @@ index c227d98388..a95a5a2b9c 100644
 +        if (alreadyOpen)
 +            live.assign(scene.getSecondaryCells().begin(), scene.getSecondaryCells().end());
 +        else
++        {
 +            live = cells;
++            // what was held behind another door goes
++            scene.unloadSecondaryCellsBut(live);
++        }
 +        mContent = prebuilt ? std::move(prebuilt) : gather(cells, other, hereOutside, false, live);
 +        if (!mContent->mLive)
 +        {
@@ -1617,7 +1683,7 @@ index c227d98388..a95a5a2b9c 100644
          mReverse->mLeafFront = mNormal;
          if (outside)
          {
-@@ -611,6 +756,39 @@ namespace MWWorld
+@@ -611,6 +770,39 @@ namespace MWWorld
          mDoor = door;
          mOther = other;
          mOtherCell = door.getCellRef().getDestCell();
@@ -1657,7 +1723,7 @@ index c227d98388..a95a5a2b9c 100644
  
          // this door: hidden from an exterior (its copy there swings), else swung toward the player
          mLeaf = makeLeaf(*doorNode, mNormal);
-@@ -625,14 +803,12 @@ namespace MWWorld
+@@ -625,14 +817,12 @@ namespace MWWorld
          mOpening = true;
          pose();
          if (alreadyOpen)
@@ -1675,7 +1741,7 @@ index c227d98388..a95a5a2b9c 100644
          Log(Debug::Verbose) << "Seamless doors: doorway " << mHalfWidth * 2.f << " wide, " << mHeight
                              << " high, door " << shape.thickness() << " thick; the door there "
                              << otherShape.alongMax() - otherShape.alongMin() << " wide, " << otherShape.thickness()
-@@ -668,6 +844,15 @@ namespace MWWorld
+@@ -668,6 +858,15 @@ namespace MWWorld
              return;
          }
  
@@ -1691,7 +1757,7 @@ index c227d98388..a95a5a2b9c 100644
          // a little more of what is seen through it, then of this side for the way back
          const Clock::time_point deadline = Clock::now() + sBuildBudget;
          if (!mContent->done())
-@@ -683,21 +868,24 @@ namespace MWWorld
+@@ -683,21 +882,24 @@ namespace MWWorld
              pose();
          if (!mOpening && mSwing <= 0.f)
          {
@@ -1724,7 +1790,7 @@ index c227d98388..a95a5a2b9c 100644
  
          const osg::Vec3f relative = player.getRefData().getPosition().asVec3() - mCentre;
          const float out = relative * mNormal;
-@@ -705,8 +893,8 @@ namespace MWWorld
+@@ -705,8 +907,8 @@ namespace MWWorld
          if (passable && out < 0.f && out > -sPassDepth * 2.f && along < mHalfWidth && relative.z() > -64.f
              && relative.z() < mHeight)
              cross();
@@ -1735,7 +1801,7 @@ index c227d98388..a95a5a2b9c 100644
              mOpening = false;
      }
  
-@@ -735,7 +923,11 @@ namespace MWWorld
+@@ -735,9 +937,16 @@ namespace MWWorld
          const float built = milliseconds(start);
          // what was seen through the door, for what of that side is put in the scene over the next frames
          std::unique_ptr<Content> standIn = Alpha3::cellsOverFrames() ? std::move(mContent) : nullptr;
@@ -1747,8 +1813,13 @@ index c227d98388..a95a5a2b9c 100644
 +        close(false);
          dropStandIn();
  
++        // the light goes over to the other side's
++        Alpha3::startLightBlend();
++
          // followers go too, where the door would have put them
-@@ -762,9 +954,18 @@ namespace MWWorld
+         std::set<Ptr> followers;
+         ActionTeleport::getFollowers(
+@@ -762,9 +971,32 @@ namespace MWWorld
                              << milliseconds(start) - changed;
      }
  
@@ -1762,14 +1833,28 @@ index c227d98388..a95a5a2b9c 100644
 +                otherNode->setNodeMask(mOtherMask);
 +        mOtherHidden = false;
 +        if (unload && !mLiveCells.empty())
-+            MWBase::Environment::get().getWorldScene()->unloadSecondaryCells();
++        {
++            // from an interior, the exterior behind its door stays in the scene: going out again loads nothing
++            const Ptr player = MWBase::Environment::get().getWorld()->getPlayerPtr();
++            if (mOtherOutside && !player.isEmpty() && player.isInCell() && !player.getCell()->getCell()->isExterior())
++            {
++                if (!mHeld)
++                {
++                    mHeld = new osg::Group;
++                    mHeld->setName("Alpha3 live cells held behind a shut door");
++                }
++                MWBase::Environment::get().getWorldScene()->holdSecondaryCells(mHeld);
++            }
++            else
++                MWBase::Environment::get().getWorldScene()->unloadSecondaryCells();
++        }
 +        mLiveCells.clear();
 +        mPendingLive.clear();
 +        mKeepCells.clear();
          if (mPortal)
          {
              for (osg::Group* parent : mPortal->getParents())
-@@ -877,4 +1078,259 @@ namespace MWWorld
+@@ -877,4 +1109,259 @@ namespace MWWorld
          mStandInCell = nullptr;
          mStandInWorldspace = ESM::RefId();
      }
@@ -2030,7 +2115,7 @@ index c227d98388..a95a5a2b9c 100644
 +    }
  }
 diff --git a/apps/openmw/mwworld/seamlessdoors.hpp b/apps/openmw/mwworld/seamlessdoors.hpp
-index 2f9e866262..7db60044ca 100644
+index 2f9e866262..de3418ad94 100644
 --- a/apps/openmw/mwworld/seamlessdoors.hpp
 +++ b/apps/openmw/mwworld/seamlessdoors.hpp
 @@ -5,6 +5,7 @@
@@ -2122,7 +2207,7 @@ index 2f9e866262..7db60044ca 100644
  
          Ptr mDoor;
          // the door on the other side and its cell
-@@ -116,6 +166,20 @@ namespace MWWorld
+@@ -116,6 +166,23 @@ namespace MWWorld
          std::unique_ptr<Content> mContent;
          std::unique_ptr<Content> mReverse;
          osg::Matrixd mToOther;
@@ -2133,6 +2218,9 @@ index 2f9e866262..7db60044ca 100644
 +        // the other side's cells still to be put in the scene, one a frame while the door swings open
 +        std::vector<CellStore*> mPendingLive;
 +        std::vector<CellStore*> mKeepCells;
++        // the exterior's cells behind a door that shut while the player is inside: they stay in the scene (going
++        // out again loads nothing), under this group, which nothing draws
++        osg::ref_ptr<osg::Group> mHeld;
 +        // the door there, hidden while this one is open (its copy, or this door, is seen swinging)
 +        unsigned int mOtherMask = 0;
 +        // where projectiles are drawn on this side (for those coming back through the door)
@@ -2143,6 +2231,30 @@ index 2f9e866262..7db60044ca 100644
          float mYaw = 0.f;
          // the doorway: its middle at the floor, its normal toward this side, the horizontal across it
          osg::Vec3f mCentre;
+diff --git a/apps/openmw/mwworld/weather.cpp b/apps/openmw/mwworld/weather.cpp
+index 8cbe8fc14b..c75f00f614 100644
+--- a/apps/openmw/mwworld/weather.cpp
++++ b/apps/openmw/mwworld/weather.cpp
+@@ -917,6 +917,19 @@ namespace MWWorld
+             {
+                 Alpha3::setOutsideLight(
+                     outside->mFogColor, outside->mSkyColor, outside->mAmbientColor, outside->mSunColor);
++                // (and where the sun is, as worked out below for the exterior)
++                {
++                    float hour = time.getHour();
++                    float nightStart = mTimeSettings.mNightStart;
++                    if (hour < mSunriseTime)
++                        hour += 24.f;
++                    if (nightStart < mSunriseTime)
++                        nightStart += 24.f;
++                    const float orbit = hour < nightStart
++                        ? 1.f - 2.f * (hour - mSunriseTime) / (nightStart - mSunriseTime)
++                        : 2.f * (hour - nightStart) / (24.f - (nightStart - mSunriseTime)) - 1.f;
++                    Alpha3::setOutsideSunDirection(osg::Vec3f(-400.f * orbit, 75.f, -100.f));
++                }
+                 Alpha3::setOutsideClouds(std::string(outside->mCloudTexture.value()),
+                     std::string(outside->mNextCloudTexture.value()), outside->mCloudBlendFactor,
+                     outside->mCloudSpeed, paused ? 0.f : duration);
 diff --git a/apps/openmw/mwworld/worldimp.cpp b/apps/openmw/mwworld/worldimp.cpp
 index 2804b71c8f..3099321c49 100644
 --- a/apps/openmw/mwworld/worldimp.cpp
@@ -2220,3 +2332,26 @@ index 2804b71c8f..3099321c49 100644
          return (targetPos - weaponPos);
      }
  
+diff --git a/components/sceneutil/lightmanager.cpp b/components/sceneutil/lightmanager.cpp
+index 986de7abf3..39ee4925a6 100644
+--- a/components/sceneutil/lightmanager.cpp
++++ b/components/sceneutil/lightmanager.cpp
+@@ -285,10 +285,14 @@ namespace SceneUtil
+             // Don't use Camera::getViewMatrix, that one might be relative to another camera!
+             const osg::RefMatrix* viewMatrix = cv->getCurrentRenderStage()->getInitialViewMatrix();
+ 
+-            stateset->getUniform("sun.position")->set(sun->getPosition() * (*viewMatrix));
+-            stateset->getUniform("sun.diffuse")->set(sun->getDiffuse());
+-            stateset->getUniform("sun.ambient")->set(sun->getAmbient());
+-            stateset->getUniform("sun.specular")->set(sun->getSpecular());
++            // Alpha3: going through a seamless door the light goes over to the other side's, not at once
++            osg::Vec4f sunPosition = sun->getPosition(), sunDiffuse = sun->getDiffuse(), sunAmbient = sun->getAmbient(),
++                       sunSpecular = sun->getSpecular();
++            Alpha3::blendSunlight(sunPosition, sunDiffuse, sunAmbient, sunSpecular);
++            stateset->getUniform("sun.position")->set(sunPosition * (*viewMatrix));
++            stateset->getUniform("sun.diffuse")->set(sunDiffuse);
++            stateset->getUniform("sun.ambient")->set(sunAmbient);
++            stateset->getUniform("sun.specular")->set(sunSpecular);
+ 
+             if (node->getClusteredLighting())
+             {

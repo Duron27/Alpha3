@@ -662,7 +662,7 @@ index ba78111..28762fc 100644
          updateNavMesh();
          updateRecastMesh();
  
-@@ -1359,6 +1363,7 @@ namespace MWRender
+@@ -1361,6 +1365,7 @@ namespace MWRender
              {
                  newChunkMgr.mObjectPaging
                      = std::make_unique<ObjectPaging>(mResourceSystem->getSceneManager(), worldspace);
@@ -674,7 +674,7 @@ diff --git a/apps/openmw/mwworld/scene.cpp b/apps/openmw/mwworld/scene.cpp
 index 25a99a7..b90758e 100644
 --- a/apps/openmw/mwworld/scene.cpp
 +++ b/apps/openmw/mwworld/scene.cpp
-@@ -825,6 +825,7 @@ namespace MWWorld
+@@ -847,6 +847,7 @@ namespace MWWorld
  
      void Scene::changeCellGrid(const osg::Vec3f& pos, ESM::ExteriorCellLocation playerCellIndex, bool changeEvent)
      {

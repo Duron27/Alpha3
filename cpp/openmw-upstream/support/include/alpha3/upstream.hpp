@@ -168,6 +168,9 @@ namespace Alpha3
     {
         osg::Vec4f mAmbient;
         osg::Vec4f mSun;
+        // where the other side's sunlight comes from, in that side's own space (a light's position, w 0); not set
+        // (all 0): this side's is left as it is
+        osg::Vec4f mSunPosition;
         // what is seen where the other side has nothing: the sky outside, from mFill at the horizon (the fog's
         // colour) up to mSky overhead; black inside
         osg::Vec4f mFill;
@@ -219,10 +222,21 @@ namespace Alpha3
     // a door: the fog's colour (the sky's, at the horizon), the sky's overhead, the ambient light and the sun's
     void setOutsideLight(const osg::Vec4f& fog, const osg::Vec4f& sky, const osg::Vec4f& ambient, const osg::Vec4f& sun);
     bool outsideLight(osg::Vec4f& fog, osg::Vec4f& sky, osg::Vec4f& ambient, osg::Vec4f& sun);
+    // and the sun's direction outside (as the weather hands it to the renderer); false: not known yet
+    void setOutsideSunDirection(const osg::Vec3f& direction);
+    bool outsideSunDirection(osg::Vec3f& direction);
     // and its clouds (textures, the blend between them, their speed), scrolled by duration as the sky scrolls them
     void setOutsideClouds(const std::string& texture, const std::string& next, float blend, float speed, float duration);
     // light's mClouds, mNextClouds, mCloudBlend and mCloudOffset
     void outsideClouds(DoorPortalLight& light);
+
+    // Going through a seamless door, the light does not change at once: startLightBlend() (at the crossing) has the
+    // sunlight and the fog go from what they were to what the engine sets, over [Cells] seamless light blend seconds
+    // (0: at once). blendSunlight is asked where the light manager hands the sunlight to the shaders, blendFog where
+    // the renderer hands them the fog.
+    void startLightBlend();
+    void blendSunlight(osg::Vec4f& position, osg::Vec4f& diffuse, osg::Vec4f& ambient, osg::Vec4f& specular);
+    void blendFog(osg::Vec4f& color, float& start, float& end);
 
     // Render scale ([Experimental] render scale, src/renderscale.cpp): the 3D scene drawn at this much of the window's
     // size (1: off, and then the calls below are not made), upscaled and sharpened onto the screen.
