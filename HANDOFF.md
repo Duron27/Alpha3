@@ -460,3 +460,34 @@ Commits: ee7a434 (ASTC block size per texture), 9d83e2b (cell borders), 9db8567 
 - `/storage/emulated/0/Alpha3/config/settings.cfg.before-test` → `settings.cfg`. The test copy has shadows off, point light shadows 0 and sharpening none.
 - Delete `/storage/emulated/0/Alpha3/sunny.txt`.
 - The installed build matches the source (no diagnostic code).
+
+### 2026-11-11: seamless cells and doors on Vulkan — UNCOMMITTED, the user is testing
+Test save: `saves/Duron/Autosave.omwsave` (outside the South Wall Cornerclub door, Balmora). The tablet's `settings.cfg` has `seamless cells = true` and `seamless doors = true` under `[Cells]` (backup from before: `settings.cfg.before-seamless2`).
+
+**What the user reported:**
+- The light changes at once at the doorway. Both sides' light is right; it should go over gradually.
+- A small stutter going in, a large one going out. From an interior, the outside cells should not unload.
+- From inside, the view out looks like a reduced render compared with the real outside.
+- A black strip on the ground outside the door, seen from inside. The user says it is part of the step ("the only part not culled I guess"). Not looked into yet.
+
+**What I measured:**
+- Crossing in or out right away costs 20–45 ms ("the cell changed in") and loads nothing: the other side's cells are kept and promoted.
+- The large exit stutter is when the door has swung shut behind the player (it shuts by itself once the player is 1000 units away). `SeamlessDoors::close()` then unloaded the nine exterior cells, so going out loaded them all again.
+- With frame generation on, the generated frame at the crossing was garbage (a mirrored smear): the camera is in another cell's coordinates from one frame to the next.
+- The view out differs from the real outside in the sun's direction (it used this side's, the interior's sideways one), has no sun shadows, a sky that goes to the overhead colour too low, and its own fog distances.
+
+**Changed (built, waiting for the user's test):**
+- **Light blend.** `Alpha3::startLightBlend()` is called in `SeamlessDoors::cross()`. `Alpha3::blendSunlight()` is asked in `lightmanager.cpp` where the sun uniforms are set each frame, and `Alpha3::blendFog()` in `RenderingManager::update`. Both mix from what was shown to what the engine sets, over `[Cells] seamless light blend` seconds (default 1, 0 is at once). Code in `support/src/seamless.cpp`.
+- **Outside cells held.** `SeamlessDoors::close()`: when the player is in an interior and the other side is the exterior, the secondary cells are not unloaded. They go under `mHeld`, a group nothing draws (`Scene::holdSecondaryCells`). `Scene::loadSecondaryCells` puts a held cell under the new portal's group when a door opens onto it again. `open()` first unloads what is held but not behind the door being opened (`Scene::unloadSecondaryCellsBut`).
+- **Frame generation at the cut.** `generateFrames` in `vulkan/translator.cpp` makes no frame when the camera moved more than 512 units between the two views.
+- **View out.** `DoorPortalLight::mSunPosition`: the other side's own sunlight position. Outside it comes from `Alpha3::setOutsideSunDirection`, which `weather.cpp` now sets also while inside. `doorportal.cpp` `OtherSunCallback` sets `sun.position` for the portal's content per camera, turned as the other side is placed. The sky gradient reaches the overhead colour at 0.6 up instead of 0.35.
+
+**Not a seamless bug:** the hard-edged block of shadow by the NPC inside the Cornerclub. It is there with seamless off and on GLES, and goes with `object shadows = false`: the room's own walls cast it (`object shadows` with `enable indoor shadows`).
+
+**Still to do:**
+- (Done) The engine edits are in patch 0027 (the live-cells patch): `mwworld/seamlessdoors.cpp/.hpp`, `scene.cpp/.hpp`, `weather.cpp`, `mwrender/renderingmanager.cpp`, `components/sceneutil/lightmanager.cpp`. 0028 and 0030 only had their hunk line numbers moved. Checked: the 30 patches applied in order with `git apply` on a clean checkout give the build tree's files.
+  - How it was done: a worktree of the build tree's checkout (`git worktree add --detach`), `git am` 0001–0027, the new diff applied, `git commit --amend`, `git am` 0028–0030, `git format-patch --zero-commit -N --no-signature --start-number 27`.
+- The black strip of the step.
+- The view out still has no sun shadows and no point lights from the other side; its fog starts at 45% of 7000 units.
+- The 20–45 ms of the crossing itself is not profiled.
+- Third option not tried: the same blend for the light of the view through the door before crossing.
