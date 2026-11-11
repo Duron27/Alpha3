@@ -156,6 +156,8 @@ namespace Alpha3::Vk
             enabled.textureCompressionBC = available.textureCompressionBC;
             enabled.textureCompressionETC2 = available.textureCompressionETC2;
             enabled.textureCompressionASTC_LDR = available.textureCompressionASTC_LDR;
+            // how much of the screen the water covers, for its reflection (the translator's water queries)
+            enabled.occlusionQueryPrecise = available.occlusionQueryPrecise;
             enabled.depthClamp = available.depthClamp;
             enabled.depthBiasClamp = available.depthBiasClamp;
             enabled.fillModeNonSolid = available.fillModeNonSolid;

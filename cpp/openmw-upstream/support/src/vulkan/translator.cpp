@@ -1233,6 +1233,7 @@ void main()
                     }
                 mDraws = mSkipped = 0;
                 gpuTimesBegin();
+                waterQueriesBegin();
                 copyFramebufferCallbacks(sceneView);
                 renderCompositeMaps();
                 renderRipples();
@@ -1268,9 +1269,14 @@ void main()
                                      << mSetBinds / 300 << " descriptor sets (" << mSameImageBinds / 300
                                      << " with the last one's images), " << mUniformBytes / 300 / 1024
                                      << " KiB of uniforms bound; " << mVertices / 300 / 3
-                                     << " triangles (vertices / 3) a frame; " << mGenerated
+                                     << " triangles (vertices / 3) a frame; reflection: "
+                                     << mReflectionKept / 300 << " draws, " << mReflectionCulled / 300
+                                     << " left out where no water is seen (water "
+                                     << (mWaterSeen ? "seen" : "not seen") << ", covers " << mWaterCover * 100.f
+                                     << "% of the screen); " << mGenerated
                                      << " generated frames; " << mDispatches << " compute dispatches";
                     mDispatches = 0;
+                    mReflectionKept = mReflectionCulled = 0;
                     mVertices = 0;
                     mGenerated = 0;
                     mPipelineBinds = mVertexBinds = mSetBinds = mUniformBytes = mSameImageBinds = 0;
@@ -1716,6 +1722,17 @@ void main()
 
             void drawStageItself(osgUtil::RenderStage& stage)
             {
+                struct KindOf
+                {
+                    StageKind& mKind;
+                    StageKind mBefore;
+                    ~KindOf() { mKind = mBefore; }
+                } kindOf{ mStageKind, mStageKind };
+                mStageKind = StageKind::Other;
+                if (const osg::Camera* camera = stage.getCamera())
+                    mStageKind = camera->getName() == "SceneCam" ? StageKind::Scene
+                        : camera->getName() == "ReflectionCamera" ? StageKind::Reflection
+                                                                  : StageKind::Other;
                 const unsigned clearMask = stage.getClearMask();
                 const bool clearColor = (clearMask & 0x4000) != 0;
                 const bool clearDepth = (clearMask & 0x100) != 0;
@@ -2005,9 +2022,37 @@ void main()
                     drawBin(*child->second, bins);
                 for (const osgUtil::RenderLeaf* leaf : bin.getRenderLeafList())
                     drawLeaf(*leaf, bins);
-                for (const osgUtil::StateGraph* graph : bin.getStateGraphList())
-                    for (const auto& leaf : graph->_leaves)
+                // The scene's opaque draws come sorted by state, whatever their distance: what is behind is shaded and
+                // then covered. Nearest first ([Camera] draw nearest first), the GPU's depth test leaves out what the
+                // nearer has covered. In bands of distance (two for each doubling), so that the draws of a band keep
+                // their order by state and most of the binds they share.
+                static const bool nearestFirst = settingBool("Camera", "draw nearest first", true);
+                // (only the bin of the ordinary solid objects, which has no order of its own: the sky's layers are
+                // drawn one over the other as they come)
+                if (nearestFirst && mStageKind == StageKind::Scene && !mInFirstPersonBin && bin.getBinNum() == 0
+                    && bin.getSortMode() == osgUtil::RenderBin::SORT_BY_STATE && bin.getStateGraphList().size() > 1)
+                {
+                    mNearestFirst.clear();
+                    for (const osgUtil::StateGraph* graph : bin.getStateGraphList())
+                        for (const auto& leaf : graph->_leaves)
+                        {
+                            const float depth = leaf->_depth;
+                            const int band = depth > 1.f ? static_cast<int>(std::log2(depth) * 2.f) : 0;
+                            mNearestFirst.emplace_back(band, leaf.get());
+                        }
+                    std::stable_sort(mNearestFirst.begin(), mNearestFirst.end(),
+                        [](const auto& a, const auto& b) { return a.first < b.first; });
+                    // (drawing a leaf can draw a bin of its own: the list is this bin's until then)
+                    std::vector<std::pair<int, const osgUtil::RenderLeaf*>> leaves;
+                    leaves.swap(mNearestFirst);
+                    for (const auto& [band, leaf] : leaves)
                         drawLeaf(*leaf, bins);
+                    leaves.swap(mNearestFirst);
+                }
+                else
+                    for (const osgUtil::StateGraph* graph : bin.getStateGraphList())
+                        for (const auto& leaf : graph->_leaves)
+                            drawLeaf(*leaf, bins);
                 for (; child != bin.getRenderBinList().end(); ++child)
                     drawBin(*child->second, bins);
                 mInFirstPersonBin = wasFirstPerson;
@@ -2161,6 +2206,156 @@ void main()
                 slot.mState = state;
                 slot.mFrame = mFrameCounter;
                 return state;
+            }
+
+            static bool waterQueriesOn()
+            {
+                static const bool on = settingBool("Water", "reflection where water is seen", true);
+                return on;
+            }
+
+            // The latest frame's answers that are in (the frames in flight: a slot's own come round too late), then
+            // this slot's pool made ready for this frame
+            void waterQueriesBegin()
+            {
+                if (!waterQueriesOn())
+                    return;
+                const unsigned slot = mContext.frameSlot();
+                VkDevice device = mContext.vkDevice();
+                constexpr uint32_t count = sWaterColumns * sWaterRows;
+                // (newest first; this slot's own, two or more frames old, before it is reset below)
+                unsigned order[sFramesInFlight];
+                for (unsigned i = 0; i < sFramesInFlight; ++i)
+                    order[i] = i;
+                std::sort(order, order + sFramesInFlight,
+                    [&](unsigned a, unsigned b) { return mWaterAsked[a] > mWaterAsked[b]; });
+                for (const unsigned other : order)
+                {
+                    if (mWaterPools[other] == VK_NULL_HANDLE || mWaterAsked[other] == 0
+                        || mWaterAsked[other] <= mWaterAnswered)
+                        break;
+                    uint32_t answers[count * 2] = {};
+                    if (vkGetQueryPoolResults(device, mWaterPools[other], 0, count, sizeof(answers), answers, 8,
+                            VK_QUERY_RESULT_WITH_AVAILABILITY_BIT)
+                        != VK_SUCCESS)
+                        continue;
+                    bool all = true;
+                    for (uint32_t i = 0; i < count; ++i)
+                        all = all && answers[i * 2 + 1] != 0;
+                    if (!all)
+                        continue;
+                    float rect[4] = { 1.f, 1.f, 0.f, 0.f };
+                    bool seen = false;
+                    uint64_t samples = 0;
+                    for (uint32_t i = 0; i < count; ++i)
+                        samples += answers[i * 2];
+                    for (int row = 0; row < sWaterRows; ++row)
+                        for (int column = 0; column < sWaterColumns; ++column)
+                            if (answers[(row * sWaterColumns + column) * 2] != 0)
+                            {
+                                seen = true;
+                                rect[0] = std::min(rect[0], float(column) / sWaterColumns);
+                                rect[1] = std::min(rect[1], float(row) / sWaterRows);
+                                rect[2] = std::max(rect[2], float(column + 1) / sWaterColumns);
+                                rect[3] = std::max(rect[3], float(row + 1) / sWaterRows);
+                            }
+                    mWaterAnswered = mWaterAsked[other];
+                    mWaterKnown = true;
+                    mWaterSeen = seen;
+                    std::copy(rect, rect + 4, mWaterRect);
+                    // a strip of water far off: its reflection is the land and the sky (the objects come back a
+                    // fifth above where they went, so that they do not flicker at the limit)
+                    static const float objectsFrom
+                        = std::clamp(settingFloat("Water", "reflection objects from water cover", 0.02f), 0.f, 1.f);
+                    mWaterCover = mContext.device().mFeatures.occlusionQueryPrecise && mScenePixels > 0
+                        ? static_cast<float>(double(samples) / mScenePixels)
+                        : 1.f;
+                    mReflectObjects = mWaterCover >= (mReflectObjects ? objectsFrom : objectsFrom * 1.2f);
+                    break;
+                }
+                // a frame that drew no water at all (none in view, an interior without any) has none to reflect
+                if (mWaterKnown && !mWaterDrawn && mFrameCounter > 8)
+                    mWaterSeen = false;
+                mWaterDrawn = false;
+                if (mWaterPools[slot] == VK_NULL_HANDLE)
+                {
+                    VkQueryPoolCreateInfo info{ VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
+                    info.queryType = VK_QUERY_TYPE_OCCLUSION;
+                    info.queryCount = count;
+                    if (vkCreateQueryPool(device, &info, nullptr, &mWaterPools[slot]) != VK_SUCCESS)
+                        return;
+                }
+                mWaterAsked[slot] = 0;
+                vkCmdResetQueryPool(mContext.commands(), mWaterPools[slot], 0, count);
+            }
+
+            // The scene's water, once for each cell of the grid (together what the one draw would have drawn)
+            bool drawWaterInQueries(const osgUtil::RenderLeaf& leaf, const osg::Geometry& geometry, Accumulated& state)
+            {
+                const unsigned slot = mContext.frameSlot();
+                if (!waterQueriesOn() || mStageKind != StageKind::Scene || mWaterDrawn
+                    || mWaterPools[slot] == VK_NULL_HANDLE || mPass == VK_NULL_HANDLE)
+                    return false;
+                mWaterDrawn = true;
+                mWaterAsked[slot] = mFrameCounter;
+                mScenePixels = uint64_t(mArea.extent.width) * mArea.extent.height;
+                const VkQueryControlFlags precise
+                    = mContext.device().mFeatures.occlusionQueryPrecise ? VK_QUERY_CONTROL_PRECISE_BIT : 0;
+                VkCommandBuffer commands = mContext.commands();
+                for (int row = 0; row < sWaterRows; ++row)
+                    for (int column = 0; column < sWaterColumns; ++column)
+                    {
+                        // (the area is OpenGL's: y up)
+                        VkRect2D cell;
+                        const int32_t x0 = int32_t(mArea.extent.width) * column / sWaterColumns;
+                        const int32_t x1 = int32_t(mArea.extent.width) * (column + 1) / sWaterColumns;
+                        const int32_t y0 = int32_t(mArea.extent.height) * row / sWaterRows;
+                        const int32_t y1 = int32_t(mArea.extent.height) * (row + 1) / sWaterRows;
+                        cell.offset = { mArea.offset.x + x0, mArea.offset.y + y0 };
+                        cell.extent = { uint32_t(x1 - x0), uint32_t(y1 - y0) };
+                        const VkRect2D scissor = scissorOf(cell);
+                        vkCmdSetScissor(commands, 0, 1, &scissor);
+                        vkCmdBeginQuery(commands, mWaterPools[slot], uint32_t(row * sWaterColumns + column), precise);
+                        drawGeometry(geometry, state, leaf._modelview.get(), leaf._projection.get());
+                        vkCmdEndQuery(commands, mWaterPools[slot], uint32_t(row * sWaterColumns + column));
+                    }
+                const VkRect2D scissor = scissorOf(mArea);
+                vkCmdSetScissor(commands, 0, 1, &scissor);
+                return true;
+            }
+
+            // In the reflection: whether what is drawn can show where the water is seen (with room for the waves'
+            // shift of the lookup, and for the answers being a few frames old)
+            bool reflectionShows(const osgUtil::RenderLeaf& leaf, const osg::Drawable& drawable)
+            {
+                if (!mWaterKnown || leaf._modelview == nullptr || leaf._projection == nullptr)
+                    return true;
+                const osg::BoundingSphere& bound = drawable.getBound();
+                if (!bound.valid())
+                    return true;
+                const osg::Matrixd& view = *leaf._modelview;
+                const osg::Matrixd& projection = *leaf._projection;
+                const osg::Vec3d centre = osg::Vec3d(bound.center()) * view;
+                const double scale = std::sqrt(std::max({ osg::Vec3d(view(0, 0), view(0, 1), view(0, 2)).length2(),
+                    osg::Vec3d(view(1, 0), view(1, 1), view(1, 2)).length2(),
+                    osg::Vec3d(view(2, 0), view(2, 1), view(2, 2)).length2() }));
+                const double radius = bound.radius() * scale;
+                const double depth = -centre.z();
+                // around the camera or behind it, or not a perspective view: no telling where it shows
+                if (depth - radius <= 1.0 || projection(3, 3) != 0.0)
+                    return true;
+                if (!mWaterSeen)
+                    return false;
+                if (!mReflectObjects && std::strstr(typeid(drawable).name(), "TerrainDrawable") == nullptr)
+                    return false;
+                constexpr double margin = 0.15;
+                const double reach = radius / (depth - radius) * 1.1;
+                const double x = ((centre.x() * projection(0, 0) + centre.z() * projection(2, 0)) / depth) * 0.5 + 0.5;
+                const double y = ((centre.y() * projection(1, 1) + centre.z() * projection(2, 1)) / depth) * 0.5 + 0.5;
+                const double reachX = reach * std::abs(projection(0, 0)) * 0.5;
+                const double reachY = reach * std::abs(projection(1, 1)) * 0.5;
+                return x + reachX >= mWaterRect[0] - margin && x - reachX <= mWaterRect[2] + margin
+                    && y + reachY >= mWaterRect[1] - margin && y - reachY <= mWaterRect[3] + margin;
             }
 
             // GPU timestamps: one at the frame's start and end, and around each render target's pass, read back when
@@ -2369,10 +2564,21 @@ void main()
                     case DrawableKind::Geometry:
                         break;
                 }
+                if (mStageKind == StageKind::Reflection && waterQueriesOn())
+                {
+                    if (!reflectionShows(leaf, *drawable))
+                    {
+                        ++mReflectionCulled;
+                        return;
+                    }
+                    ++mReflectionKept;
+                }
                 Accumulated* state = accumulate(leaf._parent, bins);
                 setChain(leaf._parent, &bins, state);
-                drawGeometry(static_cast<const osg::Geometry&>(*drawable), *state, leaf._modelview.get(),
-                    leaf._projection.get());
+                const auto& geometry = static_cast<const osg::Geometry&>(*drawable);
+                if (mStageKind != StageKind::Scene || geometry.getName() != "Water Geometry"
+                    || !drawWaterInQueries(leaf, geometry, *state))
+                    drawGeometry(geometry, *state, leaf._modelview.get(), leaf._projection.get());
                 setChain(nullptr, nullptr, nullptr);
             }
 
@@ -2941,11 +3147,24 @@ void main()
                     if (array != nullptr && array->getBinding() != osg::Array::BIND_OFF
                         && array->getNumElements() > 0)
                     {
-                        format = vertexFormat(*array, input.mInteger,
-                            input.mKind == VertexInput::Color || input.mKind == VertexInput::SecondaryColor
-                                || input.mKind == VertexInput::Normal);
-                        if (format != VK_FORMAT_UNDEFINED
-                            && mResources.buffer(*array, buffer, offset, &entry.mStreamed))
+                        // normals and colours in bytes ([Video] packed vertex data): 4 for each vertex, not 12 or 16
+                        static const bool pack = settingBool("Video", "packed vertex data", true);
+                        const bool perVertex = array->getBinding() == osg::Array::BIND_PER_VERTEX
+                            || array->getBinding() == osg::Array::BIND_UNDEFINED;
+                        const bool direction = input.mKind == VertexInput::Normal;
+                        if (pack && perVertex && !input.mInteger
+                            && (direction || input.mKind == VertexInput::Color
+                                || input.mKind == VertexInput::SecondaryColor)
+                            && mResources.packedArray(*array, direction, buffer, offset))
+                        {
+                            format = direction ? VK_FORMAT_R8G8B8A8_SNORM : VK_FORMAT_R8G8B8A8_UNORM;
+                            stride = 4;
+                        }
+                        else if ((format = vertexFormat(*array, input.mInteger,
+                                      input.mKind == VertexInput::Color || input.mKind == VertexInput::SecondaryColor
+                                          || input.mKind == VertexInput::Normal))
+                                     != VK_FORMAT_UNDEFINED
+                                 && mResources.buffer(*array, buffer, offset, &entry.mStreamed))
                             stride = array->getBinding() == osg::Array::BIND_PER_VERTEX
                                     || array->getBinding() == osg::Array::BIND_UNDEFINED
                                 ? array->getElementSize()
@@ -4486,6 +4705,25 @@ void main()
             uint64_t mClippedDraws = 0;
             osg::Vec4f mClipPlanes[2]{ osg::Vec4f(0.f, 0.f, 0.f, 1.f), osg::Vec4f(0.f, 0.f, 0.f, 1.f) };
             VkQueryPool mGpuPools[sFramesInFlight]{};
+            // Where the water is seen ([Water] reflection where water is seen): the scene's water is drawn once for
+            // each cell of a grid over the screen (the scissor), each in an occlusion query. From the cells that
+            // drew something, the part of the screen the reflection is looked up in: the reflection's camera draws
+            // only what can show there (the sky and what has no bounds always).
+            static constexpr int sWaterColumns = 4, sWaterRows = 4;
+            VkQueryPool mWaterPools[sFramesInFlight]{};
+            unsigned mWaterAsked[sFramesInFlight] = {}; // the frame (the counter) each slot's queries are of, 0 none
+            unsigned mWaterAnswered = 0; // the latest frame whose queries were read
+            std::vector<std::pair<int, const osgUtil::RenderLeaf*>> mNearestFirst; // (kept for its memory)
+            bool mWaterKnown = false; // read at least once
+            uint64_t mScenePixels = 0;
+            bool mWaterSeen = false;
+            float mWaterRect[4] = { 0.f, 0.f, 1.f, 1.f }; // x and y from, x and y to (0 to 1, y up as OpenGL's)
+            float mWaterCover = 1.f; // the part of the screen it covers (1 when the device does not count)
+            bool mReflectObjects = true; // enough of it for the objects in its reflection (else the land and sky)
+            bool mWaterDrawn = false; // this frame's water went into the queries
+            enum class StageKind { Other, Scene, Reflection };
+            StageKind mStageKind = StageKind::Other;
+            uint64_t mReflectionCulled = 0, mReflectionKept = 0;
             uint32_t mGpuUsed[sFramesInFlight]{};
             std::vector<std::string> mGpuLabels[sFramesInFlight];
             unsigned mGpuFrame[sFramesInFlight] = {}; // the frame (OSG's number) each slot's queries measure

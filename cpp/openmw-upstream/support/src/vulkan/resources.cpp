@@ -672,6 +672,70 @@ namespace Alpha3::Vk
         return true;
     }
 
+    bool Resources::packedArray(const osg::Array& array, bool direction, VkBuffer& buffer, VkDeviceSize& offset)
+    {
+        const unsigned components = array.getDataSize();
+        const unsigned count = array.getNumElements();
+        if (array.getDataType() != 0x1406 /* GL_FLOAT */ || (components != 3 && components != 4) || count == 0
+            || array.getDataPointer() == nullptr)
+            return false;
+        ConvertedEntry& entry = mPacked[&array];
+        entry.mLastUse = mFrame;
+        const bool same = entry.mData.get() == &array;
+        if (same && entry.mModified != array.getModifiedCount())
+        {
+            // it changes (a skinned shape's normals): not worth packing again each time
+            destroyLater(entry.mBuffer);
+            entry.mBuffer = {};
+            entry.mCount = 0;
+            entry.mModified = array.getModifiedCount();
+        }
+        if (same)
+        {
+            buffer = entry.mBuffer.mBuffer;
+            offset = 0;
+            return entry.mCount > 0;
+        }
+        destroyLater(entry.mBuffer);
+        entry = {};
+        entry.mData = &array;
+        entry.mLastUse = mFrame;
+        entry.mModified = array.getModifiedCount();
+        const float* in = static_cast<const float*>(array.getDataPointer());
+        std::vector<uint8_t> packed(size_t(count) * 4);
+        for (unsigned i = 0; i < count; ++i, in += components)
+        {
+            uint8_t* out = &packed[size_t(i) * 4];
+            if (direction)
+            {
+                const float length = std::sqrt(in[0] * in[0] + in[1] * in[1] + in[2] * in[2]);
+                const float scale = length > 1e-12f ? 127.f / length : 0.f;
+                for (int c = 0; c < 3; ++c)
+                    out[c] = static_cast<uint8_t>(static_cast<int8_t>(std::lround(in[c] * scale)));
+                out[3] = 0;
+            }
+            else
+            {
+                for (unsigned c = 0; c < 4; ++c)
+                {
+                    const float value = c < components ? in[c] : 1.f;
+                    if (!(value >= 0.f && value <= 1.f))
+                        return false;
+                    out[c] = static_cast<uint8_t>(value * 255.f + 0.5f);
+                }
+            }
+        }
+        entry.mBuffer = createBuffer(packed.size(), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+        if (entry.mBuffer.mBuffer == VK_NULL_HANDLE)
+            return false;
+        std::memcpy(entry.mBuffer.mMapped, packed.data(), packed.size());
+        vmaFlushAllocation(mContext.device().mAllocator, entry.mBuffer.mMemory, 0, VK_WHOLE_SIZE);
+        entry.mCount = count;
+        buffer = entry.mBuffer.mBuffer;
+        offset = 0;
+        return true;
+    }
+
     bool Resources::convertedIndices(const osg::BufferData& data, uint32_t variant,
         const std::function<void(std::vector<uint32_t>&)>& converter, VkBuffer& buffer, VkDeviceSize& offset,
         uint32_t& count)
@@ -1323,6 +1387,16 @@ namespace Alpha3::Vk
             {
                 destroyLater(it->second.mBuffer);
                 it = mBuffers.erase(it);
+            }
+            else
+                ++it;
+        }
+        for (auto it = mPacked.begin(); it != mPacked.end();)
+        {
+            if (!it->second.mData || it->second.mData->referenceCount() <= 1 || mFrame - it->second.mLastUse > 3600)
+            {
+                destroyLater(it->second.mBuffer);
+                it = mPacked.erase(it);
             }
             else
                 ++it;

@@ -7,6 +7,7 @@
 // is gone. Per frame memory (uniforms, arrays that change every frame, uploads) comes from a ring of mapped buffers.
 #include "vk.hpp"
 
+#include <osg/Array>
 #include <osg/observer_ptr>
 
 #include <array>
@@ -97,6 +98,10 @@ namespace Alpha3::Vk
         // every frame is copied to the frame's memory instead, hence the offset.
         // streamed: set when the buffer is in this frame's memory (good for this frame only)
         bool buffer(const osg::BufferData& data, VkBuffer& buffer, VkDeviceSize& offset, bool* streamed = nullptr);
+        // An array of float normals (direction: each made a unit vector, as 4 signed bytes) or colours (as 4 unsigned
+        // bytes) in a third or a quarter of the memory, made once; the GPU reads that much less for every vertex.
+        // False for what cannot be (colours outside 0 to 1) and for an array that changes: the caller uses buffer().
+        bool packedArray(const osg::Array& array, bool direction, VkBuffer& buffer, VkDeviceSize& offset);
         // An index list of GL_UNSIGNED_BYTE, or one that needs another primitive (quads), as 16 or 32 bit indices
         // made once: converter fills the given vector from the data
         bool convertedIndices(const osg::BufferData& data, uint32_t variant,
@@ -208,6 +213,7 @@ namespace Alpha3::Vk
         std::array<std::vector<Chunk>, 8> mChunks; // by frame slot
         std::unordered_map<const osg::BufferData*, BufferEntry> mBuffers;
         std::map<std::pair<const osg::BufferData*, uint32_t>, ConvertedEntry> mConverted;
+        std::unordered_map<const osg::BufferData*, ConvertedEntry> mPacked; // (mCount 0: not one to pack)
         std::unordered_map<const osg::BufferData*, StorageEntry> mStorage;
         Buffer mDummyStorage;
         std::unordered_map<const osg::Texture*, TextureEntry> mTextures;

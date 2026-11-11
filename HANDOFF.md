@@ -491,3 +491,32 @@ Test save: `saves/Duron/Autosave.omwsave` (outside the South Wall Cornerclub doo
 - The view out still has no sun shadows and no point lights from the other side; its fog starts at 45% of 7000 units.
 - The 20–45 ms of the crossing itself is not profiled.
 - Third option not tried: the same blend for the light of the view through the door before crossing.
+
+### 2026-11-11 (later): performance at a 50,000 view distance (Vulkan) — done by Fable 5.2, in its own commit ("Vulkan (Fable 5.2): ...") so it can be reverted as one
+The user raised `viewing distance` to 50000 and asked for more speed without changing `settings.cfg` or visibly lowering quality, each change behind a setting. Test view: `saves/Duron/Quicksave.omwsave` (a hill over Balmora), camera untouched after the load, numbers read from the "Vulkan: frame" and "Vulkan: GPU ms" log lines after about two minutes.
+
+**Where the time goes (before):** 10.7 fps, GPU 94 ms a frame; the CPU's 51 ms of recording overlaps it and is not the limit.
+- Main view 52.5 ms for 780,000 triangles (501,000 objects, 279,000 terrain).
+- Water reflection (512x512) 32.8 ms for 713,000 triangles (444,000 objects, 268,000 terrain).
+- Sun shadows 6.6 ms for 224,000 triangles.
+- The frame is bound by triangle count, not by pixels: the small reflection costs nearly as much as its triangle share.
+- Object triangles of the main view by the chunk's distance: under 8,000 units 80,000; to 16,000 75,000; to 33,000 110,000; 33,000 to 46,000 173,000; beyond 38,000.
+
+**Kept (all in `support/src/vulkan/`, each with a setting in `alpha3.cfg`):**
+1. `[Water] reflection where water is seen` (default true), with `reflection objects from water cover = 0.02`.
+   - The scene's water is drawn once per cell of a 4x4 grid (scissor), each in an occlusion query (`drawWaterInQueries`). The answers are read at the start of a later frame (`waterQueriesBegin`); precise counts need `occlusionQueryPrecise`, now enabled in `device.cpp` when the device has it.
+   - In the reflection's stage (`reflectionShows`): nothing with bounds is drawn when no water is seen (the sky still is); below 2% of the screen covered, only terrain and sky; otherwise what can show in the seen part of the screen (with a 0.15 margin).
+   - Result: reflection 32.7 → 12.8 ms, 10.6 → 13.4 fps (water covered 0.8% of the screen). The remaining 12.8 ms is the reflection's terrain.
+   - The screen-area test alone left out only 13 of 654 draws: distant chunks and the distant river both lie along the horizon. The cover rule is what gave the gain.
+2. `[Camera] draw nearest first` (default true): the opaque draws of the scene's bin 0 are drawn in bands of distance (two per doubling), state order kept inside a band. Main view 53.5 → 51.8 ms. Only bin 0 with state sorting: applied to every bin it broke the sky when looking up (its layers are drawn in order).
+3. `[Video] packed vertex data` (default true): float normals go up as 4 signed bytes (made unit vectors), float colours as 4 unsigned bytes (`Resources::packedArray`). Arrays that change, and colours outside 0 to 1, go up as before. Graphics memory 151 → 140 MB, main view about 1 ms less; the picture differs by no more than two runs of the same build do.
+
+**Tried, no gain, removed:**
+- Coarser far levels of the simplified distant meshes (three times the error and a third of the triangles per level instead of twice and half): 1.31M against 1.33M triangles a frame, the same within noise. The far chunks' triangles are not limited by the level's error. Not looked into further: `simplified mesh min triangles = 200` leaves small meshes alone at every distance, and locked borders stop many meshes from simplifying at all ("simplified only to 1180 of 1190").
+
+**Now:** 13.7 fps, GPU about 73 ms (main view 51–52, reflection 12.8, shadows 6.5).
+
+**Ideas not done:**
+- The reflection's terrain (268,000 triangles) with a lower level of detail than the main view's. It would need chunks of its own, so more memory.
+- Far object chunks: find why 173,000 triangles remain 4 cells and more away (which meshes, at which level).
+- Memory (the user's other request): 1.08 GB total, native heap about 870 MB, graphics 140 MB. Texture release freed only 29 MB. A guess, not measured: the merged distant chunks keep their vertex arrays in RAM after they are on the GPU. Measure what the heap holds before changing anything.
