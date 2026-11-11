@@ -411,3 +411,52 @@ The user asked for no commits. Everything below is in the working tree. Test sav
 - Still to restore: point light shadows 4, seamless doors and cells.
 - `dump_shaders` was removed.
 - **Tried and reverted:** pipelines without a fragment stage for shadow casters that cannot discard (`shadowcasting.frag` with alpha function ALWAYS and `alphaTestShadows` false). They were used, but the shadow pass time did not change (8.1–8.4 ms), so the cascades are not limited by fragment work.
+
+### 2026-11-10 (day): cell crossing, bow string ghost, HUD — committed 2026-11-11
+Commits: ee7a434 (ASTC block size per texture), 9d83e2b (cell borders), 9db8567 (Vulkan).
+
+**Already done this day (also uncommitted):**
+- Reverse-z, clustered lighting, post-processing with the normals MRT, and the source-change rebuild.
+- The purple screen at startup is fixed: the GUI waits for its programs.
+- F3 stats overlay through osgText.
+- Perf check at the Balmora autosave with frame gen off: Vulkan 26 fps vs GLES 20.7 fps.
+
+**Cell-crossing stutter:** the user confirmed it happens on PC too, so it is not a Vulkan bug.
+- New patch `patches/common/0030-Cell-borders-chunks-built-in-the-background-levelled.patch` plus `support/src/cellborders.cpp`. Each part has its own setting in `[Cells]` of `cpp/settings/alpha3.cfg`:
+  - Object paging chunks are built on the work queue. While a chunk builds, the old chunk stands in, or nothing does if the chunk is more than 3072 units from the player.
+  - Levelled creatures' models are preloaded (`getModelsToPreload`).
+  - Physics object removal is spread over frames (`cell unload budget`).
+  - The fog-of-war PNG save is deferred.
+- **A/B on the tablet:** worst crossing frame is 66–83 ms with these on, 100–166 ms with them off.
+- **What remains** is mostly `Scene::insertCell`. "Load cells over frames" exists but only with seamless cells.
+- The patch README's contents list stops at 17, so it was not updated for 0030.
+
+**Performance HUD:** it did not count Vulkan's generated frames.
+- `Alpha3::noteShownFrame()` (in `support.hpp` and `framepacing.cpp`) is now called after each generated present in `translator.cpp` `drawGenerated`.
+- Built, but not yet checked on screen.
+
+**Frame generation ghosts, first and third person (Vulkan):** fixed, the user confirmed both (2026-11-11). Committed in 9db8567.
+- **Root cause of the first-person ghost:** not the mask, and not depth from another frame. The warp looked the motion up twice (at the pixel, then where the pixel comes from). When the second lookup landed on the bow or string, the motion became 0 and the pixel was left unwarped. That left a bow- and string-shaped strip of stale world beside the real bow, which reads as a dark second string. A diagnostic tint (fill blue, static world yellow, model green) showed it at once.
+- **What is in the code now** (`support/src/vulkan/translator.cpp`, `sWarpFragment`):
+  1. `modelAt()` says which pixels go with the camera. First person: the scene depth after the first-person clear (handles reversed depth too). Third person: inside a cylinder around the player.
+  2. A model pixel stays put. A world pixel takes the world's motion; if its source is behind the model, it keeps the motion found at the pixel itself and goes to the fill.
+  3. The fill takes the world at the model's edge: the edge along the motion first (what is past it is drawn beside these pixels), the other way only if none is found. 8-texel steps, then 3 halvings to about a texel.
+  4. `drawGeometry`: in the first-person bin with frame gen on, draws that write no depth write it (the bow string), so they are in the mask.
+  5. `captureForFrameGen` uses the depth images the scene was drawn with (`mSceneDepth`, `mSceneOpaqueDepth`).
+- **Third person ("very jerky player"):** the player was warped as part of the world, so it jumped each generated frame.
+  - `FrameGenView` (`upstream.hpp`) gained `player`, `playerFeet`, `playerHeight`, `playerRadius`. `androidmain.cpp` `submitFrameGenView` fills them when not in first person (base node position, physics half extents). Patch 0003 has the same lines; applying 0003 and 0019 reproduces the tree's file.
+  - `drawGenerated` passes the cylinder in view space: from 6% of the height above the feet (the ground stays world) to 115%, radius 2.5 × the half extent.
+  - GLES `framegen.cpp` has no such handling yet.
+- **Tried, didn't work or wasn't the cause:**
+  - Swapping to the depth of the "other pair": never fired, removed.
+  - Widening `nearModel` from ±1 to ±2 texels: no change (kept at ±2).
+  - Depth from another frame: the log showed it always matched (960/960).
+  - Sharpening `none` instead of rcas: removed only faint GUI pass-through ghosts.
+  - A fill that took the nearest world pixel in 8-texel steps: it removed the bow copies but left comb-like repeated slices behind the bow and hand. Replaced by the edge fill.
+  - Mirroring the world past the nearer edge: a large mirrored wedge with a hard edge beside the bow. The user called it worse than before. Replaced by the edge fill.
+- **Capturing:** `screenrecord --size 1280x800 --bit-rate 24000000` keeps more frames than full size. TAB (`input keyevent 61`) toggles third person. The scratchpad scripts (`turn.sh`, `run3.sh`, `sheet3.py`) are lost after the session.
+
+**Tablet state to restore:**
+- `/storage/emulated/0/Alpha3/config/settings.cfg.before-test` → `settings.cfg`. The test copy has shadows off, point light shadows 0 and sharpening none.
+- Delete `/storage/emulated/0/Alpha3/sunny.txt`.
+- The installed build matches the source (no diagnostic code).
