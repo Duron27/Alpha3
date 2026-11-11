@@ -128,6 +128,7 @@ set(ALPHA3_SUPPORT_SOURCES
     src/occlusionculling.cpp
     src/pointshadows.cpp
     src/seamless.cpp
+    src/cellborders.cpp
     src/doorportal.cpp
     src/texturestreaming.cpp
     src/thermal.cpp

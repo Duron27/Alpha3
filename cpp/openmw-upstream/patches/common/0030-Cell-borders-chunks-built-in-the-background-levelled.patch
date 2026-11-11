@@ -1,0 +1,687 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Tue, 10 Nov 2026 23:00:00 -0500
+Subject: [PATCH] Cell borders: chunks built in the background, levelled
+ creatures preloaded, unloading spread over frames
+
+Crossing an exterior cell border did all its work in one frame. Each part is its own [Cells]
+setting, read through the support library (support/src/cellborders.cpp):
+
+background object paging: ObjectPaging::getChunk, asked by a view (cull, the focus ray) for a
+chunk not in the cache, builds it on the work queue when another chunk can be drawn meanwhile:
+the one taken out of the cache when an object of a loading cell was blacklisted (kept as a
+stand-in unless next to the player), or the chunk of the same place for the other side of the
+active grid's edge. RenderingManager::update rebuilds the terrain views once they are in. A
+chunk started before the refs it holds changed is not cached.
+
+preload levelled creatures: CreatureLevList::getModelsToPreload lists the models the list can
+spawn at the player's level, so the cell preloader loads them.
+
+spread cell unloading: Scene::changeCellGrid marks itself (Alpha3::CellBorderChange); the
+collision objects of the cells it unloads leave the collision world a few each frame
+(PhysicsSystem::releaseRemovedObjects, cell unload budget ms), and their fog of war is saved one
+cell a frame (LocalMap::saveDeferredFogOfWar). Any other unload, or a save written, first does
+what waits.
+---
+diff --git a/apps/openmw/mwclass/creaturelevlist.cpp b/apps/openmw/mwclass/creaturelevlist.cpp
+index 15a73fb..94b974f 100644
+--- a/apps/openmw/mwclass/creaturelevlist.cpp
++++ b/apps/openmw/mwclass/creaturelevlist.cpp
+@@ -2,8 +2,10 @@
+ 
+ #include <components/esm3/actoridconverter.hpp>
+ #include <components/esm3/creaturelevliststate.hpp>
++#include <components/esm3/loadcrea.hpp>
+ #include <components/esm3/loadlevlist.hpp>
+ 
++#include "../mwmechanics/actorutil.hpp"
+ #include "../mwmechanics/levelledlist.hpp"
+ 
+ #include "../mwworld/cellstore.hpp"
+@@ -17,6 +19,8 @@
+ #include "../mwbase/environment.hpp"
+ #include "../mwbase/world.hpp"
+ 
++#include <alpha3/upstream.hpp>
++
+ namespace MWClass
+ {
+     class CreatureLevListCustomData : public MWWorld::TypedCustomData<CreatureLevListCustomData>
+@@ -99,6 +103,52 @@ namespace MWClass
+             customData.mSpawn = true;
+     }
+ 
++    namespace
++    {
++        // the creatures getLevelledItem can pick from the list at this level (nested lists followed)
++        void addLevelledModels(const ESM::CreatureLevList& list, int level, const MWWorld::ESMStore& store,
++            std::vector<VFS::Path::NormalizedView>& models, int depth)
++        {
++            if (depth > 8)
++                return;
++            int highestLevel = 0;
++            for (const auto& item : list.mList)
++                if (item.mLevel > highestLevel && item.mLevel <= level)
++                    highestLevel = item.mLevel;
++            const bool allLevels = list.mFlags & ESM::CreatureLevList::AllLevels;
++            for (const auto& item : list.mList)
++            {
++                if (level < item.mLevel || (!allLevels && item.mLevel != highestLevel))
++                    continue;
++                if (const ESM::Creature* creature = store.get<ESM::Creature>().search(item.mId))
++                {
++                    const VFS::Path::NormalizedView model = creature->mModel.getNormalized();
++                    if (!model.empty())
++                        models.push_back(model);
++                }
++                else if (const ESM::CreatureLevList* nested = store.get<ESM::CreatureLevList>().search(item.mId))
++                    addLevelledModels(*nested, level, store, models, depth + 1);
++            }
++        }
++    }
++
++    void CreatureLevList::getModelsToPreload(
++        const MWWorld::ConstPtr& ptr, std::vector<VFS::Path::NormalizedView>& models) const
++    {
++        if (!Alpha3::preloadLevelledCreatures())
++            return;
++        // spawned already: the creature is in the cell and preloads its own model
++        if (const MWWorld::CustomData* data = ptr.getRefData().getCustomData())
++            if (!data->asCreatureLevListCustomData().mSpawn)
++                return;
++        const MWWorld::Ptr player = MWMechanics::getPlayer();
++        if (player.isEmpty())
++            return;
++        const int level = player.getClass().getCreatureStats(player).getLevel();
++        addLevelledModels(*ptr.get<ESM::CreatureLevList>()->mBase, level, *MWBase::Environment::get().getESMStore(),
++            models, 0);
++    }
++
+     void CreatureLevList::insertObjectRendering(
+         const MWWorld::Ptr& ptr, const std::string& model, MWRender::RenderingInterface& renderingInterface) const
+     {
+diff --git a/apps/openmw/mwclass/creaturelevlist.hpp b/apps/openmw/mwclass/creaturelevlist.hpp
+index ded8f77..6112c6d 100644
+--- a/apps/openmw/mwclass/creaturelevlist.hpp
++++ b/apps/openmw/mwclass/creaturelevlist.hpp
+@@ -35,6 +35,11 @@ namespace MWClass
+         MWWorld::Ptr copyToCellImpl(const MWWorld::ConstPtr& ptr, MWWorld::CellStore& cell) const override;
+ 
+         void adjustPosition(const MWWorld::Ptr& ptr, bool force) const override;
++
++        /// Alpha3 ([Cells] preload levelled creatures): the models of the creatures the list can spawn at the
++        /// player's level, while one is still to be spawned
++        void getModelsToPreload(
++            const MWWorld::ConstPtr& ptr, std::vector<VFS::Path::NormalizedView>& models) const override;
+     };
+ }
+ 
+diff --git a/apps/openmw/mwphysics/physicssystem.cpp b/apps/openmw/mwphysics/physicssystem.cpp
+index 3cad4b6..ed1268c 100644
+--- a/apps/openmw/mwphysics/physicssystem.cpp
++++ b/apps/openmw/mwphysics/physicssystem.cpp
+@@ -1,5 +1,9 @@
+ #include "physicssystem.hpp"
+ 
++#include <chrono>
++
++#include <alpha3/upstream.hpp>
++
+ #include <algorithm>
+ #include <memory>
+ #include <vector>
+@@ -137,6 +141,7 @@ namespace MWPhysics
+ 
+         mTaskScheduler->releaseSharedStates();
+         mHeightFields.clear();
++        mRemovedObjects.clear();
+         mObjects.clear();
+         mActors.clear();
+         mProjectiles.clear();
+@@ -435,10 +440,18 @@ namespace MWPhysics
+ 
+     void PhysicsSystem::remove(const MWWorld::Ptr& ptr)
+     {
++        // Alpha3: an object of a cell unloaded at a cell border (a cell or more from the player; enabled, so not one
++        // disabled or deleted) leaves the collision world over the next frames; any other removal first does what waits
++        const bool spread = Alpha3::spreadCellUnloading() && Alpha3::inCellBorderChange();
++        if (!spread && !mRemovedObjects.empty())
++            releaseRemovedObjects(true);
+         if (auto foundObject = mObjects.find(ptr.mRef); foundObject != mObjects.end())
+         {
+             mAnimatedObjects.erase(foundObject->second.get());
+ 
++            if (spread && ptr.isInCell() && ptr.getCell()->isExterior() && ptr.getRefData().isEnabled()
++                && ptr.getCellRef().getCount() > 0)
++                mRemovedObjects.push_back(std::move(foundObject->second));
+             mObjects.erase(foundObject);
+         }
+         else if (auto foundActor = mActors.find(ptr.mRef); foundActor != mActors.end())
+@@ -447,6 +460,14 @@ namespace MWPhysics
+         }
+     }
+ 
++    void PhysicsSystem::releaseRemovedObjects(bool all)
++    {
++        const auto start = std::chrono::steady_clock::now();
++        const auto budget = std::chrono::duration<float, std::milli>(Alpha3::cellUnloadBudget());
++        while (!mRemovedObjects.empty() && (all || std::chrono::steady_clock::now() - start < budget))
++            mRemovedObjects.pop_back();
++    }
++
+     void PhysicsSystem::removeProjectile(const int projectileId)
+     {
+         ProjectileMap::iterator foundProjectile = mProjectiles.find(projectileId);
+@@ -689,6 +710,9 @@ namespace MWPhysics
+     void PhysicsSystem::stepSimulation(float dt, bool skipSimulation, Misc::FrameClock::time_point statsEpoch,
+         unsigned int frameNumber, Misc::FrameStats& stats)
+     {
++        if (!mRemovedObjects.empty())
++            releaseRemovedObjects(false);
++
+         for (auto& [animatedObject, changed] : mAnimatedObjects)
+         {
+             if (animatedObject->animateCollisionShapes())
+diff --git a/apps/openmw/mwphysics/physicssystem.hpp b/apps/openmw/mwphysics/physicssystem.hpp
+index c542089..3dc6ca8 100644
+--- a/apps/openmw/mwphysics/physicssystem.hpp
++++ b/apps/openmw/mwphysics/physicssystem.hpp
+@@ -10,6 +10,7 @@
+ #include <span>
+ #include <unordered_map>
+ #include <variant>
++#include <vector>
+ 
+ #include <osg/BoundingBox>
+ #include <osg/Quat>
+@@ -306,6 +307,10 @@ namespace MWPhysics
+ 
+         using ObjectMap = std::unordered_map<const MWWorld::LiveCellRefBase*, std::shared_ptr<Object>>;
+         ObjectMap mObjects;
++        // Alpha3 ([Cells] spread cell unloading): the objects of cells unloaded in a cell border change, out of mObjects
++        // but still in the collision world, released a few each frame (releaseRemovedObjects)
++        std::vector<std::shared_ptr<Object>> mRemovedObjects;
++        void releaseRemovedObjects(bool all);
+ 
+         std::map<Object*, bool> mAnimatedObjects; // stores pointers to elements in mObjects
+ 
+diff --git a/apps/openmw/mwrender/localmap.cpp b/apps/openmw/mwrender/localmap.cpp
+index b25cb3e..7e30622 100644
+--- a/apps/openmw/mwrender/localmap.cpp
++++ b/apps/openmw/mwrender/localmap.cpp
+@@ -1,5 +1,9 @@
+ #include "localmap.hpp"
+ 
++#include <algorithm>
++
++#include <alpha3/upstream.hpp>
++
+ #include <cstdint>
+ 
+ #include <osg/ComputeBoundsVisitor>
+@@ -104,11 +108,44 @@ namespace MWRender
+ 
+     void LocalMap::clear()
+     {
++        mDeferredFogCells.clear();
+         mExteriorSegments.clear();
+         mInteriorSegments.clear();
+     }
+ 
+     void LocalMap::saveFogOfWar(MWWorld::CellStore* cell) const
++    {
++        // a save being written: the cells left for later first
++        for (MWWorld::CellStore* deferred : mDeferredFogCells)
++            saveFogOfWarNow(deferred);
++        mDeferredFogCells.clear();
++        saveFogOfWarNow(cell);
++    }
++
++    void LocalMap::saveDeferredFogOfWar()
++    {
++        if (mDeferredFogCells.empty())
++            return;
++        MWWorld::CellStore* cell = mDeferredFogCells.back();
++        mDeferredFogCells.pop_back();
++        saveFogOfWarNow(cell);
++    }
++
++    void LocalMap::saveDeferredFogOfWar(int x, int y) const
++    {
++        for (auto it = mDeferredFogCells.begin(); it != mDeferredFogCells.end();)
++        {
++            if ((*it)->getCell()->getGridX() == x && (*it)->getCell()->getGridY() == y)
++            {
++                saveFogOfWarNow(*it);
++                it = mDeferredFogCells.erase(it);
++            }
++            else
++                ++it;
++        }
++    }
++
++    void LocalMap::saveFogOfWarNow(MWWorld::CellStore* cell) const
+     {
+         if (!mInterior)
+         {
+@@ -207,12 +244,21 @@ namespace MWRender
+ 
+     void LocalMap::removeExteriorCell(int x, int y)
+     {
++        saveDeferredFogOfWar(x, y);
+         mExteriorSegments.erase({ x, y });
+     }
+ 
+     void LocalMap::removeCell(MWWorld::CellStore* cell)
+     {
+-        saveFogOfWar(cell);
++        // Alpha3: an exterior cell's segment stays, so in a cell border change its fog (a PNG encoded) can wait for a
++        // later frame; any other unload (a save loaded frees the cells after) saves what waits first
++        if (cell->isExterior() && Alpha3::spreadCellUnloading() && Alpha3::inCellBorderChange())
++        {
++            if (std::find(mDeferredFogCells.begin(), mDeferredFogCells.end(), cell) == mDeferredFogCells.end())
++                mDeferredFogCells.push_back(cell);
++        }
++        else
++            saveFogOfWar(cell);
+ 
+         if (!cell->isExterior())
+             mInteriorSegments.clear();
+@@ -240,6 +286,8 @@ namespace MWRender
+ 
+     void LocalMap::cleanupCameras()
+     {
++        saveDeferredFogOfWar();
++
+         auto it = mLocalMapRTTs.begin();
+         while (it != mLocalMapRTTs.end())
+         {
+diff --git a/apps/openmw/mwrender/localmap.hpp b/apps/openmw/mwrender/localmap.hpp
+index c5b6376..3ec3d5d 100644
+--- a/apps/openmw/mwrender/localmap.hpp
++++ b/apps/openmw/mwrender/localmap.hpp
+@@ -85,6 +85,10 @@ namespace MWRender
+          */
+         void saveFogOfWar(MWWorld::CellStore* cell) const;
+ 
++        /// Alpha3 ([Cells] spread cell unloading): saves the fog of war of one exterior cell that left the scene;
++        /// removeCell leaves them for this, called each frame
++        void saveDeferredFogOfWar();
++
+         /**
+          * Get the interior map texture index and normalized position on this texture, given a world position
+          */
+@@ -136,6 +140,10 @@ namespace MWRender
+ 
+         typedef std::map<std::pair<int, int>, MapSegment> SegmentMap;
+         SegmentMap mExteriorSegments;
++        // exterior cells whose fog of war is still to be saved (saveDeferredFogOfWar)
++        mutable std::vector<MWWorld::CellStore*> mDeferredFogCells;
++        void saveFogOfWarNow(MWWorld::CellStore* cell) const;
++        void saveDeferredFogOfWar(int x, int y) const;
+         SegmentMap mInteriorSegments;
+ 
+         int mMapResolution;
+diff --git a/apps/openmw/mwrender/objectpaging.cpp b/apps/openmw/mwrender/objectpaging.cpp
+index f5e6f2e..74121ac 100644
+--- a/apps/openmw/mwrender/objectpaging.cpp
++++ b/apps/openmw/mwrender/objectpaging.cpp
+@@ -1,5 +1,6 @@
+ #include "objectpaging.hpp"
+ 
++#include <functional>
+ #include <limits>
+ #include <unordered_map>
+ #include <vector>
+@@ -13,6 +14,7 @@
+ #include <osgParticle/ParticleSystemUpdater>
+ #include <osgUtil/IncrementalCompileOperation>
+ 
++#include <components/debug/debuglog.hpp>
+ #include <components/esm/path.hpp>
+ #include <components/esm3/esmreader.hpp>
+ #include <components/esm3/loadacti.hpp>
+@@ -42,6 +44,7 @@
+ #include <components/sceneutil/templateref.hpp>
+ #include <components/sceneutil/userdata.hpp>
+ #include <components/sceneutil/util.hpp>
++#include <components/sceneutil/workqueue.hpp>
+ #include <components/settings/values.hpp>
+ #include <components/vfs/manager.hpp>
+ 
+@@ -49,6 +52,8 @@
+ #include "apps/openmw/mwbase/world.hpp"
+ #include "apps/openmw/mwclass/esm4base.hpp"
+ #include "apps/openmw/mwworld/esmstore.hpp"
++#include "apps/openmw/mwworld/ptr.hpp"
++#include "apps/openmw/mwworld/refdata.hpp"
+ 
+ #include "vismask.hpp"
+ 
+@@ -131,11 +136,151 @@ namespace MWRender
+             return static_cast<osg::Node*>(obj.get());
+ 
+         const unsigned char lod = static_cast<unsigned char>(lodFlags >> (4 * 4));
++
++        // Alpha3: the views (cull, the focus ray) ask with compile false, the preloader with true; a view's chunk is
++        // built on the work queue when another one can be drawn meanwhile
++        if (!compile && mWorkQueue && Alpha3::backgroundObjectPaging())
++        {
++            if (osg::ref_ptr<osg::Node> node = standIn(id))
++            {
++                buildInBackground(id, viewPoint, lod);
++                return node;
++            }
++        }
++
+         osg::ref_ptr<osg::Node> node = createChunk(size, center, activeGrid, viewPoint, compile, lod);
+         mCache->addEntryToObjectCache(id, node.get());
++        if (Alpha3::backgroundObjectPaging())
++        {
++            std::lock_guard<std::mutex> lock(mBackgroundMutex);
++            mStaleChunks.erase(id);
++        }
+         return node;
+     }
+ 
++    // What a background build needs of its ObjectPaging: cleared (under the mutex) when the ObjectPaging goes, so a
++    // build still queued then does nothing, and one running holds the destructor until it ends
++    struct ObjectPaging::BackgroundOwner
++    {
++        std::mutex mMutex;
++        ObjectPaging* mPaging = nullptr;
++    };
++
++    namespace
++    {
++        class BackgroundChunkItem : public SceneUtil::WorkItem
++        {
++        public:
++            explicit BackgroundChunkItem(std::function<void()> work)
++                : mWork(std::move(work))
++            {
++            }
++            void doWork() override { mWork(); }
++
++        private:
++            std::function<void()> mWork;
++        };
++    }
++
++    ObjectPaging::~ObjectPaging()
++    {
++        std::lock_guard<std::mutex> lock(mBackgroundOwner->mMutex);
++        mBackgroundOwner->mPaging = nullptr;
++    }
++
++    osg::ref_ptr<osg::Node> ObjectPaging::standIn(const ChunkId& id)
++    {
++        {
++            std::lock_guard<std::mutex> lock(mBackgroundMutex);
++            if (auto found = mStaleChunks.find(id); found != mStaleChunks.end())
++                return found->second.first;
++        }
++        // the same place on the other side of the active grid's edge: the cell just went in or out of the grid
++        const ChunkId other = std::make_tuple(std::get<0>(id), std::get<1>(id), !std::get<2>(id));
++        if (const osg::ref_ptr<osg::Object> obj = mCache->getRefFromObjectCache(other))
++            return static_cast<osg::Node*>(obj.get());
++        std::lock_guard<std::mutex> lock(mBackgroundMutex);
++        if (auto found = mStaleChunks.find(other); found != mStaleChunks.end())
++            return found->second.first;
++        return nullptr;
++    }
++
++    void ObjectPaging::keepAsStandIn(const ChunkId& id, const osg::Vec3f& objectPosition)
++    {
++        if (!Alpha3::backgroundObjectPaging())
++            return;
++        // not next to the player: there a chunk still showing the object (a door opening) would be seen; the objects of
++        // cells loading at the grid's edge are a cell away
++        const MWBase::World* world = MWBase::Environment::get().getWorld();
++        const MWWorld::ConstPtr player = world ? world->getPlayerConstPtr() : MWWorld::ConstPtr();
++        constexpr float nearPlayer = 3072;
++        if (!player.isEmpty()
++            && (player.getRefData().getPosition().asVec3() - objectPosition).length2() < nearPlayer * nearPlayer)
++            return;
++        if (const osg::ref_ptr<osg::Object> obj = mCache->getRefFromObjectCache(id))
++        {
++            std::lock_guard<std::mutex> lock(mBackgroundMutex);
++            mStaleChunks[id] = { static_cast<osg::Node*>(obj.get()), std::chrono::steady_clock::now() };
++        }
++    }
++
++    void ObjectPaging::buildInBackground(const ChunkId& id, const osg::Vec3f& viewPoint, unsigned char lod)
++    {
++        {
++            std::lock_guard<std::mutex> lock(mBackgroundMutex);
++            if (!mBuilding.insert(id).second)
++                return;
++        }
++        const unsigned changes = mChunkChanges;
++        std::shared_ptr<BackgroundOwner> owner = mBackgroundOwner;
++        mWorkQueue->addWorkItem(std::make_shared<BackgroundChunkItem>([owner, id, viewPoint, lod, changes] {
++            std::lock_guard<std::mutex> ownerLock(owner->mMutex);
++            ObjectPaging* paging = owner->mPaging;
++            if (paging == nullptr)
++                return;
++            osg::ref_ptr<osg::Node> node;
++            try
++            {
++                node = paging->createChunk(std::get<1>(id), std::get<0>(id), std::get<2>(id), viewPoint, true, lod);
++            }
++            catch (const std::exception& e)
++            {
++                Log(Debug::Warning) << "Object paging: background chunk failed: " << e.what();
++            }
++            // what the chunk holds changed while it was built: not cached, the view asks again and it is rebuilt
++            if (node && paging->mChunkChanges == changes)
++                paging->mCache->addEntryToObjectCache(id, node.get());
++            std::lock_guard<std::mutex> lock(paging->mBackgroundMutex);
++            paging->mBuilding.erase(id);
++            if (node && paging->mChunkChanges == changes)
++                paging->mStaleChunks.erase(id);
++            paging->mBackgroundChunksReady = true;
++        }),
++            true);
++    }
++
++    bool ObjectPaging::takeBackgroundChunks()
++    {
++        const auto now = std::chrono::steady_clock::now();
++        std::lock_guard<std::mutex> lock(mBackgroundMutex);
++        // stand-ins nobody asked to replace (the view moved on) are let go after a while
++        for (auto it = mStaleChunks.begin(); it != mStaleChunks.end();)
++        {
++            if (!mBuilding.count(it->first) && now - it->second.second > std::chrono::seconds(10))
++                it = mStaleChunks.erase(it);
++            else
++                ++it;
++        }
++        if (!mBackgroundChunksReady)
++            return false;
++        // one view rebuild for the chunks of a cell change, or a few a second while they come in
++        if (!mBuilding.empty() && now - mLastViewRebuild < std::chrono::milliseconds(250))
++            return false;
++        mBackgroundChunksReady = false;
++        mLastViewRebuild = now;
++        return true;
++    }
++
+     namespace
+     {
+         class CanOptimizeCallback : public SceneUtil::Optimizer::IsOperationPermissibleForObjectCallback
+@@ -463,7 +608,9 @@ namespace MWRender
+         , mMinSizeMergeFactor(Settings::terrain().mObjectPagingMinSizeMergeFactor)
+         , mMinSizeCostMultiplier(Settings::terrain().mObjectPagingMinSizeCostMultiplier)
+         , mRefTrackerLocked(false)
++        , mBackgroundOwner(std::make_shared<BackgroundOwner>())
+     {
++        mBackgroundOwner->mPaging = this;
+     }
+ 
+     namespace
+@@ -1028,6 +1175,7 @@ namespace MWRender
+                 return false;
+             if (!enabled && !getWritableRefTracker().mDisabled.insert(refnum).second)
+                 return false;
++            ++mChunkChanges;
+             if (mRefTrackerLocked)
+                 return false;
+         }
+@@ -1037,7 +1185,10 @@ namespace MWRender
+         if (ccf.getCollected().empty())
+             return false;
+         for (const ChunkId& chunk : ccf.getCollected())
++        {
++            keepAsStandIn(chunk, pos);
+             mCache->removeFromObjectCache(chunk);
++        }
+         return true;
+     }
+ 
+@@ -1050,6 +1201,7 @@ namespace MWRender
+             std::lock_guard<std::mutex> lock(mRefTrackerMutex);
+             if (!getWritableRefTracker().mBlacklist.insert(refnum).second)
+                 return false;
++            ++mChunkChanges;
+             if (mRefTrackerLocked)
+                 return false;
+         }
+@@ -1059,7 +1211,10 @@ namespace MWRender
+         if (ccf.getCollected().empty())
+             return false;
+         for (const ChunkId& chunk : ccf.getCollected())
++        {
++            keepAsStandIn(chunk, pos);
+             mCache->removeFromObjectCache(chunk);
++        }
+         return true;
+     }
+ 
+@@ -1069,6 +1224,7 @@ namespace MWRender
+         mRefTrackerNew.mDisabled.clear();
+         mRefTrackerNew.mBlacklist.clear();
+         mRefTrackerLocked = true;
++        ++mChunkChanges;
+     }
+ 
+     bool ObjectPaging::unlockCache()
+@@ -1084,6 +1240,11 @@ namespace MWRender
+                 mRefTracker = mRefTrackerNew;
+         }
+         mCache->clear();
++        ++mChunkChanges;
++        {
++            std::lock_guard<std::mutex> lock(mBackgroundMutex);
++            mStaleChunks.clear();
++        }
+         return true;
+     }
+ 
+diff --git a/apps/openmw/mwrender/objectpaging.hpp b/apps/openmw/mwrender/objectpaging.hpp
+index a010b86..39e3b73 100644
+--- a/apps/openmw/mwrender/objectpaging.hpp
++++ b/apps/openmw/mwrender/objectpaging.hpp
+@@ -5,13 +5,23 @@
+ #include <components/resource/resourcemanager.hpp>
+ #include <components/terrain/quadtreeworld.hpp>
+ 
++#include <atomic>
++#include <chrono>
++#include <map>
++#include <memory>
+ #include <mutex>
++#include <set>
+ 
+ namespace Resource
+ {
+     class SceneManager;
+ }
+ 
++namespace SceneUtil
++{
++    class WorkQueue;
++}
++
+ namespace MWRender
+ {
+ 
+@@ -21,7 +31,7 @@ namespace MWRender
+     {
+     public:
+         ObjectPaging(Resource::SceneManager* sceneManager, ESM::RefId worldspace);
+-        ~ObjectPaging() = default;
++        ~ObjectPaging();
+ 
+         osg::ref_ptr<osg::Node> getChunk(float size, const osg::Vec2f& center, unsigned char lod, unsigned int lodFlags,
+             bool activeGrid, const osg::Vec3f& viewPoint, bool compile) override;
+@@ -47,7 +57,31 @@ namespace MWRender
+ 
+         void getPagedRefnums(const osg::Vec4i& activeGrid, std::vector<ESM::RefNum>& out);
+ 
++        /// Alpha3 ([Cells] background object paging): a chunk a view asks for that is not built yet is built on this
++        /// queue while the chunk it replaces (or the chunk of the same place for the other side of the active grid's
++        /// edge) is drawn in its place. Without a queue, or without a chunk to stand in, it is built at once.
++        void setWorkQueue(std::shared_ptr<SceneUtil::WorkQueue> workQueue) { mWorkQueue = std::move(workQueue); }
++
++        /// @return true when chunks built in the background are in the cache (the views need a rebuild to use them)
++        bool takeBackgroundChunks();
++
+     private:
++        osg::ref_ptr<osg::Node> standIn(const ChunkId& id);
++        void keepAsStandIn(const ChunkId& id, const osg::Vec3f& objectPosition);
++        void buildInBackground(const ChunkId& id, const osg::Vec3f& viewPoint, unsigned char lod);
++
++        struct BackgroundOwner;
++        std::shared_ptr<BackgroundOwner> mBackgroundOwner;
++        std::shared_ptr<SceneUtil::WorkQueue> mWorkQueue;
++        std::mutex mBackgroundMutex;
++        // chunks taken out of the cache (an object blacklisted or enabled), drawn until their rebuild is in
++        std::map<ChunkId, std::pair<osg::ref_ptr<osg::Node>, std::chrono::steady_clock::time_point>> mStaleChunks;
++        std::set<ChunkId> mBuilding;
++        // counts the changes to what chunks hold: a background chunk started before one is not cached
++        std::atomic<unsigned> mChunkChanges{ 0 };
++        std::atomic<bool> mBackgroundChunksReady{ false };
++        std::chrono::steady_clock::time_point mLastViewRebuild;
++
+         Resource::SceneManager* mSceneManager;
+         bool mActiveGrid;
+         bool mDebugBatches;
+diff --git a/apps/openmw/mwrender/renderingmanager.cpp b/apps/openmw/mwrender/renderingmanager.cpp
+index ba78111..28762fc 100644
+--- a/apps/openmw/mwrender/renderingmanager.cpp
++++ b/apps/openmw/mwrender/renderingmanager.cpp
+@@ -774,6 +774,10 @@ namespace MWRender
+             mSharedUniformStateUpdater->setPlayerPos(playerPos);
+         }
+ 
++        // Alpha3: chunks built in the background replace the ones standing in for them
++        if (mObjectPaging && mObjectPaging->takeBackgroundChunks())
++            mTerrain->rebuildViews();
++
+         updateNavMesh();
+         updateRecastMesh();
+ 
+@@ -1359,6 +1363,7 @@ namespace MWRender
+             {
+                 newChunkMgr.mObjectPaging
+                     = std::make_unique<ObjectPaging>(mResourceSystem->getSceneManager(), worldspace);
++                newChunkMgr.mObjectPaging->setWorkQueue(mWorkQueue);
+                 quadTreeWorld->addChunkManager(newChunkMgr.mObjectPaging.get());
+                 mResourceSystem->addResourceManager(newChunkMgr.mObjectPaging.get());
+             }
+diff --git a/apps/openmw/mwworld/scene.cpp b/apps/openmw/mwworld/scene.cpp
+index 25a99a7..b90758e 100644
+--- a/apps/openmw/mwworld/scene.cpp
++++ b/apps/openmw/mwworld/scene.cpp
+@@ -825,6 +825,7 @@ namespace MWWorld
+ 
+     void Scene::changeCellGrid(const osg::Vec3f& pos, ESM::ExteriorCellLocation playerCellIndex, bool changeEvent)
+     {
++        const Alpha3::CellBorderChange borderChange;
+         const int halfGridSize
+             = isEsm4Ext(playerCellIndex.mWorldspace) ? Constants::ESM4CellGridRadius : Constants::CellGridRadius;
+         auto navigatorUpdateGuard = mNavigator.makeUpdateGuard();
+-- 
+2.43.0
+

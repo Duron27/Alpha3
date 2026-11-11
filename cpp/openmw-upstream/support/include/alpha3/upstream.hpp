@@ -138,6 +138,30 @@ namespace Alpha3
     bool cellsOverFrames();
     float cellLoadNearRadius();
     float cellLoadBudget();
+    // Smoother exterior cell borders (src/cellborders.cpp), each its own [Cells] setting:
+    // background object paging: a merged-statics chunk that has to be rebuilt (a cell going in or out of the active
+    // grid, an object of a loading cell taken out of it) is built on the work queue while the old one is drawn
+    // (OpenMW's objectpaging.cpp), instead of at once in the cull or the focus ray
+    bool backgroundObjectPaging();
+    // preload levelled creatures: the cell preloader also loads the meshes a levelled creature list can pick at the
+    // player's level (OpenMW's creaturelevlist.cpp), so the creature spawned when the cell loads is already loaded
+    bool preloadLevelledCreatures();
+    // spread cell unloading: an unloaded exterior cell's collision objects are released and its fog of war saved a
+    // little each frame (OpenMW's physicssystem.cpp and localmap.cpp) instead of all in the frame of the cell change;
+    // cellUnloadBudget() milliseconds a frame for the collision objects
+    bool spreadCellUnloading();
+    float cellUnloadBudget();
+    // While OpenMW's Scene::changeCellGrid runs (a CellBorderChange on its stack): only the cells it unloads have their
+    // work spread; an unload outside it (a save loaded, which frees the cells next) first finishes what is left
+    bool inCellBorderChange();
+    void cellBorderChange(int step);
+    struct CellBorderChange
+    {
+        CellBorderChange() { cellBorderChange(1); }
+        ~CellBorderChange() { cellBorderChange(-1); }
+        CellBorderChange(const CellBorderChange&) = delete;
+        CellBorderChange& operator=(const CellBorderChange&) = delete;
+    };
     // How the other side of a door portal is lit: as an interior (no fog, the cell's colours), or as the exterior
     // (the weather's colours, fogged out to the fill colour by fogEnd, where its objects stop)
     struct DoorPortalLight
