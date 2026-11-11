@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -23,6 +24,7 @@
 #include <components/debug/debuglog.hpp>
 
 #include "blobstore.hpp"
+#include "ssimulacra2.hpp"
 
 #include <astcenc.h>
 #include <ProcessRGB.hpp>
@@ -39,6 +41,12 @@ namespace Alpha3
             bool enabled = true;
             bool etc2 = false;
             unsigned blockX = 6, blockY = 6;
+            // [Textures] astc block size per texture: each texture's block size is the largest of the candidates whose
+            // result scores at least the target on SSIMULACRA2 (see chooseBlock)
+            bool perTexture = false;
+            float targetScore = 70.f;
+            std::vector<std::pair<unsigned, unsigned>> candidates; // largest block first
+            int testSize = 256;
             float quality = ASTCENC_PRE_FAST;
             int maxSize = 4096;
             unsigned threads = 1;
@@ -81,6 +89,25 @@ namespace Alpha3
                     r.blockY = y;
                 }
                 r.internalFormat = astcFormat(r.blockX, r.blockY);
+                r.perTexture = !r.etc2 && settingBool("Textures", "astc block size per texture", false);
+                r.targetScore = std::clamp(settingFloat("Textures", "astc target score", 70.f), 0.f, 100.f);
+                r.testSize = std::clamp(settingInt("Textures", "astc score test size", 256), 16, 4096);
+                {
+                    const std::string list = setting("Textures", "astc block size candidates", "8x8 6x6 5x5 4x4");
+                    const char* p = list.c_str();
+                    int used = 0;
+                    while (sscanf(p, " %ux%u%n", &x, &y, &used) == 2)
+                    {
+                        p += used;
+                        if (astcFormat(x, y) != 0
+                            && std::find(r.candidates.begin(), r.candidates.end(), std::make_pair(x, y)) == r.candidates.end())
+                            r.candidates.emplace_back(x, y);
+                    }
+                    std::stable_sort(r.candidates.begin(), r.candidates.end(),
+                        [](const auto& a, const auto& b) { return a.first * a.second > b.first * b.second; });
+                    if (r.candidates.empty())
+                        r.perTexture = false;
+                }
                 r.quality = std::clamp(settingFloat("Textures", "astc quality", 10.f), 0.f, 100.f);
                 r.maxSize = std::clamp(settingInt("Textures", "astc max size", 4096), 64, 16384);
                 const unsigned cores = std::max(1u, std::thread::hardware_concurrency());
@@ -90,6 +117,13 @@ namespace Alpha3
                 r.dir = dir.empty() ? cacheDirectory() / "astc" : std::filesystem::path(dir);
                 r.tag = r.etc2 ? std::string("etc2bgra") : std::to_string(r.blockX) + "x" + std::to_string(r.blockY) + "q"
                     + std::to_string(static_cast<int>(r.quality)) + "m" + std::to_string(r.maxSize);
+                std::string candidates;
+                for (const auto& [cx, cy] : r.candidates)
+                    candidates += (candidates.empty() ? "" : ",") + std::to_string(cx) + "x" + std::to_string(cy);
+                // a per-texture choice is its own set of cache entries: switching it on converts again
+                if (r.perTexture)
+                    r.tag += "auto" + std::to_string(static_cast<int>(r.targetScore * 10)) + "c" + candidates + "t"
+                        + std::to_string(r.testSize);
                 if (r.enabled)
                 {
                     std::error_code ec;
@@ -109,6 +143,13 @@ namespace Alpha3
                 if (r.etc2)
                     Log(Debug::Info) << "Texture conversion " << (r.enabled ? "on" : "off") << ": ETC2, " << r.threads
                                      << " threads, textures larger than " << r.maxSize
+                                     << " px start at a smaller mip level, cache " << r.dir.string();
+                else if (r.perTexture)
+                    Log(Debug::Info) << "Texture conversion " << (r.enabled ? "on" : "off")
+                                     << ": ASTC block size per texture (largest of " << candidates
+                                     << " that scores at least " << r.targetScore << " on SSIMULACRA2 at up to "
+                                     << r.testSize << " px; normal maps " << r.blockX << "x" << r.blockY << "), quality "
+                                     << r.quality << ", " << r.threads << " threads, textures larger than " << r.maxSize
                                      << " px start at a smaller mip level, cache " << r.dir.string();
                 else
                     Log(Debug::Info) << "Texture conversion " << (r.enabled ? "on" : "off") << ": ASTC block "
@@ -233,35 +274,45 @@ namespace Alpha3
             }
         };
 
-        astcenc_context* makeContext(const Settings& s, unsigned threads)
+        struct Block
+        {
+            unsigned x, y;
+            GLenum format() const { return astcFormat(x, y); }
+            unsigned key() const { return x << 8 | y; }
+        };
+
+        astcenc_context* makeContext(const Settings& s, Block block, unsigned threads)
         {
             astcenc_config config;
-            if (astcenc_config_init(ASTCENC_PRF_LDR, s.blockX, s.blockY, 1, s.quality, 0, &config) != ASTCENC_SUCCESS)
+            if (astcenc_config_init(ASTCENC_PRF_LDR, block.x, block.y, 1, s.quality, 0, &config) != ASTCENC_SUCCESS)
                 return nullptr;
             astcenc_context* context = nullptr;
             return astcenc_context_alloc(&config, threads, &context) == ASTCENC_SUCCESS ? context : nullptr;
         }
 
         // Small images are not worth waking the other cores for, so each loader thread has its own single-thread context
-        astcenc_context* threadContext(const Settings& s)
+        // (one per block size)
+        astcenc_context* threadContext(const Settings& s, Block block)
         {
-            thread_local Encoder encoder;
+            thread_local std::map<unsigned, Encoder> encoders;
+            Encoder& encoder = encoders[block.key()];
             if (!encoder.context)
-                encoder.context = makeContext(s, 1);
+                encoder.context = makeContext(s, block, 1);
             return encoder.context;
         }
 
         // One image at a time is split between all the threads: the cores work on the same texture, so it is done as
         // soon as possible whichever loader thread asked for it
-        bool compressParallel(const Settings& s, astcenc_image& image, const astcenc_swizzle& swizzle, uint8_t* out,
-            size_t size)
+        bool compressParallel(const Settings& s, Block block, astcenc_image& image, const astcenc_swizzle& swizzle,
+            uint8_t* out, size_t size)
         {
             static std::mutex sMutex;
-            static Encoder sEncoder;
+            static std::map<unsigned, Encoder> sEncoders;
             std::lock_guard lock(sMutex);
-            if (!sEncoder.context)
-                sEncoder.context = makeContext(s, s.threads);
-            astcenc_context* context = sEncoder.context;
+            Encoder& encoder = sEncoders[block.key()];
+            if (!encoder.context)
+                encoder.context = makeContext(s, block, s.threads);
+            astcenc_context* context = encoder.context;
             if (!context)
                 return false;
             astcenc_compress_reset(context);
@@ -280,9 +331,122 @@ namespace Alpha3
             return ok;
         }
 
-        size_t astcBytes(const Settings& s, int w, int h)
+        size_t astcBytes(Block block, int w, int h)
         {
-            return static_cast<size_t>((w + s.blockX - 1) / s.blockX) * ((h + s.blockY - 1) / s.blockY) * 16;
+            return static_cast<size_t>((w + block.x - 1) / block.x) * ((h + block.y - 1) / block.y) * 16;
+        }
+
+        // one level, single or multi-threaded by its size
+        bool compressLevel(const Settings& s, Block block, uint8_t* rgba, int w, int h, uint8_t* out, size_t size)
+        {
+            void* slice = rgba;
+            astcenc_image input{ static_cast<unsigned>(w), static_cast<unsigned>(h), 1, ASTCENC_TYPE_U8, &slice };
+            const astcenc_swizzle swizzle{ ASTCENC_SWZ_R, ASTCENC_SWZ_G, ASTCENC_SWZ_B, ASTCENC_SWZ_A };
+            // the first levels hold nearly all the work
+            if (s.threads > 1 && static_cast<size_t>(w) * h >= 256 * 256)
+                return compressParallel(s, block, input, swizzle, out, size);
+            astcenc_context* context = threadContext(s, block);
+            if (!context)
+                return false;
+            astcenc_compress_reset(context);
+            return astcenc_compress_image(context, &input, &swizzle, out, size, 0) == ASTCENC_SUCCESS;
+        }
+
+        // a 2x2 box filter in place, from cw x ch to half that
+        void halve(std::vector<uint8_t>& rgba, int& cw, int& ch)
+        {
+            const int nw = std::max(1, cw / 2), nh = std::max(1, ch / 2);
+            for (int y = 0; y < nh; ++y)
+                for (int x = 0; x < nw; ++x)
+                    for (int c = 0; c < 4; ++c)
+                    {
+                        const int x0 = std::min(cw - 1, x * 2), y0 = std::min(ch - 1, y * 2);
+                        const int x1 = std::min(cw - 1, x * 2 + 1), y1 = std::min(ch - 1, y * 2 + 1);
+                        const unsigned sum = rgba[(y0 * cw + x0) * 4 + c] + rgba[(y0 * cw + x1) * 4 + c]
+                            + rgba[(y1 * cw + x0) * 4 + c] + rgba[(y1 * cw + x1) * 4 + c];
+                        rgba[(y * nw + x) * 4 + c] = static_cast<uint8_t>((sum + 2) / 4);
+                    }
+            cw = nw;
+            ch = nh;
+            rgba.resize(static_cast<size_t>(cw) * ch * 4);
+        }
+
+        // Normal maps keep the fixed block size: the score is for colour pictures, and a normal map's channels are
+        // directions. OpenMW finds them by a suffix on the diffuse map's name ([Shaders] normal map pattern, "_n", and
+        // "_nh" for a normal map with height in alpha).
+        bool isNormalMap(std::string_view path)
+        {
+            std::string stem(path.substr(path.find_last_of("/\\") == std::string_view::npos ? 0 : path.find_last_of("/\\") + 1));
+            stem = stem.substr(0, stem.find_last_of('.'));
+            std::transform(stem.begin(), stem.end(), stem.begin(), [](unsigned char c) { return std::tolower(c); });
+            auto endsWith = [&](std::string_view suffix) {
+                return stem.size() > suffix.size() && stem.compare(stem.size() - suffix.size(), suffix.size(), suffix) == 0;
+            };
+            return endsWith("_n") || endsWith("_nh") || endsWith("_nm") || endsWith("_normal");
+        }
+
+        std::atomic<unsigned> sChosen[14]{};
+        std::atomic<uint64_t> sScoreMicros{ 0 };
+
+        unsigned blockIndex(Block block)
+        {
+            static const Block order[14] = { { 4, 4 }, { 5, 4 }, { 5, 5 }, { 6, 5 }, { 6, 6 }, { 8, 5 }, { 8, 6 },
+                { 8, 8 }, { 10, 5 }, { 10, 6 }, { 10, 8 }, { 10, 10 }, { 12, 10 }, { 12, 12 } };
+            for (unsigned i = 0; i < 14; ++i)
+                if (order[i].x == block.x && order[i].y == block.y)
+                    return i;
+            return 0;
+        }
+
+        // The texture's block size: each candidate (largest first) encodes one level of at most testSize pixels across,
+        // which is decoded again and scored against it with SSIMULACRA2; the first to reach the target is used, or the
+        // smallest when none does. Alpha (when the texture has any below 255) is scored as a grey picture of its own
+        // and the lower of the two scores counts. The same block goes to every mip level.
+        Block chooseBlock(const Settings& s, std::vector<uint8_t>& test, int tw, int th, bool alpha)
+        {
+            const Block fallback{ s.candidates.back().first, s.candidates.back().second };
+            const auto start = std::chrono::steady_clock::now();
+            bool alphaUsed = false;
+            if (alpha)
+                for (size_t i = 3; i < test.size() && !alphaUsed; i += 4)
+                    alphaUsed = test[i] != 255;
+            const Ssimulacra2Reference colour(test.data(), tw, th);
+            std::unique_ptr<Ssimulacra2Reference> alphaReference;
+            if (alphaUsed)
+                alphaReference = std::make_unique<Ssimulacra2Reference>(test.data(), tw, th, true);
+            Block chosen = fallback;
+            if (colour.valid())
+            {
+                std::vector<uint8_t> encoded, decoded(test.size());
+                for (const auto& [x, y] : s.candidates)
+                {
+                    const Block block{ x, y };
+                    if (block.key() == fallback.key())
+                        break; // the last one is used whatever it scores
+                    encoded.resize(astcBytes(block, tw, th));
+                    astcenc_context* context = threadContext(s, block);
+                    if (!context || !compressLevel(s, block, test.data(), tw, th, encoded.data(), encoded.size()))
+                        continue;
+                    void* slice = decoded.data();
+                    astcenc_image output{ static_cast<unsigned>(tw), static_cast<unsigned>(th), 1, ASTCENC_TYPE_U8, &slice };
+                    const astcenc_swizzle swizzle{ ASTCENC_SWZ_R, ASTCENC_SWZ_G, ASTCENC_SWZ_B, ASTCENC_SWZ_A };
+                    astcenc_decompress_reset(context);
+                    if (astcenc_decompress_image(context, encoded.data(), encoded.size(), &output, &swizzle, 0)
+                        != ASTCENC_SUCCESS)
+                        continue;
+                    double score = colour.score(decoded.data());
+                    if (alphaReference && score >= s.targetScore)
+                        score = std::min(score, alphaReference->score(decoded.data()));
+                    if (score >= s.targetScore)
+                    {
+                        chosen = block;
+                        break;
+                    }
+                }
+            }
+            sScoreMicros += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - start).count());
+            return chosen;
         }
 
         size_t etc2Bytes(int w, int h, bool alpha)
@@ -393,6 +557,17 @@ namespace Alpha3
                              << sSlow << " over 150 ms), " << hits << " loaded from the cache, " << sFailed
                              << " failed; " << src / (1024 * 1024) << " MB of DXT -> " << out / (1024 * 1024) << " MB of "
                              << format;
+            if (settings().perTexture)
+            {
+                static const char* names[14] = { "4x4", "5x4", "5x5", "6x5", "6x6", "8x5", "8x6", "8x8", "10x5", "10x6",
+                    "10x8", "10x10", "12x10", "12x12" };
+                std::string chosen;
+                for (unsigned i = 0; i < 14; ++i)
+                    if (const unsigned n = sChosen[i])
+                        chosen += " " + std::string(names[i]) + " " + std::to_string(n);
+                Log(Debug::Info) << format << " block sizes of the textures converted:" << (chosen.empty() ? " none yet" : chosen) << " ("
+                                 << sScoreMicros / 1000 << " ms of it choosing)";
+            }
         }
 
         // A progress line every 5 seconds while textures are being converted or read back
@@ -481,16 +656,27 @@ namespace Alpha3
         const unsigned direct = halvings > 0 ? 0 : sourceLevels - skip;
         const size_t dxtBlock = (format == DXT1_RGB || format == DXT1_RGBA) ? 8 : 16;
         const bool alpha = format != DXT1_RGB;
-        const GLenum internalFormat = s.etc2 ? (alpha ? ETC2_RGBA8_EAC : ETC2_RGB8) : s.internalFormat;
+        // With a block size per texture, the size of the converted texture is only known once its block is: from the
+        // cache entry's header, or once chosen
+        const bool perTexture = s.perTexture && !isNormalMap(path);
+        Block block{ s.blockX, s.blockY };
+        GLenum internalFormat = 0;
         std::vector<uint32_t> sizes;
         size_t total = 0;
-        for (unsigned l = 0; l < levels; ++l)
-        {
-            const size_t bytes = s.etc2 ? etc2Bytes(std::max(1, w >> l), std::max(1, h >> l), alpha)
-                                        : astcBytes(s, std::max(1, w >> l), std::max(1, h >> l));
-            sizes.push_back(static_cast<uint32_t>(bytes));
-            total += bytes;
-        }
+        auto setLayout = [&](Block b) {
+            block = b;
+            internalFormat = s.etc2 ? (alpha ? ETC2_RGBA8_EAC : ETC2_RGB8) : b.format();
+            sizes.clear();
+            total = 0;
+            for (unsigned l = 0; l < levels; ++l)
+            {
+                const size_t bytes = s.etc2 ? etc2Bytes(std::max(1, w >> l), std::max(1, h >> l), alpha)
+                                            : astcBytes(b, std::max(1, w >> l), std::max(1, h >> l));
+                sizes.push_back(static_cast<uint32_t>(bytes));
+                total += bytes;
+            }
+        };
+        setLayout(block);
 
         // key: the texels of the first level used (a later mod can replace a file under the same path) and how they are
         // encoded. Only that level is hashed, from a size worked out here rather than what the image reports.
@@ -529,6 +715,10 @@ namespace Alpha3
         // the texture straight from the single cache file into the buffer the image keeps
         auto readBlob = [&]() -> osg::ref_ptr<osg::Image> {
             CacheHeader header;
+            if (perTexture && s.store && s.store->read(blobKey, 0, &header, sizeof header))
+                for (const auto& [x, y] : s.candidates)
+                    if (astcFormat(x, y) == header.format)
+                        setLayout(Block{ x, y });
             if (!s.store || s.store->size(blobKey) != sizeof header + total || !s.store->read(blobKey, 0, &header, sizeof header)
                 || std::memcmp(header.magic, s.etc2 ? "OETC" : "OAST", 4) || header.version != 1
                 || header.width != static_cast<uint32_t>(w) || header.height != static_cast<uint32_t>(h)
@@ -566,7 +756,8 @@ namespace Alpha3
             return cached;
         }
 
-        if (osg::ref_ptr<osg::Image> cached = importLoose(file))
+        // the loose files of earlier builds never had a block size per texture
+        if (osg::ref_ptr<osg::Image> cached = perTexture ? nullptr : importLoose(file))
         {
             ++sHits;
             maybeReport();
@@ -574,6 +765,7 @@ namespace Alpha3
         }
 
         // Files named by the earlier, byte-wise hash: renamed to the new name, so each is only hashed the slow way once
+        if (!perTexture)
         {
             const std::filesystem::path legacy = cacheFile(finishKey(fnv(texels, keyBytes)));
             std::error_code ec;
@@ -590,28 +782,31 @@ namespace Alpha3
             }
         }
 
-        astcenc_context* context = s.etc2 ? nullptr : threadContext(s);
-        if (!s.etc2 && !context)
-            return nullptr;
         const auto start = std::chrono::steady_clock::now();
-        std::vector<uint8_t> data(total), rgba;
-        // a 2x2 box filter in place, from cw x ch to half that
-        auto halve = [&rgba](int& cw, int& ch) {
-            const int nw = std::max(1, cw / 2), nh = std::max(1, ch / 2);
-            for (int y = 0; y < nh; ++y)
-                for (int x = 0; x < nw; ++x)
-                    for (int c = 0; c < 4; ++c)
-                    {
-                        const int x0 = std::min(cw - 1, x * 2), y0 = std::min(ch - 1, y * 2);
-                        const int x1 = std::min(cw - 1, x * 2 + 1), y1 = std::min(ch - 1, y * 2 + 1);
-                        const unsigned sum = rgba[(y0 * cw + x0) * 4 + c] + rgba[(y0 * cw + x1) * 4 + c]
-                            + rgba[(y1 * cw + x0) * 4 + c] + rgba[(y1 * cw + x1) * 4 + c];
-                        rgba[(y * nw + x) * 4 + c] = static_cast<uint8_t>((sum + 2) / 4);
-                    }
-            cw = nw;
-            ch = nh;
-            rgba.resize(static_cast<size_t>(cw) * ch * 4);
-        };
+        std::vector<uint8_t> rgba;
+        if (perTexture)
+        {
+            // the level scored: the first of at most testSize pixels across
+            unsigned tl = 0;
+            while (tl + 1 < levels && std::max(w >> tl, h >> tl) > s.testSize)
+                ++tl;
+            const int tw = std::max(1, w >> tl), th = std::max(1, h >> tl);
+            if (tl < direct)
+                decodeLevel(format, image.getMipmapData(skip + tl), tw, th, rgba);
+            else
+            {
+                decodeLevel(format, image.getMipmapData(skip), srcW, srcH, rgba);
+                int cw = srcW, ch = srcH;
+                for (unsigned i = 0; i < halvings + tl; ++i)
+                    halve(rgba, cw, ch);
+            }
+            setLayout(chooseBlock(s, rgba, tw, th, alpha));
+        }
+        if (!s.etc2)
+            ++sChosen[blockIndex(block)];
+        if (!s.etc2 && !threadContext(s, block))
+            return nullptr;
+        std::vector<uint8_t> data(total);
         size_t offset = 0;
         for (unsigned l = 0; l < levels; ++l)
         {
@@ -623,13 +818,13 @@ namespace Alpha3
                 decodeLevel(format, image.getMipmapData(skip), srcW, srcH, rgba);
                 int cw = srcW, ch = srcH;
                 for (unsigned i = 0; i < halvings; ++i)
-                    halve(cw, ch);
+                    halve(rgba, cw, ch);
             }
             else
             {
                 // rgba still holds the level above
                 int cw = std::max(1, w >> (l - 1)), ch = std::max(1, h >> (l - 1));
-                halve(cw, ch);
+                halve(rgba, cw, ch);
             }
             if (s.etc2)
             {
@@ -637,20 +832,7 @@ namespace Alpha3
                 offset += sizes[l];
                 continue;
             }
-            void* slice = rgba.data();
-            astcenc_image input{ static_cast<unsigned>(lw), static_cast<unsigned>(lh), 1, ASTCENC_TYPE_U8, &slice };
-            const astcenc_swizzle swizzle{ ASTCENC_SWZ_R, ASTCENC_SWZ_G, ASTCENC_SWZ_B, ASTCENC_SWZ_A };
-            // the first levels hold nearly all the work
-            bool done;
-            if (s.threads > 1 && static_cast<size_t>(lw) * lh >= 256 * 256)
-                done = compressParallel(s, input, swizzle, data.data() + offset, sizes[l]);
-            else
-            {
-                astcenc_compress_reset(context);
-                done = astcenc_compress_image(context, &input, &swizzle, data.data() + offset, sizes[l], 0)
-                    == ASTCENC_SUCCESS;
-            }
-            if (!done)
+            if (!compressLevel(s, block, rgba.data(), lw, lh, data.data() + offset, sizes[l]))
             {
                 ++sFailed;
                 return nullptr;

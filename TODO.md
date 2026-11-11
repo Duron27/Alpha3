@@ -5,24 +5,17 @@
 Recommended starting with screen-space contact shadows for point lights, which are cheap. Real cube-map shadows are
 much heavier. Waiting on the user's go-ahead.
 
-## ASTC block size chosen per texture by SSIMULACRA2 (user's idea, 2026-11-09, not started)
+## ASTC block size chosen per texture by SSIMULACRA2 (done 2026-11-10, optional, off by default)
 
-Today `support/src/textureconversion.cpp` converts every DXT texture to one ASTC block size (6x6 default, quality
-`ASTCENC_PRE_FAST`). Idea: pick each texture's block size automatically by a perceptual score instead, as
-https://github.com/keaukraine/astc-compression does (MIT): encode with astcenc at a large block, score the result against
-the source with SSIMULACRA2 (https://github.com/cloudinary/ssimulacra2, BSD-3-Clause + PATENTS file; 70 = "high
-quality", 90 = "visually lossless", 100 = lossless), and step down toward 4x4 until a target score is reached (that
-tool's default target is 70; it falls back to 4x4 with the best score when the target can't be reached, and gives a
-texture's mip levels mip 0's settings).
-- Where: in the conversion step, before the result goes into `astc_cache.bin` (the score is paid once per texture; the
-  cache key would need the chosen block size or the target score in it).
-- Things to settle: a quality setting (target score, e.g. `[Textures] astc quality = 70`) instead of the fixed block
-  size; the cost on a phone (each try is an astcenc encode plus a SSIMULACRA2 pass: maybe try only 8x8 / 6x6 / 4x4, or
-  do it on a PC tool over the data files); normal maps and alpha (the score is for colour pictures: normal maps may need
-  a fixed block or a different metric, alpha-tested textures a check on the alpha channel too); SSIMULACRA2 depends on
-  libjxl's code and highway, check the size it adds to the APK.
-- Gain: smaller textures where 8x8 (2 bits/texel) holds up, sharper ones where 6x6 smears detail; both the GLES and
-  the Vulkan renderer read the same cache.
+`[Textures] astc block size per texture = true` (with `astc target score`, `astc block size candidates`, `astc score
+test size`, documented in `cpp/settings/alpha3.cfg`). `support/src/textureconversion.cpp` `chooseBlock` encodes one mip
+level of at most 256 px with each candidate (8x8 6x6 5x5 4x4, largest first), decodes it and scores it with a port of
+SSIMULACRA2 (`support/src/ssimulacra2.cpp`, no libjxl/highway; separable Gaussian instead of libjxl's recursive one);
+the first to reach the target (70) is used, else the smallest. Alpha is scored as its own grey picture when used;
+normal maps (`_n`, `_nh`, `_nm`, `_normal`) keep `astc block size`. The cache tag includes the settings, and a cached
+entry's block comes from its header. The 5-second progress line logs the block sizes chosen.
+Host check: JPEG q90/75/50 score 82/73/62; a sample picture scores 8x8 68, 6x6 79, 4x4 92.
+Left: measure the extra first-conversion time on the tablet and the size saved over a full prepass.
 
 ## Not yet seen on the phone
 
