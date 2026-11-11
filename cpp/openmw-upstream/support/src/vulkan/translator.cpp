@@ -3836,6 +3836,14 @@ void main()
                 const bool known = frameGenFindView(nextFrame, next) && next.frame > cur.frame;
                 if (!known && !mGen.mHavePrev)
                     return;
+                // a cut (through a seamless door the camera is in another cell's space from one frame to the next):
+                // there is nothing between the two views
+                {
+                    const osg::Vec3d here = osg::Matrixd::inverse(cur.view).getTrans();
+                    const osg::Vec3d there = osg::Matrixd::inverse(known ? next.view : mGen.mPrev.view).getTrans();
+                    if ((there - here).length2() > 512.0 * 512.0)
+                        return;
+                }
                 Variant* variant = mPrograms.builtin("a3 frame generation", sBlitVertex, sWarpFragment);
                 if (variant == nullptr || !variant->mOk || variant->mSamplers.size() != 4)
                     return;
