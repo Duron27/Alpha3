@@ -82,6 +82,18 @@ suspend fun formatOpenMWConfig(config: OpenMWConfig): String {
         }
         .forEach { content -> builder.append(if (content.startsWith("content=")) content else "content=$content").append("\n") }
 
+    // The list's groundcover plugins (grass loaded as groundcover=, not content=); without them the list has no grass.
+    // groundcover.omwaddon is the desktop tool's output: Alpha3's groundcover tool writes and enables its own.
+    val groundcover = config.groundcoverFiles.split("\n")
+        .map { it.trim() }
+        .filter { it.isNotEmpty() && !it.startsWith("#") }
+        .map { if (it.startsWith("groundcover=")) it else "groundcover=$it" }
+        .filter { it != "groundcover=groundcover.omwaddon" }
+    if (groundcover.isNotEmpty()) {
+        builder.append("\n## Groundcover\n")
+        groundcover.forEach { builder.append(it).append("\n") }
+    }
+
     return builder.toString()
 }
 
