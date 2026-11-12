@@ -579,3 +579,93 @@ Repeated runs agree within 0.1 fps. The GPU stays at its top clock (430 MHz) and
 - Fly-through (mipmaps off): Vulkan system 1.1 **43.4–43.7**, GLES **34.5**, Turnip 1.2 35.9 (with mipmaps on: Vulkan 37.8, Turnip 36.0). The SM-T720 references above were taken with mipmaps on and need re-running.
 - The benchmark adds the vanilla BSAs to its own openmw.cfg when the player's does not list them (only files that exist, an expansion's only with its .esm in content); the player's openmw.cfg is only read.
 - Results now carry `renderer: Vulkan 1.1 (Adreno (TM) 640)` / `OpenGL ES 3.2` (txt, json, and under the fps in the popup).
+
+### 2026-11-11 (late night): point light shadows on Vulkan, up to 16 lights, darker shadows
+
+Test spot: the user's saves `saves/player/lfkf.omwsave` (Eight Plates, Balmora) and `saves/player/candle.omwsave`
+(Eight Plates bar, a candle beside a goblet) on the T867. Load one with
+`am start -n com.alpha3.launcher/org.openmw.EngineActivity --es omw_args '--skip-menu --load-savegame /storage/emulated/0/Alpha3/saves/player/candle.omwsave'`
+(the full path: a relative one is resolved against `/` and fails). `[Shadows] point light shadow debug = true` paints
+shadowed light red; compare with GLES.
+
+- **Vulkan showed no point light shadows at all** (anywhere, not only indoors). glslang's reflection gives the packed
+  element size as the array stride of `float[]`/`vec2[]` members of the default uniform block (`a3PointShadowFade` at
+  stride 4; std140 puts them 16 apart), so every element after the first was written into the first one's padding and
+  read as 0: fade 0, the lookup skipped. `vulkan/programs.cpp` rounds such strides up to 16 (helps any such array).
+- **Vulkan program cache** (`cache/vulkan`): its key held the sources from before `translateShaderSource` adds the
+  point shadows and experimental parts, so changing a point shadow setting (debug, taps, ...) kept the old programs; it
+  now has the same stamps as the GLES program cache. The salt also has `programs.cpp`'s build time (the unpacked
+  library keeps the zip's fixed time, its size can stay the same).
+- **Up to 16 shadowed lights** (`sMaxLights` 16); an object still takes at most 4 (`sMaxObjectLights`: the varyings
+  and `a3PointShadowSlots`). With point shadows on, each object's light list is always sorted closest first (second
+  hunk of patch 0028), so those 4 are its nearest (they were in scene order: a long bar took far lanterns' shadows).
+- **Near plane 4** (was 16): a goblet beside a candle was inside 16 and cast nothing. A candle's own wax can now
+  shadow itself; `point light shadow from own object = false` would stop that (and lanterns' frames' shadows).
+- **Soft edge**: a light's shadow fades in between the min-light threshold and twice it (`a3PointShadowEdge`), no hard
+  line where its reach ends.
+- **`point light shadow darkness` (0.5)**: a shadow took away only its light, faint against a bright room; where a
+  shadowed light is blocked, that part of the rest of the light (ambient, other lights) goes too. Both paths (per
+  vertex: `lighting` before the shadowed lights are added; per pixel: after `doLighting`).
+  `A3_PS_DARKNESS` and `a3PointShadowOcclusion` are declared before `main()` (the `main` anchor): the merged shader
+  has the engine's `main()` ahead of the libraries where the rest of the point shadow code goes. Seen on the candle
+  save: the goblet's shadow across the bar is clear at 0.5, hardly there at 0. With near 4 the candle's body is
+  darkened by its own wax's shadow; `from own object = false` is the choice to make (the user has not decided).
+- T867, Vulkan, 16 lights at 512 px, 16 faces a frame: faces 5.3 ms GPU, scene 9.1 ms, 60 fps (frame limit).
+- Fly-through check on the T867 (shadows off, mipmaps off): Turnip 40.1–40.6 with and without these changes; Samsung's driver 42.9 (85 C, warm after back-to-back runs) against 43.4–43.7 before. No loss.
+- Why shadows pop as the camera turns: the lights are picked from what is on screen (closest in view), fade in over
+  0.3 s, and a new light's faces are drawn first over a few frames. Picking by distance around the player instead would
+  keep the set stable (and draw lights behind the camera).
+- T867 state: point light shadows off again (the test lines removed from `settings.cfg`, the backup deleted). To test
+  again add under [Shadows]: `point light shadows = 16`, `point light shadow resolution = 512`,
+  `point light shadow faces per frame = 16` (near 4 and darkness 0.5 are the defaults now).
+
+## Meshes for replacing Morrowind's (for looking up later)
+
+Where to get textured meshes (e.g. a high-detail candle):
+- **Poly Haven / ambientCG**: CC0, mostly materials, few models.
+- **Sketchfab**: the largest pool. Filter "Downloadable" and check each licence: CC0 and CC-BY (credit the author) suit
+  a mod; avoid NC (non-commercial) and ND (no derivatives: the meshes have to be edited).
+- **Smithsonian Open Access 3D**: CC0 museum scans of real objects (period candles, vessels).
+- **Fab** (Epic's store, which took in Megascans and Sketchfab's store): many free high-quality assets, licences vary
+  by asset; check what is allowed outside Unreal.
+- **BlenderKit, TurboSquid, CGTrader**: many royalty-free licences allow use in your own game but not redistributing
+  the raw mesh, which a mod does: read them.
+- **Nexus Mods (Morrowind)**: existing high-poly replacers are already NIFs with the right nodes: the quickest drop-in.
+
+For a candle (or any light) replacement:
+- keep the `AttachLight` node (where the light, and now its shadow cube, sits) and the flame particles;
+- Blender with the io_scene_mw plugin (Greatness7) imports and exports Morrowind NIFs;
+- Morrowind is about 70 units per metre: scans need rescaling;
+- decimate and downsize: Poly Haven and scanned models are often tens of thousands of triangles with 4K textures,
+  too much for a room of candles on the tablets;
+- the official files stay untouched: replacements go in a new mod.
+
+## Ray tracing: what is next (planned 2026-11-11, waiting on the user)
+
+Done (fc53e3c): `VK_KHR_acceleration_structure` + `VK_KHR_ray_query` + deferred host operations are enabled when the
+driver has them, with buffer device address and descriptor indexing on a 1.2 device (`Device::mRayQuery`); the
+acceleration-structure functions are loaded. Nothing uses them.
+
+Blocker: hardware. Neither tablet has ray queries (Adreno 615 and 640, system driver and Turnip). Needed: about
+Snapdragon 8 Gen 2+ (Adreno 740+, also with recent Turnip), Dimensity 9200+ (Mali-G715+) or Samsung Xclipse. Samsung's
+Remote Test Lab lends Galaxy S23/S24-class phones for free (remote: for checking it works, not for tuning).
+
+Steps, all in the support library; 1-5 can be written and compiled now (checked only for not breaking the current
+path), 6 needs a device with ray queries:
+1. Buffers: vertex and index buffers get device addresses and acceleration-structure build input usage
+   (`vulkan/resources.cpp`), only with `mRayQuery`.
+2. BLAS per static mesh, built when a cell loads, cached like the GPU buffers. Statics first; actors would need a
+   rebuild or refit every frame.
+3. TLAS per frame from the visible cells' instances and transforms (cheap at Morrowind's object counts).
+4. An acceleration-structure descriptor in the draws' set layout (`vulkan/programs.cpp`, `vulkan/translator.cpp`).
+5. Shaders: ray queries need SPIR-V 1.4 on a Vulkan 1.2 target (the translator targets 1.0 / SPIR-V 1.0 now:
+   `toSpirv`), only for the ray-traced variants; `GL_EXT_ray_query` added behind a define like the point shadows'.
+6. First effect, recommended: point light shadows by ray query. It keeps the light picking, slots, edge fade and
+   darkness, and replaces only the lookup (a ray from the pixel to the light): no cube maps, no 5 ms of faces, no
+   near plane (the candle problem), no 4-lights-per-object limit, no pop-in as the camera turns. Then sun shadows by
+   ray query or ray-traced AO.
+7. Devices without ray queries keep the shadow maps.
+
+Multiview for the point shadow faces was considered and set aside (2026-11-11): the receiving costs more than the
+faces, multiview draws all six faces at once (more GPU work than 2 faces a frame), and it needs a texture array the
+GLES path does not read. Culling once per light (a sphere) instead of per face would help both renderers.

@@ -7,8 +7,8 @@ Subject: [PATCH] Point light shadows: the light list's shadowed lights in its
 The light manager hands each object's light list to the support library, which adds the
 shadow code (A3_PS_ON, the shadowed lights' slots) only for objects a shadowed light reaches.
 ---
- components/sceneutil/lightmanager.cpp | 2 ++
- 1 file changed, 2 insertions(+)
+ components/sceneutil/lightmanager.cpp | 9 +++++++--
+ 1 file changed, 7 insertions(+), 2 deletions(-)
 
 diff --git a/components/sceneutil/lightmanager.cpp b/components/sceneutil/lightmanager.cpp
 index 986de7abf3..c95f279c88 100644
@@ -23,6 +23,27 @@ index 986de7abf3..c95f279c88 100644
  
          found->second = stateset;
          return stateset;
+@@ -747,7 +749,9 @@
+ 
+             const size_t maxLights = mLightManager->getMaxLights();
+ 
+-            if (mLightList.size() > maxLights)
++            // Alpha3: with point light shadows always closest first: an object takes the shadows of the first shadowed
++            // lights of its list (Alpha3::pointShadowListState)
++            if (mLightList.size() > maxLights || (mLightList.size() > 1 && Alpha3::pointShadowLights() > 0))
+             {
+                 // Sort by proximity to object: prefer closer lights with larger radius
+                 std::sort(mLightList.begin(), mLightList.end(),
+@@ -759,7 +763,8 @@
+                         return left->mViewBound.radius() * rightDist > right->mViewBound.radius() * leftDist;
+                     });
+ 
+-                mLightList.resize(maxLights);
++                if (mLightList.size() > maxLights)
++                    mLightList.resize(maxLights);
+             }
+         }
+ 
 -- 
 2.55.0
 

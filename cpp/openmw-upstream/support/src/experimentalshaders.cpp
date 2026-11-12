@@ -335,7 +335,7 @@ namespace Alpha3
     }
 
     bool injectPointShadowSource(const std::string& name, bool vertex, int lights, std::string_view library,
-        std::string& source, const MissingAnchor& missing, bool debug, int taps, float minLight)
+        std::string& source, const MissingAnchor& missing, bool debug, int taps, float minLight, float darkness)
     {
         if (lights <= 0 || name.find("(merged)") == std::string::npos)
             return false;
@@ -361,13 +361,17 @@ namespace Alpha3
         // objects.frag and terrain.frag, the lighting the vertex shader made
         constexpr std::string_view vertexLit = "    specular = mix(shadedSpecular, passSpecular, shadowing);";
         constexpr std::string_view main = "void main()";
+        // objects.frag and terrain.frag lit per pixel: the light the shadows dim there ([Shadows] point light shadow
+        // darkness)
+        constexpr std::string_view pixelLit = "    doLighting(gl_FragCoord.xy, passViewPos, viewNormal, shininess, "
+                                              "shadowing, diffuseLight, ambientLight, specularLight);";
 
         // every anchor first: all of it or none
         std::vector<std::string_view> anchors{ signature, diffuse, specular, lightBuffer };
         if (vertex)
             anchors.push_back(pointLighting);
         else
-            anchors.insert(anchors.end(), { vertexLit, main });
+            anchors.insert(anchors.end(), { vertexLit, main, pixelLit });
         for (std::string_view anchor : anchors)
         {
             if (source.find(anchor) == std::string::npos)
@@ -422,9 +426,11 @@ namespace Alpha3
 
         // lit per pixel: shadowed where it is lit
         injection.replace(diffuse,
-            gated("    float a3Shadow = a3ShadowIndex >= 0 && attenuation * dot(light.diffuse.xyz, vec3(1.0)) > "
-                  "a3PointShadowMinLight\n"
-                  "        ? a3PointShadow(a3ShadowIndex, viewPos, viewNormal) : 1.0;\n"
+            gated("    float a3Edge = a3ShadowIndex >= 0 ? a3PointShadowEdge(attenuation * dot(light.diffuse.xyz, vec3(1.0))) "
+                  ": 0.0;\n"
+                  "    float a3Shadow = a3Edge > 0.0 ? mix(1.0, a3PointShadow(a3ShadowIndex, viewPos, viewNormal), a3Edge) "
+                  ": 1.0;\n"
+                  "    a3PointShadowOcclusion = max(a3PointShadowOcclusion, 1.0 - a3Shadow);\n"
                   "    diffuseLight += light.diffuse.xyz * lambert(viewNormal, lightDir, viewDir) * attenuation * "
                   "a3Shadow;",
                 diffuse));
@@ -442,6 +448,7 @@ namespace Alpha3
             "    {\n"
             "        vec3 a3Diffuse, a3Specular;\n"
             "        a3PointShadowLight(passViewPos, viewNormal, a3Diffuse, a3Specular);\n"
+            "        lighting *= 1.0 - A3_PS_DARKNESS * a3PointShadowOcclusion;\n"
             "        vec3 a3Lit = lighting + getDiffuseColor(material, passColor).xyz * a3Diffuse;\n"
             "        lighting = min(a3Lit, max(lighting, vec3(1.0)));\n"
             "        specular += getSpecularColor(material, passColor).xyz * a3Specular * "
@@ -449,9 +456,23 @@ namespace Alpha3
             "    }\n"
             "#endif",
             true);
+        injection.insert(pixelLit,
+            "#ifdef A3_PS_ON\n"
+            "    diffuseLight *= 1.0 - A3_PS_DARKNESS * a3PointShadowOcclusion;\n"
+            "    ambientLight *= 1.0 - A3_PS_DARKNESS * a3PointShadowOcclusion;\n"
+            "#endif",
+            true);
+        // before main(): the merged shader has the engine's main() ahead of the libraries (lib/light/util.glsl, where
+        // the rest goes), and main() reads these
         return injection.insert(main,
-            "#if defined(A3_PS_ON) && !PER_PIXEL_LIGHTING\n"
+            "#ifdef A3_PS_ON\n"
+            "#define A3_PS_DARKNESS " + std::to_string(darkness) + "\n"
+            "// how much of its light the most shadowed of the object's shadowed lights loses here (0 lit, 1 in shadow):\n"
+            "// the rest of the light (the ambient, the other lights) is dimmed by A3_PS_DARKNESS of it\n"
+            "float a3PointShadowOcclusion = 0.0;\n"
+            "#if !PER_PIXEL_LIGHTING\n"
             "void a3PointShadowLight(vec3 viewPos, vec3 viewNormal, out vec3 diffuseLight, out vec3 specularLight);\n"
+            "#endif\n"
             "#endif",
             false);
     }

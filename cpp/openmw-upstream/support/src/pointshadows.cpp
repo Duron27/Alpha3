@@ -46,8 +46,10 @@ namespace Alpha3
 {
     namespace
     {
-        // the most lights the shaders take; the setting is clamped to it
-        constexpr int sMaxLights = 4;
+        // the most lights shadowed at once (the setting is clamped to it), and the most of them one object takes (its
+        // light list's closest: the shaders' varyings and a3PointShadowSlots, an ivec4)
+        constexpr int sMaxLights = 16;
+        constexpr int sMaxObjectLights = 4;
         constexpr int sFaces = 6;
 
         struct Config
@@ -74,6 +76,9 @@ namespace Alpha3
             float mContrast;
             // testing: the shaders skip the map lookups (all lit), keeping the rest
             int mNoLookup;
+            // where a shadowed light is blocked, this part of the rest of the light there (the ambient, the other
+            // lights) goes too: 0 only the light itself (faint against a bright room), 1 dark
+            float mDarkness;
         };
 
         const Config& config()
@@ -87,7 +92,7 @@ namespace Alpha3
                 out.mOwnObject = settingBool("Shadows", "point light shadow from own object", true);
                 out.mDebug = settingBool("Shadows", "point light shadow debug", false);
                 out.mDistance = std::max(settingFloat("Shadows", "point light shadow distance", 2048.f), 1.f);
-                out.mNear = std::max(settingFloat("Shadows", "point light shadow near", 16.f), 1.f);
+                out.mNear = std::max(settingFloat("Shadows", "point light shadow near", 4.f), 1.f);
                 out.mTaps = settingInt("Shadows", "point light shadow taps", 1) >= 4 ? 4 : 1;
                 out.mOtherCameras = settingBool("Shadows", "point light shadows in reflections", false);
                 out.mMinLight = std::clamp(settingFloat("Shadows", "point light shadow min light", 0.01f), 0.f, 1.f);
@@ -95,6 +100,7 @@ namespace Alpha3
                 out.mReceive = settingBool("Shadows", "point light shadow receive", true);
                 out.mNoLookup = std::clamp(settingInt("Shadows", "point light shadow test level", 0), 0, 2);
                 out.mContrast = std::clamp(settingFloat("Shadows", "point light shadow min contrast", 0.15f), 0.f, 4.f);
+                out.mDarkness = std::clamp(settingFloat("Shadows", "point light shadow darkness", 0.5f), 0.f, 1.f);
                 return out;
             }();
             return c;
@@ -729,13 +735,13 @@ namespace Alpha3
             || std::find(sReceivingViews.begin(), sReceivingViews.end(), viewMatrix) == sReceivingViews.end())
             return;
         // the list's shadowed lights, in its order (the closest first): their slots
-        int slots[sMaxLights] = { 0, 0, 0, 0 };
+        int slots[sMaxObjectLights] = { 0, 0, 0, 0 };
         int count = 0;
         for (std::size_t i = 0; i < lightIds.size(); ++i)
         {
             for (const auto& [shadowedId, slot] : sShadowedIds)
             {
-                if (shadowedId == lightIds[i] && count < sMaxLights)
+                if (shadowedId == lightIds[i] && count < sMaxObjectLights)
                     slots[count++] = slot;
             }
         }
@@ -763,7 +769,8 @@ namespace Alpha3
         };
         const Config& c = config();
         return injectPointShadowSource(shader.getName(), shader.getType() == osg::Shader::VERTEX, lights,
-            ExperimentalSources::pointShadows, source, missing, c.mDebug, c.mNoLookup ? -c.mNoLookup + 1 : c.mTaps, c.mMinLight);
+            ExperimentalSources::pointShadows, source, missing, c.mDebug, c.mNoLookup ? -c.mNoLookup + 1 : c.mTaps, c.mMinLight,
+            c.mDarkness);
     }
 
     int pointShadowTextureUnit()
@@ -778,6 +785,7 @@ namespace Alpha3
             return "ps:0";
         const Config& c = config();
         return "ps:" + std::to_string(lights) + (c.mDebug ? "d:" : ":") + "t" + std::to_string(c.mNoLookup ? -c.mNoLookup + 1 : c.mTaps) + ":m"
-            + std::to_string(c.mMinLight) + ":" + std::to_string(sourceHash(ExperimentalSources::pointShadows));
+            + std::to_string(c.mMinLight) + ":k" + std::to_string(c.mDarkness) + ":"
+            + std::to_string(sourceHash(ExperimentalSources::pointShadows));
     }
 }

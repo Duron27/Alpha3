@@ -3,6 +3,9 @@
 #include "context.hpp"
 
 #include "../support.hpp"
+#include "../experimentalshaders.hpp"
+#include "../glesdialect.hpp"
+#include "../shaderconverter.hpp"
 
 #include <algorithm>
 #include <dlfcn.h>
@@ -520,6 +523,12 @@ namespace Alpha3::Vk
                 member.mGlType = uniform.glDefineType;
                 member.mArraySize = static_cast<uint32_t>(std::max(uniform.size, 1));
                 member.mArrayStride = static_cast<uint32_t>(std::max(uniform.arrayStride, 0));
+                // Both blocks are std140, where an array's elements are 16 bytes apart at least. glslang's reflection
+                // gives the packed element size for arrays of scalars and vec2s in the default block (a float[4] at
+                // stride 4, its next member 64 bytes on), so all but the first element would be written into the
+                // first one's padding and read as 0 (the point light shadows' fades: only one light shadowed)
+                if (member.mArraySize > 1 && member.mArrayStride % 16 != 0)
+                    member.mArrayStride = (member.mArrayStride + 15) / 16 * 16;
                 into->mMembers.push_back(member);
             }
             glslang::SpvOptions options;
@@ -562,7 +571,9 @@ namespace Alpha3::Vk
         // library file's size and time, and the driver's pipeline cache identity
         std::string cacheSalt(Context& context)
         {
-            std::string salt = "a3vk4";
+            // this file's build too: the library's size and time (unpacked from the APK with the zip entry's fixed time)
+            // can stay the same when the compile or the reflection here changes
+            std::string salt = "a3vk4 " __DATE__ " " __TIME__;
             Dl_info info{};
             if (dladdr(reinterpret_cast<const void*>(&cacheSalt), &info) != 0 && info.dli_fname != nullptr)
             {
@@ -1160,7 +1171,12 @@ namespace Alpha3::Vk
             blocks += blockName + "=" + std::to_string(index) + ";";
         for (const auto& [attribute, location] : job.mAttribBindings)
             blocks += attribute + "@" + std::to_string(location) + ";";
-        job.mCacheKey = job.mSalt + "\x01" + blocks + std::string(job.mClip ? "clip" : "") + "\x01" + job.mShaders[0]->getName()
+        // what compile() adds to the sources (translateShaderSource: the dialect, the converter, the experimental
+        // parts and the point light shadows with their settings), as the OpenGL ES program cache keys it
+        // (programcache.cpp): the sources here are from before that, so a changed setting would load the old program
+        const std::string stamps = std::string(translatorStamp()) + "\x02" + converterStamp() + "\x02" + injectionStamp()
+            + "\x02" + experimentalShaderStamp() + "\x02" + pointShadowsShaderStamp();
+        job.mCacheKey = job.mSalt + "\x01" + stamps + "\x01" + blocks + std::string(job.mClip ? "clip" : "") + "\x01" + job.mShaders[0]->getName()
             + "\x01" + job.mShaders[1]->getName() + "\x01" + job.mSources[0] + "\x01" + job.mSources[1];
         return true;
     }

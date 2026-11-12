@@ -116,6 +116,16 @@ uniform mat3 a3PointShadowViewToWorld;
 uniform float a3PointShadowMinLight;
 // x: near plane, y: one texel of a face (1 / resolution), z: depth bias, w: 1 / the lights (the atlas' rows)
 uniform vec4 a3PointShadowParams;
+// a3PointShadowOcclusion: declared before main() (src/experimentalshaders.cpp), which the library comes after
+
+// How much of a light's shadow shows where its light here (its colour times the attenuation, summed) is this: none at
+// the threshold ([Shadows] point light shadow min light, min contrast), all of it at twice that; a hard edge where the
+// light's reach ends otherwise
+float a3PointShadowEdge(float lightHere)
+{
+    float edge = clamp((lightHere - a3PointShadowMinLight) / max(a3PointShadowMinLight, 0.01), 0.0, 1.0);
+    return edge * edge * (3.0 - 2.0 * edge);
+}
 
 // 1 lit, 0 in shadow
 // index: the object's shadowed light (0 to A3_PS_COUNT - 1)
@@ -181,14 +191,17 @@ void a3PointShadowOne(int index, mediump vec4 passed, mediump float specularTerm
 {
     mediump vec3 d = passed.rgb * passed.a;
     mediump vec3 s = passed.rgb * specularTerm;
-    // too little of its light here to see its shadow ([Shadows] point light shadow min light, min contrast)
-    if (dot(passed.rgb, vec3(1.0)) <= a3PointShadowMinLight)
+    // too little of its light here to see its shadow ([Shadows] point light shadow min light, min contrast), and
+    // fading in above that
+    float edge = a3PointShadowEdge(dot(passed.rgb, vec3(1.0)));
+    if (edge <= 0.0)
     {
         diffuseLight += d;
         specularLight += s;
         return;
     }
-    float shadow = a3PointShadow(index, viewPos, viewNormal);
+    float shadow = mix(1.0, a3PointShadow(index, viewPos, viewNormal), edge);
+    a3PointShadowOcclusion = max(a3PointShadowOcclusion, 1.0 - shadow);
 #ifdef A3_PS_DEBUG
     // [Shadows] point light shadow debug: where the light is shadowed, red
     diffuseLight += vec3(1.0, 0.0, 0.0) * (1.0 - shadow);
