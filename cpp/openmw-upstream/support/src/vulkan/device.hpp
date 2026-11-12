@@ -11,8 +11,9 @@ struct VmaAllocation_T;
 
 namespace Alpha3::Vk
 {
-    // The instance, the GPU and its device: Vulkan 1.0 core, with VK_KHR_surface, VK_KHR_android_surface and
-    // VK_KHR_swapchain the only extensions required. One queue does graphics, transfers and presents.
+    // The instance, the GPU and its device: Vulkan 1.2 where the driver has it, else 1.1, else 1.0 (the renderer
+    // needs only 1.0), with VK_KHR_surface, VK_KHR_android_surface and VK_KHR_swapchain the only extensions required.
+    // One queue does graphics, transfers and presents.
     struct Device
     {
         VkInstance mInstance = VK_NULL_HANDLE;
@@ -24,6 +25,20 @@ namespace Alpha3::Vk
         VkPhysicalDeviceProperties mProperties{};
         VkPhysicalDeviceFeatures mFeatures{}; // what was enabled
         VkPipelineCache mPipelineCache = VK_NULL_HANDLE;
+        // the version in use: the lowest of the instance's and the GPU's, 1.0, 1.1 or 1.2 (VK_API_VERSION_1_x)
+        uint32_t mApiVersion = VK_API_VERSION_1_0;
+
+        // 1.1 and 1.2 features enabled where the GPU has them (false on 1.0)
+        bool mTimelineSemaphores = false;
+        bool mDescriptorIndexing = false; // runtimeDescriptorArray and partially bound, non-uniform sampled images
+        bool mBufferDeviceAddress = false;
+        bool mScalarBlockLayout = false;
+        bool mShaderFloat16 = false;
+        bool mHostQueryReset = false;
+
+        // Ray tracing: VK_KHR_acceleration_structure, VK_KHR_ray_query and VK_KHR_deferred_host_operations enabled
+        // (needs 1.2 with buffer device addresses and descriptor indexing). Shaders trace rays with ray queries.
+        bool mRayQuery = false;
 
         // What the GPU can do beyond the 1.0 minimum, read once
         bool mBcTextures = false; // DXT1/3/5 (S3TC) sampled as they are

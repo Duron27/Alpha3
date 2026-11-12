@@ -1,7 +1,7 @@
 #ifndef ALPHA3_SUPPORT_VULKAN_VK_H
 #define ALPHA3_SUPPORT_VULKAN_VK_H
 
-// Vulkan 1.0 for the native renderer ([Video] renderer = vulkan): the API through function pointers loaded at run time,
+// Vulkan 1.0, 1.1 or 1.2 for the native renderer ([Video] renderer = vulkan): the API through function pointers loaded at run time,
 // from the custom driver libadrenotools loaded (Turnip; its handle is in ALPHA3_VULKAN_HANDLE) or the system's
 // libvulkan.so. Nothing links libvulkan: a phone without Vulkan still starts, on OpenGL ES.
 
@@ -18,7 +18,8 @@
 #define ALPHA3_VK_GLOBAL_FUNCTIONS(X)                                                                                   \
     X(vkCreateInstance)                                                                                                \
     X(vkEnumerateInstanceExtensionProperties)                                                                          \
-    X(vkEnumerateInstanceLayerProperties)
+    X(vkEnumerateInstanceLayerProperties)                                                                          \
+    X(vkEnumerateInstanceVersion) /* 1.1; null from a 1.0 loader */
 
 // Loaded from the instance
 #define ALPHA3_VK_INSTANCE_FUNCTIONS(X)                                                                                 \
@@ -38,7 +39,9 @@
     X(vkGetPhysicalDeviceSurfaceCapabilitiesKHR)                                                                       \
     X(vkGetPhysicalDeviceSurfaceFormatsKHR)                                                                            \
     X(vkGetPhysicalDeviceSurfacePresentModesKHR)                                                                       \
-    X(vkCreateAndroidSurfaceKHR)
+    X(vkCreateAndroidSurfaceKHR)                                                                                       \
+    X(vkGetPhysicalDeviceFeatures2) /* 1.1; null on a 1.0 instance */                                                \
+    X(vkGetPhysicalDeviceProperties2) /* 1.1 */
 
 // Loaded from the device
 #define ALPHA3_VK_DEVICE_FUNCTIONS(X)                                                                                   \
@@ -138,7 +141,13 @@
     X(vkDestroySwapchainKHR)                                                                                           \
     X(vkGetSwapchainImagesKHR)                                                                                         \
     X(vkAcquireNextImageKHR)                                                                                           \
-    X(vkQueuePresentKHR)
+    X(vkQueuePresentKHR)                                                                                               \
+    X(vkGetBufferDeviceAddress) /* 1.2; null below */                                                                \
+    X(vkCreateAccelerationStructureKHR) /* VK_KHR_acceleration_structure; null without it */                        \
+    X(vkDestroyAccelerationStructureKHR)                                                                               \
+    X(vkGetAccelerationStructureBuildSizesKHR)                                                                         \
+    X(vkGetAccelerationStructureDeviceAddressKHR)                                                                      \
+    X(vkCmdBuildAccelerationStructuresKHR)
 
 namespace Alpha3::Vk
 {
