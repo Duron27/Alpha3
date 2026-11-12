@@ -1,0 +1,93 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Thu, 12 Nov 2026 16:45:00 -0500
+Subject: [PATCH] Lua: engine handlers called without converting the function
+ each time
+
+Handlers (onUpdate, onFrame, event handlers, ...) were kept as sol::main_function and timer callbacks
+as sol::main_protected_function, while LuaUtil::call took a const sol::protected_function&. Every call
+therefore built a temporary protected_function: two luaL_ref/luaL_unref pairs and a lua_getglobal of
+sol's default handler name. In play with a big mod list that was about 7% of the Lua thread.
+Handlers are now stored as sol::main_protected_function, and the ScriptId overload of LuaUtil::call
+takes any basic_protected_function as it is. No default handler is ever set, so the handler stays nil
+as before.
+
+---
+ components/lua/luastate.hpp         | 18 ++++++++++++++----
+ components/lua/scriptscontainer.cpp |  2 +-
+ components/lua/scriptscontainer.hpp |  3 ++-
+ 3 files changed, 17 insertions(+), 6 deletions(-)
+
+diff --git a/components/lua/luastate.hpp b/components/lua/luastate.hpp
+index 4ec8a10320..ca4dd0d498 100644
+--- a/components/lua/luastate.hpp
++++ b/components/lua/luastate.hpp
+@@ -188,9 +188,9 @@ namespace LuaUtil
+     private:
+         template <typename... Args>
+         friend sol::protected_function_result call(const sol::protected_function& fn, Args&&... args);
+-        template <typename... Args>
++        template <typename Ref, bool Aligned, typename HandlerRef, typename... Args>
+         friend sol::protected_function_result call(
+-            ScriptId scriptId, const sol::protected_function& fn, Args&&... args);
++            ScriptId scriptId, const sol::basic_protected_function<Ref, Aligned, HandlerRef>& fn, Args&&... args);
+ 
+         sol::function loadScriptAndCache(const VFS::Path::Normalized& path);
+         static void countHook(lua_State* state, lua_Debug* ar);
+@@ -252,8 +252,12 @@ namespace LuaUtil
+     }
+ 
+     // Lua must be initialized through LuaUtil::LuaState, otherwise this function will segfault.
+-    template <typename... Args>
+-    sol::protected_function_result call(ScriptId scriptId, const sol::protected_function& fn, Args&&... args)
++    // Takes any protected function type as it is: a main_protected_function passed to a
++    // const sol::protected_function& would be converted on every call (two registry refs and a
++    // lookup of the default handler by name).
++    template <typename Ref, bool Aligned, typename HandlerRef, typename... Args>
++    sol::protected_function_result call(
++        ScriptId scriptId, const sol::basic_protected_function<Ref, Aligned, HandlerRef>& fn, Args&&... args)
+     {
+         LuaState* luaState = nullptr;
+         if (LuaState::sProfilerEnabled && scriptId.mContainer)
+@@ -283,6 +287,12 @@ namespace LuaUtil
+         }
+     }
+ 
++    template <typename... Args>
++    sol::protected_function_result call(ScriptId scriptId, const sol::protected_function& fn, Args&&... args)
++    {
++        return call<sol::reference, false, sol::reference>(scriptId, fn, std::forward<Args>(args)...);
++    }
++
+     // work around for a (likely) sol3 bug
+     // when the index meta method throws, simply calling table.get crashes instead of re-throwing the error
+     template <class Key>
+diff --git a/components/lua/scriptscontainer.cpp b/components/lua/scriptscontainer.cpp
+index 851d0426df..e3508f06f0 100644
+--- a/components/lua/scriptscontainer.cpp
++++ b/components/lua/scriptscontainer.cpp
+@@ -340,7 +340,7 @@ namespace LuaUtil
+             pos--;
+         }
+         list[pos].mScriptId = scriptId;
+-        list[pos].mFn = std::move(fn);
++        list[pos].mFn = sol::main_protected_function(std::move(fn));
+     }
+ 
+     void ScriptsContainer::removeHandler(std::vector<Handler>& list, int scriptId)
+diff --git a/components/lua/scriptscontainer.hpp b/components/lua/scriptscontainer.hpp
+index 761f071fce..3b022e8aca 100644
+--- a/components/lua/scriptscontainer.hpp
++++ b/components/lua/scriptscontainer.hpp
+@@ -218,7 +218,8 @@ namespace LuaUtil
+         struct Handler
+         {
+             int mScriptId;
+-            sol::main_function mFn;
++            // protected already, so LuaUtil::call does not convert it on every call
++            sol::main_protected_function mFn;
+         };
+ 
+         struct EngineHandlerList
+-- 
+2.43.0
