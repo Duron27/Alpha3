@@ -54,6 +54,10 @@
 
 #include "buildid.hpp"
 
+#ifdef __ANDROID__
+#include "vulkan/device.hpp"
+#endif
+
 namespace Alpha3
 {
     namespace
@@ -448,6 +452,7 @@ namespace Alpha3
             void glInfo(const osg::GLExtensions& extensions, std::string vendor, std::string renderer, std::string version)
             {
                 std::lock_guard lock(mGlMutex);
+                mGlVersion = version;
                 mGl = "{\"vendor\": " + jsonString(vendor) + ", \"renderer\": " + jsonString(renderer)
                     + ", \"version\": " + jsonString(version) + ", \"gles\": " + (extensions.isOpenGLES ? "true" : "false")
                     + ", \"timer queries\": "
@@ -809,6 +814,7 @@ namespace Alpha3
                 std::snprintf(line, sizeof line, "fly-through %s  build %s  %s %s\n", route.mName, ALPHA3_BUILD_COMMIT,
                     property("ro.product.manufacturer").c_str(), property("ro.product.model").c_str());
                 table += line;
+                table += "renderer: " + rendererName() + "\n";
                 table += compare ? "             fps   p50 ms  p99 ms  max ms  GPU ms |  then  change\n"
                                  : "             fps   p50 ms  p99 ms  max ms  GPU ms\n";
                 const auto row = [&](const std::string& name, double mean, double p50, double p99, double max, double gpu) {
@@ -1066,6 +1072,7 @@ namespace Alpha3
                 }
                 const char* envs[] = { "OSG_USE_ZINK", "OPENMW_FRAMEGEN", "OPENMW_GLES_VERSION", "OPENMW_DISABLE_SPIRV",
                     "OSG_USE_ANGLE", "OSG_USE_VULKAN" };
+                h << "  \"renderer\": " << jsonString(rendererName()) << ",\n";
                 h << "  \"environment\": {";
                 bool first = true;
                 for (const char* e : envs)
@@ -1456,6 +1463,36 @@ namespace Alpha3
 
             std::mutex mGlMutex, mCameraMutex;
             std::string mGl;
+            std::string mGlVersion; // GL_VERSION, as the driver gave it
+
+            // What drew the run, for the results' "renderer:" line: "Vulkan 1.1 (Adreno (TM) 640)" (a custom driver
+            // names itself in the device name, "Turnip Adreno (TM) 640"), "OpenGL ES 3.2", "OpenGL on Vulkan (Zink)"
+            std::string rendererName()
+            {
+#ifdef __ANDROID__
+                if (usesVulkan())
+                {
+                    std::string name = "Vulkan";
+                    if (const Vk::Device* device = Vk::device())
+                        name += " " + std::to_string(VK_API_VERSION_MAJOR(device->mApiVersion)) + "."
+                            + std::to_string(VK_API_VERSION_MINOR(device->mApiVersion)) + " ("
+                            + device->mProperties.deviceName + ")";
+                    return name;
+                }
+                if (usesZink())
+                    return "OpenGL on Vulkan (Zink)";
+#endif
+                std::lock_guard lock(mGlMutex);
+                // "OpenGL ES 3.2 V@0502.0 (GIT@...)": the API and its version, without the driver's build
+                std::string version = mGlVersion;
+                const std::size_t es = version.find("OpenGL ES ");
+                if (es != std::string::npos)
+                {
+                    const std::size_t end = version.find(' ', es + 10);
+                    version = version.substr(es, end == std::string::npos ? std::string::npos : end - es);
+                }
+                return version.empty() ? std::string("OpenGL") : version;
+            }
             osg::observer_ptr<osg::Camera> mScene;
             std::atomic<bool> mCameraSeen{ false };
             std::atomic<bool> mAsk{ false };

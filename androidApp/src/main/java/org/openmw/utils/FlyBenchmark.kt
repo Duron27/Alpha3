@@ -88,11 +88,14 @@ object FlyBenchmark {
     private fun vanillaConfig(openmwCfg: File): String? {
         fun value(line: String) = line.substringAfter("=").trim().removeSurrounding("\"")
         var baseFound = false
+        var baseFiles: Array<File>? = null
         val kept = openmwCfg.readLines().filter { raw ->
             val line = raw.trim()
             val key = line.substringBefore("=", "").trim()
             when (key) {
-                "data" -> File(value(line)).listFiles()?.any { it.name.equals("Morrowind.esm", true) }.also {
+                "data" -> File(value(line)).listFiles().also { files ->
+                    if (files?.any { it.name.equals("Morrowind.esm", true) } == true && baseFiles == null) baseFiles = files
+                }?.any { it.name.equals("Morrowind.esm", true) }.also {
                     if (it == true) baseFound = true
                 } == true
                 "data-local", "groundcover" -> false
@@ -101,7 +104,18 @@ object FlyBenchmark {
                 else -> true
             }
         }
-        return if (baseFound) kept.joinToString("\n", postfix = "\n") else null
+        if (!baseFound) return null
+        // the vanilla archives in the base data folder, where the player's openmw.cfg does not list them (an older
+        // launcher's config has no fallback-archive lines: without them every mesh and texture is missing). Only
+        // archives that are there, and an expansion's only when its .esm is in the content list. The player's own
+        // openmw.cfg (the ini importer's) is only read; this goes into the benchmark profile's copy.
+        val listed = kept.filter { it.trim().startsWith("fallback-archive") }.map { value(it).lowercase() }.toSet()
+        val content = kept.filter { it.trim().startsWith("content") }.map { value(it).lowercase() }.toSet()
+        val missing = listOf("Morrowind.bsa", "Tribunal.bsa", "Bloodmoon.bsa").filter { name ->
+            name.lowercase() !in listed && baseFiles?.any { it.name.equals(name, true) } == true &&
+                name.lowercase().replace(".bsa", ".esm") in content
+        }.map { name -> "fallback-archive=" + baseFiles!!.first { it.name.equals(name, true) }.name }
+        return (missing + kept).joinToString("\n", postfix = "\n")
     }
 
     @Volatile

@@ -68,7 +68,7 @@ namespace Alpha3::Vk
         }
 
         // 1.2, else 1.1, else 1.0: the highest of the three the loader takes (a 1.0 loader refuses any apiVersion
-        // above 1.0 with VK_ERROR_INCOMPATIBLE_DRIVER; a later one takes any)
+        // above 1.0 with VK_ERROR_INCOMPATIBLE_DRIVER; a later one takes any, whatever its own version)
         VkInstance createInstance(bool quiet, uint32_t* version = nullptr)
         {
             if (!loadGlobal())
@@ -98,7 +98,9 @@ namespace Alpha3::Vk
             VkResult result = VK_ERROR_INCOMPATIBLE_DRIVER;
             for (uint32_t tried : { VK_API_VERSION_1_2, VK_API_VERSION_1_1, VK_API_VERSION_1_0 })
             {
-                if (tried > loader && tried != VK_API_VERSION_1_0)
+                // a 1.0 loader refuses any apiVersion above 1.0; a 1.1 or later one takes any, and the device's own
+                // version decides what the device gets (Samsung's Android 12 loader says 1.1 while Turnip has 1.3)
+                if (loader < VK_API_VERSION_1_1 && tried != VK_API_VERSION_1_0)
                     continue;
                 app.apiVersion = tried;
                 VkInstance instance = VK_NULL_HANDLE;

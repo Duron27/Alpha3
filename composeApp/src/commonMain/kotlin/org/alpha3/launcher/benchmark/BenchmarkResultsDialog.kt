@@ -44,6 +44,7 @@ fun BenchmarkResultsHost() {
     val file = result ?: return
     val fps = remember(file) { FlyTuning.overallFps(file) }
     val table = remember(file) { FlyTuning.table(file) }
+    val renderer = remember(file) { FlyTuning.renderer(file) }
     val chosen = remember { mutableStateMapOf<String, String>().apply { putAll(FlyTuning.loadTuning()) } }
     var note by remember { mutableStateOf<String?>(null) }
 
@@ -61,6 +62,7 @@ fun BenchmarkResultsHost() {
                     fps?.let { "${(it * 10).toInt() / 10.0} fps average" } ?: "No frames measured",
                     fontSize = 30.sp, fontWeight = FontWeight.Bold, color = Color(0xFFCAA560)
                 )
+                renderer?.let { Text(it, fontSize = 16.sp, fontWeight = FontWeight.SemiBold) }
                 Text(
                     if (chosen.isEmpty()) "Fixed benchmark settings" else "With ${chosen.size} setting(s) changed",
                     fontSize = 12.sp, color = Color.White.copy(alpha = 0.7f)

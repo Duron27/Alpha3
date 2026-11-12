@@ -88,6 +88,11 @@ object FlyTuning {
         result.readText().lines().firstOrNull { it.startsWith("data\toverall\t") }?.substringAfterLast('\t')?.toDoubleOrNull()
     }.getOrNull()
 
+    /** What drew the run ("Vulkan 1.1 (Adreno (TM) 640)", "OpenGL ES 3.2"): its .txt's renderer line; null in older results. */
+    fun renderer(result: File): String? = runCatching {
+        result.readText().lines().firstOrNull { it.startsWith("renderer: ") }?.removePrefix("renderer: ")?.trim()
+    }.getOrNull()?.takeIf { it.isNotEmpty() }
+
     /** The table part of a run's .txt (without its data lines). */
     fun table(result: File): String = runCatching {
         result.readText().lines().filterNot { it.startsWith("data\t") }.joinToString("\n").trim()
