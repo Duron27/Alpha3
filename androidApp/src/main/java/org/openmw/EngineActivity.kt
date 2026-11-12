@@ -172,7 +172,12 @@ class EngineActivity : SDLActivity() {
     @SuppressLint("ClickableViewAccessibility")
     override fun onCreate(savedInstanceState: Bundle?) {
         org.openmw.utils.FlyBenchmark.running = intent?.getStringExtra(org.openmw.utils.FlyBenchmark.EXTRA_ROUTE) != null
-        if (org.openmw.utils.FlyBenchmark.running) org.openmw.utils.FlyBenchmark.returnToLauncherWhenDone(this)
+        if (org.openmw.utils.FlyBenchmark.running) {
+            // the fixed settings, whoever started the run (the launcher's Run writes them too)
+            org.openmw.utils.FlyBenchmark.prepare(this, org.alpha3.launcher.benchmark.FlyTuning.loadTuning())
+                ?.let { android.util.Log.e("Alpha3", "Benchmark: $it") }
+            org.openmw.utils.FlyBenchmark.returnToLauncherWhenDone(this)
+        }
 
         enableEdgeToEdge()
         runCatching {

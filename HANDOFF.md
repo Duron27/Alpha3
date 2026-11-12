@@ -669,3 +669,31 @@ path), 6 needs a device with ray queries:
 Multiview for the point shadow faces was considered and set aside (2026-11-11): the receiving costs more than the
 faces, multiview draws all six faces at once (more GPU work than 2 faces a frame), and it needs a texture array the
 GLES path does not read. Culling once per light (a sphere) instead of per face would help both renderers.
+
+## Texture upscaler (2026-11-12)
+
+`[Textures] texture upscale = true` makes textures (up to `texture upscale max size`, 1024: every vanilla texture)
+twice as large while they are converted: DXT is decoded, upscaled, encoded to ASTC (or ETC2) and cached in
+`astc_cache.bin`, in one pass (`support/src/textureconversion.cpp`). It turns texture conversion on by itself, also on a
+GPU that samples DXT (`hooks.cpp prepareDxtForGpu`). Only the largest mip level is new; the levels below are the
+texture's own. Normal maps are left alone. Texture streaming's small stand-ins are not upscaled (`NoTextureUpscale`).
+The fly-through benchmark always has it off.
+
+- `texture upscale method = easu`: FSR 1 EASU on the CPU (the GPU render-scale's algorithm), then RCAS
+  (`texture upscale sharpening`, 0.25). Scored against the HD texture packs it is only a little better than bilinear:
+  a filter sharpens edges but cannot add the detail the packs invent.
+- `texture upscale method = ai` (default): `support/src/aiupscale.cpp`, a small convolutional model (Real-ESRGAN's
+  compact shape, 32 channels x 8 convolutions, ~79k weights compiled in from `aiupscale_weights.hpp`), run on the CPU
+  in 64 px tiles across all cores, borders wrapped (textures repeat). Matches PyTorch to 1/255. About 200 ms per 256 px
+  texture on the Note 10+ (Snapdragon 855). **The committed weights file is empty** (`AI_UPSCALE_AVAILABLE 0`), so `ai`
+  falls back to `easu`: no model has been trained yet on data that may be shipped. Everything we add is for the public
+  release; see the memory rule. Notes on the local experiments are outside the repo, in `~/alpha3-upscaler-local/`.
+- Training: `support/upscaler-training/` (scripts and README).
+- Next: train on shippable data (CC0 textures from Poly Haven or ambientCG, shrunk and DXT compressed to look like
+  Morrowind's, the originals as targets), add a perceptual loss so it adds fine grain, then export into
+  `aiupscale_weights.hpp`. Later: run it with Vulkan compute (10x or more faster than the CPU).
+- Phone for testing: Galaxy Note 10+ (SM-N975W, serial RF8N124YRQX, Adreno 640), set to Vulkan with Turnip. Its active
+  profile is total-overhaul (a large mod list); the Default profile is vanilla only.
+
+Also in this change: `FlyBenchmark.prepare` writes the benchmark's fixed settings every time EngineActivity starts on a
+route, so a run started over adb (or any other way) cannot use whatever was left in `benchmarks/profile`.

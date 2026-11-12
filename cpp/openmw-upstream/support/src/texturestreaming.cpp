@@ -223,8 +223,11 @@ namespace Alpha3
                 osg::ref_ptr<osg::Image> small = withoutTopLevels(image, streamingSettings().mStartSize);
                 if (!small)
                     return nullptr;
-                if (osg::ref_ptr<osg::Image> prepared = prepare(*small))
-                    small = prepared;
+                {
+                    const NoTextureUpscale noUpscale; // the stand-in at its own size: see drawableAdded
+                    if (osg::ref_ptr<osg::Image> prepared = prepare(*small))
+                        small = prepared;
+                }
 
                 std::lock_guard lock(mMutex);
                 if (mStopped)

@@ -9,6 +9,7 @@
 #include <istream>
 #include <string>
 #include <string_view>
+#include <cstdint>
 #include <vector>
 
 #include <osg/BoundingBox>
@@ -89,6 +90,14 @@ namespace Alpha3
     // ---- textureconversion.cpp / bcdecode.cpp
     bool textureConversionUsesEtc2();
     bool textureConversionEnabled();
+    // [Textures] texture upscale: DXT textures are converted (and upscaled) even on a GPU that can sample DXT
+    bool textureUpscaleEnabled();
+    // The AI texture upscaler (aiupscale.cpp): rgba (w x h, RGBA8) at twice the size into dst
+    void aiUpscale2x(const std::vector<uint8_t>& src, int w, int h, std::vector<uint8_t>& dst, unsigned threads);
+    // changes with the model's weights, so the cache converts again when they do
+    const char* aiUpscaleVersion();
+    // false when the build has no model (aiupscale_weights.hpp is the empty one): texture upscale uses EASU then
+    bool aiUpscaleAvailable();
     // since the process started; the launcher's pre-pass (texconv/) reports them
     struct TextureConversionCounts
     {
@@ -96,6 +105,15 @@ namespace Alpha3
     };
     TextureConversionCounts textureConversionCounts();
     osg::ref_ptr<osg::Image> transcodeDxt(const osg::Image& image, std::string_view name);
+    // While one is alive, this thread's conversions are not upscaled ([Textures] texture upscale): texture streaming's
+    // small stand-in images, which are swapped for the full one once it is drawn up close
+    struct NoTextureUpscale
+    {
+        NoTextureUpscale();
+        ~NoTextureUpscale();
+        NoTextureUpscale(const NoTextureUpscale&) = delete;
+        NoTextureUpscale& operator=(const NoTextureUpscale&) = delete;
+    };
     osg::ref_ptr<osg::Image> decodeS3tc(const osg::Image& image);
 
     // ---- framepacing.cpp: the swap of an OpenGL ES window (Swappy), and the frame times for the launcher's overlay

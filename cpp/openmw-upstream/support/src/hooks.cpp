@@ -134,7 +134,8 @@ namespace Alpha3
         osg::ref_ptr<osg::Image> prepareDxtForGpu(osg::Image& image)
         {
             const osg::GLExtensions* gl = osg::GLExtensions::Get(0, false);
-            if (gl == nullptr || gl->isTextureCompressionS3TCSupported)
+            // a GPU that samples DXT takes it as it is, unless the textures are upscaled (on the way to ASTC or ETC2)
+            if (gl == nullptr || (gl->isTextureCompressionS3TCSupported && !textureUpscaleEnabled()))
                 return nullptr;
 
             // ASTC textures need a GPU that can sample ASTC; ETC2 is part of OpenGL ES 3

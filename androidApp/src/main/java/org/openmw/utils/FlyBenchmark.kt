@@ -38,6 +38,25 @@ object FlyBenchmark {
     /** Starts the game on [route]; null when started, otherwise why it could not be. */
     @OptIn(InternalCoroutinesApi::class)
     fun start(context: Context, route: String = "vivec", tuning: Map<String, String> = emptyMap()): String? {
+        prepare(context, tuning)?.let { return it }
+        context.startActivity(Intent(context, EngineActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            putExtra(EXTRA_ROUTE, route)
+            // a new game without character creation, in an exterior: the benchmark takes the player to the route
+            putExtra("omw_args", "--skip-menu --start \"Seyda Neen\"")
+        })
+        (context as? Activity)?.finish()
+        return null
+    }
+
+    /**
+     * Writes the benchmark's own config folder: the same for everyone. Called by [start], and again by EngineActivity
+     * whenever it is started on a route, so a run started any other way (over adb, by a shortcut) cannot pick up
+     * whatever was left in the folder. [tuning] is the tuning loop's chosen changes (FlyTuning). Null when written,
+     * otherwise why it could not be.
+     */
+    @OptIn(InternalCoroutinesApi::class)
+    fun prepare(context: Context, tuning: Map<String, String>): String? {
         val openmwCfg = File(OpenMWPaths.USER_OPENMW_CFG)
         if (!openmwCfg.isFile) return "No openmw.cfg: set up the game first"
         val dir = File(folder).apply { mkdirs() }
@@ -57,6 +76,8 @@ object FlyBenchmark {
         val own = readSettings(File(OpenMWPaths.SETTINGS_FILE))
         for (key in listOf("Textures/enable texture conversion", "Textures/astc cache path", "Textures/astc block size per texture"))
             own[key]?.let { values[key] = it }
+        // the texture upscaler changes how every texture looks and loads: never in the benchmark
+        values["Textures/texture upscale"] = "false"
         values.putAll(FlyTuning.settingValues(tuning, width, height))
         var section = ""
         settings.writeText(settings.readLines().joinToString("\n", postfix = "\n") { line ->
@@ -66,14 +87,6 @@ object FlyBenchmark {
             val value = if (key.isNotEmpty() && !trimmed.startsWith("#")) values["$section/$key"] else null
             if (value != null) "$key = $value" else line
         })
-
-        context.startActivity(Intent(context, EngineActivity::class.java).apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            putExtra(EXTRA_ROUTE, route)
-            // a new game without character creation, in an exterior: the benchmark takes the player to the route
-            putExtra("omw_args", "--skip-menu --start \"Seyda Neen\"")
-        })
-        (context as? Activity)?.finish()
         return null
     }
 

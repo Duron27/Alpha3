@@ -49,6 +49,12 @@ namespace Alpha3
             int testSize = 256;
             float quality = ASTCENC_PRE_FAST;
             int maxSize = 4096;
+            // [Textures] texture upscale: textures at most upscaleMax across are made twice as large (easu2x) before
+            // they are encoded, and sharpened by upscaleSharpening (rcas, 0 none)
+            bool upscale = false;
+            bool upscaleAi = true; // [Textures] texture upscale method: ai (aiupscale.cpp), else easu
+            int upscaleMax = 1024;
+            float upscaleSharpening = 0.25f;
             unsigned threads = 1;
             GLenum internalFormat = GL_COMPRESSED_RGBA_ASTC_6x6_KHR;
             std::filesystem::path dir;
@@ -79,7 +85,9 @@ namespace Alpha3
         {
             static const Settings s = [] {
                 Settings r;
-                r.enabled = settingBool("Textures", "enable texture conversion", false);
+                // texture upscale goes through the conversion (decoded, upscaled, encoded, cached): it turns it on too
+                r.upscale = settingBool("Textures", "texture upscale", false);
+                r.enabled = settingBool("Textures", "enable texture conversion", false) || r.upscale;
                 r.etc2 = setting("Textures", "texture conversion format", "astc") == "etc2";
                 unsigned x = 0, y = 0;
                 if (sscanf(setting("Textures", "astc block size", "6x6").c_str(), "%ux%u", &x, &y) == 2
@@ -110,6 +118,9 @@ namespace Alpha3
                 }
                 r.quality = std::clamp(settingFloat("Textures", "astc quality", 10.f), 0.f, 100.f);
                 r.maxSize = std::clamp(settingInt("Textures", "astc max size", 4096), 64, 16384);
+                r.upscaleAi = setting("Textures", "texture upscale method", "ai") != "easu" && aiUpscaleAvailable();
+                r.upscaleMax = std::clamp(settingInt("Textures", "texture upscale max size", 1024), 4, 8192);
+                r.upscaleSharpening = std::clamp(settingFloat("Textures", "texture upscale sharpening", 0.25f), 0.f, 1.f);
                 const unsigned cores = std::max(1u, std::thread::hardware_concurrency());
                 const int wanted = std::clamp(settingInt("Textures", "astc threads", 0), 0, 64);
                 r.threads = wanted > 0 ? static_cast<unsigned>(wanted) : cores;
@@ -124,6 +135,11 @@ namespace Alpha3
                 if (r.perTexture)
                     r.tag += "auto" + std::to_string(static_cast<int>(r.targetScore * 10)) + "c" + candidates + "t"
                         + std::to_string(r.testSize);
+                // upscaled textures are their own cache entries too
+                if (r.upscale)
+                    r.tag += r.upscaleAi ? "ai" + std::string(aiUpscaleVersion()) + "m" + std::to_string(r.upscaleMax)
+                                         : "up" + std::to_string(r.upscaleMax) + "s"
+                            + std::to_string(static_cast<int>(r.upscaleSharpening * 100));
                 if (r.enabled)
                 {
                     std::error_code ec;
@@ -156,6 +172,12 @@ namespace Alpha3
                                      << r.blockX << "x" << r.blockY << ", quality " << r.quality << ", " << r.threads
                                      << " threads, textures larger than " << r.maxSize
                                      << " px start at a smaller mip level, cache " << r.dir.string();
+                if (r.upscale)
+                    Log(Debug::Info) << "Texture upscale on: textures at most " << r.upscaleMax
+                                     << " px across made twice the size ("
+                                     << (r.upscaleAi ? std::string("AI upscaler ") + aiUpscaleVersion()
+                                                     : "FSR 1 EASU, sharpening " + std::to_string(r.upscaleSharpening))
+                                     << "); normal maps as they are";
                 return r;
             }();
             return s;
@@ -371,6 +393,177 @@ namespace Alpha3
             rgba.resize(static_cast<size_t>(cw) * ch * 4);
         }
 
+        // ---- upscaling ---------------------------------------------------------------------------------------------
+
+        // Rows [0, rows) split between up to threads threads, the calling one among them
+        template <class F>
+        void inRows(int rows, unsigned threads, F&& work)
+        {
+            const unsigned chunks = std::max(1u, std::min<unsigned>(threads, static_cast<unsigned>(rows / 16 + 1)));
+            std::vector<std::thread> helpers;
+            for (unsigned i = 1; i < chunks; ++i)
+                helpers.emplace_back(work, static_cast<int>(rows * i / chunks), static_cast<int>(rows * (i + 1) / chunks));
+            work(0, static_cast<int>(rows / chunks));
+            for (std::thread& helper : helpers)
+                helper.join();
+        }
+
+        // FSR 1 EASU (AMD FidelityFX, MIT licence; the same as experimental/upscale.glsl's) on the CPU at twice the size:
+        // each new pixel is a Lanczos-like blend of the 12 nearest texels, stretched along the edge the luma there
+        // follows, so edges stay sharp instead of blurring like a bilinear upscale. Alpha takes the same weights. The
+        // result is held to the nearest four texels' range (no ringing). Textures repeat, so the taps wrap around.
+        void easu2x(const std::vector<uint8_t>& src, int w, int h, std::vector<uint8_t>& dst, unsigned threads)
+        {
+            const int ow = w * 2, oh = h * 2;
+            dst.resize(static_cast<size_t>(ow) * oh * 4);
+            std::vector<float> luma(static_cast<size_t>(w) * h);
+            for (size_t i = 0; i < luma.size(); ++i)
+                luma[i] = (src[i * 4 + 1] + 0.5f * (src[i * 4] + src[i * 4 + 2])) * (1.f / 255.f);
+            auto wrap = [](int v, int size) { v %= size; return v < 0 ? v + size : v; };
+            // one of the four nearest texels' share of the edge's direction and length: A above, B left, C itself,
+            // D right, E below
+            auto set = [](float& dx, float& dy, float& len, float weight, float lA, float lB, float lC, float lD, float lE) {
+                float lenX = std::max(std::abs(lD - lC), std::abs(lC - lB));
+                const float dirX = lD - lB;
+                dx += dirX * weight;
+                lenX = std::clamp(std::abs(dirX) / std::max(lenX, 1e-5f), 0.f, 1.f);
+                len += lenX * lenX * weight;
+                float lenY = std::max(std::abs(lE - lC), std::abs(lC - lA));
+                const float dirY = lE - lA;
+                dy += dirY * weight;
+                lenY = std::clamp(std::abs(dirY) / std::max(lenY, 1e-5f), 0.f, 1.f);
+                len += lenY * lenY * weight;
+            };
+            //     b c
+            //   e F G h
+            //   i J K l
+            //     n o      (F at the floor of the source position)
+            static const int taps[12][2] = { { 0, -1 }, { 1, -1 }, { -1, 0 }, { 0, 0 }, { 1, 0 }, { 2, 0 }, { -1, 1 },
+                { 0, 1 }, { 1, 1 }, { 2, 1 }, { 0, 2 }, { 1, 2 } };
+            enum { B, C, E, F, G, H, I, J, K, L, N, O };
+            inRows(oh, threads, [&](int y0, int y1) {
+                for (int oy = y0; oy < y1; ++oy)
+                {
+                    const float py = oy * 0.5f - 0.25f;
+                    const int fy = static_cast<int>(std::floor(py));
+                    const float ty = py - fy;
+                    int rows[4];
+                    for (int r = 0; r < 4; ++r)
+                        rows[r] = wrap(fy - 1 + r, h) * w;
+                    for (int ox = 0; ox < ow; ++ox)
+                    {
+                        const float px = ox * 0.5f - 0.25f;
+                        const int fx = static_cast<int>(std::floor(px));
+                        const float tx = px - fx;
+                        int cols[4];
+                        for (int c = 0; c < 4; ++c)
+                            cols[c] = wrap(fx - 1 + c, w);
+                        size_t at[12];
+                        float l[12];
+                        for (int t = 0; t < 12; ++t)
+                        {
+                            at[t] = static_cast<size_t>(rows[taps[t][1] + 1] + cols[taps[t][0] + 1]);
+                            l[t] = luma[at[t]];
+                        }
+                        float dx = 0.f, dy = 0.f, len = 0.f;
+                        set(dx, dy, len, (1.f - tx) * (1.f - ty), l[B], l[E], l[F], l[G], l[J]);
+                        set(dx, dy, len, tx * (1.f - ty), l[C], l[F], l[G], l[H], l[K]);
+                        set(dx, dy, len, (1.f - tx) * ty, l[F], l[I], l[J], l[K], l[N]);
+                        set(dx, dy, len, tx * ty, l[G], l[J], l[K], l[L], l[O]);
+                        const float dirR = dx * dx + dy * dy;
+                        if (dirR < 1.f / 32768.f)
+                        {
+                            dx = 1.f;
+                            dy = 0.f;
+                        }
+                        else
+                        {
+                            const float inv = 1.f / std::sqrt(dirR);
+                            dx *= inv;
+                            dy *= inv;
+                        }
+                        len *= 0.5f;
+                        len *= len;
+                        const float stretch = (dx * dx + dy * dy) / std::max(std::abs(dx), std::abs(dy));
+                        const float lenX = 1.f + (stretch - 1.f) * len, lenY = 1.f - 0.5f * len;
+                        const float lob = 0.5f + (1.f / 4.f - 0.04f - 0.5f) * len;
+                        const float clp = 1.f / lob;
+                        float sum[4] = { 0.f, 0.f, 0.f, 0.f }, total = 0.f;
+                        for (int t = 0; t < 12; ++t)
+                        {
+                            const float offX = taps[t][0] - tx, offY = taps[t][1] - ty;
+                            const float vx = (offX * dx + offY * dy) * lenX, vy = (offX * -dy + offY * dx) * lenY;
+                            const float d2 = std::min(vx * vx + vy * vy, clp);
+                            float wB = 0.4f * d2 - 1.f, wA = lob * d2 - 1.f;
+                            wB *= wB;
+                            wA *= wA;
+                            const float weight = (1.5625f * wB - 0.5625f) * wA;
+                            const uint8_t* texel = &src[at[t] * 4];
+                            for (int c = 0; c < 4; ++c)
+                                sum[c] += texel[c] * weight;
+                            total += weight;
+                        }
+                        uint8_t* out = &dst[(static_cast<size_t>(oy) * ow + ox) * 4];
+                        for (int c = 0; c < 4; ++c)
+                        {
+                            const uint8_t f = src[at[F] * 4 + c], g = src[at[G] * 4 + c], j = src[at[J] * 4 + c],
+                                          k = src[at[K] * 4 + c];
+                            const float lo = std::min(std::min(f, g), std::min(j, k));
+                            const float hi = std::max(std::max(f, g), std::max(j, k));
+                            const float v = std::clamp(sum[c] / std::max(total, 1e-5f), lo, hi);
+                            out[c] = static_cast<uint8_t>(v + 0.5f);
+                        }
+                    }
+                }
+            });
+        }
+
+        // FSR 1 RCAS (AMD FidelityFX, MIT licence) on the colour: sharpens each pixel against its four neighbours by as
+        // much as their range allows without clipping. amount 1 is RCAS at its strongest, 0 none. Alpha is kept.
+        void rcas(std::vector<uint8_t>& img, int w, int h, float amount, unsigned threads)
+        {
+            if (amount <= 0.f)
+                return;
+            const std::vector<uint8_t> src(img);
+            auto wrap = [](int v, int size) { v %= size; return v < 0 ? v + size : v; };
+            inRows(h, threads, [&](int y0, int y1) {
+                for (int y = y0; y < y1; ++y)
+                {
+                    const size_t up = static_cast<size_t>(wrap(y - 1, h)) * w, row = static_cast<size_t>(y) * w,
+                                 down = static_cast<size_t>(wrap(y + 1, h)) * w;
+                    for (int x = 0; x < w; ++x)
+                    {
+                        const size_t left = static_cast<size_t>(wrap(x - 1, w)), right = static_cast<size_t>(wrap(x + 1, w));
+                        const uint8_t* n[4] = { &src[(up + x) * 4], &src[(row + left) * 4], &src[(row + right) * 4],
+                            &src[(down + x) * 4] };
+                        const uint8_t* e = &src[(row + x) * 4];
+                        float lobe = -1.f;
+                        for (int c = 0; c < 3; ++c)
+                        {
+                            float mn = 1.f, mx = 0.f;
+                            for (const uint8_t* p : n)
+                            {
+                                mn = std::min(mn, p[c] * (1.f / 255.f));
+                                mx = std::max(mx, p[c] * (1.f / 255.f));
+                            }
+                            // as RCAS: the centre's own value counts towards the limits
+                            const float ec = e[c] * (1.f / 255.f);
+                            const float hitMin = mx > 0.f ? std::min(mn, ec) / (4.f * mx) : 0.f;
+                            const float hitMax = mn < 1.f ? (1.f - std::max(mx, ec)) / (4.f * mn - 4.f) : 0.f;
+                            lobe = std::max(lobe, std::max(-hitMin, hitMax));
+                        }
+                        lobe = std::max(-0.1875f, std::min(lobe, 0.f)) * amount;
+                        uint8_t* out = &img[(row + x) * 4];
+                        for (int c = 0; c < 3; ++c)
+                        {
+                            const float v = (lobe * (n[0][c] + n[1][c] + n[2][c] + n[3][c]) + e[c]) / (4.f * lobe + 1.f);
+                            out[c] = static_cast<uint8_t>(std::clamp(v, 0.f, 255.f) + 0.5f);
+                        }
+                    }
+                }
+            });
+        }
+
         // Normal maps keep the fixed block size: the score is for colour pictures, and a normal map's channels are
         // directions. OpenMW finds them by a suffix on the diffuse map's name ([Shaders] normal map pattern, "_n", and
         // "_nh" for a normal map with height in alpha).
@@ -386,6 +579,9 @@ namespace Alpha3
         }
 
         std::atomic<unsigned> sChosen[14]{};
+        std::atomic<unsigned> sUpscaled{ 0 };
+        thread_local int tlNoUpscale = 0;
+        std::atomic<uint64_t> sUpscaleMicros{ 0 };
         std::atomic<uint64_t> sScoreMicros{ 0 };
 
         unsigned blockIndex(Block block)
@@ -557,6 +753,9 @@ namespace Alpha3
                              << sSlow << " over 150 ms), " << hits << " loaded from the cache, " << sFailed
                              << " failed; " << src / (1024 * 1024) << " MB of DXT -> " << out / (1024 * 1024) << " MB of "
                              << format;
+            if (settings().upscale)
+                Log(Debug::Info) << format << " upscaled to twice the size: " << sUpscaled << " textures ("
+                                 << sUpscaleMicros / 1000 << " ms of it upscaling)";
             if (settings().perTexture)
             {
                 static const char* names[14] = { "4x4", "5x4", "5x5", "6x5", "6x6", "8x5", "8x6", "8x8", "10x5", "10x6",
@@ -610,6 +809,16 @@ namespace Alpha3
         }
     }
 
+    NoTextureUpscale::NoTextureUpscale()
+    {
+        ++tlNoUpscale;
+    }
+
+    NoTextureUpscale::~NoTextureUpscale()
+    {
+        --tlNoUpscale;
+    }
+
     bool textureConversionUsesEtc2()
     {
         return settings().etc2;
@@ -618,6 +827,11 @@ namespace Alpha3
     bool textureConversionEnabled()
     {
         return settings().enabled;
+    }
+
+    bool textureUpscaleEnabled()
+    {
+        return settings().enabled && settings().upscale;
     }
 
     TextureConversionCounts textureConversionCounts()
@@ -645,20 +859,27 @@ namespace Alpha3
         unsigned halvings = 0;
         while (std::max(srcW >> halvings, srcH >> halvings) > s.maxSize)
             ++halvings;
-        const int w = std::max(1, srcW >> halvings), h = std::max(1, srcH >> halvings);
+        // bw x bh: the texture as it is (its first level after the skipped and halved ones), w x h: as it is encoded,
+        // twice that when it is upscaled ([Textures] texture upscale). An upscaled texture's second level is the
+        // texture's own first, and so on: only the first level is made up, the ones below are the real texels.
+        const int bw = std::max(1, srcW >> halvings), bh = std::max(1, srcH >> halvings);
+        const bool normalMap = isNormalMap(path);
+        const unsigned up = s.upscale && tlNoUpscale == 0 && !normalMap && std::max(bw, bh) <= s.upscaleMax
+                && std::max(bw, bh) * 2 <= s.maxSize ? 1 : 0;
+        const int w = bw << up, h = bh << up;
         // Always the whole chain down to 1x1. The levels the DDS lacks (it has one level, or its mip data could not be
         // read, or the first level was halved) are made by halving the level above: OSG would otherwise ask for
         // glGenerateMipmap, which OpenGL ES refuses on compressed textures and leaves the texture incomplete.
         unsigned levels = 1;
         while (std::max(w >> levels, h >> levels) > 0)
             ++levels;
-        // the source levels that can be decoded as they are
+        // the source levels that can be decoded as they are (levels of bw x bh)
         const unsigned direct = halvings > 0 ? 0 : sourceLevels - skip;
         const size_t dxtBlock = (format == DXT1_RGB || format == DXT1_RGBA) ? 8 : 16;
         const bool alpha = format != DXT1_RGB;
         // With a block size per texture, the size of the converted texture is only known once its block is: from the
         // cache entry's header, or once chosen
-        const bool perTexture = s.perTexture && !isNormalMap(path);
+        const bool perTexture = s.perTexture && !normalMap;
         Block block{ s.blockX, s.blockY };
         GLenum internalFormat = 0;
         std::vector<uint32_t> sizes;
@@ -783,6 +1004,33 @@ namespace Alpha3
         }
 
         const auto start = std::chrono::steady_clock::now();
+        const unsigned threads = thermalThreads(s.threads);
+        // level sl of the texture as it is (bw x bh at 0), from the DDS
+        auto decodeSource = [&](unsigned sl, std::vector<uint8_t>& out) {
+            if (sl < direct)
+                decodeLevel(format, image.getMipmapData(skip + sl), std::max(1, bw >> sl), std::max(1, bh >> sl), out);
+            else
+            {
+                decodeLevel(format, image.getMipmapData(skip), srcW, srcH, out);
+                int cw = srcW, ch = srcH;
+                for (unsigned i = 0; i < halvings + sl; ++i)
+                    halve(out, cw, ch);
+            }
+        };
+        // the texture's first level at twice the size, from rgba (the level as it is)
+        std::vector<uint8_t> upscaled;
+        auto upscaleFirst = [&](const std::vector<uint8_t>& rgba) {
+            const auto upStart = std::chrono::steady_clock::now();
+            if (s.upscaleAi)
+                aiUpscale2x(rgba, bw, bh, upscaled, threads); // trained to its targets' sharpness: no sharpening after
+            else
+            {
+                easu2x(rgba, bw, bh, upscaled, threads);
+                rcas(upscaled, w, h, s.upscaleSharpening, threads);
+            }
+            sUpscaleMicros += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - upStart).count());
+        };
         std::vector<uint8_t> rgba;
         if (perTexture)
         {
@@ -791,16 +1039,14 @@ namespace Alpha3
             while (tl + 1 < levels && std::max(w >> tl, h >> tl) > s.testSize)
                 ++tl;
             const int tw = std::max(1, w >> tl), th = std::max(1, h >> tl);
-            if (tl < direct)
-                decodeLevel(format, image.getMipmapData(skip + tl), tw, th, rgba);
-            else
+            decodeSource(tl >= up ? tl - up : 0, rgba);
+            if (tl < up)
             {
-                decodeLevel(format, image.getMipmapData(skip), srcW, srcH, rgba);
-                int cw = srcW, ch = srcH;
-                for (unsigned i = 0; i < halvings + tl; ++i)
-                    halve(rgba, cw, ch);
+                upscaleFirst(rgba); // kept for the first level below
+                setLayout(chooseBlock(s, upscaled, tw, th, alpha));
             }
-            setLayout(chooseBlock(s, rgba, tw, th, alpha));
+            else
+                setLayout(chooseBlock(s, rgba, tw, th, alpha));
         }
         if (!s.etc2)
             ++sChosen[blockIndex(block)];
@@ -811,28 +1057,34 @@ namespace Alpha3
         for (unsigned l = 0; l < levels; ++l)
         {
             const int lw = std::max(1, w >> l), lh = std::max(1, h >> l);
-            if (l < direct)
-                decodeLevel(format, image.getMipmapData(skip + l), lw, lh, rgba);
-            else if (l == 0)
+            // the level of the texture as it is that this one is (an upscaled first level is made from level 0)
+            const unsigned sl = l >= up ? l - up : 0;
+            if (up && l == 1)
             {
-                decodeLevel(format, image.getMipmapData(skip), srcW, srcH, rgba);
-                int cw = srcW, ch = srcH;
-                for (unsigned i = 0; i < halvings; ++i)
-                    halve(rgba, cw, ch);
+                // rgba already holds level 0, which the first level was made from
             }
+            else if (sl < direct || sl == 0)
+                decodeSource(sl, rgba);
             else
             {
                 // rgba still holds the level above
-                int cw = std::max(1, w >> (l - 1)), ch = std::max(1, h >> (l - 1));
+                int cw = std::max(1, bw >> (sl - 1)), ch = std::max(1, bh >> (sl - 1));
                 halve(rgba, cw, ch);
             }
+            if (up && l == 0)
+            {
+                if (upscaled.empty())
+                    upscaleFirst(rgba);
+                ++sUpscaled;
+            }
+            std::vector<uint8_t>& pixels = up && l == 0 ? upscaled : rgba;
             if (s.etc2)
             {
-                encodeEtc2(rgba.data(), lw, lh, alpha, data.data() + offset, thermalThreads(s.threads));
+                encodeEtc2(pixels.data(), lw, lh, alpha, data.data() + offset, threads);
                 offset += sizes[l];
                 continue;
             }
-            if (!compressLevel(s, block, rgba.data(), lw, lh, data.data() + offset, sizes[l]))
+            if (!compressLevel(s, block, pixels.data(), lw, lh, data.data() + offset, sizes[l]))
             {
                 ++sFailed;
                 return nullptr;

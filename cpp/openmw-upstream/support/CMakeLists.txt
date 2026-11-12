@@ -121,6 +121,7 @@ set(ALPHA3_SUPPORT_SOURCES
     src/shaders.cpp
     src/textureconversion.cpp
     src/ssimulacra2.cpp
+    src/aiupscale.cpp
     src/texturepreload.cpp
     src/texturerelease.cpp
     src/meshsplitting.cpp
@@ -218,7 +219,7 @@ if (NOT ANDROID)
     # The launcher's texture pre-pass, as on Android below: libalpha3_texconv.dylib, which the build wraps as
     # libalpha3_texconv.framework. The launcher opens it at runtime and calls alpha3_texconv_run; only that and
     # alpha3_texconv_cancel are exported.
-    add_library(alpha3_texconv SHARED texconv/texconv.cpp src/textureconversion.cpp src/ssimulacra2.cpp src/blobstore.cpp)
+    add_library(alpha3_texconv SHARED texconv/texconv.cpp src/textureconversion.cpp src/ssimulacra2.cpp src/aiupscale.cpp src/blobstore.cpp)
     target_include_directories(alpha3_texconv BEFORE PRIVATE texconv/shim src)
     target_include_directories(alpha3_texconv PRIVATE ${OPENSCENEGRAPH_INCLUDE_DIRS})
     target_compile_options(alpha3_texconv PRIVATE -fvisibility=hidden -fvisibility-inlines-hidden)
@@ -255,7 +256,7 @@ endif()
 # libalpha3_texconv.so with a logcat stand-in for OpenMW's log (texconv/shim) and no other part of the engine. It is
 # loaded into the same process as the engine, so it keeps its OSG, libc++ and everything else to itself: only its JNI
 # functions are exported.
-add_library(alpha3_texconv SHARED texconv/texconv.cpp src/textureconversion.cpp src/ssimulacra2.cpp src/blobstore.cpp)
+add_library(alpha3_texconv SHARED texconv/texconv.cpp src/textureconversion.cpp src/ssimulacra2.cpp src/aiupscale.cpp src/blobstore.cpp)
 target_include_directories(alpha3_texconv BEFORE PRIVATE texconv/shim src)
 target_include_directories(alpha3_texconv PRIVATE ${OPENSCENEGRAPH_INCLUDE_DIRS})
 target_compile_options(alpha3_texconv PRIVATE -fvisibility=hidden -fvisibility-inlines-hidden)
@@ -271,3 +272,7 @@ target_link_libraries(alpha3_texconv PRIVATE
 )
 target_link_options(alpha3_texconv PRIVATE -static-libstdc++ -Wl,--exclude-libs,ALL -Wl,--gc-sections)
 set_target_properties(alpha3_texconv PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+
+# The AI texture upscaler's convolutions (src/aiupscale.cpp) vectorise well only at -O3; fast math lets them fuse
+# multiply-adds. About twice as fast as -O2 on the CPU.
+set_source_files_properties(src/aiupscale.cpp PROPERTIES COMPILE_OPTIONS "-O3;-ffast-math")
