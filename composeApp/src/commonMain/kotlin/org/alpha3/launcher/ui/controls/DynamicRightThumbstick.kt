@@ -12,7 +12,6 @@ import org.alpha3.launcher.resources.interact
 import org.alpha3.launcher.resources.options
 import org.alpha3.launcher.resources.virtual_right_thumbstick
 import org.alpha3.launcher.resources.Res
-import org.alpha3.launcher.utils.PlatformContext
 import org.alpha3.launcher.utils.Log
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.EnterTransition
@@ -123,7 +122,6 @@ import kotlin.math.roundToInt
 @OptIn(InternalCoroutinesApi::class)
 @Composable
 fun ResizableDraggableRightThumbstick(
-    context: PlatformContext,
     containerWidth: Float,
     containerHeight: Float
 ) {
@@ -567,7 +565,6 @@ fun ResizableDraggableRightThumbstick(
                                                 ) {
                                                     if (options) {
                                                         CustomIconPickerButton(
-                                                            context = context,
                                                             buttonId = 98,
                                                             buttonUri = buttonUri,
                                                             containerWidth = containerWidth,

@@ -105,6 +105,9 @@ namespace Alpha3
     void paceZinkPost();
     // a frame sent to the screen that the swap above did not send (Vulkan's generated frames), for the overlay's rate
     void noteShownFrame();
+    // The GPU's time for one frame (the Vulkan renderer's timestamps, ms): the HUD's GPU load where the device's own
+    // load counter cannot be read (omwGetGpuBusy)
+    void noteGpuFrameTime(double milliseconds);
 
     // ---- framegen.cpp: frame generation (OPENMW_FRAMEGEN, the launcher's switch), in the swap. Shows the drawn frame through
     // present (and generated ones between, each through present too); false when frame generation is off, and the caller

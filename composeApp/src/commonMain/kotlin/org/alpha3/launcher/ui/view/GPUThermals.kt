@@ -248,14 +248,18 @@ fun readProcessOutput(vararg command: String): String = SystemInfo.services.read
  * `cat`, which is a process per read and so only a last resort.
  */
 internal fun readSysfs(path: String): String {
+    if (path in unreadableNodes) return ""
     val file = File(path)
-    // a missing node: cat could not read it either, and a process per refresh is not free
-    if (!file.exists() || path in unreadableNodes) return ""
-    if (file.canRead()) {
+    // SELinux may refuse even the look at a node (Adreno's kgsl on LineageOS): "missing" is then only "not ours to see",
+    // which root still reads. A node really missing costs root one cat; without root nothing (no su: never tried again)
+    val exists = file.exists()
+    if (exists && file.canRead()) {
         runCatching { return file.readText().trim() }
     }
-    val text = runCatching { readProcessOutput("cat", path).trim() }.getOrDefault("")
-    // refused both ways (SELinux on some ROMs, whatever the file's mode says): not asked again, every refresh would
+    // cat is a process per read, and could not open what the app could not see either
+    val text = (if (exists) runCatching { readProcessOutput("cat", path).trim() }.getOrDefault("") else "")
+        .ifEmpty { runCatching { SystemInfo.services.readFileAsRoot(path).trim() }.getOrDefault("") }
+    // refused every way (SELinux on some ROMs, whatever the file's mode says): not asked again, every refresh would
     // start a process and log a denial
     if (text.isEmpty()) unreadableNodes += path
     return text
@@ -279,7 +283,7 @@ internal fun parseTempCelsius(raw: String): Double? {
 internal object HudSources {
     // Read, not only checked: canRead() looks at the file's mode alone, and SELinux can still refuse the read (LineageOS
     // denies apps the Adreno nodes). A node found unreadable here is not tried again on every refresh.
-    private fun readable(path: String) = File(path).exists() && readSysfs(path).isNotEmpty()
+    private fun readable(path: String) = readSysfs(path).isNotEmpty()
 
     /** The Adreno folder (/sys/class/kgsl/kgsl-3d0) when there is one. */
     val kgslDir: String? by lazy {
@@ -354,8 +358,11 @@ internal fun readGpuUtilization(): Int? {
         val total = parts[1].toDoubleOrNull() ?: return null
         return if (total > 0) ((busy / total) * 100).toInt().coerceIn(0, 100) else 0
     }
-    val file = HudSources.loadFile ?: return null
-    return Regex("\\d+").find(readSysfs(file))?.value?.toIntOrNull()?.coerceIn(0, 100)
+    HudSources.loadFile?.let { file ->
+        Regex("\\d+").find(readSysfs(file))?.value?.toIntOrNull()?.let { return it.coerceIn(0, 100) }
+    }
+    // no counter this app can read: the Vulkan renderer's own GPU time per second (-1 under OpenGL ES)
+    return UIStateManager.gpuBusyFromRenderer.value.takeIf { it >= 0 }
 }
 
 internal fun readGpuClockMhz(): Int? {

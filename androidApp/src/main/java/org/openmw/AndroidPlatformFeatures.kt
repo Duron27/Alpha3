@@ -71,6 +71,10 @@ class AndroidPlatformFeatures(private val app: Application) : PlatformFeatures()
         if (isFinish) host?.finish()
     }
 
+    override fun startFlyBenchmark(tuning: Map<String, String>): String? =
+        org.openmw.utils.FlyBenchmark.start(activity ?: app, tuning = tuning)
+    override fun nativeScreenSize(): Pair<Int, Int> = org.openmw.utils.FlyBenchmark.nativeSize(activity ?: app)
+
     override fun hasInternetConnection(): Boolean {
         val cm = app.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return false
         val network = cm.activeNetwork ?: return false

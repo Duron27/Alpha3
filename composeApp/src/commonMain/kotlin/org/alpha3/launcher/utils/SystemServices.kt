@@ -40,6 +40,12 @@ open class SystemServices {
     /** Runs a command and returns its output; used to read root-only sysfs nodes. */
     open fun readProcessOutput(vararg command: String): String = ""
 
+    /**
+     * A file read as root (on a rooted device, through one `su` shell kept open), for the GPU nodes SELinux keeps from
+     * apps; "" where there is no root or it was refused.
+     */
+    open fun readFileAsRoot(path: String): String = ""
+
     /** Whether [showMagnifier] does anything here (the experimental cursor magnifier). */
     open val canMagnify: Boolean = false
 

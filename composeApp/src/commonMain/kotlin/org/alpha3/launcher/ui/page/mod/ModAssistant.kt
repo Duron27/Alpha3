@@ -95,6 +95,9 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -255,6 +258,7 @@ private fun ModTabRow(
     val inSettingsGroup = selectedTabIndex in SETTINGS_TAB_BASE until SETTINGS_TAB_BASE + SettingsTab.entries.size
     var lastModsTab by remember { mutableStateOf(0) }
     if (!inSettingsGroup && selectedTabIndex in categories.indices) lastModsTab = selectedTabIndex
+    val compact = layoutType == NavigationSuiteType.NavigationBar
 
     fun openCategory(index: Int) {
         resetStates()
@@ -357,63 +361,70 @@ private fun ModTabRow(
                 }
             }
         }
+        // On a phone the tabs are icons, with only the selected one named, so they fit without a swipe.
+        @Composable
+        fun TabPill(selected: Boolean, icon: ImageVector, label: String, onClick: () -> Unit) =
+            NavPill(selected, icon, if (compact && !selected) null else label, description = label, compact = compact, onClick = onClick)
         Row(
             modifier = Modifier.weight(1f).horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
+            horizontalArrangement = Arrangement.spacedBy(if (compact) 2.dp else 6.dp)
         ) {
             if (inSettingsGroup) {
                 settingsTabs.forEach { tab ->
-                    NavPill(selectedTabIndex == SETTINGS_TAB_BASE + tab.ordinal, tab.icon(), tab.title()) { openSettings(tab) }
+                    TabPill(selectedTabIndex == SETTINGS_TAB_BASE + tab.ordinal, tab.icon(), tab.title()) { openSettings(tab) }
                 }
             } else {
                 categories.forEachIndexed { index, category ->
-                    NavPill(selectedTabIndex == index, categoryIcon(index), category.tag) { openCategory(index) }
+                    TabPill(selectedTabIndex == index, categoryIcon(index), category.tag) { openCategory(index) }
                 }
                 if (Platform.features.supportsModDownloader) {
-                    NavPill(selectedTabIndex == 4, Icons.Outlined.CloudDownload, stringResource(Res.string.mod_downloader)) { openDownloader() }
+                    TabPill(selectedTabIndex == 4, Icons.Outlined.CloudDownload, stringResource(Res.string.mod_downloader)) { openDownloader() }
                 }
                 if (Platform.features.supportsModTools) {
-                    NavPill(selectedTabIndex == 5, Icons.Outlined.Build, stringResource(Res.string.mod_tools)) { openModTools() }
+                    TabPill(selectedTabIndex == 5, Icons.Outlined.Build, stringResource(Res.string.mod_tools)) { openModTools() }
                 }
                 // Without a rail the settings pages live on the side navigation, so they are not tabs here.
             }
         }
-        NavPill(
-            selected = selectedTabIndex == 7,
-            icon = Icons.Default.Search,
-            label = null,
-            description = stringResource(Res.string.search_mods)
-        ) {
-            resetStates()
-            showSearchDialog = true
-            selectedTabIndex = 7
-        }
-        NavPill(
-            selected = selectedTabIndex == HELP_TAB,
-            icon = Icons.Outlined.HelpOutline,
-            label = null,
-            description = "Help"
-        ) {
-            resetStates()
-            showHelp = true
-            selectedTabIndex = HELP_TAB
-        }
-        if (Platform.features.supportsModTools) NavPill(selectedTabIndex == CS_TAB, Icons.Outlined.Architecture, label = null, description = "Construction Set") {
-            resetStates()
-            constructionSet = true
-            selectedTabIndex = CS_TAB
-        }
-        if (newFeatureEnabledChecked) {
-            if (Platform.features.supportsTerminal) NavPill(selectedTabIndex == 8, Icons.Outlined.Terminal, label = null, description = "Terminal") {
-                resetStates()
-                terminal = true
-                selectedTabIndex = 8
+        fun openSearch() { resetStates(); showSearchDialog = true; selectedTabIndex = 7 }
+        fun openHelp() { resetStates(); showHelp = true; selectedTabIndex = HELP_TAB }
+        fun openCs() { resetStates(); constructionSet = true; selectedTabIndex = CS_TAB }
+        fun openTerminal() { resetStates(); terminal = true; selectedTabIndex = 8 }
+        fun openKram() { resetStates(); kram = true; selectedTabIndex = 9 }
+        val showCs = Platform.features.supportsModTools
+        val showTerminal = newFeatureEnabledChecked && Platform.features.supportsTerminal
+        val showKram = newFeatureEnabledChecked && Platform.features.supportsKram
+        if (compact) {
+            // Search, Help and the tools go in one menu so the tabs keep the width.
+            var menuOpen by remember { mutableStateOf(false) }
+            Box {
+                NavPill(
+                    selected = selectedTabIndex in listOf(7, 8, 9, HELP_TAB, CS_TAB),
+                    icon = Icons.Default.MoreVert,
+                    label = null,
+                    description = "More",
+                    compact = true
+                ) { menuOpen = true }
+                DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                    @Composable
+                    fun Item(icon: ImageVector, text: String, onClick: () -> Unit) = DropdownMenuItem(
+                        text = { Text(text) },
+                        leadingIcon = { Icon(icon, contentDescription = null) },
+                        onClick = { menuOpen = false; onClick() }
+                    )
+                    Item(Icons.Default.Search, stringResource(Res.string.search_mods)) { openSearch() }
+                    Item(Icons.Outlined.HelpOutline, "Help") { openHelp() }
+                    if (showCs) Item(Icons.Outlined.Architecture, "Construction Set") { openCs() }
+                    if (showTerminal) Item(Icons.Outlined.Terminal, "Terminal") { openTerminal() }
+                    if (showKram) Item(Icons.Outlined.Memory, "Kram") { openKram() }
+                }
             }
-            if (Platform.features.supportsKram) NavPill(selectedTabIndex == 9, Icons.Outlined.Memory, label = null, description = "Kram") {
-                resetStates()
-                kram = true
-                selectedTabIndex = 9
-            }
+        } else {
+            NavPill(selectedTabIndex == 7, Icons.Default.Search, label = null, description = stringResource(Res.string.search_mods)) { openSearch() }
+            NavPill(selectedTabIndex == HELP_TAB, Icons.Outlined.HelpOutline, label = null, description = "Help") { openHelp() }
+            if (showCs) NavPill(selectedTabIndex == CS_TAB, Icons.Outlined.Architecture, label = null, description = "Construction Set") { openCs() }
+            if (showTerminal) NavPill(selectedTabIndex == 8, Icons.Outlined.Terminal, label = null, description = "Terminal") { openTerminal() }
+            if (showKram) NavPill(selectedTabIndex == 9, Icons.Outlined.Memory, label = null, description = "Kram") { openKram() }
         }
         if (layoutType != NavigationSuiteType.NavigationBar) {
             BarOptions(context)
@@ -445,6 +456,7 @@ private fun NavPill(
     label: String?,
     strong: Boolean = false,
     description: String? = label,
+    compact: Boolean = false,
     onClick: () -> Unit
 ) {
     val gold = MaterialTheme.colorScheme.primary
@@ -456,7 +468,7 @@ private fun NavPill(
             .background(if (selected) gold.copy(alpha = if (strong) 0.28f else 0.18f) else Color.Transparent, shape)
             .border(1.dp, if (selected && !strong) gold.copy(alpha = 0.7f) else Color.Transparent, shape)
             .clickable(onClick = onClick)
-            .padding(horizontal = if (label == null) 10.dp else 14.dp, vertical = 8.dp),
+            .padding(horizontal = if (label == null) (if (compact) 9.dp else 10.dp) else (if (compact) 12.dp else 14.dp), vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp)
     ) {
@@ -752,7 +764,7 @@ fun ModValuesList(
             enter = fadeIn() + expandIn(),
             exit = fadeOut() + shrinkOut()
         ) {
-            KramConversion(context)
+            KramConversion()
         }
         AnimatedVisibility(
             visible = showModTools,

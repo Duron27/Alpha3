@@ -2,12 +2,9 @@
 
 package org.openmw
 
-import org.alpha3.launcher.paths.OpenMWPaths
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Context
-import android.content.Intent
-import android.os.Build
 import android.os.Bundle
 import android.os.Process
 import android.system.ErrnoException
@@ -27,18 +24,18 @@ import androidx.compose.animation.expandIn
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkOut
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Text
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -49,12 +46,13 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.ComposeView
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -65,21 +63,22 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.runBlocking
-import org.libsdl.app.SDLActivity
-import org.alpha3.launcher.paths.OpenMWPaths.USER_OPENMW_CFG
+import org.alpha3.launcher.engine.Engine
+import org.alpha3.launcher.launch.LaunchArguments
+import org.alpha3.launcher.launch.LaunchEnvironment
+import org.alpha3.launcher.launch.tokenizeArguments
+import org.alpha3.launcher.paths.OpenMWPaths
 import org.alpha3.launcher.paths.Profiles
 import org.alpha3.launcher.ui.controls.MouseIcon
 import org.alpha3.launcher.ui.controls.ResizableDraggableButton
 import org.alpha3.launcher.ui.controls.ResizableDraggableRightThumbstick
 import org.alpha3.launcher.ui.controls.ResizableDraggableThumbstick
 import org.alpha3.launcher.ui.controls.ScrollWheelIndicator
+import org.alpha3.launcher.ui.controls.TouchLookArea
+import org.alpha3.launcher.ui.controls.TouchMoveArea
 import org.alpha3.launcher.ui.controls.UIKeyboard
 import org.alpha3.launcher.ui.controls.UIStateManager
 import org.alpha3.launcher.ui.controls.UIStateManager.configureControls
-import org.alpha3.launcher.ui.controls.TouchLookArea
-import org.alpha3.launcher.ui.controls.TouchMoveArea
-import org.alpha3.launcher.ui.controls.rememberLeftThumbEnabled
-import org.alpha3.launcher.ui.controls.touchAreaActive
 import org.alpha3.launcher.ui.controls.UIStateManager.containerGlobalHeight
 import org.alpha3.launcher.ui.controls.UIStateManager.containerGlobalWidth
 import org.alpha3.launcher.ui.controls.UIStateManager.editMode
@@ -91,6 +90,8 @@ import org.alpha3.launcher.ui.controls.UIStateManager.isCursorVisible
 import org.alpha3.launcher.ui.controls.UIStateManager.isRadialMenuExpanded
 import org.alpha3.launcher.ui.controls.UIStateManager.launchedActivity
 import org.alpha3.launcher.ui.controls.VirtualKeyboard
+import org.alpha3.launcher.ui.controls.rememberLeftThumbEnabled
+import org.alpha3.launcher.ui.controls.touchAreaActive
 import org.alpha3.launcher.ui.overlay.ExpandableCircleButton
 import org.alpha3.launcher.ui.overlay.GridOverlay
 import org.alpha3.launcher.ui.overlay.HiddenMenu
@@ -99,17 +100,14 @@ import org.alpha3.launcher.ui.view.BackgroundAnimation
 import org.alpha3.launcher.ui.view.addCustomLog
 import org.alpha3.launcher.ui.view.enableLogcat
 import org.alpha3.launcher.ui.view.vibrateHelper
-import org.alpha3.launcher.launch.LaunchArguments
-import org.alpha3.launcher.launch.LaunchEnvironment
-import org.alpha3.launcher.launch.tokenizeArguments
 import org.alpha3.launcher.utils.DriverDebugEnvs
 import org.alpha3.launcher.utils.GameFilesPreferences
 import org.alpha3.launcher.utils.GpuDrivers
+import org.alpha3.launcher.utils.dataStore
+import org.libsdl.app.SDLActivity
 import org.openmw.utils.AndroidGpuDriverManager
 import org.openmw.utils.LibraryLoader
 import org.openmw.utils.UpstreamEngine
-import org.alpha3.launcher.engine.Engine
-import org.alpha3.launcher.utils.dataStore
 import kotlin.time.Duration.Companion.milliseconds
 
 @Suppress("DEPRECATION")
@@ -126,6 +124,7 @@ class EngineActivity : SDLActivity() {
     external fun omwGetFrameTimes(): FloatArray
     /** Every buffer sent to the screen, generated frames included (support/src/framepacing.cpp) */
     external fun omwGetShownFrameTimes(): FloatArray
+    external fun omwGetGpuBusy(): Int
     //external fun omwQuitGame()
     external fun omwGetPlayerHealthCurrent(): Float
     external fun omwGetPlayerHealthModified(): Float
@@ -172,6 +171,8 @@ class EngineActivity : SDLActivity() {
 
     @SuppressLint("ClickableViewAccessibility")
     override fun onCreate(savedInstanceState: Bundle?) {
+        org.openmw.utils.FlyBenchmark.running = intent?.getStringExtra(org.openmw.utils.FlyBenchmark.EXTRA_ROUTE) != null
+        if (org.openmw.utils.FlyBenchmark.running) org.openmw.utils.FlyBenchmark.returnToLauncherWhenDone(this)
 
         enableEdgeToEdge()
         runCatching {
@@ -282,6 +283,18 @@ class EngineActivity : SDLActivity() {
                 UIStateManager.loadButtonState(containerWidth, containerHeight)
                     // Adds Overlay menu for buttons and edit mode
                     composeViewUI.setContent {
+                        // the fly-through benchmark: the view alone, with a way out at the top right
+                        if (org.openmw.utils.FlyBenchmark.running) {
+                            BackHandler { }
+                            StartupStatus(startedAt = engineStartedAt)
+                            Box(Modifier.fillMaxSize().padding(16.dp), contentAlignment = Alignment.TopEnd) {
+                                Button(
+                                    onClick = { org.openmw.utils.FlyBenchmark.cancel(this@EngineActivity) },
+                                    colors = ButtonDefaults.buttonColors(containerColor = Color.Black.copy(alpha = 0.6f), contentColor = Color.White)
+                                ) { Text("Cancel benchmark") }
+                            }
+                            return@setContent
+                        }
 
                         val isUIHiddenFlow = remember { GameFilesPreferences.getPreference(GameFilesPreferences.UI_HIDDEN_STATE_KEY, "false").map { it.toBoolean() } }
                         val isUIHidden by isUIHiddenFlow.collectAsState(initial = false)
@@ -320,7 +333,7 @@ class EngineActivity : SDLActivity() {
                                     // Scale duration from 100ms up to 300ms
                                     val duration = (damage * 5).toLong().coerceIn(100L, 300L)
                                     
-                                    vibrateHelper(this@EngineActivity, amplitude, duration)
+                                    vibrateHelper(amplitude, duration)
                                 }
                             }
                         } else {
@@ -391,13 +404,12 @@ class EngineActivity : SDLActivity() {
 
                         if (!isUIHidden) {
                             OverlayUI(
-                                context = this@EngineActivity,
                                 virtualKeyboard = virtualKeyboard,
                                 onKeyEvent = { keyCode -> handleKeyEvent(keyCode) }
                             )
                         }
 
-                        Buttons(context = this@EngineActivity, containerWidth = containerWidth, containerHeight = containerHeight)
+                        Buttons(containerWidth = containerWidth, containerHeight = containerHeight)
 
                         AnimatedVisibility(
                             visible = (enableRightThumb && UIStateManager.tempCodeGroup == "OpenMW") ||
@@ -406,7 +418,6 @@ class EngineActivity : SDLActivity() {
                             exit = fadeOut() + shrinkOut()
                         ) {
                             ResizableDraggableRightThumbstick(
-                                context = this@EngineActivity,
                                 containerWidth = containerWidth,
                                 containerHeight = containerHeight
                             )
@@ -414,7 +425,6 @@ class EngineActivity : SDLActivity() {
 
                         if (leftThumbEnabled || UIStateManager.tempCodeGroup != "OpenMW") {
                             ResizableDraggableThumbstick(
-                                context = this@EngineActivity,
                                 containerWidth = containerWidth,
                                 containerHeight = containerHeight
                             )
@@ -436,7 +446,6 @@ class EngineActivity : SDLActivity() {
                             exit = fadeOut() + shrinkOut()
                         ) {
                             HiddenMenu(
-                                context = this@EngineActivity,
                                 containerWidth = containerWidth,
                                 containerHeight = containerHeight
                             )
@@ -453,7 +462,6 @@ class EngineActivity : SDLActivity() {
                         }
 
                         ScrollWheelIndicator(
-                            context = this@EngineActivity,
                             containerWidth = containerWidth,
                             containerHeight = containerHeight
                         )
@@ -485,7 +493,11 @@ class EngineActivity : SDLActivity() {
             val noSwappy = runBlocking { dataStore.data.first()[GameFilesPreferences.DISABLE_SWAPPY_KEY] != false } // (off unless turned on)
             if (noSwappy) setEnv("OPENMW_NO_SWAPPY", "1") else Os.unsetenv("OPENMW_NO_SWAPPY")
             // Launcher switch: an extra generated frame between the rendered ones (read by the engine's SDL window)
-            val frameGeneration = runBlocking { dataStore.data.first()[GameFilesPreferences.FRAME_GENERATION_KEY] == true }
+            // The fly-through benchmark (FlyBenchmark): its route for the support library, and no frame generation
+            val benchmarkRoute = intent?.getStringExtra(org.openmw.utils.FlyBenchmark.EXTRA_ROUTE)
+            if (benchmarkRoute != null) setEnv("OPENMW_BENCHMARK_FLY", benchmarkRoute) else Os.unsetenv("OPENMW_BENCHMARK_FLY")
+            val frameGeneration = benchmarkRoute == null &&
+                runBlocking { dataStore.data.first()[GameFilesPreferences.FRAME_GENERATION_KEY] == true }
             if (frameGeneration) setEnv("OPENMW_FRAMEGEN", "1") else Os.unsetenv("OPENMW_FRAMEGEN")
             // Launcher choice: frames shown per rendered one (2x to 4x), as the generated frames between two rendered ones
             val multiplier = runBlocking { dataStore.data.first()[GameFilesPreferences.FRAME_GENERATION_MULTIPLIER_KEY] ?: 2 }
@@ -557,6 +569,7 @@ class EngineActivity : SDLActivity() {
             while (true) {
                 runCatching { UIStateManager.frameTimes.value = activity.omwGetFrameTimes().toList() }
                 runCatching { UIStateManager.shownFrameTimes.value = activity.omwGetShownFrameTimes().toList() }
+                runCatching { UIStateManager.gpuBusyFromRenderer.value = activity.omwGetGpuBusy() }
                 delay(500.milliseconds)
             }
         }
@@ -684,9 +697,15 @@ class EngineActivity : SDLActivity() {
             // Dev hook: adb shell am start -n <pkg>/org.openmw.EngineActivity --es omw_args "--load-savegame <path>"
             val intentArgs = tokenizeArguments(intent?.getStringExtra("omw_args").orEmpty())
             val resources = if (UIStateManager.useUpstreamEngine) UpstreamEngine.resourcesDir else OpenMWPaths.USER_RESOURCES
-            // The default profile is the engine's own user config; another one is a config folder of its own
-            val profile = if (Profiles.isDefault) emptyList() else Profiles.engineArguments()
-            val args = listOf("--resources", resources) + profile + chosen + intentArgs
+            // The default profile is the engine's own user config; another one is a config folder of its own. The
+            // fly-through benchmark has its own folder and leaves out the Launch options, so its runs are alike.
+            val benchmark = intent?.getStringExtra(org.openmw.utils.FlyBenchmark.EXTRA_ROUTE) != null
+            val profile = when {
+                benchmark -> Profiles.engineArguments(org.openmw.utils.FlyBenchmark.folder)
+                Profiles.isDefault -> emptyList()
+                else -> Profiles.engineArguments()
+            }
+            val args = listOf("--resources", resources) + profile + (if (benchmark) emptyList() else chosen) + intentArgs
             Log.i("EngineActivity", "OpenMW arguments: $args")
             args.toTypedArray()
         } catch (_: Exception) {
@@ -718,14 +737,13 @@ fun AutoMouseModeComposable() {
 }
 
 @Composable
-fun Buttons(context: Context, containerWidth: Float, containerHeight: Float) {
+fun Buttons(containerWidth: Float, containerHeight: Float) {
     val buttonStates by UIStateManager.buttonStates.collectAsState()
 
     buttonStates.values
         .filter { it.id !in listOf(99, 98, 101, 201) }
         .forEach { button ->
             ResizableDraggableButton(
-                context = context,
                 id = button.id,
                 keyCode = button.keyCode,
                 containerWidth = containerWidth,

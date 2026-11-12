@@ -365,7 +365,7 @@ namespace Alpha3::Vk
             insertAfterDirectives(source,
                 "layout(std140, set = 0, binding = 2) uniform a3DrawUniforms { mat4 osg_ModelViewMatrix; mat4 "
                 "osg_ProjectionMatrix; mat4 osg_ModelViewProjectionMatrix; mat3 osg_NormalMatrix; vec4 osg_ClipPlane0; "
-                "vec4 osg_ClipPlane1; };\n");
+                "vec4 osg_ClipPlane1; mat4 osg_ModelViewMatrixInverse; };\n");
             return true;
         }
 
@@ -562,7 +562,7 @@ namespace Alpha3::Vk
         // library file's size and time, and the driver's pipeline cache identity
         std::string cacheSalt(Context& context)
         {
-            std::string salt = "a3vk3";
+            std::string salt = "a3vk4";
             Dl_info info{};
             if (dladdr(reinterpret_cast<const void*>(&cacheSalt), &info) != 0 && info.dli_fname != nullptr)
             {
@@ -706,6 +706,7 @@ namespace Alpha3::Vk
             w.u32(variant.mDrawStages);
             w.u32(variant.mLightStages);
             w.u32(variant.mVaryingEnd);
+            w.u32(variant.mInverseModelView ? 1 : 0);
             w.u32(static_cast<uint32_t>(variant.mStorage.size()));
             for (const StorageSlot& slot : variant.mStorage)
             {
@@ -768,6 +769,7 @@ namespace Alpha3::Vk
             loaded.mDrawStages = r.u32();
             loaded.mLightStages = r.u32();
             loaded.mVaryingEnd = r.u32();
+            loaded.mInverseModelView = r.u32() != 0;
             const uint32_t storage = r.u32();
             for (uint32_t i = 0; r.mOk && i < storage && i < 64; ++i)
             {
@@ -789,6 +791,7 @@ namespace Alpha3::Vk
             variant.mDrawStages = loaded.mDrawStages;
             variant.mLightStages = loaded.mLightStages;
             variant.mVaryingEnd = loaded.mVaryingEnd;
+            variant.mInverseModelView = loaded.mInverseModelView;
             variant.mStorage = std::move(loaded.mStorage);
             variant.mSpirv[0] = std::move(loaded.mSpirv[0]);
             variant.mSpirv[1] = std::move(loaded.mSpirv[1]);
@@ -875,6 +878,20 @@ namespace Alpha3::Vk
         if ((!mContext.device().mFeatures.shaderClipDistance || !clip) && vertex.find("gl_ClipDistance") != std::string::npos)
             insertAfterDirectives(vertex, "float a3NoClipDistance[8];\n#define gl_ClipDistance a3NoClipDistance\n");
         variant.mLightStages = blockLights(vertex, fragment);
+        // the model view matrix's inverse from the draw's block (computed once a draw) rather than for each vertex
+        // or pixel; OpenGL's drivers lift a uniform's inverse out of the shader themselves, the Adreno 615's Vulkan
+        // driver does not
+        variant.mInverseModelView = false;
+        {
+            static const std::regex inverseModelView(R"(\binverse\s*\(\s*osg_ModelViewMatrix\s*\))");
+            for (std::string* source : { &vertex, &fragment })
+                if (std::regex_search(*source, inverseModelView)
+                    && source->find("osg_ModelViewMatrix") != std::string::npos)
+                {
+                    *source = std::regex_replace(*source, inverseModelView, "osg_ModelViewMatrixInverse");
+                    variant.mInverseModelView = true;
+                }
+        }
         if (blockMatrices(vertex))
             variant.mDrawStages |= VK_SHADER_STAGE_VERTEX_BIT;
         if (blockMatrices(fragment))

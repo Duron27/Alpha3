@@ -1,22 +1,5 @@
 package org.alpha3.launcher.ui.view
 
-import org.alpha3.launcher.utils.SystemInfo
-import org.alpha3.launcher.utils.NavMeshStatus
-import org.alpha3.launcher.utils.MToast
-import org.alpha3.launcher.utils.formatDecimals
-import org.alpha3.launcher.utils.Log
-import kotlinx.coroutines.IO
-import org.alpha3.launcher.resources.backgroundbouncebw
-import org.alpha3.launcher.resources.battery
-import org.alpha3.launcher.resources.charging
-import org.alpha3.launcher.resources.cpu_usage
-import org.alpha3.launcher.resources.file_size
-import org.alpha3.launcher.resources.free_space
-import org.alpha3.launcher.resources.memory
-import org.alpha3.launcher.resources.navmesh_complete
-import org.alpha3.launcher.resources.navmesh_details
-import org.alpha3.launcher.resources.Res
-import org.alpha3.launcher.utils.PlatformContext
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -58,6 +41,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -69,10 +53,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.input.pointer.pointerInput
-import coil3.compose.LocalPlatformContext
 import androidx.compose.ui.platform.LocalWindowInfo
-import org.jetbrains.compose.resources.painterResource
-import org.jetbrains.compose.resources.stringResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
@@ -82,13 +63,23 @@ import coil3.compose.rememberAsyncImagePainter
 import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.IO
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.alpha3.launcher.io.File
 import org.alpha3.launcher.paths.OpenMWPaths
+import org.alpha3.launcher.resources.Res
+import org.alpha3.launcher.resources.backgroundbouncebw
+import org.alpha3.launcher.resources.cpu_usage
+import org.alpha3.launcher.resources.file_size
+import org.alpha3.launcher.resources.free_space
+import org.alpha3.launcher.resources.memory
+import org.alpha3.launcher.resources.navmesh_complete
+import org.alpha3.launcher.resources.navmesh_details
 import org.alpha3.launcher.ui.controls.UIStateManager
 import org.alpha3.launcher.ui.controls.UIStateManager.cpuUsageFlow
 import org.alpha3.launcher.ui.controls.UIStateManager.customColor
@@ -97,8 +88,13 @@ import org.alpha3.launcher.ui.controls.UIStateManager.memoryInfoFlow
 import org.alpha3.launcher.ui.controls.UIStateManager.userUI
 import org.alpha3.launcher.ui.overlay.MemoryInfo
 import org.alpha3.launcher.utils.GameFilesPreferences
+import org.alpha3.launcher.utils.MToast
+import org.alpha3.launcher.utils.NavMeshStatus
+import org.alpha3.launcher.utils.SystemInfo
+import org.alpha3.launcher.utils.formatDecimals
 import org.alpha3.launcher.utils.stringRes
-import org.alpha3.launcher.io.File
+import org.jetbrains.compose.resources.painterResource
+import org.jetbrains.compose.resources.stringResource
 import kotlin.math.cos
 import kotlin.math.ln
 import kotlin.math.pow
@@ -186,13 +182,13 @@ fun startLoggingUpdates() {
 private var resourceUpdateJob: kotlinx.coroutines.Job? = null
 
 @DelicateCoroutinesApi
-fun startResourceInfoUpdates(context: PlatformContext) {
+fun startResourceInfoUpdates() {
     if (resourceUpdateJob?.isActive == true) return
 
     resourceUpdateJob = GlobalScope.launch(Dispatchers.IO) {
         while (UIStateManager.isMemoryInfoEnabled || UIStateManager.isPerformanceHudEnabled) {
             // Existing memory & CPU
-            val memoryInfo = getMemoryInfo(context)
+            val memoryInfo = getMemoryInfo()
             val cpuUsage = getCpuProcessUsage()
             UIStateManager.cpuBusiestThread = SystemInfo.services.cpuBusiestThread()
 
@@ -237,7 +233,7 @@ fun startResourceInfoUpdates(context: PlatformContext) {
             updateHistory(UIStateManager.gpuTempHistory, gpuTemp.removeSuffix("°C").trim().toIntOrNull() ?: 0)
 
             // Build the display string
-            memoryInfoFlow.value = getDetailedSystemInfo(context, memoryInfo, cpuUsage, gpuModel, gpuUtilization, gpuTemp, gpuClock)
+            memoryInfoFlow.value = getDetailedSystemInfo(memoryInfo, cpuUsage, gpuModel, gpuUtilization, gpuTemp, gpuClock)
             cpuUsageFlow.value = cpuUsage
 
             delay(1000.milliseconds)
@@ -249,12 +245,12 @@ fun startResourceInfoUpdates(context: PlatformContext) {
     }
 }
 
-fun vibrate(context: PlatformContext, amplitude: Int = -1 /* default amplitude */, duration: Long = 100L) {
+fun vibrate(amplitude: Int = -1 /* default amplitude */, duration: Long = 100L) {
     SystemInfo.services.vibrate(amplitude, duration)
 }
 
-fun vibrateHelper(context: PlatformContext, amplitude: Int, duration: Long) {
-    vibrate(context, amplitude, duration)
+fun vibrateHelper(amplitude: Int, duration: Long) {
+    vibrate(amplitude, duration)
 }
 
 fun getDirectorySize(directory: File): Long {
@@ -279,6 +275,18 @@ fun getCpuProcessUsage(pid: Int? = null): Int = SystemInfo.services.cpuProcessUs
 
 fun getAvailableStorageSpace(): String = humanReadableByteCountBin(SystemInfo.services.availableStorageBytes())
 
+/** Free storage, read again every [intervalMs] while shown, so it goes down as downloads write to disk. */
+@Composable
+fun rememberAvailableStorageSpace(intervalMs: Long = 1000): String {
+    val space by produceState(initialValue = getAvailableStorageSpace()) {
+        while (true) {
+            value = withContext(Dispatchers.IO) { getAvailableStorageSpace() }
+            delay(intervalMs.milliseconds)
+        }
+    }
+    return space
+}
+
 fun <T> updateHistory(flow: MutableStateFlow<List<T>>, newValue: T) {
     val current = flow.value.toMutableList()
     current.add(newValue)
@@ -287,7 +295,6 @@ fun <T> updateHistory(flow: MutableStateFlow<List<T>>, newValue: T) {
 }
 
 fun getDetailedSystemInfo(
-    context: PlatformContext,
     mem: MemoryInfo,
     cpu: Int,
     gpuModel: String,
@@ -296,7 +303,7 @@ fun getDetailedSystemInfo(
     gpuClock: String
 ): String = SystemInfo.services.detailedSystemInfo(mem, cpu, gpuModel, gpuUsage, gpuTemp, gpuClock)
 
-fun getMemoryInfo(context: PlatformContext): MemoryInfo = SystemInfo.services.memoryInfo()
+fun getMemoryInfo(): MemoryInfo = SystemInfo.services.memoryInfo()
 
 fun humanReadableByteCountBin(bytes: Long): String {
     val unit = 1024
@@ -306,7 +313,7 @@ fun humanReadableByteCountBin(bytes: Long): String {
     return "${formatDecimals(bytes / unit.toDouble().pow(exp.toDouble()), 1)} ${pre}B"
 }
 
-fun getBatteryStatus(context: PlatformContext): String = SystemInfo.services.batteryStatus()
+fun getBatteryStatus(): String = SystemInfo.services.batteryStatus()
 
 fun getFolderSize(folder: File): Long {
     if (!folder.exists() || !folder.isDirectory) return 0L
@@ -377,7 +384,7 @@ fun CustomProgressIndicator(progress: Float) {
     }
 }
 
-fun hasInternetPermission(context: PlatformContext): Boolean = SystemInfo.services.hasInternetPermission()
+fun hasInternetPermission(): Boolean = SystemInfo.services.hasInternetPermission()
 
 @Suppress("DEPRECATION")
 @Composable
@@ -386,7 +393,6 @@ fun ProgressWithNavmesh(onComplete: () -> Unit) {
     val navmeshStatus = remember { MutableStateFlow("0.0") }
     val fileSizeFlow = remember { MutableStateFlow(0L) }
     val memoryInfoFlow = remember { MutableStateFlow(MemoryInfo("", "", "")) }
-    val context = LocalPlatformContext.current
     val availableSpace = getAvailableStorageSpace()
     val logLinesFlow = remember { MutableStateFlow<List<String>>(emptyList()) }
     val scrollState = rememberScrollState()
@@ -480,7 +486,7 @@ fun ProgressWithNavmesh(onComplete: () -> Unit) {
                 }
 
                 // Update memory info
-                memoryInfoFlow.value = getMemoryInfo(context)
+                memoryInfoFlow.value = getMemoryInfo()
 
                 val reported = NavMeshStatus.progress.value
                 if (reported != null) {
@@ -494,7 +500,7 @@ fun ProgressWithNavmesh(onComplete: () -> Unit) {
                     val lines = try { logFile.readLines() } catch (_: Exception) { emptyList() }
                     logLinesFlow.value = lines
 
-                    if (reported == null && lines.any { it.contains("runNavMeshTool sucess") }) {
+                    if (reported == null && lines.any { it.contains("runNavMeshTool success") }) {
                         // 1. Check for success message to end loop
                         navmeshStatus.value = "Done"
                     } else if (reported == null) {
@@ -541,7 +547,6 @@ fun ProgressWithNavmesh(onComplete: () -> Unit) {
 
 @Composable
 fun BackgroundAnimation() {
-    val context = LocalPlatformContext.current
     val backgroundAnimation by GameFilesPreferences.getPreference(GameFilesPreferences.BACKGROUND_ANIMATION_KEY, "BouncingBackground").collectAsState(initial = "BouncingBackground")
     Box(
         modifier = Modifier
@@ -571,7 +576,6 @@ fun BackgroundAnimation() {
 @Suppress("DEPRECATION")
 @Composable
 fun NoneBackground() {
-    val context = LocalPlatformContext.current
     val codeGroupOption by GameFilesPreferences.getPreference(GameFilesPreferences.CODE_GROUP_KEY, "OpenMW").collectAsState(initial = "OpenMW")
     val image: Painter = when (codeGroupOption) {
         "OpenMW" -> rememberAsyncImagePainter(model = "file://${userUI}/backgroundbouncebw.jpg")
@@ -593,7 +597,6 @@ fun NoneBackground() {
 @Suppress("DEPRECATION")
 @Composable
 fun RotatingImageBackground() {
-    val context = LocalPlatformContext.current
     val codeGroupOption by GameFilesPreferences.getPreference(GameFilesPreferences.CODE_GROUP_KEY, "OpenMW").collectAsState(initial = "OpenMW")
     val image: Painter = when (codeGroupOption) {
         "OpenMW" -> rememberAsyncImagePainter(model = "file://${userUI}/backgroundbouncebw.jpg")
@@ -634,7 +637,6 @@ fun RotatingImageBackground() {
 @Suppress("DEPRECATION")
 @Composable
 fun BouncingBackground() {
-    val context = LocalPlatformContext.current
     val codeGroupOption by GameFilesPreferences.getPreference(GameFilesPreferences.CODE_GROUP_KEY, "OpenMW").collectAsState(initial = "OpenMW")
     val image: Painter = when (codeGroupOption) {
         "OpenMW" -> rememberAsyncImagePainter(model = "file://${userUI}/backgroundbouncebw.jpg")
@@ -682,7 +684,6 @@ fun BouncingBackground() {
 @Suppress("DEPRECATION")
 @Composable
 fun CircularBackground() {
-    val context = LocalPlatformContext.current
     val codeGroupOption by GameFilesPreferences.getPreference(GameFilesPreferences.CODE_GROUP_KEY, "OpenMW").collectAsState(initial = "OpenMW")
     val image: Painter = when (codeGroupOption) {
         "OpenMW" -> rememberAsyncImagePainter(model = "file://${userUI}/backgroundbouncebw.jpg")

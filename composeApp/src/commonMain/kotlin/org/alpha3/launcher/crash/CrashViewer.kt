@@ -90,7 +90,7 @@ fun CrashViewerDialog(context: PlatformContext, onClose: () -> Unit) {
                         }) { Text("Copy") }
                         TextButton(onClick = {
                             scope.launch {
-                                val path = withContext(Dispatchers.Default) { CrashExport.export(context, current) }
+                                val path = withContext(Dispatchers.Default) { CrashExport.export(current) }
                                 exported = path
                                 MToast(if (path != null) "Saved $path" else "Could not write the zip", isLong = true)
                             }

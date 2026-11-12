@@ -9,7 +9,6 @@ import org.alpha3.launcher.resources.colors
 import org.alpha3.launcher.resources.increase_size_delete_decrease_size
 import org.alpha3.launcher.resources.options
 import org.alpha3.launcher.resources.Res
-import org.alpha3.launcher.utils.PlatformContext
 import org.alpha3.launcher.utils.Log
 import org.alpha3.launcher.engine.MouseActions.ACTION_SCROLL
 import androidx.compose.animation.AnimatedVisibility
@@ -87,7 +86,6 @@ import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
-import coil3.compose.LocalPlatformContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import org.jetbrains.compose.resources.stringResource
 import androidx.compose.ui.text.font.FontWeight
@@ -131,7 +129,6 @@ fun MouseIcon(
     containerWidth: Float,
     containerHeight: Float
 ) {
-    val context = LocalPlatformContext.current
     val offsetXMouse by GameFilesPreferences.getNullablePreference(GameFilesPreferences.OFFSET_X_MOUSE).collectAsState(initial = 0f)
     val offsetYMouse by GameFilesPreferences.getNullablePreference(GameFilesPreferences.OFFSET_Y_MOUSE).collectAsState(initial = 0f)
     var xPos by remember { mutableFloatStateOf(0f) }
@@ -228,7 +225,6 @@ fun CursorMagnifier(containerWidth: Float, containerHeight: Float) {
 
 @Composable
 fun ScrollWheelIndicator(
-    context: PlatformContext,
     containerWidth: Float,
     containerHeight: Float
 ) {
@@ -657,7 +653,6 @@ fun ScrollWheelIndicator(
                                                                     )
                                                                 } else {
                                                                     CustomIconPickerButton(
-                                                                        context = context,
                                                                         buttonId = 101,
                                                                         buttonUri = buttonUri,
                                                                         containerWidth = containerWidth,

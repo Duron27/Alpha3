@@ -74,7 +74,6 @@ import org.alpha3.launcher.resources.vibration_enabled
 import org.alpha3.launcher.resources.warning
 import org.alpha3.launcher.resources.Res
 import org.alpha3.launcher.engine.Engine
-import org.alpha3.launcher.utils.PlatformContext
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.animation.AnimatedVisibility
@@ -376,7 +375,6 @@ fun SettingRow(
 
 @Composable
 fun GeneralSettingsSection() {
-    val context = LocalPlatformContext.current
     val scope = rememberCoroutineScope()
     val translationChecked by GameFilesPreferences.getPreference(GameFilesPreferences.TRANSLATION_ENABLED_KEY, false).collectAsState(initial = false)
 
@@ -401,7 +399,7 @@ fun GeneralSettingsSection() {
             }
         
             if (translationChecked) {
-                LanguageSelector(context)
+                LanguageSelector()
             }
         }
         
@@ -463,6 +461,21 @@ fun GraphicsSettingsSection() {
                             )
                         }
                     }
+                }
+            }
+            var flyNote by remember { mutableStateOf<String?>(null) }
+            SettingRow(
+                title = "Benchmark: Vivec fly-through",
+                subtitle = flyNote ?: "About 2 minutes over Vivec, the same on every run: the base game only (no mods), the reset " +
+                    "settings with view distance 63545, the screen's own resolution, no post-processing or frame generation, " +
+                    "first person, and your chosen renderer. Afterwards: the average fps and settings to try. " +
+                    "Results: Alpha3/benchmarks/flythrough-*"
+            ) {
+                TextButton(onClick = {
+                    org.alpha3.launcher.benchmark.FlyTuning.saveTuning(emptyMap())
+                    flyNote = Platform.features.startFlyBenchmark()
+                }) {
+                    Text("Run", color = Color.Green)
                 }
             }
             if (glRenderer == "zink" && !useFreedreno) {
@@ -619,7 +632,6 @@ fun ControlsSettingsSection() {
 
 @Composable
 fun InterfaceSettingsSection() {
-    val context = LocalPlatformContext.current
     val scope = rememberCoroutineScope()
     val isUIHiddenFlow = remember { GameFilesPreferences.getPreference(GameFilesPreferences.UI_HIDDEN_STATE_KEY, "false").map { it.toBoolean() } }
     val isUIHidden by isUIHiddenFlow.collectAsState(initial = false)
@@ -654,7 +666,7 @@ fun InterfaceSettingsSection() {
         }
         
         HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = White.copy(alpha = 0.1f))
-        AnimationSettings(context, scope)
+        AnimationSettings(scope)
     }
 }
 
@@ -734,7 +746,6 @@ fun DeveloperToolsSection() {
 
 @Composable
 fun DevInsert() {
-    val context = LocalPlatformContext.current
     val scope = rememberCoroutineScope()
     val bypassGameCheck by GameFilesPreferences.getPreference(GameFilesPreferences.BYPASS_GAME_FILES_KEY, false).collectAsState(initial = false)
     val avoidInsertion by GameFilesPreferences.getPreference(GameFilesPreferences.AVOID_RESOLUTION_INSERTION, false).collectAsState(initial = false)
@@ -848,7 +859,7 @@ fun DevInsert() {
     }
 
     if (showPopup) {
-        DataStoreContentPopup(context = context, onDismiss = { showPopup = false })
+        DataStoreContentPopup(onDismiss = { showPopup = false })
     }
 
     if (showFileBrowser && selectedInitialDirectory == null) {
@@ -903,7 +914,6 @@ fun FeaturesSwitches() {
 
 @Composable
 fun InGameSettings() {
-    val context = LocalPlatformContext.current
     val developerOptions by GameFilesPreferences.getPreference(GameFilesPreferences.NEW_FEATURE_ENABLED_KEY, false).collectAsState(initial = false)
     val scope = rememberCoroutineScope()
     
@@ -1009,7 +1019,7 @@ fun InGameSettings() {
         AutoMouseModeOptionSelector()
         
         HorizontalDivider(color = White.copy(alpha = 0.1f))
-        AnimationSettings(context, scope)
+        AnimationSettings(scope)
     }
 }
 @Composable
@@ -1054,7 +1064,7 @@ fun LogcatLevelSelector() {
     }
 }
 @Composable
-fun DataStoreContentPopup(context: PlatformContext, onDismiss: () -> Unit) {
+fun DataStoreContentPopup(onDismiss: () -> Unit) {
     val scope = rememberCoroutineScope()
     var dataStoreContent by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
 
@@ -1151,7 +1161,7 @@ fun DataStoreContentPopup(context: PlatformContext, onDismiss: () -> Unit) {
     )
 }
 @Composable
-fun LanguageSelector(context: PlatformContext) {
+fun LanguageSelector() {
     val scope = rememberCoroutineScope()
     val languageSelection by GameFilesPreferences.getPreference(GameFilesPreferences.LANGUAGE_KEY, "en").collectAsState(initial = "en")
     val supportedLanguagesFlow = remember {

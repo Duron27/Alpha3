@@ -37,7 +37,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
-import coil3.compose.LocalPlatformContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -64,7 +63,6 @@ fun TravelMenuPopup(
 ) {
     var popupVisible by remember { mutableStateOf(false) }
     var dropdownExpanded by remember { mutableStateOf(false) }
-    val context = LocalPlatformContext.current
     var selectedText by remember { mutableStateOf("Travel to destination ") }
     val matchIconColorChecked by remember { GameFilesPreferences.getPreference(GameFilesPreferences.MATCH_ICON_COLOR_KEY, "false").map { it.toBoolean() } }.collectAsState(initial = false)
     val iconGlowChecked by GameFilesPreferences.getPreference(GameFilesPreferences.ICON_GLOW_KEY, true).collectAsState(initial = true)

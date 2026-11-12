@@ -179,6 +179,10 @@ namespace Alpha3::Vk
         bool mUsesBuiltins = false;
         bool mClips = false; // writes the clip distances
         VkShaderStageFlags mDrawStages = 0; // the stages with the block of OSG's matrices (binding 2)
+        // reads the model view matrix's inverse (OpenGL's gl_ModelViewMatrixInverse): the draw block's fifth matrix,
+        // computed once a draw, instead of inverse() in the shader (which the Adreno 615's Vulkan driver ran for every
+        // pixel: 30 ms a frame of the water at 2560x1600)
+        bool mInverseModelView = false;
         // the light list's uniforms (OpenMW's LightBuffer and PointLightCount, point light shadows' slots), in a block of
         // their own (binding 3, the same in both stages): a draw with another light list sends only these
         UniformBlock mLightUniforms;

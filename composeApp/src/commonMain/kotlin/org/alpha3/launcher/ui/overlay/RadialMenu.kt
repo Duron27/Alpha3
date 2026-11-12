@@ -8,7 +8,6 @@ import org.alpha3.launcher.resources.interact
 import org.alpha3.launcher.resources.options
 import org.alpha3.launcher.resources.Res
 import org.alpha3.launcher.engine.KeyCodes
-import org.alpha3.launcher.utils.PlatformContext
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.EnterTransition
@@ -543,7 +542,6 @@ fun SimpleKeySelectionDialog(
 
 @Composable
 fun HiddenMenu(
-    context: PlatformContext,
     containerWidth: Float,
     containerHeight: Float
 ) {
@@ -905,7 +903,6 @@ fun HiddenMenu(
                                                             )
                                                         } else {
                                                             CustomIconPickerButton(
-                                                                context = context,
                                                                 buttonId = 201,
                                                                 buttonUri = buttonUri,
                                                                 containerWidth = containerWidth,

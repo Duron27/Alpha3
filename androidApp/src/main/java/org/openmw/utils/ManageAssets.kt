@@ -93,6 +93,11 @@ class UserManageAssets(val context: Context) {
         assetCopier.copy("$shared/openmw/settings.fallback.cfg", OpenMWPaths.SETTINGS_FILE)
     }
 
+    /** The settings the reset button gives (settings.fallback.cfg) written to [destination], replacing what is there. */
+    fun copySettingsTemplate(destination: String) {
+        assetCopier.copy("$shared/openmw/settings.fallback.cfg", destination, overwrite = true)
+    }
+
     private fun copyIfNotExists(source: String, destination: String) {
         if (!File(destination).exists()) {
             Log.d("ManageAssets", "Copying $source to $destination")

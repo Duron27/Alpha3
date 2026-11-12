@@ -26,7 +26,6 @@ import org.alpha3.launcher.resources.set_offset_y
 import org.alpha3.launcher.resources.size_transform
 import org.alpha3.launcher.resources.ui_toturial_finish_tip
 import org.alpha3.launcher.resources.Res
-import org.alpha3.launcher.utils.PlatformContext
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.SizeTransform
@@ -113,7 +112,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
-import coil3.compose.LocalPlatformContext
 import org.jetbrains.compose.resources.stringResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.input.ImeAction
@@ -176,7 +174,6 @@ data class MemoryInfo(
 @DelicateCoroutinesApi
 @Composable
 fun OverlayUI(
-    context: PlatformContext,
     virtualKeyboard: Boolean,
     onKeyEvent: (Int) -> Unit,
     blurRadius: Dp = 6.dp,
@@ -234,13 +231,13 @@ fun OverlayUI(
     }
 
     LaunchedEffect(UIStateManager.isPerformanceHudEnabled) {
-        startResourceInfoUpdates(context)
+        startResourceInfoUpdates()
     }
 
     // Collect in your UI layer
     LaunchedEffect(UIStateManager.isMemoryInfoEnabled) {
         if (UIStateManager.isMemoryInfoEnabled) {
-            startResourceInfoUpdates(context)
+            startResourceInfoUpdates()
         }
         launch {
             memoryInfoFlow.collect { memoryInfoText ->
@@ -266,7 +263,7 @@ fun OverlayUI(
     // Battery Status LaunchedEffect
     LaunchedEffect(UIStateManager.isBatteryStatusEnabled) {
         while (UIStateManager.isBatteryStatusEnabled) {
-            UIStateManager.batteryStatus = getBatteryStatus(context)
+            UIStateManager.batteryStatus = getBatteryStatus()
             delay(2000.milliseconds)
         }
         UIStateManager.batteryStatus = ""
@@ -546,14 +543,13 @@ fun OverlayUI(
                             verticalAlignment = Alignment.Top
                         ) {
                             DynamicButtonManager(
-                                context = context,
                                 onNewButtonAdded = { newButtonState ->
                                     UIStateManager.addButtonState(newButtonState)
                                 }
                             )
                             if (!editMode && !configureControls) {
                                 if (newFeatureEnabledChecked) {
-                                    if (hasInternetPermission(context)) {
+                                    if (hasInternetPermission()) {
                                         IconButton(
                                             onClick = { showWebView = true }
                                         ) {

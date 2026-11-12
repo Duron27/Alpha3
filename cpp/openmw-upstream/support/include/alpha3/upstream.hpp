@@ -410,6 +410,17 @@ namespace Alpha3
     // End of HUD::onFrame (main: the HUD's main widget): its elements where the touch overlay's edit mode put them,
     // at their size (src/hudlayout.cpp)
     void hudLayoutFrame(MyGUI::Widget* main);
+
+    // The fly-through benchmark (src/benchmark.cpp, started by the launcher with OPENMW_BENCHMARK_FLY): where the
+    // player is to be this frame, in the default worldspace's exterior. Asked on the main thread before each frame
+    // (androidmain.cpp), which puts the player there with collision off. False when no fly-through runs; done goes true
+    // on the frame after the last pose, for the engine to give the player their collision back.
+    struct BenchmarkPose
+    {
+        osg::Vec3f position;
+        float pitch = 0.f, yaw = 0.f; // radians, as the player's rotation
+    };
+    bool benchmarkFlyPose(BenchmarkPose& pose, bool& done);
 }
 
 #endif

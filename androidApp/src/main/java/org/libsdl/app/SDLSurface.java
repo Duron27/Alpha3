@@ -77,7 +77,7 @@ public class SDLSurface extends SurfaceView implements SurfaceHolder.Callback,
     private static int readConfiguredHeight() {
         int x = 0, y = 0;
         try (java.io.BufferedReader reader = new java.io.BufferedReader(
-                new java.io.FileReader(org.alpha3.launcher.paths.OpenMWPaths.INSTANCE.getSETTINGS_FILE()))) {
+                new java.io.FileReader(org.openmw.utils.FlyBenchmark.settingsFile()))) {
             String line;
             while ((line = reader.readLine()) != null) {
                 if (line.startsWith("resolution x = ")) {

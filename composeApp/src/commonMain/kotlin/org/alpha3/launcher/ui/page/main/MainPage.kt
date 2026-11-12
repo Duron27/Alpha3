@@ -322,7 +322,6 @@ fun OpenMW(
 ) {
     var showFileBrowser by viewModel.showFileBrowser
     val infiniteTransition = rememberInfiniteTransition(label = "")
-    val context = LocalPlatformContext.current
     val savedPath by GameFilesPreferences.getNullablePreference(GameFilesPreferences.GAME_FILES_URI_KEY).collectAsState(initial = null)
 
     val pulse by infiniteTransition.animateFloat(
@@ -340,9 +339,7 @@ fun OpenMW(
         Button(
             onClick = {
                 customCFG = true
-                viewModel.selectMorrowWindFolder(
-                    context = context
-                )
+                viewModel.selectMorrowWindFolder()
             },
             modifier = Modifier
                 .fillMaxWidth()
@@ -381,7 +378,7 @@ fun OpenMW(
                 initialDirectory = if (getPlatform().name.startsWith("Android")) defaultDir.parentFile ?: defaultDir else defaultDir,
                 onDismiss = { showFileBrowser = false },
                 onFolderSelected = { folder ->
-                    viewModel.onGameFolderSelected(folder, context)
+                    viewModel.onGameFolderSelected(folder)
                 },
                 mode = FileBrowserMode.FOLDER
             )

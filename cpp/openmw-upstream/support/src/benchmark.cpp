@@ -119,6 +119,37 @@ namespace Alpha3
         };
         constexpr int sPhaseCount = static_cast<int>(std::size(sPhases));
 
+        // ---- The fly-through (OPENMW_BENCHMARK_FLY, set by the launcher's Benchmarks button, which also starts the
+        // game with the benchmark's own settings): the player is held at a route's start until the world around it has
+        // loaded, then moved along it at a fixed speed with collision off, and the frame is measured in tenths of the
+        // route. The speed is the same on every build and phone, so a slower frame shows as fewer frames, not as a
+        // different route.
+        struct FlyRoute
+        {
+            const char* mName;
+            float mFrom[3], mTo[3];
+            float mPitch, mYaw; // degrees, as the console's GetAngle X and Z
+            float mSeconds;
+        };
+        constexpr FlyRoute sRoutes[] = {
+            // Vivec from the north, about 6200 units up, south over the cantons and the water (31,900 units)
+            { "vivec", { 33055.8f, -70769.0f, 6185.4f }, { 32815.6f, -102628.4f, 6310.2f }, -0.22f, 179.94f, 90.f },
+        };
+        constexpr float sFlyHold = 15.f; // s at the start, not measured: the cells round it load, the programs build
+        constexpr int sFlySegments = 10;
+        constexpr Phase sFlyPhases[sFlySegments] = {
+            { "0-10%", "the route's first tenth", 0, Extra::None },
+            { "10-20%", "the route's second tenth", 0, Extra::None },
+            { "20-30%", "the route's third tenth", 0, Extra::None },
+            { "30-40%", "the route's fourth tenth", 0, Extra::None },
+            { "40-50%", "the route's fifth tenth", 0, Extra::None },
+            { "50-60%", "the route's sixth tenth", 0, Extra::None },
+            { "60-70%", "the route's seventh tenth", 0, Extra::None },
+            { "70-80%", "the route's eighth tenth", 0, Extra::None },
+            { "80-90%", "the route's ninth tenth", 0, Extra::None },
+            { "90-100%", "the route's last tenth", 0, Extra::None },
+        };
+
         std::string trimmed(std::string s)
         {
             while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' ' || s.back() == '\0'))
@@ -368,6 +399,10 @@ namespace Alpha3
                     if (key.find("begin") != std::string::npos || key.find("end time") != std::string::npos
                         || key.find("Reference") != std::string::npos || key == "FrameNumber")
                         continue;
+                    // a timer query across a disjoint event (Adreno's GLES: a clock change) reads back garbage, such
+                    // as 1.6e11 s; one such frame would make the whole part's average meaningless
+                    if (key.find("GPU") != std::string::npos && !(value >= 0 && value < 10.0))
+                        continue;
                     auto& [sum, count] = mValues[key];
                     sum += value;
                     ++count;
@@ -453,6 +488,8 @@ namespace Alpha3
             void frame()
             {
                 const Clock::time_point now = Clock::now();
+                if (flyFrame(now))
+                    return;
                 if (mResultsShown
                     && (now > mResultsUntil || viewMoved()
                         || Settings::ShaderManager::get().getMode() == Settings::ShaderManager::Mode::Debug))
@@ -539,7 +576,286 @@ namespace Alpha3
                 }
             }
 
+            // ---- the fly-through
+
+            // the main thread, for androidmain.cpp: where the player is to be this frame
+            bool flyPose(BenchmarkPose& pose, bool& done)
+            {
+                done = false;
+                if (mFlyReleased)
+                {
+                    mFlyReleased = false;
+                    done = true;
+                    return false;
+                }
+                if (mRoute == nullptr || (mFly != Fly::Holding && mFly != Fly::Flying))
+                    return false;
+                const FlyRoute& r = *mRoute;
+                const float t = mFly == Fly::Holding
+                    ? 0.f
+                    : std::clamp(std::chrono::duration<float>(Clock::now() - mFlyStart).count() / r.mSeconds, 0.f, 1.f);
+                pose.position = osg::Vec3f(r.mFrom[0], r.mFrom[1], r.mFrom[2]) * (1.f - t)
+                    + osg::Vec3f(r.mTo[0], r.mTo[1], r.mTo[2]) * t;
+                pose.pitch = osg::DegreesToRadians(r.mPitch);
+                pose.yaw = osg::DegreesToRadians(r.mYaw);
+                return true;
+            }
+
         private:
+            enum class Fly
+            {
+                Off,
+                Waiting, // for the game: the scene camera drawing the world
+                Holding, // at the start, not measured
+                Flying,
+            };
+
+            // true while the fly-through has the frame (the still benchmark is not run then)
+            bool flyFrame(Clock::time_point now)
+            {
+                if (!mFlyChecked)
+                {
+                    mFlyChecked = true;
+                    if (const char* name = std::getenv("OPENMW_BENCHMARK_FLY"); name != nullptr && *name != '\0')
+                    {
+                        for (const FlyRoute& r : sRoutes)
+                            if (std::string_view(r.mName) == name)
+                                mRoute = &r;
+                        if (mRoute == nullptr)
+                            mRoute = &sRoutes[0];
+                        mFly = Fly::Waiting;
+                        Log(Debug::Info) << "Fly-through: route " << mRoute->mName << ", waiting for the game";
+                    }
+                }
+                if (mFly == Fly::Off)
+                    return false;
+                if (!cameraSeen())
+                    return true;
+                osg::ref_ptr<osg::Camera> scene;
+                {
+                    std::lock_guard lock(mCameraMutex);
+                    mScene.lock(scene);
+                }
+                osgViewer::ViewerBase* viewer = scene ? viewerOf(*scene) : nullptr;
+                if (viewer == nullptr)
+                {
+                    mCameraSeen.store(false, std::memory_order_release);
+                    return true;
+                }
+                holdView(now);
+                const FlyRoute& route = *mRoute;
+                if (mFly == Fly::Waiting)
+                {
+                    hideResults();
+                    mFly = Fly::Holding;
+                    mFlyStart = now;
+                    Log(Debug::Info) << "Fly-through: holding at the start";
+                }
+                if (mFly == Fly::Holding)
+                {
+                    const float t = std::chrono::duration<float>(now - mFlyStart).count();
+                    const int left = static_cast<int>(std::ceil(sFlyHold - t));
+                    if (left != mFlyShown)
+                    {
+                        mFlyShown = left;
+                        status("Fly-through benchmark (" + std::string(route.mName) + ") in " + std::to_string(left)
+                            + " s: do not touch the screen");
+                    }
+                    if (t < sFlyHold)
+                        return true;
+                    // what the header says about the view, as the still benchmark has it
+                    mCullMask = scene->getCullMask();
+                    mShadows = findShadows(*scene, 0);
+                    mShadowsOn = mShadows && ShadowPeek::on(*mShadows);
+                    mGrassOn = grassOn();
+                    mOcclusionOn = occlusionOn();
+                    mHeader = header(*scene, *viewer);
+                    collectStats(*viewer);
+                    mResults.assign(sFlySegments, {});
+                    for (int i = 0; i < sFlySegments; ++i)
+                        mResults[i].mPhase = &sFlyPhases[i];
+                    mFly = Fly::Flying;
+                    mFlyStart = mLast = now;
+                    beginSegment(0, *viewer, now);
+                    Log(Debug::Info) << "Fly-through: flying (" << route.mSeconds << " s)";
+                    return true;
+                }
+                const float t = std::chrono::duration<float>(now - mFlyStart).count() / route.mSeconds;
+                const int segment = std::min(sFlySegments - 1, static_cast<int>(t * sFlySegments));
+                if (segment != mPhase)
+                {
+                    endMeasure(mResults[mPhase], now);
+                    beginSegment(segment, *viewer, now);
+                }
+                PhaseResult& r = mResults[mPhase];
+                r.mIntervals.push_back(std::chrono::duration<double, std::milli>(now - mLast).count());
+                sample(*viewer, r);
+                mLast = now;
+                const int percent = std::min(100, static_cast<int>(t * 100.f));
+                if (percent / 5 != mFlyShown)
+                {
+                    mFlyShown = percent / 5;
+                    status("Fly-through " + std::to_string(percent) + "%");
+                }
+                if (t < 1.f)
+                    return true;
+                endMeasure(r, now);
+                uncollectStats();
+                mFly = Fly::Off;
+                mFlyReleased = true;
+                finishFly();
+                return true;
+            }
+
+            void beginSegment(int index, osgViewer::ViewerBase& viewer, Clock::time_point now)
+            {
+                mPhase = index;
+                mMeasureFrame = frameNumber(viewer);
+                mCpuStart = cpuTimes();
+                mMeasureStart = now;
+            }
+
+            static double overall(const std::vector<PhaseResult>& results, double p)
+            {
+                std::vector<double> v;
+                for (const PhaseResult& r : results)
+                    v.insert(v.end(), r.mIntervals.begin(), r.mIntervals.end());
+                if (v.empty())
+                    return std::nan("");
+                std::sort(v.begin(), v.end());
+                if (p < 0)
+                {
+                    double sum = 0;
+                    for (double x : v)
+                        sum += x;
+                    return sum / v.size();
+                }
+                return v[std::min(v.size() - 1, static_cast<std::size_t>(p * v.size()))];
+            }
+
+            void finishFly()
+            {
+                const FlyRoute& route = *mRoute;
+                const std::filesystem::path dir = cacheDirectory().parent_path() / "benchmarks";
+                std::error_code ec;
+                std::filesystem::create_directories(dir, ec);
+                const std::string prefix = std::string("flythrough-") + route.mName + "-";
+                const std::filesystem::path path = dir / (prefix + mStamp + "-" + ALPHA3_BUILD_COMMIT + ".json");
+                std::ofstream out(path);
+                out << "{\n  \"alpha3 flythrough\": 1,\n  \"route\": {\"name\": " << jsonString(route.mName)
+                    << ", \"from\": [" << number(route.mFrom[0]) << ", " << number(route.mFrom[1]) << ", "
+                    << number(route.mFrom[2]) << "], \"to\": [" << number(route.mTo[0]) << ", "
+                    << number(route.mTo[1]) << ", " << number(route.mTo[2]) << "], \"pitch\": " << number(route.mPitch)
+                    << ", \"yaw\": " << number(route.mYaw) << ", \"seconds\": " << number(route.mSeconds)
+                    << ", \"hold\": " << number(sFlyHold) << "},\n"
+                    << mHeader << "  \"overall\": {\"fps\": " << number(1000.0 / overall(mResults, -1))
+                    << ", \"ms\": {\"mean\": " << number(overall(mResults, -1)) << ", \"p50\": "
+                    << number(overall(mResults, 0.5)) << ", \"p99\": " << number(overall(mResults, 0.99))
+                    << ", \"max\": " << number(overall(mResults, 1.0)) << "}},\n  \"segments\": [";
+                for (int i = 0; i < sFlySegments; ++i)
+                    out << (i ? ",\n" : "\n") << phaseJson(mResults[i]);
+                out << "\n  ]\n}\n";
+                out.close();
+                mStatusUntil = Clock::now() + std::chrono::seconds(12);
+                if (!out)
+                {
+                    Log(Debug::Error) << "Fly-through: cannot write " << path.string();
+                    status("Fly-through: could not write the file");
+                    return;
+                }
+                Log(Debug::Info) << "Fly-through: written to " << path.string();
+
+                // the newest earlier run of the same route, to set this one beside
+                std::filesystem::path txt = path;
+                txt.replace_extension(".txt");
+                std::filesystem::path newest;
+                for (const auto& entry : std::filesystem::directory_iterator(dir, ec))
+                {
+                    const std::filesystem::path& f = entry.path();
+                    if (f.extension() == ".txt" && f.filename().string().rfind(prefix, 0) == 0 && f != txt
+                        && (newest.empty() || f.filename() > newest.filename()))
+                        newest = f;
+                }
+                std::map<std::string, double> then; // segment (or "overall") -> fps
+                std::string thenBuild;
+                if (!newest.empty())
+                {
+                    std::ifstream in(newest);
+                    std::string line;
+                    while (std::getline(in, line))
+                    {
+                        if (line.rfind("build ", 0) == 0 && thenBuild.empty())
+                            thenBuild = line.substr(6, line.find(' ', 6) - 6);
+                        if (line.rfind("data\t", 0) != 0)
+                            continue;
+                        std::istringstream fields(line.substr(5));
+                        std::string name, fps;
+                        std::getline(fields, name, '\t');
+                        std::getline(fields, fps, '\t');
+                        then[name] = fps == "null" ? std::nan("") : std::atof(fps.c_str());
+                    }
+                }
+                const bool compare = !then.empty();
+                const auto cell = [](double v, const char* format) {
+                    char b[32];
+                    if (std::isfinite(v))
+                        std::snprintf(b, sizeof b, format, v);
+                    else
+                        std::snprintf(b, sizeof b, "%7s", "-");
+                    return std::string(b);
+                };
+                std::string table;
+                char line[256];
+                std::snprintf(line, sizeof line, "fly-through %s  build %s  %s %s\n", route.mName, ALPHA3_BUILD_COMMIT,
+                    property("ro.product.manufacturer").c_str(), property("ro.product.model").c_str());
+                table += line;
+                table += compare ? "             fps   p50 ms  p99 ms  max ms  GPU ms |  then  change\n"
+                                 : "             fps   p50 ms  p99 ms  max ms  GPU ms\n";
+                const auto row = [&](const std::string& name, double mean, double p50, double p99, double max, double gpu) {
+                    const double fps = 1000.0 / mean;
+                    std::snprintf(line, sizeof line, "%-10s", name.c_str());
+                    std::string text = line + cell(fps, "%6.1f") + cell(p50, "%8.1f") + cell(p99, "%8.1f")
+                        + cell(max, "%8.1f") + cell(gpu, "%8.1f");
+                    if (compare)
+                    {
+                        const auto it = then.find(name);
+                        const double was = it == then.end() ? std::nan("") : it->second;
+                        text += " |" + cell(was, "%6.1f") + cell(fps - was, "%+7.1f");
+                    }
+                    return text + "\n";
+                };
+                std::string data;
+                for (const PhaseResult& r : mResults)
+                {
+                    std::vector<double> v = r.mIntervals;
+                    std::sort(v.begin(), v.end());
+                    const auto pct = [&](double p) {
+                        return v.empty() ? std::nan("") : v[std::min(v.size() - 1, static_cast<std::size_t>(p * v.size()))];
+                    };
+                    table += row(r.mPhase->mName, meanMs(r), pct(0.5), pct(0.99), v.empty() ? std::nan("") : v.back(),
+                        gpuMs(r));
+                    data += std::string("data\t") + r.mPhase->mName + "\t" + number(1000.0 / meanMs(r)) + "\n";
+                }
+                const double mean = overall(mResults, -1);
+                table += row("overall", mean, overall(mResults, 0.5), overall(mResults, 0.99), overall(mResults, 1.0),
+                    std::nan(""));
+                data += "data\toverall\t" + number(1000.0 / mean) + "\n";
+                const auto get = [&](const char* key) {
+                    const auto it = mResults.back().mMachine.mValues.find(key);
+                    return it == mResults.back().mMachine.mValues.end() ? std::nan("") : it->second;
+                };
+                std::snprintf(line, sizeof line, "at the end: hottest %.0f C, GPU %.0f MHz %.0f%% busy, thermal %d\n",
+                    get("temp hottest c"), get("gpu mhz"), get("gpu busy %"), mResults.back().mThermalPressure);
+                table += line;
+                if (compare)
+                    table += "then: " + newest.filename().string() + " (build " + thenBuild + ")\n";
+                table += "saved: Alpha3/benchmarks/" + path.filename().string() + " (and .txt)";
+                std::ofstream text(txt);
+                text << table << "\n" << data;
+                hideStatus();
+                mStatusUntil.reset();
+                showResults(table);
+            }
             static osgViewer::ViewerBase* viewerOf(osg::Camera& camera)
             {
                 auto* view = dynamic_cast<osgViewer::View*>(camera.getView());
@@ -580,12 +896,19 @@ namespace Alpha3
                 // measured as it is when it works, not resting or trying itself out in the middle of a phase
                 occlusionForce(mOcclusionOn);
                 mHeader = header(*scene, *viewer);
+                collectStats(*viewer);
+                Log(Debug::Info) << "Benchmark: started (" << sPhaseCount << " phases, about "
+                                 << static_cast<int>(sWarmup + sPhaseCount * (sSettle + sMeasure)) << " s)";
+                status("Benchmark starting: hold still, do not touch the screen");
+            }
 
-                // OSG's stats, as OpenMW's profiler turns them on (F3), kept as they were for after. OpenMW's own CPU
-                // work is timed only while its category is collected: lua (the Lua worker's update, which overlaps
-                // the draw), luasyncupdate (the part the frame waits for), mechanics, physics and mwscript.
+            // OSG's stats, as OpenMW's profiler turns them on (F3), kept as they were for after. OpenMW's own CPU
+            // work is timed only while its category is collected: lua (the Lua worker's update, which overlaps the
+            // draw), luasyncupdate (the part the frame waits for), mechanics, physics and mwscript.
+            void collectStats(osgViewer::ViewerBase& viewer)
+            {
                 mCollect.clear();
-                osg::Stats* stats = viewer->getViewerStats();
+                osg::Stats* stats = viewer.getViewerStats();
                 for (const char* c : { "frame_rate", "event", "update", "engine", "resource", "scene", "lua",
                          "luasyncupdate", "mechanics", "physics", "physicsworker", "script" })
                 {
@@ -593,7 +916,7 @@ namespace Alpha3
                     stats->collectStats(c, true);
                 }
                 osgViewer::ViewerBase::Cameras cameras;
-                viewer->getCameras(cameras);
+                viewer.getCameras(cameras);
                 for (osg::Camera* camera : cameras)
                     if (osg::Stats* s = camera->getStats())
                         for (const char* c : { "rendering", "gpu", "scene" })
@@ -601,9 +924,14 @@ namespace Alpha3
                             mCollect.push_back({ s, c, s->collectStats(c) });
                             s->collectStats(c, true);
                         }
-                Log(Debug::Info) << "Benchmark: started (" << sPhaseCount << " phases, about "
-                                 << static_cast<int>(sWarmup + sPhaseCount * (sSettle + sMeasure)) << " s)";
-                status("Benchmark starting: hold still, do not touch the screen");
+            }
+
+            void uncollectStats()
+            {
+                for (const Collect& c : mCollect)
+                    if (osg::ref_ptr<osg::Stats> s; c.mStats.lock(s))
+                        s->collectStats(c.mName, c.mWas);
+                mCollect.clear();
             }
 
             void restore(osg::Camera& scene)
@@ -737,7 +1065,7 @@ namespace Alpha3
                     h << "  \"gl\": " << (mGl.empty() ? "{}" : mGl) << ",\n";
                 }
                 const char* envs[] = { "OSG_USE_ZINK", "OPENMW_FRAMEGEN", "OPENMW_GLES_VERSION", "OPENMW_DISABLE_SPIRV",
-                    "OSG_USE_ANGLE" };
+                    "OSG_USE_ANGLE", "OSG_USE_VULKAN" };
                 h << "  \"environment\": {";
                 bool first = true;
                 for (const char* e : envs)
@@ -795,10 +1123,7 @@ namespace Alpha3
                     restore(*scene);
                 occlusionForce(false);
                 occlusionTune(0, 0);
-                for (const Collect& c : mCollect)
-                    if (osg::ref_ptr<osg::Stats> s; c.mStats.lock(s))
-                        s->collectStats(c.mName, c.mWas);
-                mCollect.clear();
+                uncollectStats();
                 mRunning = false;
                 mStatusUntil = Clock::now() + std::chrono::seconds(12);
                 if (!error.empty())
@@ -1152,6 +1477,11 @@ namespace Alpha3
             bool mResultsShown = false;
             bool mResultsViewKnown = false;
             osg::Vec3d mResultsEye, mResultsLook;
+            bool mFlyChecked = false, mFlyReleased = false;
+            Fly mFly = Fly::Off;
+            const FlyRoute* mRoute = nullptr;
+            Clock::time_point mFlyStart;
+            int mFlyShown = -1;
         };
     }
 
@@ -1177,6 +1507,11 @@ namespace Alpha3
     void benchmarkFrame()
     {
         Benchmark::get().frame();
+    }
+
+    bool benchmarkFlyPose(BenchmarkPose& pose, bool& done)
+    {
+        return Benchmark::get().flyPose(pose, done);
     }
 }
 

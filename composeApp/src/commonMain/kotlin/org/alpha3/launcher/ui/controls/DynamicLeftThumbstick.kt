@@ -14,7 +14,6 @@ import org.alpha3.launcher.resources.virtual_left_thumbstick
 import org.alpha3.launcher.resources.Res
 import org.alpha3.launcher.engine.KeyCodes
 import org.alpha3.launcher.engine.Engine
-import org.alpha3.launcher.utils.PlatformContext
 import org.alpha3.launcher.utils.Log
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.EnterTransition
@@ -131,7 +130,6 @@ import kotlin.math.sqrt
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
 fun ResizableDraggableThumbstick(
-    context: PlatformContext,
     containerWidth: Float,
     containerHeight: Float,
 ) {
@@ -256,7 +254,7 @@ fun ResizableDraggableThumbstick(
         val animations = getAnimations().toMutableMap().apply { put("None", EnterTransition.None to ExitTransition.None) }
         val (currentEnterAnimation, currentExitAnimation) = animations[selectedAnimation] ?: (animations["Slide Vertically"] ?: error("Default animation not found"))
 
-        val selectedKeycodesFlow = remember(context) {
+        val selectedKeycodesFlow = remember {
             GameFilesPreferences.getPreference(GameFilesPreferences.SELECTED_MOUSE_KEYS, "54,111").map { keycodeString ->
                 keycodeString.split(",").map { it.toInt() }
             }
@@ -606,7 +604,6 @@ fun ResizableDraggableThumbstick(
                                                 ) {
                                                     if (options) {
                                                         CustomIconPickerButton(
-                                                            context = context,
                                                             buttonId = 99,
                                                             buttonUri = buttonUri,
                                                             containerWidth = containerWidth,

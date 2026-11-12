@@ -2,7 +2,6 @@ package org.openmw
 
 import org.alpha3.launcher.paths.OpenMWPaths
 import android.Manifest
-import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
@@ -162,7 +161,7 @@ class MainActivity : ComponentActivity() {
 
                         LaunchedEffect(Unit) {
                             launch(Dispatchers.IO) {
-                                startObservingCodeGroup(this@MainActivity, lifecycleScope)
+                                startObservingCodeGroup(lifecycleScope)
                             }
                         }
 
@@ -190,6 +189,7 @@ class MainActivity : ComponentActivity() {
 
                         if (!UIStateManager.useNavmesh) {
                             RootNav()
+                            org.alpha3.launcher.benchmark.BenchmarkResultsHost()
                             MoeDialog()
                         } else {
                             BackgroundAnimation()
@@ -202,7 +202,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-fun startObservingCodeGroup(context: Context, scope: CoroutineScope) {
+fun startObservingCodeGroup(scope: CoroutineScope) {
     scope.launch {
         GameFilesPreferences.getPreference(GameFilesPreferences.CODE_GROUP_KEY, "OpenMW").collect { codeGroup ->
             UIStateManager.tempCodeGroup = codeGroup

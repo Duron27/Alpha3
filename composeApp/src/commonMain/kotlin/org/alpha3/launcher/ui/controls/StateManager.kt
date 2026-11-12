@@ -14,7 +14,6 @@ import org.alpha3.launcher.resources.select_a_numpad_button
 import org.alpha3.launcher.resources.select_a_unique_key_the_shift_and_alt_keys_toggle
 import org.alpha3.launcher.resources.Res
 import org.alpha3.launcher.engine.KeyCodes
-import org.alpha3.launcher.utils.PlatformContext
 import org.alpha3.launcher.utils.Uri
 import org.alpha3.launcher.utils.Log
 import androidx.compose.animation.core.LinearEasing
@@ -249,6 +248,8 @@ object UIStateManager {
     val frameTimes = MutableStateFlow<List<Float>>(emptyList())
     /** The intervals between frames sent to the screen, generated ones included; empty where the engine has no such list. */
     val shownFrameTimes = MutableStateFlow<List<Float>>(emptyList())
+    /** The GPU's load in percent from the Vulkan renderer's own timing (-1: none, as under OpenGL ES). */
+    val gpuBusyFromRenderer = MutableStateFlow(-1)
     val cpuHistory = MutableStateFlow<List<Int>>(emptyList())
     val gpuHistory = MutableStateFlow<List<Int>>(emptyList())
     val memoryHistory = MutableStateFlow<List<Long>>(emptyList()) // MB
@@ -982,7 +983,6 @@ fun KeySelectionMenu(onKeySelected: (Int) -> Unit, usedKeys: List<Int>, containe
 
 @Composable
 fun DynamicButtonManager(
-    context: PlatformContext,
     onNewButtonAdded: (ButtonState) -> Unit,
     blurRadius: Dp = 6.dp,
     shadowColor: Color = Color.White.copy(alpha = 0.6f),

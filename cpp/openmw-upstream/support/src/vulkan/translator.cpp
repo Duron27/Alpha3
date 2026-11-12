@@ -800,7 +800,9 @@ namespace Alpha3::Vk
             });
         }
 
-        constexpr uint32_t sDrawBlockSize = 272; // a3DrawUniforms: three mat4, a mat3 and two clip planes, std140
+        // a3DrawUniforms: three mat4, a mat3, two clip planes and the model view's inverse (filled only for the programs
+        // that read it), std140
+        constexpr uint32_t sDrawBlockSize = 336;
 
         int builtinIndex(const std::string& name)
         {
@@ -2404,6 +2406,9 @@ void main()
                         }
                         const double total = (ticks[mGpuUsed[slot] - 1] - ticks[0]) * period;
                         mGpuSums["frame"] += total;
+#ifdef __ANDROID__
+                        Alpha3::noteGpuFrameTime(total);
+#endif
                         mGpuSums["window+rest"] += total - inPasses;
                         // the statistics' GPU line (F3), as osgViewer's Renderer gives it from OpenGL's timer
                         // queries: on the main camera's statistics, for the frame measured, begun with its draw
@@ -2953,6 +2958,11 @@ void main()
                         const osg::Vec4f plane
                             = (clipModes & (1u << i)) ? mClipPlanes[i] : osg::Vec4f(0.f, 0.f, 0.f, 1.f);
                         std::memcpy(span.mData + 240 + i * 16, plane.ptr(), 16);
+                    }
+                    if (variant.mInverseModelView)
+                    {
+                        const osg::Matrixf inverseModelView(osg::Matrix::inverse(modelViewMatrix));
+                        std::memcpy(span.mData + 272, inverseModelView.ptr(), 64);
                     }
                     buffers[2] = span.mBuffer;
                     bufferOffsets[2] = span.mOffset;

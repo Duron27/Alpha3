@@ -50,6 +50,13 @@ open class PlatformFeatures {
     open fun prepareResources() {}
     open fun resetUserResources() {}
     open fun resetUserConfig() {}
+    /**
+     * Starts the game on the fly-through benchmark with its own settings, and [tuning]'s changes ("Section/key" to value,
+     * see FlyTuning) on top; null when started, otherwise why not.
+     */
+    open fun startFlyBenchmark(tuning: Map<String, String> = emptyMap()): String? = "Not available here"
+    /** The screen's full size in pixels, the longer side first. */
+    open fun nativeScreenSize(): Pair<Int, Int> = 0 to 0
     open fun resetUI() {}
 
     // Background helpers
@@ -171,8 +178,8 @@ class UserManageAssets(context: PlatformContext) {
 @Composable fun Terminal() = Platform.features.Terminal()
 @Composable fun UqmDownloads() = Platform.features.UqmDownloads()
 @Composable fun SSOHome() = Platform.features.ModDownloader()
-@Composable fun KramConversion(context: PlatformContext) =
-    org.alpha3.launcher.ui.page.mod.KramConversionScreen(context, Platform.features.kramRunner)
+@Composable fun KramConversion() =
+    org.alpha3.launcher.ui.page.mod.KramConversionScreen(Platform.features.kramRunner)
 
 @Composable
 fun FileBrowserPopup(
@@ -193,10 +200,8 @@ fun FileBrowserPopup(
 fun InitialDirectorySelection(onSelect: (File) -> Unit, onDismiss: () -> Unit) =
     Platform.features.InitialDirectorySelection({ path -> onSelect(File(path)) }, onDismiss)
 
-@Suppress("UNUSED_PARAMETER")
 @Composable
 fun CustomIconPickerButton(
-    context: PlatformContext,
     buttonId: Int,
     buttonUri: MutableState<Uri?>,
     containerWidth: Float,

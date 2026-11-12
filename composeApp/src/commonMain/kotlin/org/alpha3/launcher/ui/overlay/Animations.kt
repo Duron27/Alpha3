@@ -2,7 +2,6 @@ package org.alpha3.launcher.ui.overlay
 
 import org.alpha3.launcher.resources.animation_for_controls
 import org.alpha3.launcher.resources.Res
-import org.alpha3.launcher.utils.PlatformContext
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -182,7 +181,7 @@ fun getAnimations(): Map<String, Pair<EnterTransition, ExitTransition>> {
 }
 
 @Composable
-fun AnimationSettings(context: PlatformContext, scope: CoroutineScope) {
+fun AnimationSettings(scope: CoroutineScope) {
     val animations = getAnimations().toMutableMap().apply { put("None", EnterTransition.None to ExitTransition.None) }
     var selectedAnimation by remember { mutableStateOf("None") }
     var expanded by remember { mutableStateOf(false) }

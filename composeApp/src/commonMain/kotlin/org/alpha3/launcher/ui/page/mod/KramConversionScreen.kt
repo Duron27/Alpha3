@@ -60,7 +60,6 @@ import org.alpha3.launcher.tools.KramTool
 import org.alpha3.launcher.ui.view.getMemoryInfo
 import org.alpha3.launcher.utils.FileBrowserMode
 import org.alpha3.launcher.utils.FileBrowserPopup
-import org.alpha3.launcher.utils.PlatformContext
 import org.alpha3.launcher.utils.stringRes
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.TimeSource
@@ -88,7 +87,7 @@ private val storageRoot get() = File(OpenMWPaths.USER_FILE_STORAGE).parentFile ?
  * via [KramTool]. Laid out for a small screen: the controls scroll, the log keeps a fixed share of the height.
  */
 @Composable
-fun KramConversionScreen(context: PlatformContext, runner: KramTool.Runner?) {
+fun KramConversionScreen(runner: KramTool.Runner?) {
     if (runner == null) {
         Text("Texture conversion is not available on this platform.", modifier = Modifier.padding(16.dp))
         return
@@ -123,7 +122,7 @@ fun KramConversionScreen(context: PlatformContext, runner: KramTool.Runner?) {
 
     LaunchedEffect(Unit) {
         while (true) {
-            val info = getMemoryInfo(context)
+            val info = getMemoryInfo()
             memory = "${stringRes(Res.string.total_used_memory)}: ${info.usedMemory} / ${info.totalMemory}"
             delay(1000.milliseconds)
         }

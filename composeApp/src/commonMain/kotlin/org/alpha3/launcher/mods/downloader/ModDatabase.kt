@@ -30,6 +30,9 @@ interface ModDao {
     @Query("SELECT COUNT(*) FROM mods")
     suspend fun getModCount(): Int
 
+    @Query("SELECT COUNT(*) FROM mods")
+    fun getModCountFlow(): Flow<Int>
+
     @Update
     suspend fun updateMods(mods: List<ModDesc>)
 

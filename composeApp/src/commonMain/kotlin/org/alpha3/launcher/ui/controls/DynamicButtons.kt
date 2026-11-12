@@ -12,7 +12,6 @@ import org.alpha3.launcher.resources.show_in_mouse_ui
 import org.alpha3.launcher.resources.toggleable
 import org.alpha3.launcher.resources.Res
 import org.alpha3.launcher.engine.KeyCodes
-import org.alpha3.launcher.utils.PlatformContext
 import org.alpha3.launcher.utils.Log
 import org.alpha3.launcher.engine.MouseActions.ACTION_DOWN
 import org.alpha3.launcher.engine.MouseActions.ACTION_UP
@@ -142,7 +141,6 @@ fun stringToShape(shapeName: String): Shape {
 @Suppress("DEPRECATION")
 @Composable
 fun ResizableDraggableButton(
-    context: PlatformContext,
     id: Int,
     keyCode: Int,
     containerWidth: Float,
@@ -206,7 +204,7 @@ fun ResizableDraggableButton(
         val animatedOffsetY = remember { Animatable(offsetY.floatValue) }
 
         // Get the selected key codes from the data store as a flow of lists of integers
-        val selectedKeycodesFlow = remember(context) {
+        val selectedKeycodesFlow = remember {
             GameFilesPreferences.getPreference(GameFilesPreferences.SELECTED_MOUSE_KEYS, "54,111").map { keycodeString ->
                 keycodeString.split(",").map { it.toInt() }
             }
@@ -504,7 +502,7 @@ fun ResizableDraggableButton(
                                                             onNativeKeyUp(keyCode)
                                                         }
                                                     } else {
-                                                        if (buttonVibrate.value && isVibrationOn) vibrate(context)
+                                                        if (buttonVibrate.value && isVibrationOn) vibrate()
                                                         if (isMouseButton.value) {
                                                             Engine.onNativeMouse(mouseButton.intValue, ACTION_DOWN, 0f, 0f, true)
                                                             Log.d(
@@ -907,7 +905,6 @@ fun ResizableDraggableButton(
                                                             HorizontalDivider(color = Color(202, 165, 96), thickness = 1.dp)
 
                                                             CustomIconPickerButton(
-                                                                context = context,
                                                                 buttonId = id,
                                                                 buttonUri = buttonUri,
                                                                 containerWidth = containerWidth,

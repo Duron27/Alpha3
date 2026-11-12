@@ -65,7 +65,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
@@ -90,10 +89,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.datastore.preferences.core.edit
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
+import androidx.compose.runtime.produceState
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import org.alpha3.launcher.paths.OpenMWPaths
@@ -121,6 +123,7 @@ import org.alpha3.launcher.ui.controls.UIStateManager.gold
 import org.alpha3.launcher.ui.view.ProgressDialog
 import org.alpha3.launcher.ui.view.addCustomLog
 import org.alpha3.launcher.ui.view.getAvailableStorageSpace
+import org.alpha3.launcher.ui.view.rememberAvailableStorageSpace
 import org.alpha3.launcher.ui.view.getMessages
 import org.alpha3.launcher.utils.GameFilesPreferences.IS_NEXUS_PREMIUM
 import org.alpha3.launcher.utils.GameFilesPreferences.NEXUS_API_KEY
@@ -152,6 +155,8 @@ object StatusInfo {
 @Composable
 fun OnboardingScreen() {
     val scope = rememberCoroutineScope()
+    var checking by remember { mutableStateOf(false) }
+    var keyError by remember { mutableStateOf<String?>(null) }
 
     Box(
         modifier = Modifier
@@ -162,20 +167,24 @@ fun OnboardingScreen() {
     ) {
         Column {
             Text(
-                "Please enter your nexus API key,\nif nothing happens when you try to press the ok button the key is not valid ",
+                "Please enter your Nexus API key. It is checked with Nexus and kept only if Nexus accepts it.",
                 style = MaterialTheme.typography.labelLarge,
                 color = gold
             )
             OutlinedTextField(
-                value = apiKey.replace("null", ""),
+                value = apiKey.takeUnless { it == "null" }.orEmpty(),
                 onValueChange = {
                     apiKey = it
+                    keyError = null
                 },
                 label = { Text(stringResource(Res.string.nexus_api_key)) },
+                isError = keyError != null,
+                singleLine = true,
                 modifier = Modifier
                     .height(100.dp)
                     .fillMaxWidth()
             )
+            keyError?.let { Text(it, color = MaterialTheme.colorScheme.error, fontSize = 13.sp) }
             Spacer(modifier = Modifier.padding(8.dp))
             Row {
                 TextButton(
@@ -192,18 +201,13 @@ fun OnboardingScreen() {
                 Spacer(modifier = Modifier.weight(1f))
 
                 TextButton(
+                    enabled = !checking,
                     onClick = {
-                        scope.launch(Dispatchers.Default) {
-                            try {
-                                validate()
-                            } catch (e: Exception) {
-                                Log.e("VALIDATE_ERROR", "Validation failed: ${e.message}")
-                                addCustomLog("VALIDATE_ERROR: Validation failed: ${e.message}", textSize = 10, textColor = Color.Cyan)
-                            } finally {
-                                dataStore.edit { preferences ->
-                                    preferences[NEXUS_API_KEY] = apiKey
-                                }
-                            }
+                        val typed = apiKey
+                        checking = true
+                        scope.launch {
+                            keyError = ModListManager.checkAndSaveKey(typed)
+                            checking = false
                         }
                     },
                     colors = ButtonDefaults.buttonColors(
@@ -211,7 +215,7 @@ fun OnboardingScreen() {
                         contentColor = Color.Black
                     )
                 ) {
-                    Text("OK")
+                    Text(if (checking) "Checking…" else "OK")
                 }
             }
         }
@@ -222,6 +226,8 @@ fun OnboardingScreen() {
 fun ModDownloaderScreen() {
     val modDao = ModDatabase.getDatabase().modDao()
     var settings by remember { mutableStateOf(false) }
+    var settingsKeyChecking by remember { mutableStateOf(false) }
+    var settingsKeyError by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
     var showInitiatingDialog by rememberSaveable { mutableStateOf(false) }
     val fetchNexusAPI by GameFilesPreferences.getNullablePreference(NEXUS_API_KEY).collectAsState(initial = "")
@@ -239,10 +245,10 @@ fun ModDownloaderScreen() {
     val logMessages = remember { mutableStateListOf<String>() }
     var showBrowse by remember { mutableStateOf(false) }
     var showMyLists by remember { mutableStateOf(false) }
-    val isPremium by GameFilesPreferences.getNullablePreference(IS_NEXUS_PREMIUM).collectAsState(initial = null)
-    val isValidated by remember {
-        derivedStateOf { isPremium != null }
-    }
+    // One flow for the screen's life (a new one each recomposition restarts the collection), and the check read
+    // straight from it, so a key accepted in the onboarding opens the downloader at once
+    val isPremium by remember { GameFilesPreferences.getNullablePreference(IS_NEXUS_PREMIUM) }.collectAsState(initial = null)
+    val isValidated = isPremium != null
 
     AnimatedVisibility(
         visible = showModsLog,
@@ -311,6 +317,12 @@ fun ModDownloaderScreen() {
             // The lists land in the database, which the screens observe; the returned list isn't needed
             ModListManager.downloadAndParseModList()
         }
+        // A membership flag without a saved key (an older build could lose the key while keeping the flag) opens the
+        // downloader with nothing to send Nexus; clearing the flag brings back the key entry
+        launch(Dispatchers.IO) {
+            val saved = GameFilesPreferences.getPreference(NEXUS_API_KEY, "").first().trim()
+            if (saved.isEmpty() || saved == "null") dataStore.edit { it.remove(IS_NEXUS_PREMIUM) }
+        }
 
         println("Entry nexusAPI: $fetchNexusAPI")
         addCustomLog("Entry nexusAPI: $fetchNexusAPI", textSize = 10, textColor = Color.Cyan)
@@ -321,7 +333,8 @@ fun ModDownloaderScreen() {
     }
 
     LaunchedEffect(fetchNexusAPI, isPremium) {
-        apiKey = "$fetchNexusAPI"
+        // No key saved reads as null: it must not become the text "null", which Nexus refuses for every request
+        apiKey = fetchNexusAPI?.takeUnless { it == "null" }.orEmpty().trim()
         println("nexusAPI changed: $fetchNexusAPI")
         println("apiKey changed: $apiKey")
         println("isNowPremium changed: $isPremium")
@@ -597,21 +610,25 @@ fun ModDownloaderScreen() {
                         }
                     } else {
                         OutlinedTextField(
-                            value = apiKey,
-                            onValueChange = { apiKey = it },
+                            value = apiKey.takeUnless { it == "null" }.orEmpty(),
+                            onValueChange = { apiKey = it; settingsKeyError = null },
                             label = { Text(stringResource(Res.string.nexus_api_key)) },
+                            isError = settingsKeyError != null,
+                            supportingText = settingsKeyError?.let { e -> { Text(e) } },
+                            singleLine = true,
                             modifier = Modifier
                                 .height(100.dp)
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Button(
+                            enabled = !settingsKeyChecking,
                             onClick = {
-                                // Save the value to DataStore
+                                // Kept only if Nexus accepts it
+                                val typed = apiKey
+                                settingsKeyChecking = true
                                 scope.launch {
-                                    dataStore.edit { preferences ->
-                                        preferences[NEXUS_API_KEY] = apiKey
-                                    }
-                                    validate()
+                                    settingsKeyError = ModListManager.checkAndSaveKey(typed)
+                                    settingsKeyChecking = false
                                 }
                             },
                             colors = ButtonDefaults.buttonColors(
@@ -889,14 +906,20 @@ fun getAllAvailableLists(modDao: ModDao): List<String> {
 
 @Composable
 fun RateLimitDisplay() {
-    val availableSpace = getAvailableStorageSpace()
+    val availableSpace = rememberAvailableStorageSpace()
     val modDao = remember { ModDatabase.getDatabase().modDao() }
-    var totalMods by remember { mutableIntStateOf(0) }
+    val totalMods by modDao.getModCountFlow().collectAsState(initial = 0)
+    // Finished archives in the download cache (partial downloads left out), read again every second.
+    val downloadedArchives by produceState(initialValue = 0) {
+        while (true) {
+            value = withContext(Dispatchers.IO) {
+                File(modCache).listFiles { f -> f.isFile && !f.name.endsWith(".part") }?.size ?: 0
+            }
+            delay(1000)
+        }
+    }
     val isPremium by GameFilesPreferences.getNullablePreference(IS_NEXUS_PREMIUM).collectAsState(initial = null)
 
-    LaunchedEffect(Unit) {
-        totalMods = modDao.getModCount()
-    }
 
     Column(
         modifier = Modifier
@@ -959,7 +982,7 @@ fun RateLimitDisplay() {
 
 
             Text(
-                text = "Free Space: $availableSpace    Cached Mods: $totalMods    $selectedThreadCount Threads Detected",
+                text = "Free Space: $availableSpace    Mods in Lists: $totalMods    Downloaded Archives: $downloadedArchives    $selectedThreadCount Threads Detected",
                 color = White,
                 fontSize = 12.sp
             )

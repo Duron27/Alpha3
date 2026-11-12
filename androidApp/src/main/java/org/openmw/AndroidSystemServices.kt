@@ -248,6 +248,8 @@ class AndroidSystemServices(private val context: Context) : SystemServices() {
         }
     }
 
+    override fun readFileAsRoot(path: String): String = RootShell.read(path)
+
     // The experimental cursor magnifier: Android's own Magnifier on SDL's SurfaceView, which copies the lens' few pixels
     // out of the game's surface (PixelCopy), so it works with either renderer and costs the engine nothing.
     override val canMagnify: Boolean get() = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q

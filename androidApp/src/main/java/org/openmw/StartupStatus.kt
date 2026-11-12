@@ -43,7 +43,8 @@ fun StartupStatus(startedAt: Long) {
     LaunchedEffect(Unit) {
         // The engine cannot tell how far along it is here, so the bar runs against how long the last start took
         val expected = prefs.getLong("expected_ms", 60_000L).coerceAtLeast(5_000L)
-        val log = File(OpenMWPaths.ACTIVE_CONFIG, "openmw.log")
+        // the fly-through benchmark runs in a folder of its own, and logs there
+        val log = File(if (org.openmw.utils.FlyBenchmark.running) org.openmw.utils.FlyBenchmark.folder else OpenMWPaths.ACTIVE_CONFIG, "openmw.log")
         var archives = false
         while (message != null) {
             val text = withContext(Dispatchers.IO) {

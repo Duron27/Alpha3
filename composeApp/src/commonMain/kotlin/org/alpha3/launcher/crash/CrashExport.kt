@@ -2,7 +2,6 @@ package org.alpha3.launcher.crash
 
 import org.alpha3.launcher.io.File
 import org.alpha3.launcher.paths.OpenMWPaths
-import org.alpha3.launcher.utils.PlatformContext
 
 object CrashExport {
     /** Largest part of openmw.log that goes in; the end of it is what matters. */
@@ -18,7 +17,7 @@ object CrashExport {
      * Zips the previous crash into the Alpha3 folder as Alpha3-crash-<date>.zip: the symbolized report as it is shown,
      * then every file it was made from. Returns the path, or null when nothing could be written.
      */
-    fun export(context: PlatformContext, data: CrashData): String? {
+    fun export(data: CrashData): String? {
         val entries = ArrayList<ZipSource>()
         entries += ZipSource("report.txt", CrashLoader.toText(data).encodeToByteArray())
         for (name in configFiles) {

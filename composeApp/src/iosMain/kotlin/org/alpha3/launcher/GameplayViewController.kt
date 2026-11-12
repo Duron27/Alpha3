@@ -4,7 +4,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.window.ComposeUIViewController
-import coil3.PlatformContext
 import org.alpha3.launcher.engine.Engine
 import kotlinx.coroutines.delay
 import org.alpha3.launcher.ui.controls.UIStateManager
@@ -31,7 +30,6 @@ fun GameplayViewController() = ComposeUIViewController(configure = { opaque = fa
     }
     OpenMWTheme(darkTheme = true) {
         GameplayScreen(
-            context = PlatformContext.INSTANCE,
             forwardTouches = true,
             landscapeOnly = true,
             prepare = { installDefaultUi() }

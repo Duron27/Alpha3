@@ -114,6 +114,14 @@
             android:foregroundServiceType="dataSync"
             android:exported="false" />
 
+        <!-- brings the launcher back after a benchmark run, from a process of its own (utils/RestartActivity.kt) -->
+        <activity
+            android:name="org.openmw.utils.RestartActivity"
+            android:exported="false"
+            android:process=":restart"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
         <activity
             android:name=".plugins.PluginActivity"
             android:configChanges="orientation|screenSize|keyboardHidden"

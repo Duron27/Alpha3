@@ -59,6 +59,51 @@ namespace
     }
 }
 
+namespace
+{
+    // The GPU's time per frame, as the Vulkan renderer measures it, with when it was read back: the share of the last
+    // second the GPU spent on frames is the HUD's GPU load where the device's own counter cannot be read (SELinux keeps
+    // apps from Adreno's kgsl nodes on many ROMs, and from Mali's on most)
+    struct GpuSample
+    {
+        std::chrono::steady_clock::time_point mWhen;
+        double mMs;
+    };
+    std::mutex sGpuMutex;
+    std::vector<GpuSample> sGpuSamples;
+}
+
+void Alpha3::noteGpuFrameTime(double milliseconds)
+{
+    if (!(milliseconds > 0 && milliseconds < 10000))
+        return;
+    const auto now = std::chrono::steady_clock::now();
+    std::lock_guard<std::mutex> lock(sGpuMutex);
+    sGpuSamples.erase(sGpuSamples.begin(),
+        std::find_if(sGpuSamples.begin(), sGpuSamples.end(),
+            [&](const GpuSample& s) { return now - s.mWhen < std::chrono::seconds(2); }));
+    sGpuSamples.push_back({ now, milliseconds });
+}
+
+/// The GPU's load over the last second in percent from the renderer's own timing, -1 when it has none (OpenGL ES, or
+/// nothing drawn lately)
+extern "C" JNIEXPORT jint JNICALL Java_org_openmw_EngineActivity_omwGetGpuBusy(JNIEnv*, jobject)
+{
+    const auto now = std::chrono::steady_clock::now();
+    std::lock_guard<std::mutex> lock(sGpuMutex);
+    double sum = 0;
+    bool any = false;
+    for (const GpuSample& s : sGpuSamples)
+        if (now - s.mWhen < std::chrono::seconds(1))
+        {
+            sum += s.mMs;
+            any = true;
+        }
+    if (!any)
+        return -1;
+    return static_cast<jint>(std::clamp(sum / 10.0, 0.0, 100.0));
+}
+
 /// The recent intervals between frames sent to the screen in milliseconds, oldest first (EngineActivity)
 extern "C" JNIEXPORT jfloatArray JNICALL Java_org_openmw_EngineActivity_omwGetShownFrameTimes(JNIEnv* env, jobject)
 {

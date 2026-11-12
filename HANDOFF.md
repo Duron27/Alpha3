@@ -520,3 +520,54 @@ The user raised `viewing distance` to 50000 and asked for more speed without cha
 - The reflection's terrain (268,000 triangles) with a lower level of detail than the main view's. It would need chunks of its own, so more memory.
 - Far object chunks: find why 173,000 triangles remain 4 cells and more away (which meshes, at which level).
 - Memory (the user's other request): 1.08 GB total, native heap about 870 MB, graphics 140 MB. Texture release freed only 29 MB. A guess, not measured: the merged distant chunks keep their vertex arrays in RAM after they are on the GPU. Measure what the heap holds before changing anything.
+
+### 2026-11-11 (evening): the fly-through benchmark — the reference for GLES vs Vulkan
+**What it is.** Launcher → Settings → Graphics & Performance → "Benchmark: Vivec fly-through" → Run. The run cannot be steered:
+- a new game (`--skip-menu --start "Seyda Neen"`) with the vanilla content only (Morrowind, Tribunal, Bloodmoon and their BSAs; no mods, no groundcover), in its own profile `Alpha3/benchmarks/profile/`;
+- the reset settings (`settings.fallback.cfg`) with `viewing distance = 63545`, post-processing off, no frame generation, the screen's native resolution, and the user's `[Textures]` conversion settings (without them textures are white on a GPU with no BC formats);
+- first person, nothing in the hands, HUD hidden, collision off;
+- holds 15 s at the start, then flies 90 s from (33055.8, -70769.0, 6185.4), yaw 179.94°, pitch -0.22°, to (32815.6, -102628.4, 6310.2), straight over Vivec;
+- the renderer is the launcher's choice (`glRenderer`).
+- Results: `Alpha3/benchmarks/flythrough-vivec-<date>-<build>.txt/.json`. The `data` lines hold fps per tenth of the route and overall. The launcher then shows the average and settings to try.
+- Code: `support/src/benchmark.cpp` (flyFrame/finishFly), patch 0031 (`omw_benchmark_fly` in androidmain.cpp, called from engine.cpp), `androidApp/.../utils/FlyBenchmark.kt`, `RestartActivity.kt`, `composeApp/.../benchmark/FlyTuning.kt` and `BenchmarkResultsDialog.kt`.
+- From adb (rooted tablet): the scratchpad `flybench.sh vulkan|gles <label>` sets the renderer and starts EngineActivity with `--es benchmark_route vivec`.
+
+**Weather and time are fixed** (patch 0031, from the hold on): 12:00, the game clock stopped (timescale 0, given back after), clear weather in every region applied at once and put back if anything changes it. Before this a run could start raining (rain is in the transparent bin) and runs did not compare. Scores taken before 2026-11-11 16:58 are not a reference.
+
+**Reference scores (SM-T720, system driver, 2560x1600, weather fixed, build 48e1e8c + uncommitted work):**
+
+| tenth   | Vulkan | GLES |
+|---------|-------:|-----:|
+| 0-10%   | 13.4 | 12.9 |
+| 10-20%  | 11.6 | 11.7 |
+| 20-30%  | 11.9 | 12.5 |
+| 30-40%  | 12.2 | 12.6 |
+| 40-50%  | 11.1 | 12.0 |
+| 50-60%  |  9.9 | 12.2 |
+| 60-70%  |  7.9 |  8.8 |
+| 70-80%  |  9.2 | 11.9 |
+| 80-90%  |  8.7 | 11.7 |
+| 90-100% |  8.4 | 10.4 |
+| **overall** | **10.4** | **11.7** |
+
+Repeated runs agree within 0.1 fps. The GPU stays at its top clock (430 MHz) and 99% busy for the whole flight, so there is no throttling (read as root from `/sys/class/kgsl/kgsl-3d0`). An app cannot read those nodes on this ROM: SELinux denies `sysfs_kgsl` to untrusted apps, which is why the HUD and the benchmark show no GPU load or clock here.
+- Vulkan's SceneCam GPU time grows from 29 ms to 100 ms along the route while its triangles fall (573k → 505k): a per-pixel cost (the end of the route is mostly water and sky), not geometry. CPU recording is 12–31 ms.
+- GL's timer queries (the GPU ms column on GLES) are not reliable on this driver: values of seconds. The benchmark now drops GPU values outside 0–10 s per frame. The result JSON now records `OSG_USE_VULKAN` in `environment`; the `gl` strings are recorded in both modes and do not tell the renderer.
+- Ruled out: half precision. The GLES path declares `precision highp` everywhere too (`glesdialect.cpp`, `shaderconverter.cpp`).
+
+**Where Vulkan loses to GLES on this route: the water, and in it the anisotropic filtering of the wave normal maps.**
+- Water drawn, everything else the same: Vulkan 10.4 → 23.0 fps without the water, 21.1 with a flat-colour water shader (GLES 17.7 with a flat one). Vulkan is faster than GLES at everything but the water ("Water Geometry", bin 10, TransparentDepthBinCallback).
+- Fixed (lossless): `inverse(osg_ModelViewMatrix)` was computed for every pixel. The GL driver lifts it out of the shader, the Adreno Vulkan driver does not. programs.cpp now swaps it for `osg_ModelViewMatrixInverse`, a mat4 added at offset 272 of a3DrawUniforms (`sDrawBlockSize` 336), filled by translator.cpp only for programs that read it (`Variant::mInverseModelView`, saved in the program cache, salt a3vk4). Vulkan 10.4 → 11.0.
+- Bisected with early returns in water.frag: cut right after the wave normal is computed, Vulkan 10.8 / GLES 16.0. So on Vulkan the six chained normal-map taps (+ ripple map) are the whole cost; the reflection, refraction, fog, fresnel and scattering are close to free.
+- The cause: `anisotropy = 4` on those taps. With `anisotropy = 1` in the benchmark profile: **Vulkan 12.4, GLES 12.1** (Vulkan ahead). Anisotropy costs Vulkan 1.4 fps and GLES 0.4. GLES does apply it (screenshots differ between 4 and 1), so it is the Adreno 615 Vulkan driver's anisotropic sampling that is slower, with `texture mipmap = nearest`. Not changed: lowering it would lower quality.
+- No effect (each 10.4–11.0): the rain branch, point-light specular, the 3x3 depth taps, the six normal samples alone set constant, screen-space reads as constants, the FragData1 write, mediump, a `#version 320 es` compile, glslang's optimiser off, the render-target textures as the dummy, the water occlusion queries off.
+- Ideas not tried: the water normal map's sampler with anisotropy only on the low-frequency taps (a quality call for the user), or a mipmapped trilinear sampler for it (may suit the driver better).
+
+**Scores after the fix (clean build, weather fixed):** system driver Vulkan **10.9**, GLES **11.7** (Vulkan per tenth 13.5 11.9 12.7 12.6 11.5 10.4 8.1 10.0 9.1 8.8). **Turnip (useFreedreno=true): Vulkan 13.7**, ahead of GLES by 2 fps on the same tablet.
+
+### 2026-11-11 (night): Vulkan 1.2 → 1.1 → 1.0 at startup, ray-tracing groundwork
+- `device.cpp createInstance`: asks for 1.2, then 1.1, then 1.0 (a 1.0 loader refuses anything above 1.0 with VK_ERROR_INCOMPATIBLE_DRIVER; `vkEnumerateInstanceVersion` is null on 1.0). The device version is the lower of the instance's and the GPU's, clamped to 1.0/1.1/1.2 (`Device::mApiVersion`).
+- On 1.2 the 1.1/1.2 features the GPU has are enabled through `VkPhysicalDeviceFeatures2` (timeline semaphores, host query reset, scalar block layout, float16, 16-bit storage, buffer device address, descriptor indexing with runtime arrays and partially bound non-uniform sampled images, ...) and recorded on `Device` (`mTimelineSemaphores`, `mDescriptorIndexing`, `mBufferDeviceAddress`, ...). Nothing in the renderer uses them yet. If vkCreateDevice refuses the chain, a plain 1.0 device is made.
+- VMA is now built with `VMA_VULKAN_VERSION 1002000` in vma.cpp, vma.hpp, device.cpp **and** context.cpp. They must agree: a mismatch changes `VmaVulkanFunctions` and crashed in vmaCreateImage.
+- Ray tracing: VK_KHR_acceleration_structure + VK_KHR_ray_query + VK_KHR_deferred_host_operations are enabled (`Device::mRayQuery`) when the device is 1.2 with buffer device address and descriptor indexing; the acceleration-structure functions are loaded (null otherwise). **No effect uses them yet.** Neither the Adreno 615's system driver (1.1) nor Turnip on it (1.3, a6xx) has ray queries, so nothing here can be tried on the test devices; RT needs a GPU such as Adreno 740+/Mali-G715+/Xclipse. The next step is building BLAS/TLAS for the static cell geometry and a ray-query sun shadow or water reflection in the fragment shaders, behind `mRayQuery`.
+- Seen on the tablet: system driver "instance 1.2 (the loader has 1.3) … API 1.1.128, using 1.1"; Turnip "API 1.3.366, using 1.2; timeline semaphores yes, descriptor indexing yes, buffer device address yes, float16 yes, ray queries no".

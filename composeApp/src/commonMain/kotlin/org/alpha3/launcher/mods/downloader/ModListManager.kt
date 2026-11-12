@@ -52,6 +52,7 @@ import org.alpha3.launcher.paths.OpenMWPaths
 import org.alpha3.launcher.ui.view.addCustomLog
 import org.alpha3.launcher.utils.GameFilesPreferences
 import org.alpha3.launcher.utils.Log
+import org.alpha3.launcher.utils.MToast
 import org.alpha3.launcher.utils.availableCpuCores
 import org.alpha3.launcher.utils.currentTimeMillis
 import org.alpha3.launcher.utils.dataStore
@@ -66,12 +67,14 @@ private const val LIST_REFRESH_INTERVAL_MS = 6L * 60 * 60 * 1000
 internal val modStorage get() = "${OpenMWPaths.USER_FILE_STORAGE}/OpenMW"
 internal val modCache get() = "$modStorage/CACHE"
 
+internal const val NO_API_KEY = "no Nexus API key: enter yours in the mod downloader's settings (the gear)"
+
 /** A file that has no download link must show up as failed, not silently count as done. */
-private fun failWithoutLink(mod: ModDesc, info: DownloadInfo) {
+private fun failWithoutLink(mod: ModDesc, info: DownloadInfo, reason: String = "no download link") {
     val key = progressKey(mod, info)
-    NexusInfo.downloadProgressMap[key] = "Failed to download ${mod.name}: no download link"
+    NexusInfo.downloadProgressMap[key] = "Failed to download ${mod.name}: $reason"
     NexusInfo.downloadSpeedMap.remove(key)
-    appendToDownloadLog("Failed: ${info.fileName}: no download link")
+    appendToDownloadLog("Failed: ${info.fileName}: $reason")
     ModListManager.fileFailed()
     addCustomLog("No download link for ${mod.slug} (${info.fileName})", textSize = 10, textColor = Color.Red)
     ModListManager.finishMod()
@@ -103,6 +106,10 @@ fun processModList(isPremium: Boolean): Flow<List<ModDesc>> = flow {
     val mods = modDao.getModsByModList(modList).filter { mod -> mod.onLists.contains(modList) }
 
     Log.d("ProcessModList", "Found ${mods.size} mods for list: $modList")
+    if (!ModListManager.hasApiKey && mods.any { it.url.contains("nexusmods.com") }) {
+        appendToDownloadLog("No Nexus API key: the Nexus mods of $modList are skipped")
+        withContext(Dispatchers.Main) { MToast("No Nexus API key: Nexus mods will fail. Enter your key under the gear.", isLong = true) }
+    }
     addCustomLog("Found ${mods.size} mods for list: $modList", textSize = 10, textColor = Color.Cyan)
 
     // One unit of work per mod when only syncing, otherwise one per file to download and extract.
@@ -140,7 +147,7 @@ fun processModList(isPremium: Boolean): Flow<List<ModDesc>> = flow {
 
     coroutineScope {
         // Only refreshes the premium flag in the background; it must not hold up the sync.
-        if (ModListManager.apiKey.isNotBlank()) {
+        if (ModListManager.hasApiKey) {
             launch { withTimeoutOrNull(15_000.milliseconds) { validate() } }
         }
         // Biggest archives first: they take longest, so starting them late would leave one or two slow downloads at the end.
@@ -330,7 +337,9 @@ private suspend fun fetchFile(mod: ModDesc, info: DownloadInfo, isPremium: Boole
         }
         when {
             mod.url.contains("nexusmods.com") -> {
-                if (!isPremium) {
+                if (!ModListManager.hasApiKey) {
+                    failWithoutLink(mod, info, NO_API_KEY)
+                } else if (!isPremium) {
                     withContext(Dispatchers.Main) { NxmDownloads.open(mod, info) }
                 } else if (!info.directDownload.isNullOrEmpty()) {
                     downloadModFile(mod, info)
@@ -512,19 +521,68 @@ object ModListManager {
         }
     }
 
-    suspend fun validate() {
-        try {
+    /** A key Nexus could accept: nothing saved (or the text "null" an older build stored) is no key. */
+    val hasApiKey get() = apiKey.isNotBlank() && apiKey != "null"
+
+    /**
+     * Asks Nexus about [apiKey] and saves the membership flag it reports. Returns null when Nexus accepted the key,
+     * otherwise why not. No key, or one Nexus refuses, clears the flag, so the downloader asks for the key again (it
+     * opens only once a key was checked) instead of going on with a flag left from an earlier key.
+     */
+    suspend fun validate(): String? {
+        if (!hasApiKey) {
+            dataStore.edit { preferences -> preferences.remove(GameFilesPreferences.IS_NEXUS_PREMIUM) }
+            return "Enter your Nexus API key"
+        }
+        return try {
             val jsonString = fetchJsonResponse("https://api.nexusmods.com/v1/users/validate.json")
-            val premiumStatus = Json.parseToJsonElement(jsonString).jsonObject["is_premium"]?.jsonPrimitive?.booleanOrNull ?: false
+            val user = Json.parseToJsonElement(jsonString).jsonObject
+            if (user["user_id"] == null && user["name"] == null) return "Nexus did not accept this key"
+            val premiumStatus = user["is_premium"]?.jsonPrimitive?.booleanOrNull ?: false
             dataStore.edit { preferences -> preferences[GameFilesPreferences.IS_NEXUS_PREMIUM] = premiumStatus }
-            Log.i("Validate", "Raw JSON: $jsonString")
-            addCustomLog("Validate: Raw JSON: $jsonString", textSize = 10, textColor = Color.Yellow)
+            Log.i("Validate", "Key accepted, premium: $premiumStatus")
+            addCustomLog("Validate: key accepted, premium: $premiumStatus", textSize = 10, textColor = Color.Yellow)
+            null
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             Log.e("VALIDATE_ERROR", "Validation failed: ${e.message}")
             addCustomLog("Validate: Validation failed: ${e.message}", textSize = 10, textColor = Color.Yellow)
+            if (e.message?.contains("401") == true) {
+                dataStore.edit { preferences -> preferences.remove(GameFilesPreferences.IS_NEXUS_PREMIUM) }
+                "Nexus did not accept this key"
+            } else "Could not reach Nexus to check the key: ${e.message}"
         }
+    }
+
+    /**
+     * Checks [typed] with Nexus and keeps it only if Nexus accepts it; returns null then, otherwise why not (and the
+     * key used before stays). The key is saved before the membership flag, because the flag opens the downloader,
+     * which then reloads the key from the settings.
+     */
+    suspend fun checkAndSaveKey(typed: String): String? {
+        val key = typed.trim()
+        if (key.isEmpty()) return "Enter your Nexus API key"
+        val previous = apiKey
+        apiKey = key
+        val premium = try {
+            val user = Json.parseToJsonElement(fetchJsonResponse("https://api.nexusmods.com/v1/users/validate.json")).jsonObject
+            if (user["user_id"] == null && user["name"] == null) null else user["is_premium"]?.jsonPrimitive?.booleanOrNull ?: false
+        } catch (e: CancellationException) {
+            apiKey = previous
+            throw e
+        } catch (e: Exception) {
+            apiKey = previous
+            return if (e.message?.contains("401") == true) "Nexus did not accept this key"
+            else "Could not reach Nexus to check the key: ${e.message}"
+        }
+        if (premium == null) {
+            apiKey = previous
+            return "Nexus did not accept this key"
+        }
+        dataStore.edit { it[GameFilesPreferences.NEXUS_API_KEY] = key }
+        dataStore.edit { it[GameFilesPreferences.IS_NEXUS_PREMIUM] = premium }
+        return null
     }
 
     private val blockedModNames = listOf(
@@ -664,6 +722,7 @@ object ModListManager {
     }
 
     suspend fun fetchJsonResponse(url: String, retried: Boolean = false): String {
+        if (url.contains("api.nexusmods.com") && !hasApiKey) throw IOException(NO_API_KEY)
         if (url.contains("api.nexusmods.com")) awaitNexusRateLimit()
         try {
             val response = withTimeout(90_000.milliseconds) {

@@ -62,7 +62,6 @@ import org.alpha3.launcher.ui.controls.UIStateManager
 import org.alpha3.launcher.ui.controls.VirtualKeyboard
 import org.alpha3.launcher.ui.view.BackgroundAnimation
 import org.alpha3.launcher.utils.GameFilesPreferences
-import org.alpha3.launcher.utils.PlatformContext
 import kotlin.math.roundToInt
 
 /** Button ids that are drawn by dedicated composables (thumbsticks, scroll wheel, ...) rather than as plain buttons. */
@@ -78,7 +77,6 @@ private val SpecialButtonIds = listOf(99, 98, 101, 201)
 @OptIn(DelicateCoroutinesApi::class)
 @Composable
 fun GameplayScreen(
-    context: PlatformContext,
     forwardTouches: Boolean = false,
     landscapeOnly: Boolean = false,
     /** Runs before the saved control layout is loaded (e.g. to install the default layout on first run). */
@@ -178,20 +176,20 @@ fun GameplayScreen(
         }
 
         if (!isUIHidden) {
-            OverlayUI(context = context, virtualKeyboard = virtualKeyboard, onKeyEvent = onKeyEvent)
+            OverlayUI(virtualKeyboard = virtualKeyboard, onKeyEvent = onKeyEvent)
         }
 
-        GameplayButtons(context, containerWidth, containerHeight)
+        GameplayButtons(containerWidth, containerHeight)
 
         AnimatedVisibility(
             visible = UIStateManager.enableRightThumb && UIStateManager.tempCodeGroup == "OpenMW",
             enter = fadeIn() + expandIn(),
             exit = fadeOut() + shrinkOut()
         ) {
-            ResizableDraggableRightThumbstick(context, containerWidth, containerHeight)
+            ResizableDraggableRightThumbstick(containerWidth, containerHeight)
         }
 
-        if (leftThumbEnabled || UIStateManager.tempCodeGroup != "OpenMW") ResizableDraggableThumbstick(context, containerWidth, containerHeight)
+        if (leftThumbEnabled || UIStateManager.tempCodeGroup != "OpenMW") ResizableDraggableThumbstick(containerWidth, containerHeight)
 
         AnimatedVisibility(
             visible = UIKeyboard.showVKB,
@@ -206,7 +204,7 @@ fun GameplayScreen(
             enter = fadeIn() + expandIn(),
             exit = fadeOut() + shrinkOut()
         ) {
-            HiddenMenu(context = context, containerWidth = containerWidth, containerHeight = containerHeight)
+            HiddenMenu(containerWidth = containerWidth, containerHeight = containerHeight)
         }
 
         AnimatedVisibility(
@@ -217,19 +215,18 @@ fun GameplayScreen(
             Box(Modifier.wrapContentSize()) { ExpandableCircleButton() }
         }
 
-        ScrollWheelIndicator(context = context, containerWidth = containerWidth, containerHeight = containerHeight)
+        ScrollWheelIndicator(containerWidth = containerWidth, containerHeight = containerHeight)
 
     }
 }
 
 @Composable
-private fun GameplayButtons(context: PlatformContext, containerWidth: Float, containerHeight: Float) {
+private fun GameplayButtons(containerWidth: Float, containerHeight: Float) {
     val buttonStates by UIStateManager.buttonStates.collectAsState()
     buttonStates.values
         .filter { it.id !in SpecialButtonIds }
         .forEach { button ->
             ResizableDraggableButton(
-                context = context,
                 id = button.id,
                 keyCode = button.keyCode,
                 containerWidth = containerWidth,

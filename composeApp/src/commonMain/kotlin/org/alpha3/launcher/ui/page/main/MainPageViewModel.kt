@@ -22,7 +22,6 @@ import org.alpha3.launcher.resources.searching_for_morrowind_esm
 import org.alpha3.launcher.resources.selected_folder
 import org.alpha3.launcher.resources.yes
 import org.alpha3.launcher.resources.Res
-import org.alpha3.launcher.utils.PlatformContext
 import org.alpha3.launcher.utils.Log
 import androidx.compose.runtime.mutableStateOf
 import androidx.lifecycle.ViewModel
@@ -47,10 +46,10 @@ class MainPageViewModel() : ViewModel() {
     val showFileBrowser = mutableStateOf(false)
     val persistedPath = mutableStateOf<String?>(null)
 
-    fun onGameFolderSelected(folder: File, context: PlatformContext) {
+    fun onGameFolderSelected(folder: File) {
         if (File(folder, "Morrowind.ini").exists() && File(folder, "Data Files").isDirectory) {
             MToast("${stringRes(Res.string.selected_folder)}${folder.name}")
-            applyGameFolder(context, folder)
+            applyGameFolder(folder)
             showFileBrowser.value = false
         } else {
             viewModelScope.launch(Dispatchers.IO) { GameFilesPreferences.setPreference(GameFilesPreferences.GAME_FILES_URI_KEY, "") }
@@ -58,7 +57,7 @@ class MainPageViewModel() : ViewModel() {
         }
     }
 
-    private fun applyGameFolder(context: PlatformContext, folder: File) {
+    private fun applyGameFolder(folder: File) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val path = folder.absolutePath
@@ -79,7 +78,7 @@ class MainPageViewModel() : ViewModel() {
         }
     }
 
-    fun selectMorrowWindFolder(context: PlatformContext) {
+    fun selectMorrowWindFolder() {
         val progress = "".moeDialog(fullCustom = true) { ProgressDialog(text = stringRes(Res.string.searching_for_morrowind_esm)) }
         viewModelScope.launch(Dispatchers.IO) {
             try {
@@ -112,7 +111,7 @@ class MainPageViewModel() : ViewModel() {
                         onConfirm = {
                             val iniFile = listOf(File(dir, "Morrowind.ini"), dir.parentFile?.let { File(it, "Morrowind.ini") })
                                 .firstOrNull { it?.exists() == true }
-                            applyGameFolder(context, iniFile?.parentFile ?: dir)
+                            applyGameFolder(iniFile?.parentFile ?: dir)
                             MToast(stringRes(Res.string.game_files_location_set))
                         },
                         dismissLabel = stringRes(Res.string.no),

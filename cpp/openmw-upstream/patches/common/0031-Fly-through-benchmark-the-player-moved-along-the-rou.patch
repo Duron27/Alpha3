@@ -1,0 +1,169 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Wed, 11 Nov 2026 15:15:00 -0500
+Subject: [PATCH] Fly-through benchmark: the player moved along the route each
+ frame
+
+The launcher's fly-through benchmark (support/src/benchmark.cpp, Alpha3::benchmarkFlyPose) says
+where the player is to be each frame. omw_benchmark_fly (androidmain.cpp) puts them there, in the
+default worldspace's exterior through moveObject as PositionCell does, turned to the route's pitch
+and yaw, with collision off for the run (given back when it ends), in first person with nothing
+in the hands and the HUD hidden, at noon with the game clock stopped and clear weather everywhere
+(applied at once, put back if anything changes it), so every run sees the same sky. OMW::Engine::frame
+calls it after
+the state update, where the world may change: from the draw (omw_frame_update) it raced the Lua
+worker. A guard stops the loading screen's frames from starting the cell change again inside itself.
+---
+ apps/openmw/androidmain.cpp | 98 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ apps/openmw/engine.cpp      | 10 ++++++++++
+ 2 files changed, 108 insertions(+)
+
+diff --git a/apps/openmw/androidmain.cpp b/apps/openmw/androidmain.cpp
+--- a/apps/openmw/androidmain.cpp
++++ b/apps/openmw/androidmain.cpp
+@@ -18,11 +18,19 @@ int stderr = 0; // Hack: fix linker error
+ #include "mwworld/class.hpp"
+ #include "mwworld/inventorystore.hpp"
+ #include "mwworld/ptr.hpp"
++#include "mwworld/worldmodel.hpp"
++#include "mwworld/datetimemanager.hpp"
++#include "mwworld/esmstore.hpp"
++#include "mwworld/globals.hpp"
++#include "mwworld/weather.hpp"
++#include <components/esm3/loadregn.hpp>
+ #include "mwrender/postprocessor.hpp"
+ #include <SDL_events.h>
+ #include <SDL_gamecontroller.h>
+ #include <SDL_hints.h>
+ #include <SDL_mouse.h>
++#include <components/esm/util.hpp>
++#include <components/esm3/loadcell.hpp>
+ #include <components/resource/resourcesystem.hpp>
+ #include <components/sceneutil/depth.hpp>
+ #include <components/sceneutil/positionattitudetransform.hpp>
+@@ -355,6 +363,96 @@ static void submitFrameGenView()
+   }
+ }
+ 
++// The fly-through benchmark (support/src/benchmark.cpp): the player put where it says each frame, in the default
++// worldspace's exterior (crossing cells as PositionCell does), with collision off (TCL) so nothing stops or drops them.
++// Their collision is given back when it ends. The view is held in first person with nothing in the hands and no HUD. Called by OMW::Engine::frame after the state update, where the world may
++// change (not from omw_frame_update: the Lua worker reads the world while the frame is drawn).
++extern "C" void omw_benchmark_fly()
++{
++  static bool flying = false;
++  static bool collisionWasOn = true;
++  static bool hudWasVisible = true;
++  static float timeScaleWas = 0.f;
++  // moving the player into an unloaded cell shows the loading screen, which draws frames and so comes back here:
++  // the cell change in progress must not be started again from inside itself
++  static bool moving = false;
++  if (moving)
++    return;
++  Alpha3::BenchmarkPose pose;
++  bool done = false;
++  if (!Alpha3::benchmarkFlyPose(pose, done) && !done)
++    return;
++  try
++  {
++    auto& env = liveEnvironment();
++    auto stateMgr = env.getStateManager();
++    MWBase::World* world = env.getWorld();
++    if (!stateMgr || stateMgr->getState() != MWState::StateManager::State_Running || world == nullptr)
++      return;
++    MWWorld::Ptr player = world->getPlayerPtr();
++    if (player.isEmpty())
++      return;
++    if (done)
++    {
++      if (flying && collisionWasOn)
++        world->toggleCollisionMode();
++      if (flying && hudWasVisible)
++        env.getWindowManager()->setHudVisibility(true);
++      if (flying)
++        world->getTimeManager()->setGameTimeScale(timeScaleWas);
++      flying = false;
++      return;
++    }
++    if (!flying)
++    {
++      flying = true;
++      // toggleCollisionMode returns the new state: on means it was off, so it is turned off again
++      collisionWasOn = !world->toggleCollisionMode();
++      if (!collisionWasOn)
++        world->toggleCollisionMode();
++      // the view alone: no HUD (bars, map, crosshair) over it
++      hudWasVisible = env.getWindowManager()->isHudVisible();
++      env.getWindowManager()->setHudVisibility(false);
++      // the same sky on every run, whoever runs it and wherever: noon, and the game's clock stopped (no sun moving, no
++      // weather timer running out), the timescale given back when it ends
++      timeScaleWas = world->getTimeManager()->getGameTimeScale();
++      world->getTimeManager()->setGameTimeScale(0.f);
++      world->setGlobalFloat(MWWorld::Globals::sGameHour, 12.f);
++    }
++    // and clear weather, everywhere the route goes, at once (not faded into): put back whenever anything changed it
++    {
++      const MWWorld::Weather* now = world->getCurrentWeather();
++      if (now == nullptr || now->mScriptId != 0 || world->getNextWeather() != nullptr)
++      {
++        ESM::RefId clear;
++        for (const MWWorld::Weather* weather : world->getAllWeather())
++          if (weather != nullptr && weather->mScriptId == 0)
++            clear = weather->mId;
++        if (!clear.empty())
++        {
++          for (const ESM::Region& region : world->getStore().get<ESM::Region>())
++            world->changeWeather(region.mId, clear);
++          world->advanceTime(0.0, false); // weather changes take effect at once, as after waiting
++        }
++      }
++    }
++    // the view the benchmark measures: first person, nothing in the hands
++    if (!world->isFirstPerson())
++      world->togglePOV();
++    player.getClass().getCreatureStats(player).setDrawState(MWMechanics::DrawState::Nothing);
++    MWWorld::CellStore* store = &env.getWorldModel()->getExterior(
++        ESM::positionToExteriorCellLocation(pose.position.x(), pose.position.y(), ESM::Cell::sDefaultWorldspaceId));
++    moving = true;
++    player = world->moveObject(player, store, pose.position);
++    world->rotateObject(player, osg::Vec3f(pose.pitch, 0.f, pose.yaw));
++    moving = false;
++  }
++  catch (...)
++  {
++    moving = false;
++  }
++}
++
+ // Alpha3's support library calls it on the engine's main thread before each frame is rendered
+ void omw_frame_update()
+ {
+diff --git a/apps/openmw/engine.cpp b/apps/openmw/engine.cpp
+--- a/apps/openmw/engine.cpp
++++ b/apps/openmw/engine.cpp
+@@ -210,6 +210,10 @@ void OMW::Engine::executeLocalScripts()
+     }
+ }
+ 
++#ifdef __ANDROID__
++extern "C" void omw_benchmark_fly();
++#endif
++
+ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
+ {
+     const osg::Timer* const timer = osg::Timer::instance();
+@@ -268,6 +272,12 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
+             mStateManager->update(frametime);
+         }
+ 
++#ifdef __ANDROID__
++        // the fly-through benchmark puts the player on its route (androidmain.cpp): here, where the world may change,
++        // not while the frame is drawn and the Lua worker reads it
++        omw_benchmark_fly();
++#endif
++
+         bool paused = mWorld->getTimeManager()->isPaused();
+ 
+         {
+-- 
+2.43.0

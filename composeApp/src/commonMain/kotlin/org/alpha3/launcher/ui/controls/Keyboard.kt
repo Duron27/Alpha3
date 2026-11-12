@@ -53,7 +53,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
-import coil3.compose.LocalPlatformContext
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -185,7 +184,6 @@ private class Modifiers {
 
 @Composable
 fun VirtualKeyboard() {
-    val context = LocalPlatformContext.current
     val scope = rememberCoroutineScope()
     val density = LocalDensity.current
 
@@ -320,7 +318,7 @@ fun VirtualKeyboard() {
                                     val code = charCodeNow.value
                                     pressed = true
                                     scope.launch { pulse.snapTo(0f); pulse.animateTo(1f, tween(320, easing = LinearEasing)) }
-                                    if (vibrateNow.value) vibrateHelper(context, 50, 50)
+                                    if (vibrateNow.value) vibrateHelper(50, 50)
                                     var repeater: Job? = null
                                     when (key.kind) {
                                         Kind.CHAR -> {
