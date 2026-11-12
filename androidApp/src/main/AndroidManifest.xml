@@ -149,5 +149,7 @@
             android:theme="@style/Theme.AppCompat.DayNight.NoActionBar"
             tools:ignore="DiscouragedApi" />
 
+        <!-- simpleperf from adb on non-rooted phones (startup and Lua profiling); only the shell user can attach -->
+        <profileable android:shell="true" tools:targetApi="29" />
     </application>
 </manifest>

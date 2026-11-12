@@ -22,6 +22,10 @@
 
 #include <alpha3/upstream.hpp>
 
+#ifdef __ANDROID__
+#include <sys/system_properties.h>
+#endif
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -1247,6 +1251,8 @@ void main()
                 readImages();
                 runFinalDrawCallbacks(sceneView, true);
                 captureForFrameGen();
+                if (mWindowTimed)
+                    gpuTimestamp("");
                 gpuTimestamp(nullptr);
                 if (mSceneColor != nullptr)
                 {
@@ -1811,6 +1817,13 @@ void main()
                     mPass = mContext.windowCompatiblePass();
                     // the first window pass starts the frame's second command buffer: nothing is bound on it
                     commands = mContext.commands();
+                    // the window's part of the frame, timed from its first pass to the frame's end (what is left of
+                    // "window+rest" then is the GPU waiting, for the window's image among others)
+                    if (!mWindowTimed)
+                    {
+                        gpuTimestamp("window");
+                        mWindowTimed = true;
+                    }
                     if (mContext.commandsGeneration() != mBoundGeneration)
                     {
                         forgetBindings();
@@ -2401,11 +2414,18 @@ void main()
                             open.pop_back();
                             const double ms = (ticks[i] - ticks[begun]) * period;
                             mGpuSums[labels[begun]] += ms;
+                            if (mGpuSplitPhase[slot] >= 0 && labels[begun].rfind("SceneCam ", 0) == 0)
+                                mGpuSplit[mGpuSplitPhase[slot]].mScene += ms;
                             if (open.empty())
                                 inPasses += ms;
                         }
                         const double total = (ticks[mGpuUsed[slot] - 1] - ticks[0]) * period;
                         mGpuSums["frame"] += total;
+                        if (mGpuSplitPhase[slot] >= 0)
+                        {
+                            mGpuSplit[mGpuSplitPhase[slot]].mFrame += total;
+                            ++mGpuSplit[mGpuSplitPhase[slot]].mFrames;
+                        }
 #ifdef __ANDROID__
                         Alpha3::noteGpuFrameTime(total);
 #endif
@@ -2426,6 +2446,8 @@ void main()
                 mGpuUsed[slot] = 0;
                 mGpuLabels[slot].clear();
                 mGpuFrame[slot] = mFrameNumber;
+                mGpuSplitPhase[slot] = gpuSplitNext();
+                mWindowTimed = false;
                 vkCmdResetQueryPool(mContext.commands(), mGpuPools[slot], 0, sGpuQueries);
                 gpuTimestamp("start");
             }
@@ -2440,6 +2462,141 @@ void main()
                 vkCmdWriteTimestamp(mContext.commands(), VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mGpuPools[slot],
                     mGpuUsed[slot]++);
                 mGpuLabels[slot].push_back(label);
+            }
+
+            // GPU split (a measurement, off unless asked for: adb shell setprop debug.alpha3.gpusplit 1). The scene's
+            // pass is a tiled GPU's: timestamps inside it say little. Instead one kind of draw is left out of the
+            // scene's pass for a while at a time, and what the pass then takes is set against the frames with
+            // everything, so what each kind costs the GPU is seen. Stand still while it runs; it logs each round.
+            enum class SplitKind
+            {
+                None,
+                Terrain,
+                Objects, // the solid objects' bin: statics, actors, groundcover
+                Sky, // the bins before it
+                Water,
+                Transparent, // the bins after it (depth sorted and the rest), but the first person view
+                Particles,
+                FirstPerson,
+                Count,
+            };
+            static const char* splitName(SplitKind kind)
+            {
+                static const char* const names[] = { "everything", "terrain", "solid objects", "sky", "water",
+                    "transparent", "particles", "first person" };
+                return names[static_cast<int>(kind)];
+            }
+            // each kind's frames come straight after frames with everything, set against those (the GPU's clock and
+            // what is in view drift: a baseline for the round would be stale by the round's end)
+            static constexpr unsigned sSplitFrames = 60, sSplitSettle = 8;
+            struct SplitSums
+            {
+                double mScene = 0, mFrame = 0;
+                unsigned mFrames = 0;
+            };
+
+            static bool gpuSplitAsked()
+            {
+#ifdef __ANDROID__
+                char value[PROP_VALUE_MAX] = {};
+                return __system_property_get("debug.alpha3.gpusplit", value) > 0 && value[0] == '1';
+#else
+                const char* value = std::getenv("ALPHA3_GPU_SPLIT");
+                return value != nullptr && value[0] == '1';
+#endif
+            }
+
+            // The phase the frame being recorded is measured in (-1 not measured), and what its scene leaves out
+            int gpuSplitNext()
+            {
+                if (mGpuSplitFrame % 60 == 0)
+                {
+                    const bool asked = gpuSplitAsked();
+                    if (asked != mGpuSplitOn)
+                    {
+                        mGpuSplitOn = asked;
+                        mGpuSplitFrame = 0;
+                        for (SplitSums& sums : mGpuSplit)
+                            sums = SplitSums();
+                        Log(Debug::Info) << "Vulkan: GPU split " << (asked ? "on" : "off");
+                    }
+                }
+                if (!mGpuSplitOn)
+                {
+                    mGpuSplitSkip = SplitKind::None;
+                    ++mGpuSplitFrame;
+                    return -1;
+                }
+                // phases: everything before kind 1, kind 1, everything before kind 2, kind 2, ...; the sums of the
+                // frames with everything before kind k are kept in mGpuSplitBase[k]
+                const unsigned kinds = static_cast<unsigned>(SplitKind::Count) - 1;
+                const unsigned step = (mGpuSplitFrame / sSplitFrames) % (2 * kinds);
+                const unsigned within = mGpuSplitFrame % sSplitFrames;
+                if (mGpuSplitFrame > 0 && within == 0 && step == 0)
+                    gpuSplitReport();
+                const unsigned kind = step / 2 + 1;
+                const bool leftOut = step % 2 == 1;
+                mGpuSplitSkip = leftOut ? static_cast<SplitKind>(kind) : SplitKind::None;
+                ++mGpuSplitFrame;
+                // (the frames just after a change are left out: the GPU's results come frames late; phase numbers
+                // above Count are the baselines')
+                if (within < sSplitSettle)
+                    return -1;
+                return leftOut ? static_cast<int>(kind) : static_cast<int>(static_cast<unsigned>(SplitKind::Count) + kind);
+            }
+
+            void gpuSplitReport()
+            {
+                const unsigned count = static_cast<unsigned>(SplitKind::Count);
+                SplitSums all;
+                for (unsigned i = 1; i < count; ++i)
+                {
+                    all.mScene += mGpuSplit[count + i].mScene;
+                    all.mFrame += mGpuSplit[count + i].mFrame;
+                    all.mFrames += mGpuSplit[count + i].mFrames;
+                }
+                if (all.mFrames == 0)
+                    return;
+                std::ostringstream out;
+                out.setf(std::ios::fixed);
+                out.precision(2);
+                out << "Vulkan: GPU split: with everything the scene's pass " << all.mScene / all.mFrames
+                    << " ms, the frame " << all.mFrame / all.mFrames
+                    << " ms; what leaving out each kind saves, against the frames just before it (scene / frame):";
+                for (unsigned i = 1; i < count; ++i)
+                {
+                    const SplitSums& sums = mGpuSplit[i];
+                    const SplitSums& base = mGpuSplit[count + i];
+                    if (sums.mFrames == 0 || base.mFrames == 0)
+                        continue;
+                    out << " " << splitName(static_cast<SplitKind>(i)) << " "
+                        << base.mScene / base.mFrames - sums.mScene / sums.mFrames << " / "
+                        << base.mFrame / base.mFrames - sums.mFrame / sums.mFrames << ";";
+                }
+                Log(Debug::Info) << out.str();
+                for (SplitSums& sums : mGpuSplit)
+                    sums = SplitSums();
+            }
+
+            SplitKind splitKindOf(const osg::Drawable& drawable, const std::vector<const osgUtil::RenderBin*>& bins)
+            {
+                if (mInFirstPersonBin)
+                    return SplitKind::FirstPerson;
+                if (kindOf(drawable) == DrawableKind::Particles)
+                    return SplitKind::Particles;
+                if (std::strstr(typeid(drawable).name(), "TerrainDrawable") != nullptr)
+                    return SplitKind::Terrain;
+                if (drawable.getName() == "Water Geometry")
+                    return SplitKind::Water;
+                int binNum = 0;
+                for (const osgUtil::RenderBin* bin : bins)
+                    if (bin->getBinNum() != 0)
+                        binNum = bin->getBinNum();
+                if (binNum < 0)
+                    return SplitKind::Sky;
+                if (binNum > 0)
+                    return SplitKind::Transparent;
+                return SplitKind::Objects;
             }
 
             void setChain(const osgUtil::StateGraph* graph, const std::vector<const osgUtil::RenderBin*>* bins,
@@ -2531,6 +2688,9 @@ void main()
             {
                 const osg::Drawable* drawable = leaf.getDrawable();
                 if (drawable == nullptr || leaf._parent == nullptr)
+                    return;
+                if (mGpuSplitSkip != SplitKind::None && mStageKind == StageKind::Scene
+                    && splitKindOf(*drawable, bins) == mGpuSplitSkip)
                     return;
                 switch (kindOf(*drawable))
                 {
@@ -4736,6 +4896,13 @@ void main()
             uint64_t mReflectionCulled = 0, mReflectionKept = 0;
             uint32_t mGpuUsed[sFramesInFlight]{};
             std::vector<std::string> mGpuLabels[sFramesInFlight];
+            // the GPU split (gpuSplitNext): each slot's phase (set as its frame is recorded), the sums of each phase
+            int mGpuSplitPhase[sFramesInFlight] = {};
+            SplitSums mGpuSplit[2 * static_cast<int>(SplitKind::Count)]; // each kind left out, then each baseline
+            bool mGpuSplitOn = false;
+            unsigned mGpuSplitFrame = 0;
+            SplitKind mGpuSplitSkip = SplitKind::None;
+            bool mWindowTimed = false; // the window's passes have their "window" timestamp this frame
             unsigned mGpuFrame[sFramesInFlight] = {}; // the frame (OSG's number) each slot's queries measure
             osg::observer_ptr<osg::Stats> mCameraStats; // the main camera's (for the GPU's time)
             std::map<std::string, double> mGpuSums;
