@@ -739,3 +739,63 @@ route, so a run started over adb (or any other way) cannot use whatever was left
 one after the owner's copy was uninstalled; `pm install-existing --user 0 com.alpha3.launcher` fixed it. The T867 is
 now a fresh install (the user's test), Vulkan, with the Duron saves in `Alpha3/saves/Duron/`. The launcher's renderer
 choice is `glRenderer` in `Alpha3/game_files_prefs.preferences_pb` (shared storage).
+
+## 2026-11-12: profiling a big mod list (Note 10+), Lua fixes, GPU split, main thread next
+
+Device: the user's Note 10+ (SM-N975W, Adreno 640, Android 12, not rooted; adb `RF8N124YRQX`), profile
+`total-overhaul` (678 content files, 1231 data folders, 390 Lua scripts incl. Fresh Loot), save
+`Alpha3/config/total-overhaul/saves/kskd/narsis.omwsave` (Narsis), Vulkan.
+
+**Tools (all off by default; keep them in the code):**
+- Profiling without root: `<profileable android:shell="true">` in `androidApp/src/main/AndroidManifest.xml`, then
+  `adb shell simpleperf record --app com.alpha3.launcher -g -f 1000 --duration 30 -o /data/local/tmp/x.data`
+  (`-p pid` is refused; `--app` waits for the app). Report with the NDK's simpleperf and `--symfs` pointing at the
+  unstripped `.cxx/.../openmw_upstream-build/libopenmw_upstream.so`. Threads are all named SDLThread: use `--tids`.
+- Start straight into a save from adb: `adb shell am start -n com.alpha3.launcher/org.openmw.EngineActivity --es
+  omw_args "--load-savegame '<path>'"` (the current profile is used).
+- **GPU split** (`support/src/vulkan/translator.cpp`, `gpuSplitNext`): `adb shell setprop debug.alpha3.gpusplit 1`
+  (0 off; `ALPHA3_GPU_SPLIT=1` off Android). The scene's pass (SceneCam) leaves out one kind of draw at a time
+  (terrain, solid objects, sky, water, transparent, particles, first person), 60 frames each, each set against the
+  60 frames with everything just before it, and logs "Vulkan: GPU split: ..." each round. Stand still while it runs.
+  Timestamps inside a tiler's pass say little, hence leaving draws out.
+- The "GPU ms a frame" line now has **window**: from the frame's first window pass to its end (the scene's pass is
+  inside it). "window+rest" is then what comes before: mostly the GPU idle, waiting for the frame's commands.
+
+**Lua (patches, not committed yet):**
+- `0032-Lua-pcall-require-of-a-missing-module-answered-witho.patch`: mods probe with `pcall(require, 'openmw.world')`;
+  a missing module threw a C++ exception that LuaJIT unwinds with the system unwinder on arm64 (~2.7 s CPU from start
+  to a loaded save). The sandbox's `pcall` now asks the require (loaded table, else the VFS) first and returns the
+  same `false, 'module not found: <name>'`. Startup `dl_iterate_phdr` 2.95% → 0.37%.
+- `0033-Lua-engine-handlers-called-without-converting-the-fu.patch`: handlers were `sol::main_function`, timers
+  `main_protected_function`, and `LuaUtil::call` took `const sol::protected_function&`, so each call built a temporary
+  (2 luaL_ref/unref + a lookup of sol's default handler by name; ~7% of the Lua thread in play). Handlers are now
+  `main_protected_function` and `call(ScriptId, ...)` takes any `basic_protected_function`. No default handler is ever
+  set, so behaviour is the same.
+- Both checked: same errors in the log as the old build on the same save (Signpost Fast Travel `time.lua:90` and
+  LightHotkey `ui.lua:73` errors are the mods', 0.51-era scripts on 0.52 dev). Wall-clock startup and fps unchanged
+  (Lua is not on the critical path); it is CPU saved.
+- LuaJIT: rubic0n already has maxtrace 8000 / maxmcode 40 MB (no trace flushes). ~20% of the Lua thread is trace
+  recording/compiling in play (390 scripts); left alone since Lua is not the limit.
+
+**Findings (Narsis, standing still, ~26 fps):**
+- **The main thread is the limit**: ~95% busy (~38 ms a frame); the GPU idles ~10 ms a frame; the Vulkan translator
+  (~11–12 ms a frame) and navmesh/physics run on their own threads.
+- Main thread: cull 38% (traversal, occlusion culling ~12% which pays for itself, RigGeometry cull, light lists are
+  cheap), mechanics 17% (Actors::update, CharacterController), Lua synchronized update 15% (applyDelayedActions 9%),
+  `World::updateFocusObject` raycast ~5% (`castRenderingRay` → IntersectionVisitor over the scene, every frame),
+  update traversal 8%, physics step 6%.
+- GPU split: solid objects 8–12 ms of a 16–23 ms scene pass; water ~2, transparent ~2, sky ~1, the rest ~0.
+  ~328k triangles a frame: not geometry-bound. Render scale 0.5 cut the scene pass 17–24 → 6–11 ms but fps only
+  26 → 28–33: the GPU's cost is pixels (lighting, normal maps, texture reads), and fps is held by the CPU.
+- Occlusion culling A/B (on/off/on): 25.8 / 23.8 / 26.2 fps. Keep it (users with newer devices report big gains).
+- Ideas not done: GPU (helps GPU-bound devices like the 2560x1600 tablet): cheaper shading of solid objects;
+  vertex-cache reorder at load (meshoptimizer, MIT) and a position-only stream for Adreno's binning pass if geometry
+  ever matters. Translator: `bindUniforms`, `step`, `templateFor`, hash lookups of textures/buffers dominate.
+
+**Next: main-thread work** (user's choice, 2026-11-12). Candidates: focus raycast, cull traversal costs, Actors and
+CharacterController update, Lua delayed actions. Mostly upstream code: keep the OpenMW hunks minimal.
+
+**Mod downloader cfg generator: groundcover was dropped.** `CfgGenerator.kt` parsed the site's "groundcover files"
+but `formatOpenMWConfig` never wrote them, so lists like total-overhaul had no `groundcover=` lines (no grass from
+those plugins). Fixed (uncommitted): a `## Groundcover` section after the plugins, without `groundcover.omwaddon`
+(the desktop tool's; Alpha3's groundcover tool writes and enables `alpha3_groundcover.omwaddon` itself).
