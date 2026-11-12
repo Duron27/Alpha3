@@ -188,6 +188,24 @@ The **Settings** group has Launcher Settings, Settings.cfg, Controls and (with d
 
 ![Graphics and performance](docs/screenshots/12-graphics-performance.jpg)
 
+**Pick a renderer.** In the same section, **Renderer** chooses how the game draws: **Device** (the phone's own OpenGL ES, the default), **ANGLE** or **Zink** (OpenGL on top of Vulkan), or **Vulkan** (native Vulkan, still in development). Vulkan starts at the newest version the driver offers (1.2, else 1.1, else 1.0). On a Galaxy Tab S6 (Adreno 640) native Vulkan was the fastest in the benchmark below: about 43 fps with Samsung's driver and 40 with Turnip, against 35 for Device.
+
+**Benchmark: Vivec fly-through.** Press **Run** under Graphics & Performance. It flies over Vivec for about two minutes, the same way every time: the base game only (no mods), the reset settings with a long view distance, the screen's own resolution, clear weather at noon, and no post-processing or frame generation. Your chosen renderer and GPU driver are used, so you can compare them. Afterwards a box shows the average fps, how each part of the route went against your last run, and settings to try. **Apply to my settings** writes the ones you tick into your own settings, and **Run again** tries them. Results are saved in `Alpha3/benchmarks/flythrough-*.txt`.
+
+**Point light shadows (experimental).** Candles, lanterns and torches can cast shadows from the objects near them, on both GLES and Vulkan. They are off by default. To turn them on, add these to the `[Shadows]` section of `settings.cfg`:
+
+    point light shadows = 8
+    point light shadow resolution = 512
+    point light shadow faces per frame = 8
+
+`point light shadows` is how many lights cast shadows at once (0 to 16, 0 is off). It needs a lighting method other than clustered. Every shadowed light costs frame time, so start low on a phone. Other settings:
+
+- `point light shadow darkness`: how dark the shadow is, from 0 to 1 (default 0.5).
+- `point light shadow near`: lower it to let small objects close to a light cast shadows.
+- `point light shadow from own object`: whether a light's own object shadows it, such as a lantern's frame or a candle's wax.
+
+The game's `settings.cfg` explains each one.
+
 **Settings.cfg** is the game's own settings file, shown as a list of options:
 
 ![Settings.cfg](docs/screenshots/10-settings-cfg.jpg)
@@ -223,7 +241,7 @@ The **?** icon in the top bar opens the in-app guide. It has the same how-tos as
 - **A line in `openmw.cfg` starts with `;`.** Its file was missing when the launcher checked, so it was turned off. Download the mod again and remove the `;`.
 - **No Morrowind files found.** Check that the first Data row points at the folder that contains `Morrowind.esm`.
 - **Downloads stop.** Check the Nexus limits above the list, the free space shown in the downloader, and your connection.
-- **Black screen or graphics glitches.** Try a different GPU driver (see above).
+- **Black screen or graphics glitches.** Try a different GPU driver or renderer (see above). Device is the safest renderer.
 
 ---
 
