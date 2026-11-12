@@ -1,0 +1,108 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Thu, 12 Nov 2026 16:30:00 -0500
+Subject: [PATCH] Lua: pcall(require, name) of a missing module answered
+ without an exception
+
+Mods probe their context with pcall(require, 'openmw.world') and the like. A missing module threw
+a C++ exception in loadFromVFS that sol turned into lua_error, and on arm64 LuaJIT unwinds with the
+system unwinder, so every probe cost two full unwinds (about 2.7 s of CPU from start to a loaded
+save with a big mod list). The sandbox's pcall now checks first whether a require function made by
+requireGen can find the module (already loaded, or in the VFS); when not, it returns false and the
+same 'module not found: <name>' message without calling it. Anything else goes to the real pcall.
+
+---
+ components/lua/luastate.cpp | 43 ++++++++++++++++++++++++++++++++++++++++---
+ 1 file changed, 40 insertions(+), 3 deletions(-)
+
+diff --git a/components/lua/luastate.cpp b/components/lua/luastate.cpp
+index cac4ce4afe..a858a35a1a 100644
+--- a/components/lua/luastate.cpp
++++ b/components/lua/luastate.cpp
+@@ -36,6 +36,16 @@ namespace LuaUtil
+             throw std::runtime_error("module not found: " + std::string(packageName));
+     }
+ 
++    // packageNameToVfsPath's lookup without the exception, for probes such as pcall(require, 'openmw.world')
++    static bool vfsPackageExists(std::string_view packageName, const VFS::Manager& vfs)
++    {
++        std::string pathValue(packageName);
++        std::replace(pathValue.begin(), pathValue.end(), '.', '/');
++        VFS::Path::Normalized pathWithInit(pathValue + "/init.lua");
++        pathValue.append(".lua");
++        return vfs.exists(VFS::Path::Normalized(pathValue)) || vfs.exists(pathWithInit);
++    }
++
+     static std::filesystem::path packageNameToPath(
+         std::string_view packageName, const std::vector<std::filesystem::path>& searchDirs)
+     {
+@@ -210,6 +220,8 @@ namespace LuaUtil
+                 return loadScriptAndCache(packageNameToVfsPath(packageName, *mVFS));
+             };
+             sol["loadInternalLib"] = [this](std::string_view packageName) { return loadInternalLib(packageName); };
++            sol["vfsPackageExists"]
++                = [this](std::string_view packageName) { return vfsPackageExists(packageName, *mVFS); };
+ 
+             // Some fixes for compatibility between different Lua versions
+             if (sol["unpack"] == sol::nil)
+@@ -246,8 +258,15 @@ namespace LuaUtil
+                 end
+                 printGen = function(name) return function(...) return printToLog(name, ...) end end
+ 
+-                function requireGen(env, loaded, loadFn)
+-                    return function(packageName)
++                -- Scripts probe for optional modules and for their context with pcall(require, name)
++                -- ('openmw.world' in a local script, for one). A missing module raised an error, and an error
++                -- unwinds the stack through the system unwinder (LuaJIT's errors and the C++ exception behind
++                -- this one), slow on Android, and paid for every script of every object as it loads. pcall of
++                -- a sandbox's require on a module that does not exist now returns what the error gave
++                -- (false and the same message) without raising it.
++                local requireProbes = setmetatable({}, { __mode = 'k' })
++                function requireGen(env, loaded, loadFn, existsFn)
++                    local require = function(packageName)
+                         local p = loaded[packageName]
+                         if p == nil then
+                             local loader = loadFn(packageName)
+@@ -257,6 +276,23 @@ namespace LuaUtil
+                         end
+                         return p
+                     end
++                    if existsFn then
++                        requireProbes[require] = function(packageName)
++                            return loaded[packageName] ~= nil or existsFn(packageName)
++                        end
++                    end
++                    return require
++                end
++                local rawPcall = pcall
++                function sandboxPcall(f, ...)
++                    local probe = requireProbes[f]
++                    if probe ~= nil then
++                        local packageName = ...
++                        if type(packageName) == 'string' and not probe(packageName) then
++                            return false, 'module not found: ' .. packageName
++                        end
++                    end
++                    return rawPcall(f, ...)
+                 end
+ 
+                 function createStrictIndexFn(tbl)
+@@ -312,6 +348,7 @@ namespace LuaUtil
+                 mCommonPackages[s] = mSandboxEnv[s] = makeReadOnly(sol[s]);
+             }
+             mSandboxEnv["getmetatable"] = sol["getSafeMetatable"];
++            mSandboxEnv["pcall"] = sol["sandboxPcall"];
+             mCommonPackages["os"] = mSandboxEnv["os"]
+                 = makeReadOnly(tableFromPairs<std::string_view, sol::function>(sol,
+                     { { "date", sol["os"]["date"] }, { "difftime", sol["os"]["difftime"] },
+@@ -386,7 +423,7 @@ namespace LuaUtil
+             loaded[key] = maybeRunLoader(value);
+         for (const auto& [key, value] : packages)
+             loaded[key] = maybeRunLoader(value);
+-        env["require"] = mSol["requireGen"](env, loaded, mSol["loadFromVFS"]);
++        env["require"] = mSol["requireGen"](env, loaded, mSol["loadFromVFS"], mSol["vfsPackageExists"]);
+ 
+         sol::set_environment(env, script);
+         return call(scriptId, script);
+-- 
+2.43.0
