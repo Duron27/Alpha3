@@ -14,9 +14,32 @@
 #define VMA_VULKAN_VERSION 1002000
 #include <vk_mem_alloc.h>
 
+#include <atomic>
+
 #include <components/debug/debuglog.hpp>
 
 #include "../support.hpp"
+
+namespace Alpha3
+{
+    namespace
+    {
+        // set once the device is made, before any texture is read; textures are read on several threads
+        std::atomic<unsigned> sTextureFormats{ 0 };
+        constexpr unsigned sKnown = 1, sBc = 2, sEtc2 = 4, sAstc = 8;
+    }
+
+    VulkanTextureFormats vulkanTextureFormats()
+    {
+        const unsigned bits = sTextureFormats.load(std::memory_order_acquire);
+        VulkanTextureFormats formats;
+        formats.mKnown = (bits & sKnown) != 0;
+        formats.mBc = (bits & sBc) != 0;
+        formats.mEtc2 = (bits & sEtc2) != 0;
+        formats.mAstc = (bits & sAstc) != 0;
+        return formats;
+    }
+}
 
 namespace Alpha3::Vk
 {
@@ -403,6 +426,10 @@ namespace Alpha3::Vk
                     break;
                 }
             }
+
+            sTextureFormats.store(sKnown | (device->mBcTextures ? sBc : 0u) | (device->mEtc2Textures ? sEtc2 : 0u)
+                    | (device->mAstcTextures ? sAstc : 0u),
+                std::memory_order_release);
 
             const VkPhysicalDeviceProperties& p = device->mProperties;
             Log(Debug::Info) << "Vulkan: " << p.deviceName << ", API " << VK_VERSION_MAJOR(p.apiVersion) << "."

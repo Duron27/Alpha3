@@ -697,3 +697,45 @@ The fly-through benchmark always has it off.
 
 Also in this change: `FlyBenchmark.prepare` writes the benchmark's fixed settings every time EngineActivity starts on a
 route, so a run started over adb (or any other way) cannot use whatever was left in `benchmarks/profile`.
+
+## 2026-11-12: white textures on Vulkan fixed; GLES and Vulkan crash reports from testing
+
+**Fixed (committed): textures white on a fresh install under Vulkan** when texture conversion is off. Two causes:
+- With conversion off, DXT is decoded on the CPU (`bcdecode.cpp decodeS3tc`) into 16-bit RGB565 / RGB5_A1 images.
+  `vulkan/resources.cpp uncompressedLayout` had no mapping for them, so those textures were dropped (white). Log line:
+  `Vulkan: texture pixel format 0x1907 type 0x8363 is not supported`. Now 565 goes as `VK_FORMAT_R5G6B5_UNORM_PACK16`
+  (every Vulkan GPU samples it) and 5551 is expanded to RGBA8.
+- `hooks.cpp prepareDxtForGpu` asked the hidden GLES context (`osg::GLExtensions`) whether DXT can be sampled. Under
+  Vulkan that is the wrong driver (Adreno GLES samples DXT, its Vulkan driver does not), so DXT could be passed to Vulkan
+  as it is. `vulkan/device.cpp` now records the Vulkan device's BC/ETC2/ASTC support (`vulkanTextureFormats()` in
+  `support.hpp`), and the hook uses it under Vulkan; when the GPU cannot sample DXT and conversion does not happen,
+  Vulkan always decodes (no need for `OPENMW_DECOMPRESS_TEXTURES`). The GLES path is unchanged.
+- Checked on the T867 (system driver, conversion off): textures white before, correct after.
+
+**Open: crashes the user hit by toggling settings in game.**
+- Texture Filtering (Options → Video → Detail Level) and shadows crashed on **GLES on a Mali device** (user report).
+  Not reproduced on Adreno: on the T867 neither crashes in game on Vulkan or GLES. No Mali log yet.
+- Likely for Texture Filtering: both menu choices (Bilinear, Trilinear) set `texture mipmap` to nearest/linear, and on
+  GLES that crashes at startup in the terrain composite maps (`CompositeMapRenderer::compile` →
+  `FrameBufferObject::apply` → `glGenerateMipmap` on the empty GL_RGB render targets; reproduced on the T867 GLES with
+  `texture mipmap = linear`, see the 2026-11-11 note). The in-game change also re-applies the filter to existing
+  composite maps (`ChunkManager::updateTextureFiltering`). Proposed fix, not made: on GLES, keep composite-map RTTs
+  without mipmaps (a support call after `applyFilterSettings` in `createCompositeMapRTT` and the update functor); the
+  default look (mipmaps off) does not change, Vulkan untouched.
+- Shadows on Mali GLES: cause unknown; turning shadows on in game makes every shader recompile with the shadow defines.
+  Needs a crash log. The user has an S7 edge; the Exynos model (SM-G935F/FD, Mali-T880, Android 8.0) can run the app
+  (minSdk 26), the US Snapdragon models cannot help.
+- **Vulkan: VK_ERROR_DEVICE_LOST once** on a fresh install (T867, system driver, new game in Seyda Neen): about 4.5 s
+  after Clustered Lighting was turned off in game (16:47:28 programs remade, 16:47:32.8 device lost), then Per-Pixel
+  Lighting toggled. Every submit failed after that (frozen screen). Not reproduced in four tries (warm and cleared
+  Vulkan cache, clustered off then per-pixel 4 times, menu open and closed). The user recalls an older bug from toggling
+  per-pixel lighting 3–4 times. Suspect a race: turning clustered off resets the light manager's cull callback, which
+  drops the cluster SSBOs and DispatchCompute nodes while frames in flight may still use them, or a stale program
+  bound to bindings that are gone. Next: review how `vulkan/translator.cpp`/`resources.cpp` free buffers and compute
+  pipelines when OSG releases them (deferred until the frame slots are done?). If it happens again, grab `adb logcat`
+  at once (it rolls over in minutes).
+
+**Device notes:** the T867 has a second Android user (10) with its own copy of Alpha3; `adb install` updated only that
+one after the owner's copy was uninstalled; `pm install-existing --user 0 com.alpha3.launcher` fixed it. The T867 is
+now a fresh install (the user's test), Vulkan, with the Duron saves in `Alpha3/saves/Duron/`. The launcher's renderer
+choice is `glRenderer` in `Alpha3/game_files_prefs.preferences_pb` (shared storage).

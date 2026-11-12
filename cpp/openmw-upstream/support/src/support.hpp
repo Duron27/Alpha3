@@ -74,6 +74,15 @@ namespace Alpha3
     bool usesVulkan();
     bool usesGles();
 
+    // ---- vulkan/device.cpp (Android): the compressed formats the Vulkan device samples. mKnown is false until the
+    // device is made (and always on GLES): the GLES context under the Vulkan window can differ (Adreno's GLES samples
+    // DXT, its Vulkan driver does not), so texture decisions under Vulkan must ask this, not osg::GLExtensions.
+    struct VulkanTextureFormats
+    {
+        bool mKnown = false, mBc = false, mEtc2 = false, mAstc = false;
+    };
+    VulkanTextureFormats vulkanTextureFormats();
+
     // ---- angle.cpp (iOS): OSG_USE_ANGLE, and ANGLE's eglGetProcAddress (null when ANGLE is not loaded)
     bool usesAngle();
     void* angleProcAddress(const char* name);

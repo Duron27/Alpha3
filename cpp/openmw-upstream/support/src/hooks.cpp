@@ -133,13 +133,36 @@ namespace Alpha3
         // A DXT image as the GPU can sample it: null when it can as it is (or nothing can be done, and the engine decides)
         osg::ref_ptr<osg::Image> prepareDxtForGpu(osg::Image& image)
         {
-            const osg::GLExtensions* gl = osg::GLExtensions::Get(0, false);
+            // what the GPU samples. Under Vulkan the Vulkan device's formats: the GLES context beneath the Vulkan window
+            // may sample DXT when the Vulkan driver does not (Adreno), and DXT handed on to Vulkan would be white.
+            bool samplesDxt = false, samplesAstc = false, samplesEtc2 = true; // ETC2 is part of OpenGL ES 3
+            bool vulkan = false;
+#ifdef __ANDROID__
+            if (usesVulkan())
+            {
+                const VulkanTextureFormats formats = vulkanTextureFormats();
+                if (formats.mKnown)
+                {
+                    vulkan = true;
+                    samplesDxt = formats.mBc;
+                    samplesAstc = formats.mAstc;
+                    samplesEtc2 = formats.mEtc2;
+                }
+            }
+#endif
+            if (!vulkan)
+            {
+                const osg::GLExtensions* gl = osg::GLExtensions::Get(0, false);
+                if (gl == nullptr)
+                    return nullptr;
+                samplesDxt = gl->isTextureCompressionS3TCSupported;
+                samplesAstc = gl->isTextureCompressionASTCSupported;
+            }
             // a GPU that samples DXT takes it as it is, unless the textures are upscaled (on the way to ASTC or ETC2)
-            if (gl == nullptr || (gl->isTextureCompressionS3TCSupported && !textureUpscaleEnabled()))
+            if (samplesDxt && !textureUpscaleEnabled())
                 return nullptr;
 
-            // ASTC textures need a GPU that can sample ASTC; ETC2 is part of OpenGL ES 3
-            if (textureConversionUsesEtc2() || gl->isTextureCompressionASTCSupported)
+            if (textureConversionUsesEtc2() ? samplesEtc2 : samplesAstc)
             {
                 if (osg::ref_ptr<osg::Image> converted = transcodeDxt(image, image.getFileName().empty() ? readingImagePath() : image.getFileName()))
                     return converted;
@@ -147,13 +170,18 @@ namespace Alpha3
             else
             {
                 static std::once_flag logged;
-                std::call_once(logged,
-                    [] { Log(Debug::Info) << "Texture conversion is off: this GPU does not support ASTC textures"; });
+                std::call_once(logged, [] {
+                    Log(Debug::Info) << "Texture conversion is off: this GPU does not support "
+                                     << (textureConversionUsesEtc2() ? "ETC2" : "ASTC") << " textures";
+                });
             }
+            if (samplesDxt)
+                return nullptr; // upscaling was asked for but did not happen: DXT as it is
 
-            // decompressed on the CPU, block-wise with all mip levels
+            // decompressed on the CPU, block-wise with all mip levels. Always under Vulkan, which has no other way to
+            // show DXT on such a GPU; on GLES only when the launcher asks (the driver may decode it itself).
             static const bool decompress = std::getenv("OPENMW_DECOMPRESS_TEXTURES") != nullptr;
-            if (decompress)
+            if (decompress || vulkan)
             {
                 if (osg::ref_ptr<osg::Image> decoded = decodeS3tc(image))
                     return decoded;

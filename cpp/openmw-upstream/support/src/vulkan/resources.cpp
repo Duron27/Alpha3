@@ -25,7 +25,8 @@ namespace Alpha3::Vk
                            glRg = 0x8227, glAlpha = 0x1906, glLuminance = 0x1909, glLuminanceAlpha = 0x190A,
                            glUnsignedByte = 0x1401, glFloat = 0x1406, glHalfFloat = 0x140B, glHalfFloatOes = 0x8D61,
                            glUnsignedShort = 0x1403, glDepthComponent = 0x1902, glDepthStencil = 0x84F9,
-                           glUnsignedInt248 = 0x84FA, glUnsignedInt = 0x1405;
+                           glUnsignedInt248 = 0x84FA, glUnsignedInt = 0x1405, glUnsignedShort565 = 0x8363,
+                           glUnsignedShort5551 = 0x8034;
 
         constexpr VkDeviceSize sChunkSize = 16 << 20;
         constexpr VkDeviceSize sUploadBudget = 48 << 20; // texture bytes uploaded per frame, the rest waits
@@ -239,6 +240,27 @@ namespace Alpha3::Vk
                     default:
                         return layout;
                 }
+            }
+            // DXT1 decoded on the CPU (bcdecode.cpp, a GPU without BC formats) is 16 bit: RGB565 or RGB5_A1, the
+            // top bits red. R5G6B5 is a format every Vulkan GPU samples and filters; R5G5B5A1 is not, so it goes as RGBA8.
+            if (dataType == glUnsignedShort565 && pixelFormat == glRgb)
+                return { VK_FORMAT_R5G6B5_UNORM_PACK16, 2 };
+            if (dataType == glUnsignedShort5551 && pixelFormat == glRgba)
+            {
+                layout = { VK_FORMAT_R8G8B8A8_UNORM, 4 };
+                layout.mConvert = [](const uint8_t* s, uint8_t* d, uint32_t n) {
+                    for (uint32_t i = 0; i < n; ++i, s += 2, d += 4)
+                    {
+                        uint16_t v;
+                        std::memcpy(&v, s, 2);
+                        const uint32_t r = (v >> 11) & 31, g = (v >> 6) & 31, b = (v >> 1) & 31;
+                        d[0] = static_cast<uint8_t>((r << 3) | (r >> 2));
+                        d[1] = static_cast<uint8_t>((g << 3) | (g >> 2));
+                        d[2] = static_cast<uint8_t>((b << 3) | (b >> 2));
+                        d[3] = (v & 1) ? 255 : 0;
+                    }
+                };
+                return layout;
             }
             if (dataType == glUnsignedShort)
             {
