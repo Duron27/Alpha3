@@ -9,6 +9,10 @@
 #
 # Settings: ~/.config/alpha3/mpserver-deploy.conf (asked for on the first run). Log in with an SSH key, not a password:
 #   ssh-copy-id user@your-server      (once; it asks for the password that one time)
+# To have it restart the service as well when the login user is not root, allow that user that one command, on the
+# server as root (user and service as yours):
+#   echo 'openmwadmin ALL=(root) NOPASSWD: /usr/bin/systemctl restart openmw-mp-server.service' > /etc/sudoers.d/openmw-mp
+#   chmod 440 /etc/sudoers.d/openmw-mp
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -58,7 +62,7 @@ case ${1:-} in
     --setup) setup; exit 0 ;;
     --no-build) ;;
     "") ;;
-    *) sed -n '2,12p' "$0"; exit 2 ;;
+    *) sed -n '2,17p' "$0"; exit 2 ;;
 esac
 [ -f "$conf" ] || setup
 # shellcheck disable=SC1090
@@ -81,23 +85,34 @@ echo "== Installing in $MP_DIR and restarting $MP_SERVICE"
 "${ssh[@]}" bash -s -- "$MP_DIR" "$MP_SERVICE" "/tmp/openmw-mp-server-$stamp.zip" "$stamp" <<'REMOTE'
 set -euo pipefail
 dir=$1 service=$2 zip=$3 stamp=$4
+# sudo only where it is needed: the folder is usually the login user's own, the restart is root's
 sudo=""; [ "$(id -u)" -eq 0 ] || sudo="sudo -n"
+fs=""; [ -w "$dir" ] || [ -w "$(dirname "$dir")" ] || fs=$sudo
 stage=$(mktemp -d)
 if command -v unzip >/dev/null; then unzip -q "$zip" -d "$stage"
 else python3 -m zipfile -e "$zip" "$stage"; fi
 chmod +x "$stage"/openmw-mp-server/openmw-mp-server "$stage"/openmw-mp-server/*.sh "$stage"/openmw-mp-server/alerts/*.sh 2>/dev/null || true
 owner=$(stat -c %U:%G "$dir" 2>/dev/null || echo "")
 if [ -d "$dir" ]; then
-    $sudo cp -a "$dir" "$dir.bak-$stamp"
+    $fs cp -a "$dir" "$dir.bak-$stamp"
     echo "backup: $dir.bak-$stamp"
     # keep the five newest backups
-    ls -1d "$dir".bak-* 2>/dev/null | sort | head -n -5 | xargs -r $sudo rm -rf
+    ls -1d "$dir".bak-* 2>/dev/null | sort | head -n -5 | xargs -r $fs rm -rf
 fi
-$sudo mkdir -p "$dir"
-$sudo cp -a "$stage"/openmw-mp-server/. "$dir"/
-[ -n "$owner" ] && $sudo chown -R "$owner" "$dir"
+$fs mkdir -p "$dir"
+# --remove-destination: each old file is unlinked, not written into, so the running server keeps its program until the
+# restart (written in place, it crashed); no SELinux context carried over from /tmp, the folder's own is applied (a
+# program labelled as a temporary file cannot be started by systemd)
+$fs cp -r --remove-destination --preserve=mode,timestamps "$stage"/openmw-mp-server/. "$dir"/
+command -v restorecon >/dev/null && $fs restorecon -R "$dir" || true
+[ -n "$fs" ] && [ -n "$owner" ] && $fs chown -R "$owner" "$dir"
 rm -rf "$stage" "$zip"
-$sudo systemctl restart "$service"
+if ! $sudo systemctl restart "$service" 2>/dev/null; then
+    echo "The new files are in place. Restarting needs root here: run on the server"
+    echo "    sudo systemctl restart $service"
+    echo "(or let this user restart it without a password: see the top of deploy-server.sh)"
+    exit 0
+fi
 port=$(systemctl show -p ExecStart --value "$service" | grep -oE -- '--port[ =][0-9]+' | grep -oE '[0-9]+' | head -1)
 port=${port:-25565}
 for i in 1 2 3 4 5 6 7 8 9 10; do
@@ -105,7 +120,7 @@ for i in 1 2 3 4 5 6 7 8 9 10; do
     if { exec 3<>"/dev/tcp/127.0.0.1/$port"; } 2>/dev/null && IFS= read -r -t 5 line <&3; then
         exec 3<&- 3>&-
         echo "running: port $port answers"
-        $sudo journalctl -u "$service" -n 6 --no-pager -o cat || true
+        journalctl -u "$service" -n 6 --no-pager -o cat 2>/dev/null || true
         exit 0
     fi
 done
