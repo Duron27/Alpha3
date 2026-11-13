@@ -280,6 +280,10 @@ class EngineActivity : SDLActivity() {
             override fun onGlobalLayout() {
                 val containerWidth = sdlContainer.width.toFloat()
                 val containerHeight = sdlContainer.height.toFloat()
+                // The activity is landscape only, but started while the device is in portrait (from a shortcut, adb or
+                // a locked screen) its first layout is portrait-sized: the controls' positions, fractions of the size
+                // they are loaded at, would land squeezed into the left part of the screen. Wait for the landscape one.
+                if (containerWidth < 1f || containerWidth < containerHeight) return
 
                 containerGlobalHeight.floatValue = sdlContainer.height.toFloat()
                 containerGlobalWidth.floatValue = sdlContainer.width.toFloat()
