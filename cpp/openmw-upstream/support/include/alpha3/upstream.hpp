@@ -356,6 +356,9 @@ namespace Alpha3
     // set); not renderScale, which is the scene's scale of the common render scale (src/renderscale.cpp)
     float nativeScreenScale();
     float windowPixelsPerPoint();
+    // The window's safe area (clear of the rounded corners, the Dynamic Island and the home indicator) as the insets
+    // left, top, right, bottom in fractions of the window; read on the main thread now and then, else the last ones
+    void safeAreaInsets(float out[4]);
     // Renders the window at about width x height pixels (the width decides, the window keeps its shape): sets the scale of
     // SDL's view, the graphics context takes the new size on its draw thread, then the engine gets a size change event.
     void setRenderResolution(SDL_Window* window, osg::GraphicsContext* context, int width, int height);

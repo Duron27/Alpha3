@@ -3,6 +3,10 @@
 // sends where the player put it (omwHudSet); HUD::onFrame calls hudLayoutFrame, which places the elements every frame
 // (the HUD moves some of them itself) on the main thread. Kept in Alpha3/config/hudlayout.cfg: one line an element,
 // "name left top scale", left and top as fractions of the screen.
+//
+// iOS: the HUD is kept inside the screen's safe area, so the bars and the minimap in its bottom corners are clear of the
+// rounded corners (and the Dynamic Island's side): its main widget is made that much smaller, the same on opposite sides
+// so that what is centred (the crosshair) stays where the camera looks. Placements stay fractions of the whole screen.
 
 #include "support.hpp"
 
@@ -11,6 +15,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -19,6 +24,7 @@
 #include <string>
 #include <vector>
 
+#include <MyGUI_RenderManager.h>
 #include <MyGUI_TextBox.h>
 #include <MyGUI_Widget.h>
 
@@ -183,6 +189,20 @@ namespace Alpha3
     {
         if (main == nullptr)
             return;
+#if defined(__APPLE__)
+        // (a widget of the HUD layer itself: its coordinates are the screen's)
+        if (main->getParent() == nullptr)
+        {
+            float inset[4];
+            safeAreaInsets(inset);
+            const MyGUI::IntSize screen = MyGUI::RenderManager::getInstance().getViewSize();
+            const int side = scaled(screen.width, std::max(inset[0], inset[2]));
+            const int vertical = scaled(screen.height, std::max(inset[1], inset[3]));
+            const MyGUI::IntCoord safe(side, vertical, screen.width - 2 * side, screen.height - 2 * vertical);
+            if (safe.width > 0 && safe.height > 0 && main->getCoord() != safe)
+                main->setCoord(safe);
+        }
+#endif
         // [GUI] overlay hud layout: off, nothing is read, placed or reported
         static const bool enabled = settingBool("GUI", "overlay hud layout", true);
         if (!enabled)
@@ -210,10 +230,16 @@ namespace Alpha3
         // the layout prefixes every name: "<prefix>_Main" is the main widget
         const std::string& mainName = main->getName();
         const std::string prefix = mainName.size() >= 5 ? mainName.substr(0, mainName.size() - 5) : std::string();
+#if defined(__APPLE__)
+        // the screen (the main widget is the safe area, see the top)
+        const MyGUI::IntSize view = MyGUI::RenderManager::getInstance().getViewSize();
+        const MyGUI::IntPoint origin;
+#else
         const MyGUI::IntSize view = main->getSize();
+        const MyGUI::IntPoint origin = main->getAbsolutePosition();
+#endif
         if (view.width <= 0 || view.height <= 0)
             return;
-        const MyGUI::IntPoint origin = main->getAbsolutePosition();
 
         if (sResetAsked)
         {
@@ -321,6 +347,30 @@ extern "C" JNIEXPORT void JNICALL Java_org_openmw_SdlEngineBridge_omwHudSet(
 }
 
 extern "C" JNIEXPORT void JNICALL Java_org_openmw_SdlEngineBridge_omwHudReset(JNIEnv*, jobject)
+{
+    Alpha3::hudLayoutReset();
+}
+#else
+// The same for the iOS launcher (IosEngineBridge), which looks them up with dlsym in the running engine
+
+// The report (see hudLayoutReport) copied into [out], up to [capacity] bytes and not terminated; returns its whole
+// length, so a caller whose buffer was too small asks again with a larger one
+extern "C" __attribute__((visibility("default"), used)) int alpha3_hud_layout(char* out, int capacity)
+{
+    const std::string report = Alpha3::hudLayoutReport();
+    if (out != nullptr && capacity > 0)
+        std::memcpy(out, report.data(), std::min(report.size(), static_cast<std::size_t>(capacity)));
+    return static_cast<int>(report.size());
+}
+
+extern "C" __attribute__((visibility("default"), used)) void alpha3_hud_set(
+    const char* name, float left, float top, float scale, int keep)
+{
+    if (name != nullptr)
+        Alpha3::hudLayoutSet(name, left, top, scale, keep != 0);
+}
+
+extern "C" __attribute__((visibility("default"), used)) void alpha3_hud_reset()
 {
     Alpha3::hudLayoutReset();
 }

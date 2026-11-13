@@ -80,6 +80,33 @@ namespace Alpha3
         return sRenderScale;
     }
 
+    void safeAreaInsets(float out[4])
+    {
+        static float cached[4] = { 0.f, 0.f, 0.f, 0.f };
+        static int untilNext = 0;
+        // UIKit is the main thread's; once a second at 60 fps (the insets change with the rotation)
+        if ([NSThread isMainThread] && --untilNext <= 0)
+        {
+            untilNext = 60;
+            UIWindow* window = nil;
+            for (UIScene* scene in UIApplication.sharedApplication.connectedScenes)
+                if ([scene isKindOfClass:UIWindowScene.class])
+                    for (UIWindow* candidate in static_cast<UIWindowScene*>(scene).windows)
+                        if (candidate.isKeyWindow || window == nil)
+                            window = candidate;
+            const CGSize size = window != nil ? window.bounds.size : CGSizeZero;
+            if (size.width > 0 && size.height > 0)
+            {
+                const UIEdgeInsets insets = window.safeAreaInsets;
+                cached[0] = static_cast<float>(insets.left / size.width);
+                cached[1] = static_cast<float>(insets.top / size.height);
+                cached[2] = static_cast<float>(insets.right / size.width);
+                cached[3] = static_cast<float>(insets.bottom / size.height);
+            }
+        }
+        std::copy(cached, cached + 4, out);
+    }
+
     void setRenderResolution(SDL_Window* window, osg::GraphicsContext* context, int width, int height)
     {
         UIView* view = sdlView(window);
@@ -105,6 +132,19 @@ namespace Alpha3
 
         sRenderScale = scale;
         view.contentScaleFactor = scale;
+        // The native Metal renderer draws into SDL's Metal view, a view inside that one with a scale of its own. SDL
+        // gives its layer's size as the window's (SDL_Metal_GetDrawableSize: the engine's window size, the touches'
+        // positions, the size a resize event hands the window manager) and sizes the layer from its scale on every
+        // layout: at the screen's scale that was the full size, which the window manager then took for the resolution
+        // (applied with the next settings change, it drew the game in a corner).
+        UIView* metalView = [view viewWithTag:SDL_METALVIEW_TAG];
+        if (metalView != nil && metalView != view)
+        {
+            metalView.contentScaleFactor = scale;
+            metalView.layer.contentsScale = scale;
+            [metalView setNeedsLayout];
+            [metalView layoutIfNeeded];
+        }
         // The Metal view sizes its layer's drawable in layoutSubviews; the OpenGL ES view would make its renderbuffers
         // there, on this thread, so that is left to the draw thread
         if (![view respondsToSelector:NSSelectorFromString(@"updateFrame")])

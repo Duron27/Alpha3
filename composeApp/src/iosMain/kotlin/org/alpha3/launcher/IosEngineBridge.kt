@@ -9,6 +9,7 @@ import kotlinx.cinterop.ByteVar
 import kotlinx.cinterop.COpaquePointer
 import kotlinx.cinterop.COpaquePointerVar
 import kotlinx.cinterop.ExperimentalForeignApi
+import kotlinx.cinterop.ObjCAction
 import kotlinx.cinterop.IntVar
 import kotlinx.cinterop.UIntVar
 import kotlinx.cinterop.UShortVar
@@ -28,10 +29,22 @@ import kotlinx.cinterop.value
 import org.alpha3.launcher.engine.EngineBridge
 import org.alpha3.launcher.engine.MouseActions
 import org.alpha3.launcher.globals.PlayBridge
+import org.alpha3.launcher.ui.controls.UIStateManager
+import platform.Foundation.NSProcessInfo
+import platform.Foundation.NSRunLoop
+import platform.Foundation.NSRunLoopCommonModes
+import platform.Foundation.NSSelectorFromString
+import platform.Foundation.NSThread
+import platform.QuartzCore.CADisplayLink
+import platform.darwin.NSObject
 import platform.posix.RTLD_NOW
 import platform.posix.dlopen
 import platform.posix.dlsym
 import platform.posix.memset
+import kotlin.math.PI
+import kotlin.math.abs
+import kotlin.math.exp
+import kotlin.math.hypot
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.TimeSource
 
@@ -112,6 +125,7 @@ class IosEngineBridge : EngineBridge {
     override fun onNativeMouse(button: Int, action: Int, x: Float, y: Float, relative: Boolean) {
         when (action) {
             MouseActions.ACTION_DOWN, MouseActions.ACTION_UP -> {
+                flushMotion() // a click lands where the motion so far has taken the cursor
                 val state = if (action == MouseActions.ACTION_DOWN) 1.toUByte() else 0.toUByte()
                 // Android button masks (1 primary, 2 secondary, 4 tertiary) -> SDL buttons (1 left, 3 right, 2 middle).
                 val sdlButton = when (button) {
@@ -122,9 +136,103 @@ class IosEngineBridge : EngineBridge {
                 sendMouseButton?.invoke(null, 0u, state, sdlButton)
             }
             MouseActions.ACTION_SCROLL -> sendMouseWheel?.invoke(null, 0u, x, y, 0)
-            else -> if (relative) relativeMotion(x, y)
-                else sendMouseMotion?.invoke(null, 0u, 0, x.toInt(), y.toInt())
+            else -> if (relative) smoothMotion(x, y)
+                else {
+                    flushMotion()
+                    sendMouseMotion?.invoke(null, 0u, 0, x.toInt(), y.toInt())
+                }
         }
+    }
+
+    // As Android's SdlEngineBridge: the thumbstick, dynamic buttons and touch areas turn the finger's moves straight into
+    // mouse motion, and touches come in steps (a slow diagonal is runs of x moves, then y moves), so looking around went
+    // in stairs. The motion is summed into rawX/Y and followed each display frame (a CADisplayLink) by a 1€ filter
+    // (Casiez et al.): strong smoothing while the finger is slow, where the steps show, almost none when it is fast, so
+    // flicks do not lag. Nothing is lost: the filtered position ends on the finger's, and a click first sends whatever is
+    // still waiting.
+    private var rawX = 0f
+    private var rawY = 0f
+    private var filtX = 0f
+    private var filtY = 0f
+    private var prevRawX = 0f
+    private var prevRawY = 0f
+    private var speed = 0f
+    private var lastFrame = 0.0
+    private var pumping = false
+    private val pumpTarget = DisplayLinkTarget { timestamp -> pumpFrame(timestamp) }
+    private val displayLink: CADisplayLink by lazy {
+        CADisplayLink.displayLinkWithTarget(pumpTarget, NSSelectorFromString("frame:")).also {
+            it.paused = true
+            it.addToRunLoop(NSRunLoop.mainRunLoop, NSRunLoopCommonModes)
+        }
+    }
+
+    private fun pumpFrame(timestamp: Double) {
+        val dt = if (lastFrame == 0.0) FRAME_S else (timestamp - lastFrame).toFloat().coerceIn(0.001f, 0.1f)
+        lastFrame = timestamp
+        // the finger's speed (game pixels a second), itself smoothed, sets how much the position is smoothed
+        val v = hypot(rawX - prevRawX, rawY - prevRawY) / dt
+        prevRawX = rawX
+        prevRawY = rawY
+        speed += alpha(dt, SPEED_CUTOFF_HZ) * (v - speed)
+        val a = alpha(dt, MIN_CUTOFF_HZ + BETA * speed)
+        val nx = filtX + a * (rawX - filtX)
+        val ny = filtY + a * (rawY - filtY)
+        relativeMotion(nx - filtX, ny - filtY)
+        filtX = nx
+        filtY = ny
+        if (abs(rawX - filtX) < 0.05f && abs(rawY - filtY) < 0.05f && speed < 1f) flushMotion()
+    }
+
+    private fun alpha(dt: Float, cutoffHz: Float): Float {
+        val tau = 1f / (2f * PI.toFloat() * cutoffHz)
+        return 1f / (1f + tau / dt)
+    }
+
+    // Pointer acceleration while OpenMW's cursor is shown (as Android): slow moves get less gain (precise, the finger's
+    // wobble stays small), fast ones more (crossing the screen stays quick). Looking around keeps the plain gain.
+    private var inSpeed = 0f
+    private var lastInput = 0.0
+
+    private fun accelerate(dx: Float, dy: Float): Float {
+        if (UIStateManager.isCursorVisible == 0) return 1f
+        val now = NSProcessInfo.processInfo.systemUptime
+        val dt = if (lastInput == 0.0) FRAME_S else (now - lastInput).toFloat().coerceIn(0.004f, 0.1f)
+        lastInput = now
+        val v = hypot(dx, dy) / dt
+        inSpeed += (1f - exp(-dt / 0.05f)) * (v - inSpeed) // input speed, game pixels a second, over ~50 ms
+        val t = ((inSpeed - ACCEL_SLOW) / (ACCEL_FAST - ACCEL_SLOW)).coerceIn(0f, 1f)
+        return GAIN_SLOW + (GAIN_FAST - GAIN_SLOW) * t * t * (3f - 2f * t)
+    }
+
+    private fun smoothMotion(dx0: Float, dy0: Float) {
+        // the display link is the main thread's; anything else goes straight through
+        if (!NSThread.isMainThread) return relativeMotion(dx0, dy0)
+        val gain = accelerate(dx0, dy0)
+        val dx = dx0 * gain
+        val dy = dy0 * gain
+        rawX += dx
+        rawY += dy
+        if (!pumping) {
+            pumping = true
+            lastFrame = 0.0
+            speed = 0f
+            prevRawX = rawX - dx
+            prevRawY = rawY - dy
+            displayLink.paused = false
+        }
+    }
+
+    /** Sends what is still waiting at once and stops the frame pump. */
+    private fun flushMotion() {
+        if (pumping && NSThread.isMainThread) {
+            displayLink.paused = true
+            pumping = false
+        }
+        val x = rawX - filtX
+        val y = rawY - filtY
+        rawX = 0f; rawY = 0f; filtX = 0f; filtY = 0f
+        if (x != 0f || y != 0f) relativeMotion(x, y)
     }
 
     // SDL takes whole-number deltas; keep the fraction so slow drags are not rounded away.
@@ -249,7 +357,55 @@ class IosEngineBridge : EngineBridge {
         val joystick = virtualJoystick ?: return
         setVirtualAxisSym.get()?.invoke(joystick, axis, (value.coerceIn(-1f, 1f) * 32767f).toInt().toShort())
     }
+
+    // The HUD layout of the overlay's edit mode (support/src/hudlayout.cpp's C exports; Android's are JNI)
+    private val hudLayoutSym = Symbol<CFunction<(CPointer<ByteVar>?, Int) -> Int>>("alpha3_hud_layout")
+    private val hudSetSym = Symbol<CFunction<(CPointer<ByteVar>?, Float, Float, Float, Int) -> Unit>>("alpha3_hud_set")
+    private val hudResetSym = Symbol<CFunction<() -> Unit>>("alpha3_hud_reset")
+
+    override fun hudLayout(): String? {
+        val layout = hudLayoutSym.get() ?: return null
+        var capacity = 4096
+        repeat(2) {
+            val text = memScoped {
+                val buffer = allocArray<ByteVar>(capacity)
+                val length = layout.invoke(buffer, capacity)
+                if (length > capacity) {
+                    capacity = length
+                    null
+                } else {
+                    ByteArray(length) { buffer[it] }.decodeToString()
+                }
+            }
+            if (text != null) return text
+        }
+        return null
+    }
+
+    override fun hudSet(name: String, left: Float, top: Float, scale: Float, keep: Boolean) {
+        val set = hudSetSym.get() ?: return
+        memScoped { set.invoke(name.cstr.ptr, left, top, scale, if (keep) 1 else 0) }
+    }
+
+    override fun hudReset() {
+        hudResetSym.get()?.invoke()
+    }
 }
+
+/** The display link's target: CADisplayLink calls an Objective-C selector each frame. */
+private class DisplayLinkTarget(private val onFrame: (Double) -> Unit) : NSObject() {
+    @ObjCAction
+    fun frame(link: CADisplayLink) = onFrame(link.timestamp)
+}
+
+private const val FRAME_S = 1f / 60f
+private const val MIN_CUTOFF_HZ = 1.0f   // slow drags: about 160 ms of smoothing, which hides the touches' steps
+private const val GAIN_SLOW = 0.45f      // cursor gain at or under ACCEL_SLOW game pixels a second of input
+private const val GAIN_FAST = 1.4f       // and at or over ACCEL_FAST, eased between
+private const val ACCEL_SLOW = 150f
+private const val ACCEL_FAST = 1500f
+private const val BETA = 0.02f           // + this many Hz per game pixel a second: a 1000 px/s flick is at 21.5 Hz
+private const val SPEED_CUTOFF_HZ = 2f
 
 private const val VIRTUAL_DESC_SIZE = 88
 private const val STANDARD_BUTTONS = 15
