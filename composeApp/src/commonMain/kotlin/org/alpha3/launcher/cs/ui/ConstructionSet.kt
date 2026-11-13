@@ -42,6 +42,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -126,8 +127,17 @@ fun ConstructionSet() {
     var luaMods by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
-    val workspace = remember {
-        runCatching { Workspace(fs, platform, OpenMWPaths.USER_OPENMW_CFG) }.onFailure { error = it.message }.getOrNull()
+    // read in the background: openmw.cfg, an index of every data folder and the load order took seconds on the UI
+    // thread with a large mod list, so the launcher froze when the Construction Set was opened
+    var workspace by remember { mutableStateOf<Workspace?>(null) }
+    var readingWorkspace by remember { mutableStateOf(true) }
+    LaunchedEffect(Unit) {
+        val read = withContext(Dispatchers.Default) {
+            runCatching { Workspace(fs, platform, OpenMWPaths.USER_OPENMW_CFG).also { it.loadOrder } }
+        }
+        read.onFailure { error = it.message }
+        workspace = read.getOrNull()
+        readingWorkspace = false
     }
 
     fun run(label: String, block: suspend () -> CsDocument) {
@@ -153,14 +163,15 @@ fun ConstructionSet() {
         when {
             savedGames -> org.alpha3.launcher.cs.save.SaveEditorScreen(fs, onClose = { savedGames = false })
             luaMods -> org.alpha3.launcher.cs.lua.ui.LuaModCreator(fs, joinPath(csPluginDir(), "lua"), onClose = { luaMods = false })
+            readingWorkspace -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
             workspace == null -> Text(error ?: "No openmw.cfg yet: set up the game files first", modifier = Modifier.padding(16.dp))
             s == null -> StartScreen(
-                workspace,
+                workspace!!,
                 onSaves = { savedGames = true },
                 onLua = { luaMods = true },
-                onOpen = { path -> run("Opening ${baseName(path)}") { workspace.openFile(path) { busy = it } } },
+                onOpen = { path -> run("Opening ${baseName(path)}") { workspace!!.openFile(path) { busy = it } } },
                 onNew = { name, author, desc, masters ->
-                    run("Creating $name") { workspace.create(csPluginDir(), name, author, desc, masters) { busy = it } }
+                    run("Creating $name") { workspace!!.create(csPluginDir(), name, author, desc, masters) { busy = it } }
                 },
             )
             else -> Editor(s, onClose = { s.doc.close(); session = null })
@@ -197,14 +208,32 @@ private fun StartScreen(workspace: Workspace, onSaves: () -> Unit, onLua: () -> 
     var over by remember { mutableStateOf<LoadOrderEntry?>(null) }
     val order = workspace.loadOrder
     Column(Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Construction Set", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
-            androidx.compose.material3.OutlinedButton(onClick = onLua) { Text("Lua mods") }
-            androidx.compose.material3.OutlinedButton(onClick = onSaves) { Text("Saved games") }
+        @Composable
+        fun Buttons() {
+            androidx.compose.material3.OutlinedButton(onClick = onLua) { Text("Lua mods", maxLines = 1) }
+            androidx.compose.material3.OutlinedButton(onClick = onSaves) { Text("Saved games", maxLines = 1) }
             Button(onClick = { creating = true }) {
                 Icon(Icons.Default.Add, null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(6.dp))
-                Text("New plugin")
+                Text("New plugin", maxLines = 1)
+            }
+        }
+        androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxWidth()) {
+            if (maxWidth >= 640.dp) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Construction Set", style = MaterialTheme.typography.titleLarge, maxLines = 1, modifier = Modifier.weight(1f))
+                    Buttons()
+                }
+            } else {
+                // portrait phone: the buttons left the title one letter a line; title above, buttons wrapping below
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Construction Set", style = MaterialTheme.typography.titleLarge, maxLines = 1)
+                    @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+                    androidx.compose.foundation.layout.FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) { Buttons() }
+                }
             }
         }
         Text("Open a plugin of the load order to edit it. The official Morrowind files are read-only: picking one starts a new mod that changes it.",
