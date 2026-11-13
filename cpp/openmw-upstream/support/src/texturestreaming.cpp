@@ -278,15 +278,16 @@ namespace Alpha3
                         out.emplace_back(image, std::max(image->s(), image->t()));
             }
 
-            // Drawn over this many pixels: the images smaller than that are made full size
-            void drawn(const std::vector<std::pair<const osg::Image*, int>>& images, float pixels)
+            // Each drawn over this many pixels: the images smaller than that are made full size
+            void drawn(const std::vector<std::pair<const std::vector<std::pair<const osg::Image*, int>>*, float>>& drawn)
             {
                 std::lock_guard lock(mMutex);
                 if (mPressure)
                     return; // nothing made full size while memory is short
-                for (const auto& [image, size] : images)
-                    if (pixels > static_cast<float>(size))
-                        upgrade(image);
+                for (const auto& [images, pixels] : drawn)
+                    for (const auto& [image, size] : *images)
+                        if (pixels > static_cast<float>(size))
+                            upgrade(image);
             }
 
             void frame()
@@ -601,11 +602,22 @@ namespace Alpha3
         }
 
         // What the scene camera's cull has found this frame, per state graph: the small images it draws with
+        // The scene camera's state graphs of one frame: the still small images of each, and the most pixels any of
+        // its drawables covered. Handed to the streaming at once when the next frame begins (one lock, not one for
+        // each drawable)
         struct CullCache
         {
+            struct Graph
+            {
+                std::vector<std::pair<const osg::Image*, int>> mImages;
+                float mPixels = 0.f;
+            };
             unsigned mFrame = ~0u;
-            std::unordered_map<const osgUtil::StateGraph*, std::vector<std::pair<const osg::Image*, int>>> mPending;
+            std::unordered_map<const osgUtil::StateGraph*, Graph> mPending;
+            const osgUtil::StateGraph* mLastGraph = nullptr; // drawables in a row share a graph often
+            Graph* mLast = nullptr;
             std::vector<const osg::Image*> mScratch;
+            std::vector<std::pair<const std::vector<std::pair<const osg::Image*, int>>*, float>> mDrawn;
         };
     }
 
@@ -668,20 +680,34 @@ namespace Alpha3
         thread_local CullCache cache;
         if (stamp->getFrameNumber() != cache.mFrame)
         {
+            // the last frame's sizes, then a new frame (its state graphs are rebuilt, and may be freed)
+            cache.mDrawn.clear();
+            for (const auto& [graph, entry] : cache.mPending)
+                if (entry.mPixels > 0.f && !entry.mImages.empty())
+                    cache.mDrawn.emplace_back(&entry.mImages, entry.mPixels);
+            if (!cache.mDrawn.empty())
+                streaming().drawn(cache.mDrawn);
             cache.mFrame = stamp->getFrameNumber();
-            cache.mPending.clear(); // the state graphs are rebuilt (and may be freed) every frame
+            cache.mPending.clear();
+            cache.mLastGraph = nullptr;
+            cache.mLast = nullptr;
         }
         const osgUtil::StateGraph* graph = cv.getCurrentStateGraph();
-        auto found = cache.mPending.find(graph);
-        if (found == cache.mPending.end())
+        if (graph != cache.mLastGraph || cache.mLast == nullptr)
         {
-            cache.mScratch.clear();
-            imagesOf(graph, cache.mScratch);
-            found = cache.mPending.emplace(graph, std::vector<std::pair<const osg::Image*, int>>()).first;
-            streaming().pendingOf(cache.mScratch, found->second);
-            streaming().seen(found->second);
+            auto [found, added] = cache.mPending.try_emplace(graph);
+            if (added)
+            {
+                cache.mScratch.clear();
+                imagesOf(graph, cache.mScratch);
+                streaming().pendingOf(cache.mScratch, found->second.mImages);
+                streaming().seen(found->second.mImages);
+            }
+            cache.mLastGraph = graph;
+            cache.mLast = &found->second;
         }
-        if (found->second.empty())
+        CullCache::Graph& entry = *cache.mLast;
+        if (entry.mImages.empty())
             return;
 
         // how many pixels the drawable covers across, at its nearest
@@ -698,7 +724,7 @@ namespace Alpha3
         const float pixels = distance <= 1.0
             ? std::numeric_limits<float>::infinity()
             : static_cast<float>(radius / distance * std::abs(projection(1, 1)) * viewport->height());
-        streaming().drawn(found->second, pixels);
+        entry.mPixels = std::max(entry.mPixels, pixels);
     }
 
     void textureStreamingFrame()
