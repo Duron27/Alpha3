@@ -14,6 +14,7 @@
 #   BUILD_NUMBER       CFBundleVersion, must grow with every upload (default: seconds since 2026-01-01, in minutes)
 #   TEAM_ID            Apple developer team (default J7W2R8H393)
 #   SKIP_UPLOAD=1      archive and export an .ipa into build/ios-release without uploading it
+#   SKIP_NATIVE=1      the device native libraries are already built (the Gradle tasks iosDeviceBuild/iosTestFlight)
 set -euo pipefail
 
 repo="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -42,7 +43,9 @@ echo "Alpha3 iOS $version ($build), team $team"
 # Device libraries (vcpkg, OpenMW, frameworks into iosApp/EmbeddedLibsDevice). The Xcode build phase would start this
 # too, but on its own it shows its output and fails here rather than inside xcodebuild.
 cd "$repo"
-./gradlew :composeApp:buildNativeIos -PnativeIosPlatform=ios --no-configuration-cache
+if [ "${SKIP_NATIVE:-0}" != 1 ]; then
+    ./gradlew :composeApp:buildNativeIos -PnativeIosPlatform=ios --no-configuration-cache
+fi
 
 archive="$out/Alpha3.xcarchive"
 rm -rf "$archive" "$out/export"

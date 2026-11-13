@@ -1,3 +1,4 @@
+import java.util.Properties
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
@@ -242,6 +243,50 @@ val buildNativeIos = tasks.register("buildNativeIos") {
     description = "Builds the iOS native libraries per -PnativeIosPlatform"
     if (nativeIosPlatform == "ios" || nativeIosPlatform == "both") dependsOn(buildNativeIosDevice)
     if (nativeIosPlatform == "ios-simulator" || nativeIosPlatform == "both") dependsOn(buildNativeIosSimulator)
+}
+
+// Device build (.ipa) and TestFlight upload, for the run configurations in .run/. Both build the device native
+// libraries here (output in the Build window), then run iosApp/ci/testflight.sh (xcodebuild archive + export).
+// The App Store Connect API key comes from local.properties, or from the environment like on CI:
+//   ios.asc.keyId=XXXXXXXXXX        (ASC_KEY_ID)
+//   ios.asc.issuerId=xxxxxxxx-…     (ASC_ISSUER_ID)
+//   ios.asc.keyP8=/path/AuthKey_XXXXXXXXXX.p8   (ASC_KEY_P8)
+val iosAscKeys = mapOf("ASC_KEY_ID" to "ios.asc.keyId", "ASC_ISSUER_ID" to "ios.asc.issuerId", "ASC_KEY_P8" to "ios.asc.keyP8")
+val iosAscValues: Map<String, String?> = run {
+    val local = Properties()
+    rootProject.file("local.properties").takeIf { it.isFile }?.reader()?.use { local.load(it) }
+    iosAscKeys.mapValues { (env, prop) -> System.getenv(env)?.takeIf { it.isNotBlank() } ?: local.getProperty(prop)?.trim() }
+}
+
+fun registerIosRelease(taskName: String, upload: Boolean) = tasks.register<Exec>(taskName) {
+    group = "ios"
+    description = if (upload) "Builds the iOS app for devices and uploads it to TestFlight"
+        else "Builds the iOS app for devices into build/ios-release/export/Alpha3.ipa"
+    dependsOn(buildNativeIosDevice)
+    workingDir = rootProject.projectDir
+    environment("PATH", nativeToolPath)
+    xcodeEnvVars.forEach { environment.remove(it) }
+    // Xcode's Kotlin build phase starts Gradle again and needs a JDK; Android Studio doesn't export JAVA_HOME
+    environment("JAVA_HOME", System.getProperty("java.home"))
+    environment("SKIP_NATIVE", "1")
+    if (!upload) environment("SKIP_UPLOAD", "1")
+    iosAscValues.forEach { (env, value) -> if (value != null) environment(env, value) }
+    commandLine("bash", rootProject.file("iosApp/ci/testflight.sh").absolutePath)
+}
+val iosDeviceBuild = registerIosRelease("iosDeviceBuild", upload = false)
+val iosTestFlight = registerIosRelease("iosTestFlight", upload = true)
+
+// Report a missing key before the native build, which can take a long time
+gradle.taskGraph.whenReady {
+    if (hasTask(iosDeviceBuild.get()) || hasTask(iosTestFlight.get())) {
+        val missing = iosAscKeys.filterKeys { iosAscValues[it].isNullOrBlank() }
+        if (missing.isNotEmpty()) throw GradleException(
+            "App Store Connect API key not set. Add to local.properties: " +
+                missing.values.joinToString(", ") { "$it=…" } + " (or set " + missing.keys.joinToString(", ") + ")"
+        )
+        val p8 = File(iosAscValues.getValue("ASC_KEY_P8")!!)
+        if (!p8.isFile) throw GradleException("ios.asc.keyP8: no file at $p8")
+    }
 }
 
 // Default control layout + icons: composeApp/UI is the single source (Android installs it on first run);

@@ -56,3 +56,6 @@ androidApp/native-symbols/
 .secure_files/
 /handoff/
 __pycache__/
+
+# Schemes Android Studio generates for the iOS run configurations in .run/ (iosApp.xcscheme is the real one)
+iosApp/iosApp.xcodeproj/xcshareddata/xcschemes/iOS Simulator*.xcscheme
