@@ -23,6 +23,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
@@ -37,6 +38,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.window.Dialog
@@ -142,6 +144,9 @@ internal fun CellEditor(s: CsSession, row: RecordRow) {
     val placed = remember(row.id) { HashMap<RefKey, PlacedRef>() }
     var scene by remember(row.id) { mutableStateOf<List<PlacedRef>>(emptyList()) }
     var loading by remember(row.id) { mutableStateOf(true) }
+    // how far the loading is, shown over the view: objects placed of all of them
+    var loadedObjects by remember(row.id) { mutableIntStateOf(0) }
+    var totalObjects by remember(row.id) { mutableIntStateOf(0) }
 
     LaunchedEffect(view) {
         loading = true
@@ -150,9 +155,19 @@ internal fun CellEditor(s: CsSession, row: RecordRow) {
             // every core places objects (reading and decoding models and textures is most of the wait)
             val previous = HashMap(placed)
             val chunk = (live.size / 32).coerceAtLeast(4)
+            val countLock = CacheLock()
+            var done = 0
+            totalObjects = live.size
+            loadedObjects = 0
             val next = dropActorsToGround(coroutineScope {
                 live.chunked(chunk).map { part ->
-                    async { part.map { r -> placeRef(cache, doc, r, r.position, r.scale, previous[r.key]) } }
+                    async {
+                        part.map { r ->
+                            placeRef(cache, doc, r, r.position, r.scale, previous[r.key]).also {
+                                loadedObjects = countLock.locked { ++done }
+                            }
+                        }
+                    }
                 }.awaitAll().flatten()
             })
             placed.clear(); next.forEach { placed[it.key] = it }
@@ -195,7 +210,8 @@ internal fun CellEditor(s: CsSession, row: RecordRow) {
         val wide = maxWidth > 760.dp
         val viewportFull: @Composable (Modifier) -> Unit = { m ->
             CellViewport(
-                view = view, scene = scene, loading = loading, selected = selected, drag = drag, tool = tool, editorLight = editorLight, live = live,
+                view = view, scene = scene,
+                loading = if (!loading) null else if (totalObjects > 0 && loadedObjects >= totalObjects) "Placing actors..." else "Loading models... $loadedObjects of $totalObjects objects", selected = selected, drag = drag, tool = tool, editorLight = editorLight, live = live,
                 yaw = yaw, pitch = pitch, dist = dist, target = target,
                 onCamera = { y, p, d, t -> yaw = y; pitch = p; dist = d; target = t },
                 onPick = { selected = it },
@@ -231,8 +247,10 @@ internal fun CellEditor(s: CsSession, row: RecordRow) {
                 }
             }
         }
-        val toolbar: @Composable () -> Unit = {
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp), itemVerticalAlignment = Alignment.CenterVertically) {
+        // a landscape phone: too short for the toolbar, the view and the list stacked, so the toolbar is one row that
+        // scrolls sideways and the list sits beside the view
+        val short = maxHeight < 480.dp
+        val toolbarItems: @Composable () -> Unit = {
                 Column(Modifier.widthIn(max = 360.dp)) {
                     Text(view.header.firstOrNull { it.tag == "NAME" }?.let { org.alpha3.launcher.cs.model.zstringOf(it.data) }?.ifEmpty { null } ?: row.displayId,
                         style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -254,6 +272,14 @@ internal fun CellEditor(s: CsSession, row: RecordRow) {
                 SmallButton("Full screen") { full = true }
                 SmallButton("Place object") { placing = true }
                 SmallButton("Cell settings") { headerOpen = true }
+        }
+        val toolbar: @Composable () -> Unit = {
+            if (short) Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically,
+            ) { toolbarItems() }
+            else FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp), itemVerticalAlignment = Alignment.CenterVertically) {
+                toolbarItems()
             }
         }
         val inspector: @Composable (Modifier) -> Unit = { m ->
@@ -265,7 +291,23 @@ internal fun CellEditor(s: CsSession, row: RecordRow) {
         }
         val list: @Composable (Modifier) -> Unit = { m -> RefList(view, selected, s.onlyPlugin, m) { r -> selected = r.key; if (tool == Tool.View) focus(r) } }
 
-        if (wide) {
+        if (short) {
+            var tab by remember { mutableStateOf(1) }
+            Column(Modifier.fillMaxSize().padding(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                toolbar()
+                Row(Modifier.fillMaxWidth().weight(1f), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    viewport(Modifier.weight(1.6f).fillMaxHeight())
+                    Column(Modifier.weight(1f).fillMaxHeight()) {
+                        TabRow(tab) {
+                            Tab(tab == 0, { tab = 0 }, text = { Text("Selected") })
+                            Tab(tab == 1, { tab = 1 }, text = { Text("Objects") })
+                        }
+                        if (tab == 0) inspector(Modifier.fillMaxWidth().weight(1f))
+                        else list(Modifier.fillMaxWidth().weight(1f))
+                    }
+                }
+            }
+        } else if (wide) {
             Column(Modifier.fillMaxSize().padding(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 toolbar()
                 viewport(Modifier.fillMaxWidth().weight(1.15f))
@@ -305,7 +347,7 @@ internal fun CellEditor(s: CsSession, row: RecordRow) {
 private fun CellViewport(
     view: CellView,
     scene: List<PlacedRef>,
-    loading: Boolean,
+    loading: String?,
     selected: RefKey?,
     drag: Pair<RefKey, FloatArray>?,
     tool: Tool,
@@ -521,7 +563,7 @@ private fun CellViewport(
             )
             camCb.value(c.yaw, c.pitch, c.dist, t)
         }
-        if (loading) Text("Loading models...", color = Color.Gray, fontSize = 12.sp, modifier = Modifier.align(Alignment.TopStart).padding(8.dp))
+        if (loading != null) Text(loading, color = Color.Gray, fontSize = 12.sp, modifier = Modifier.align(Alignment.TopStart).padding(8.dp))
         if (!view.interior) Text("Exteriors are shown without their landscape for now", color = Color.Gray, fontSize = 11.sp,
             modifier = Modifier.align(Alignment.BottomStart).padding(8.dp))
     }
