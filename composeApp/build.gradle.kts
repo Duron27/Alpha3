@@ -226,7 +226,9 @@ fun registerNativeIos(taskName: String, sysroot: String, buildDirName: String): 
         workingDir = cppDir
         environment("PATH", nativeToolPath)
         xcodeEnvVars.forEach { environment.remove(it) }
-        commandLine(cmakeExe, "--build", buildDir, "-j")
+        // A job per core: the generator is Unix Makefiles, where a bare -j starts every job at once and a full engine
+        // build ran a 16 GB Mac out of memory
+        commandLine(cmakeExe, "--build", buildDir, "-j", Runtime.getRuntime().availableProcessors().toString())
     }
     return tasks.register(taskName) {
         group = "native"
