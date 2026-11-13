@@ -792,8 +792,38 @@ Device: the user's Note 10+ (SM-N975W, Adreno 640, Android 12, not rooted; adb `
   vertex-cache reorder at load (meshoptimizer, MIT) and a position-only stream for Adreno's binning pass if geometry
   ever matters. Translator: `bindUniforms`, `step`, `templateFor`, hash lookups of textures/buffers dominate.
 
-**Next: main-thread work** (user's choice, 2026-11-12). Candidates: focus raycast, cull traversal costs, Actors and
-CharacterController update, Lua delayed actions. Mostly upstream code: keep the OpenMW hunks minimal.
+**Main-thread work** (user's choice, 2026-11-12). Note: the earlier numbers were without groundcover; from here on
+the total-overhaul profile has its `groundcover=` lines (added by hand to the phone's openmw.cfg; backup
+`/data/local/tmp/openmw.cfg.bak`). With grass, Narsis ran ~30 fps at first, later runs 25–27 (phone warm/charging:
+compare fps only under the same conditions; the camera also drifts after loading, so later windows differ).
+
+Done (committed):
+- `8c3be82` patch 0034, rendering rays: the ignore list compared each transform's Ptr (findUserData, a dynamic_cast per
+  user object) even when empty. Now the ignored objects' base nodes are compared (the Ptr user data is only on base
+  nodes, objects.cpp and the player's node). All of `castRenderingRay` in play was Lua's (`nearby.castRenderingRay` /
+  `asyncCastRenderingRay` via delayed actions), not the focus raycast. 7.7% → 3.3% of the main thread.
+- `76b93cd` occlusion culling (support, `occlusionculling.cpp`): `OccluderIndices` keeps the triangle index list of
+  occluders drawn as they are (≤ 1000 triangles; bigger ones are simplified already) instead of walking
+  TriangleIndexFunctor each frame; `toViewSpace` transforms without the divide by w. Occluder drawing 3.8–3.9 → 2.6 ms
+  a frame for the same 131 occluders; culled share unchanged (19% vs 18%). 12% → ~3% of the main thread.
+- `1f6231c` texture streaming hook (`texturestreaming.cpp`): drawn sizes kept per state graph (max pixels) and handed to
+  `TextureStreaming::drawn` once when the next frame starts (one lock), last graph cached. 5.4% → 3.5%. Textures still
+  become full size (checked on screen).
+- Main-thread CPU in the 30 s Narsis profiles: 53.2 → 47.4 → 43.8 → 36.5 G cycles over these builds (rough: the
+  view drifts).
+
+Profiling notes: symbols need the unstripped library at
+`androidApp/.cxx/RelWithDebInfo/<hash>/arm64-v8a/openmw-upstream/openmw_upstream-prefix/src/openmw_upstream-build/
+libopenmw_upstream.so` linked into `symfs/data/app/<install path>/lib/arm64/` (the install path changes with every
+install; a wrong link silently falls back to the device's symbols, anonymous functions then show as addresses). The
+main thread is the tid whose report has `OMW::Engine::frame`.
+
+Left on the main thread (Narsis, with grass): cull ~44% (actors' Skeleton/RigGeometry ~16% incl. CPU skinning 5.5%,
+already an affine vectorised loop; terrain QuadTreeWorld ~11%; Group::computeBound ~3%: a moving actor dirties its
+cell group's bound, which then re-sums all its children each frame), mechanics ~16% (Actors::update,
+CharacterController), Lua synchronized update (~5% engine handlers run on the main thread, delayed actions), physics
+step ~6%. Proposed order: Lua main-thread handlers, mechanics; GPU skinning as its own project (shaders on GLES and
+Vulkan, bone uploads; biggest cull win but riskiest for GLES).
 
 **Mod downloader cfg generator: groundcover was dropped.** `CfgGenerator.kt` parsed the site's "groundcover files"
 but `formatOpenMWConfig` never wrote them, so lists like total-overhaul had no `groundcover=` lines (no grass from
