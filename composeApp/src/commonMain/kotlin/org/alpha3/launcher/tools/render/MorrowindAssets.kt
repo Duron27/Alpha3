@@ -1,5 +1,6 @@
 package org.alpha3.launcher.tools.render
 
+import org.alpha3.launcher.cs.ui.CacheLock
 import org.alpha3.launcher.tools.openmw.ToolFs
 import kotlin.math.max
 
@@ -99,18 +100,34 @@ internal class MwAssets(private val fs: ToolFs, dataDirs: List<String>) {
         return out
     }
 
+    // Each folder's names (lower case to the name on disk), listed once: a lookup stat'ed and listed its way down every
+    // data folder each time, so a cell over a large mod list (hundreds of folders) never finished loading its models
+    private val listings = HashMap<String, Map<String, String>?>()
+    private val listingLock = CacheLock()
+
+    private fun listing(dir: String): Map<String, String>? {
+        val (found, cached) = listingLock.locked { listings.containsKey(dir) to listings[dir] }
+        if (found) return cached
+        val names = fs.list(dir)?.associateBy { it.lowercase() }
+        listingLock.locked { listings[dir] = names }
+        return names
+    }
+
     private fun findLoose(root: String, rel: String): String? {
         var cur = root
         for (part in rel.split('/')) {
-            val direct = "$cur/$part"
-            cur = if (fs.isFile(direct) || fs.isDirectory(direct)) direct
-            else "$cur/" + (fs.list(cur)?.firstOrNull { it.equals(part, true) } ?: return null)
+            if (part.isEmpty()) continue
+            cur = "$cur/" + (listing(cur)?.get(part.lowercase()) ?: return null)
         }
         return cur.takeIf { fs.isFile(it) }
     }
 
     /** Textures are referenced as .tga/.bmp but are often shipped as .dds (and vice versa). */
-    fun readTexture(name: String): Bitmap? {
+    /** Textures larger than this are read at the mip level that fits (the Construction Set's views: a 2K or 4K replacer
+     *  decoded at full size took a minute and ran the app out of memory on a large mod list). */
+    var maxTextureSize = Int.MAX_VALUE
+
+    fun readTexture(name: String, maxSize: Int = maxTextureSize): Bitmap? {
         val base = name.replace('\\', '/').substringBeforeLast('.')
         val candidates = listOf(name, "$base.dds", "$base.tga", "$base.bmp")
             .map { if (it.startsWith("textures/", true)) it else "textures/$it" }
@@ -118,11 +135,11 @@ internal class MwAssets(private val fs: ToolFs, dataDirs: List<String>) {
             val bytes = read(c) ?: continue
             val bmp = runCatching {
                 when (c.substringAfterLast('.').lowercase()) {
-                    "dds" -> decodeDds(bytes)
+                    "dds" -> decodeDds(bytes, maxSize)
                     "tga" -> decodeTga(bytes)
                     else -> decodeBmp(bytes)
                 }
-            }.getOrNull()
+            }.getOrNull()?.let { capSize(it, maxSize) }
             if (bmp != null) return bmp
         }
         return null
@@ -185,20 +202,37 @@ private fun lerpColor(c0: Int, c1: Int, n0: Int, n1: Int): Int {
     return (255 shl 24) or ch(16) or ch(8) or ch(0)
 }
 
-internal fun decodeDds(b: ByteArray): Bitmap? {
+/** [bmp] halved (box filtered) until neither side is over [maxSize]: its own level of the mip chain. */
+internal fun capSize(bmp: Bitmap, maxSize: Int): Bitmap {
+    if (maxOf(bmp.width, bmp.height) <= maxSize) return bmp
+    val (w, h, px) = bmp.levels.firstOrNull { (lw, lh, _) -> maxOf(lw, lh) <= maxSize } ?: bmp.levels.last()
+    return Bitmap(w, h, px)
+}
+
+internal fun decodeDds(b: ByteArray, maxSize: Int = Int.MAX_VALUE): Bitmap? {
     if (b.size < 128 || le32(b, 0) != 0x20534444) return null
-    val height = le32(b, 12)
-    val width = le32(b, 16)
+    var height = le32(b, 12)
+    var width = le32(b, 16)
     val pfFlags = le32(b, 80)
     val fourCC = CharArray(4) { (b[84 + it].toInt() and 0xff).toChar() }.concatToString()
     val bpp = le32(b, 88)
-    val px = IntArray(width * height)
     var p = 128
+    // Larger than asked for (a 2K or 4K replacer): start at the first stored mip level that fits, instead of decoding
+    // the full size and shrinking it
+    val mips = if (le32(b, 8) and 0x20000 != 0) le32(b, 28) else 1
+    val compressed = pfFlags and 0x4 != 0
+    val blockBytes = if (fourCC == "DXT1") 8 else 16
+    var level = 0
+    while (level < mips - 1 && maxOf(width, height) > maxSize) {
+        p += if (compressed) maxOf(1, (width + 3) / 4) * maxOf(1, (height + 3) / 4) * blockBytes else width * height * (bpp / 8)
+        width = maxOf(1, width / 2); height = maxOf(1, height / 2); level++
+    }
+    if (p >= b.size) return null
+    val px = IntArray(width * height)
 
     if (pfFlags and 0x4 != 0) { // FOURCC -> DXT
         val dxt1 = fourCC == "DXT1"
         if (!dxt1 && fourCC != "DXT3" && fourCC != "DXT5") return null
-        val blockBytes = if (dxt1) 8 else 16
         for (by in 0 until (height + 3) / 4) for (bx in 0 until (width + 3) / 4) {
             val alpha = IntArray(16) { 255 }
             var c = p

@@ -51,7 +51,7 @@ internal class Workspace(val fs: ToolFs, platform: ToolPlatform, cfg: String) {
     }
 
     /** Meshes, textures and icons from the data folders and their archives, later folders winning (as in the game). */
-    val assets: MwAssets by lazy { MwAssets(fs, omw.data) }
+    val assets: MwAssets by lazy { MwAssets(fs, omw.data).also { it.maxTextureSize = 512 } }
 
     fun masterSize(name: String): Long? = find(name)?.let { fs.size(it) }
 }
