@@ -221,6 +221,8 @@ namespace Alpha3
         {
             osg::ref_ptr<const osg::Geometry> mGeometry;
             std::shared_ptr<const SimplifiedOccluder> mSimplified; // drawn in place of the geometry when there is one
+            // else the geometry's triangles, found once (OccluderIndices): its vertices are read each time it is drawn
+            std::shared_ptr<const std::vector<unsigned>> mIndices;
             osg::Matrix mWorld;
             osg::BoundingBox mBox; // the geometry's own
             bool mCullBack;
@@ -643,6 +645,48 @@ namespace Alpha3
             bool mStopped = false;
         };
 
+        // The triangles of the occluders drawn as they are (not simplified), found once with OSG's index functor rather
+        // than each frame: a static mesh's primitive sets do not change once it is drawn. Used on the cull thread only
+        // (the helpers read what it gave out)
+        class OccluderIndices
+        {
+        public:
+            std::shared_ptr<const std::vector<unsigned>> get(const osg::Geometry& geometry, unsigned frame)
+            {
+                Entry& entry = mEntries[&geometry];
+                if (!entry.mGeometry.valid())
+                {
+                    // new, or a geometry freed whose address is used again
+                    auto indices = std::make_shared<std::vector<unsigned>>();
+                    osg::TriangleIndexFunctor<IndexCollector> collector;
+                    collector.mIndices = indices.get();
+                    collector.mVertices = geometry.getVertexArray()->getNumElements();
+                    geometry.accept(collector);
+                    entry.mGeometry = &geometry;
+                    entry.mIndices = std::move(indices);
+                }
+                entry.mLastUsed = frame;
+                return entry.mIndices;
+            }
+
+            // Lets go of what has not been used for a while
+            void sweep(unsigned frame)
+            {
+                std::erase_if(mEntries, [&](const auto& item) {
+                    return !item.second.mGeometry.valid() || frame - item.second.mLastUsed > 1200;
+                });
+            }
+
+        private:
+            struct Entry
+            {
+                osg::observer_ptr<const osg::Geometry> mGeometry;
+                std::shared_ptr<const std::vector<unsigned>> mIndices;
+                unsigned mLastUsed = 0;
+            };
+            std::unordered_map<const osg::Geometry*, Entry> mEntries;
+        };
+
         // Hands a geometry's triangles (as OSG's index functor finds them) to a callable
         template <class F>
         struct IndexSink
@@ -674,6 +718,20 @@ namespace Alpha3
             return false;
         }
 
+        // Vertices to view space. The object's matrix times the view is affine: the w OSG's Vec3 * Matrix divides by
+        // is 1, so the division is left out
+        void toViewSpace(const osg::Vec3f* in, std::size_t count, const osg::Matrixf& m, std::vector<osg::Vec3f>& out)
+        {
+            out.resize(count);
+            const float* r = m.ptr();
+            for (std::size_t i = 0; i < count; ++i)
+            {
+                const float x = in[i].x(), y = in[i].y(), z = in[i].z();
+                out[i].set(x * r[0] + y * r[4] + z * r[8] + r[12], x * r[1] + y * r[5] + z * r[9] + r[13],
+                    x * r[2] + y * r[6] + z * r[10] + r[14]);
+            }
+        }
+
         // An occluder into a buffer, its vertices taken to view space in [scratch]
         void drawOccluder(DepthBuffer& buffer, std::vector<osg::Vec3f>& scratch, const Occluder& occluder,
             const osg::Matrixf& toView)
@@ -681,9 +739,7 @@ namespace Alpha3
             if (occluder.mSimplified)
             {
                 const SimplifiedOccluder& mesh = *occluder.mSimplified;
-                scratch.resize(mesh.mPositions.size());
-                for (std::size_t i = 0; i < mesh.mPositions.size(); ++i)
-                    scratch[i] = mesh.mPositions[i] * toView;
+                toViewSpace(mesh.mPositions.data(), mesh.mPositions.size(), toView, scratch);
                 buffer.drawMesh(scratch, occluder.mCullBack, occluder.mCullFront, [&](auto&& triangle) {
                     for (std::size_t i = 0; i + 2 < mesh.mIndices.size(); i += 3)
                         triangle(mesh.mIndices[i], mesh.mIndices[i + 1], mesh.mIndices[i + 2]);
@@ -692,9 +748,16 @@ namespace Alpha3
             else
             {
                 const auto& vertices = static_cast<const osg::Vec3Array&>(*occluder.mGeometry->getVertexArray());
-                scratch.resize(vertices.size());
-                for (std::size_t i = 0; i < vertices.size(); ++i)
-                    scratch[i] = vertices[i] * toView;
+                toViewSpace(vertices.empty() ? nullptr : &vertices.front(), vertices.size(), toView, scratch);
+                if (occluder.mIndices)
+                {
+                    const std::vector<unsigned>& indices = *occluder.mIndices;
+                    buffer.drawMesh(scratch, occluder.mCullBack, occluder.mCullFront, [&](auto&& triangle) {
+                        for (std::size_t i = 0; i + 2 < indices.size(); i += 3)
+                            triangle(indices[i], indices[i + 1], indices[i + 2]);
+                    });
+                    return;
+                }
                 buffer.drawMesh(scratch, occluder.mCullBack, occluder.mCullFront, [&](auto&& triangle) {
                     osg::TriangleIndexFunctor<IndexSink<std::remove_reference_t<decltype(triangle)>>> sink;
                     sink.mF = &triangle;
@@ -931,8 +994,12 @@ namespace Alpha3
                     if (simplified)
                         triangles = static_cast<unsigned>(simplified->mIndices.size() / 3);
                 }
+                std::shared_ptr<const std::vector<unsigned>> indices;
+                if (!simplified)
+                    indices = mIndices.get(*geometry, mFrame);
                 const float distance = std::max(1.f, (box.center() * modelView).length() - radius);
-                mRecording.push_back({ geometry, std::move(simplified), modelView * mInverseView, box, verdict.mCullBack,
+                mRecording.push_back({ geometry, std::move(simplified), std::move(indices), modelView * mInverseView, box,
+                    verdict.mCullBack,
                     verdict.mCullFront, radius / distance, triangles });
             }
 
@@ -1265,7 +1332,10 @@ namespace Alpha3
             void logStatistics()
             {
                 if (mFrames % 600 == 0)
+                {
                     mSimplifier.sweep(mFrame);
+                    mIndices.sweep(mFrame);
+                }
                 mSumTested += mTested;
                 mSumCulled += mCulled;
                 if (++mFrames % 600 != 0)
@@ -1306,6 +1376,7 @@ namespace Alpha3
             std::vector<std::pair<const Occluder*, osg::Matrixf>> mToDraw;
             std::unique_ptr<Helpers> mHelpers;
             OccluderSimplifier mSimplifier;
+            OccluderIndices mIndices;
             unsigned mTested = 0, mCulled = 0, mDrawnOccluders = 0, mDrawnTriangles = 0, mFrames = 0;
             unsigned mHiddenOccluders = 0;
             enum Reject { RejectSmall, RejectBin, RejectState, Accepted, RejectCount };
