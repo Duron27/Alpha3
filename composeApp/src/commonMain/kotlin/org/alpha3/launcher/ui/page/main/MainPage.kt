@@ -110,7 +110,7 @@ fun MainPage(
     val modValues by lazy { readModValues() }
     val context = LocalPlatformContext.current
     val density = LocalDensity.current
-    val screenHeightPx = LocalWindowInfo.current.containerSize.height.toFloat()
+    val screenHeightPx = org.alpha3.launcher.utils.currentWindowPxSize().height.toFloat()
 
     // Drag state for the logs overlay
     val offsetY = remember { Animatable(0f) }

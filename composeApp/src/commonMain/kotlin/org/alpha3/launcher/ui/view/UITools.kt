@@ -644,7 +644,7 @@ fun BouncingBackground() {
         else -> painterResource(Res.drawable.backgroundbouncebw)
     }
 
-    val containerSize = LocalWindowInfo.current.containerSize
+    val containerSize = org.alpha3.launcher.utils.currentWindowPxSize()
     val screenWidth = containerSize.width
     val screenHeight = containerSize.height
 
@@ -691,7 +691,7 @@ fun CircularBackground() {
         else -> painterResource(Res.drawable.backgroundbouncebw)
     }
 
-    val containerSize = LocalWindowInfo.current.containerSize
+    val containerSize = org.alpha3.launcher.utils.currentWindowPxSize()
     val screenWidth = containerSize.width
     val screenHeight = containerSize.height
 
