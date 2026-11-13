@@ -1307,7 +1307,11 @@ namespace Alpha3::Vk
             const osg::Vec4d& border = texture->getBorderColor();
             key[8] = border.a() < 0.5 ? 0 : (border.r() > 0.5 ? 2 : 1);
             key[9] = static_cast<uint32_t>(texture->getLODBias() * 256 + 65536);
-            key[10] = static_cast<uint32_t>(texture->getMaxLOD() * 16);
+            // OSG leaves the LOD range unset (max -1) unless asked, and then OpenGL's own applies (0 to 1000). The
+            // float is never cast negative to unsigned: on ARM that gives 0, a max LOD of 0, so no mip level was read.
+            const bool lodRange = texture->getMaxLOD() - texture->getMinLOD() >= 0.f;
+            key[10] = lodRange ? static_cast<uint32_t>(std::clamp(texture->getMaxLOD(), 0.f, 1000.f) * 16) : 16000;
+            key[11] = lodRange ? static_cast<uint32_t>(std::clamp(texture->getMinLOD(), 0.f, 1000.f) * 16) : 0;
         }
         else
         {
@@ -1336,9 +1340,10 @@ namespace Alpha3::Vk
         }
         info.compareEnable = shadow ? VK_TRUE : VK_FALSE;
         info.compareOp = compareOp(key[7]);
-        info.minLod = 0.f;
         // without a mipmap filter only the base level is read (as in OpenGL)
-        info.maxLod = (minFilter >= 0x2700 && minFilter <= 0x2703) ? std::max(key[10] / 16.f, 0.f) : 0.25f;
+        const bool mipmapped = minFilter >= 0x2700 && minFilter <= 0x2703;
+        info.minLod = mipmapped ? key[11] / 16.f : 0.f;
+        info.maxLod = mipmapped ? std::max(key[10] / 16.f, info.minLod) : 0.25f;
         info.borderColor = key[8] == 0 ? VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK
             : key[8] == 1             ? VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK
                                       : VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
