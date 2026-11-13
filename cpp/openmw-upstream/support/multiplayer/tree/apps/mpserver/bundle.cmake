@@ -46,6 +46,9 @@ file(COPY "${FILES_DIR}/start-server.sh" DESTINATION "${dir}" FILE_PERMISSIONS O
 file(READ "${FILES_DIR}/start-server.bat" bat)
 string(REGEX REPLACE "\r?\n" "\r\n" bat "${bat}")
 file(WRITE "${dir}/start-server.bat" "${bat}")
+# Discord alerts for a server under systemd (alerts/install-alerts.sh sets them up)
+file(COPY "${FILES_DIR}/alerts" DESTINATION "${dir}" FILE_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ
+    GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
 file(COPY "${FILES_DIR}/BUNDLE-README.txt" DESTINATION "${dir}")
 file(RENAME "${dir}/BUNDLE-README.txt" "${dir}/README.txt")
 

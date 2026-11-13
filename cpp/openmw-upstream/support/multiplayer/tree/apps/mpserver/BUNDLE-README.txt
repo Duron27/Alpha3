@@ -23,3 +23,8 @@ add --cli-only for a plain terminal. A build with the window needs the Qt 6 libr
 terminal-only build needs nothing but the system's C++ runtime.
 
 The mod is found by itself next to the program. To use another copy: --mod <folder holding scripts/mp>.
+
+Alerts on Discord (a server run by systemd on Linux): sudo ./alerts/install-alerts.sh asks for the channel's webhook
+(Edit Channel > Integrations > Webhooks), the service and the port. It then posts when the server stops other than by
+a normal stop, when players cannot connect (checked every 5 minutes), when the server's scripts report errors, and
+once a day that it is still running.
