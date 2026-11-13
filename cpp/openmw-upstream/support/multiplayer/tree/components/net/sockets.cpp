@@ -67,6 +67,7 @@ namespace Net
 
             // Incoming: the socket is already connected.
             tcp::socket& socket() { return mSocket; }
+            bool closed() const { return mClosed; }
             void startAccepted(std::uint32_t listener)
             {
                 opened();
@@ -212,6 +213,7 @@ namespace Net
             const std::uint32_t id = mNextId.fetch_add(1);
             mLive.insert(id);
             asio::post(mIo, [this, id, host, port] {
+                std::erase_if(mConnections, [](const auto& entry) { return entry.second->closed(); });
                 auto c = std::make_shared<Connection>(mIo, id, mShared);
                 mConnections[id] = c;
                 c->connect(host, port);
@@ -399,7 +401,22 @@ namespace Net
             listener->mAcceptor.async_accept(
                 connection->socket(), [this, listenerId, listener, connection, id](const asio::error_code& ec) {
                     if (ec)
-                        return; // listener closed
+                    {
+                        if (ec == asio::error::operation_aborted || !listener->mAcceptor.is_open())
+                            return; // listener closed
+                        // anything else (out of file descriptors, a connection reset while queued) used to end the
+                        // listener for good: the server kept running and nobody could join. Try again shortly.
+                        auto retry = std::make_shared<asio::steady_timer>(mIo, std::chrono::milliseconds(250));
+                        retry->async_wait([this, listenerId, listener, retry](const asio::error_code& timerEc) {
+                            if (!timerEc && listener->mAcceptor.is_open())
+                                accept(listenerId, listener);
+                        });
+                        return;
+                    }
+                    // Connections the other side closed stay in the map until a script closes them, and a script
+                    // need not (their id is dead, see poll); without this they piled up to sMaxSockets and every
+                    // new connection was refused until the server was restarted.
+                    std::erase_if(mConnections, [](const auto& entry) { return entry.second->closed(); });
                     if (mConnections.size() >= sMaxSockets)
                         connection->close();
                     else
