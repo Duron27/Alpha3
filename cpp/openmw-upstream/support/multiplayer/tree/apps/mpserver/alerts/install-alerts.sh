@@ -71,7 +71,9 @@ Description=Checks the OpenMW multiplayer server and posts problems to Discord
 [Service]
 Type=oneshot
 EnvironmentFile=$env
-ExecStart=/usr/local/lib/openmw-mp-server/mp-watch.sh check
+# started through bash: run directly, systemd keeps a script labelled as a library (SELinux, /usr/local/lib) in its own
+# confined domain, which may not connect to the game's port (every check said nothing was listening)
+ExecStart=/bin/bash /usr/local/lib/openmw-mp-server/mp-watch.sh check
 EOF
 cat >/etc/systemd/system/openmw-mp-watch.timer <<EOF
 [Unit]
@@ -89,7 +91,7 @@ EOF
 install -d "/etc/systemd/system/$service.d"
 cat >"/etc/systemd/system/$service.d/alerts.conf" <<EOF
 [Service]
-ExecStopPost=+/bin/sh -c 'set -a; . $env; exec /usr/local/lib/openmw-mp-server/mp-watch.sh stopped'
+ExecStopPost=+/bin/sh -c 'set -a; . $env; exec /bin/bash /usr/local/lib/openmw-mp-server/mp-watch.sh stopped'
 EOF
 
 systemctl daemon-reload
@@ -98,7 +100,14 @@ set -a
 # shellcheck disable=SC1090
 . "$env"
 set +a
-/usr/local/lib/openmw-mp-server/mp-watch.sh test
+/bin/bash /usr/local/lib/openmw-mp-server/mp-watch.sh test
+# a first check right away, as the timer will run it (today's heartbeat counts as sent: the test message just went)
+install -d /var/lib/openmw-mp-watch
+printf 'last_heartbeat=%s\n' "$(date +%F)" >/var/lib/openmw-mp-watch/state
+systemctl start openmw-mp-watch.service
+sleep 1
+. /var/lib/openmw-mp-watch/state 2>/dev/null || true
+echo "First check from the timer: ${last_status:-not run}"
 echo
 echo "Done: a test message went to the channel. The checks run every 5 minutes (systemctl list-timers openmw-mp-watch)."
 echo "The stop message applies from the server's next start (systemctl restart $service)."
