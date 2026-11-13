@@ -1,0 +1,58 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Thu, 12 Nov 2026 20:00:00 -0500
+Subject: [PATCH] Rendering rays: skip ignored objects by their base node
+
+A rendering ray (castRenderingRay, Lua's nearby.castRenderingRay and
+asyncCastRenderingRay) read the Ptr back from every transform it passed, a
+dynamic_cast for each user object, even with nothing to ignore; with mods
+casting several rays a frame that was ~5% of the main thread. An object's Ptr is
+attached to its base node only (the player's to theirs), so the ignored
+objects' base nodes are compared with the transform instead. Rays with a paged
+object to ignore still skip nothing, as before.
+
+---
+ apps/openmw/mwrender/renderingmanager.cpp | 18 ++++++++++++------
+ 1 file changed, 12 insertions(+), 6 deletions(-)
+
+diff --git a/apps/openmw/mwrender/renderingmanager.cpp b/apps/openmw/mwrender/renderingmanager.cpp
+index a25916eebf..9ad83540c5 100644
+--- a/apps/openmw/mwrender/renderingmanager.cpp
++++ b/apps/openmw/mwrender/renderingmanager.cpp
+@@ -1026,10 +1026,10 @@ namespace MWRender
+             if (mContainsPagedRefs)
+                 return false;
+ 
+-            if (const MWWorld::Ptr* p = SceneUtil::findUserData<MWWorld::Ptr>(transform))
+-                return std::find(mIgnoreList.begin(), mIgnoreList.end(), *p) != mIgnoreList.end();
+-
+-            return false;
++            // An object's Ptr is attached to its base node (and the player's to theirs), so comparing the node with
++            // the ignored objects' base nodes says the same as reading the Ptr back from every transform (a
++            // dynamic_cast for each user object of each transform the ray passes, most of a ray's cost).
++            return std::find(mIgnoreNodes.begin(), mIgnoreNodes.end(), &transform) != mIgnoreNodes.end();
+         }
+ 
+         void apply(osg::Transform& transform) override
+@@ -1041,11 +1041,17 @@ namespace MWRender
+             osgUtil::IntersectionVisitor::apply(transform);
+         }
+ 
+-        void setIgnoreList(std::span<const MWWorld::Ptr> ignoreList) { mIgnoreList = ignoreList; }
++        void setIgnoreList(std::span<const MWWorld::Ptr> ignoreList)
++        {
++            mIgnoreNodes.clear();
++            for (const MWWorld::Ptr& ptr : ignoreList)
++                if (!ptr.isEmpty() && ptr.getRefData().getBaseNode() != nullptr)
++                    mIgnoreNodes.push_back(ptr.getRefData().getBaseNode());
++        }
+         void setContainsPagedRefs(bool contains) { mContainsPagedRefs = contains; }
+ 
+     private:
+-        std::span<const MWWorld::Ptr> mIgnoreList;
++        std::vector<const osg::Node*> mIgnoreNodes;
+         bool mContainsPagedRefs = false;
+     };
+ 
+-- 
+2.43.0
