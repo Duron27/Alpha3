@@ -44,12 +44,17 @@ class IosPlatformFeatures : PlatformFeatures() {
 
     override fun showSoftKeyboard() = SystemKeyboard.toggle()
 
+    // The first is the default: the native Metal renderer; Apple's OpenGL ES 3.0 and ANGLE stay as fallbacks
     override val glRenderers = linkedMapOf(
+        "metal" to "Metal (native)",
         "gles" to "OpenGL ES 3.0 (Apple)",
         "angle" to "ANGLE (OpenGL ES 3.0 on Metal)",
     )
 
     override val systemLogName get() = "Console log"
+
+    override val frameGenerationNote get() =
+        "Frames made between the rendered ones from the camera's motion and the depth. Metal renderer only; on a 120 Hz screen a 60 fps game shows 120."
 
     override val modDownloaderHost get() = org.alpha3.launcher.mods.downloader.IosModDownloaderHost
 

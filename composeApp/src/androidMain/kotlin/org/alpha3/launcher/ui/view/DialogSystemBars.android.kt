@@ -3,6 +3,7 @@ package org.alpha3.launcher.ui.view
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.DialogWindowProvider
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -23,3 +24,6 @@ actual fun HideDialogSystemBars() {
         onDispose { }
     }
 }
+
+actual fun fullScreenDialogProperties(): DialogProperties =
+    DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)

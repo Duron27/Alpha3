@@ -352,9 +352,10 @@ namespace Alpha3
     };
 
     // iOS: the window always fills the screen at its size in points, and [Video] resolution is the scale it is rendered at.
-    // nativeScreenScale: the screen's pixels per point. renderScale: drawable pixels per point now (1 until set).
+    // nativeScreenScale: the screen's pixels per point. windowPixelsPerPoint: drawable pixels per point now (1 until
+    // set); not renderScale, which is the scene's scale of the common render scale (src/renderscale.cpp)
     float nativeScreenScale();
-    float renderScale();
+    float windowPixelsPerPoint();
     // Renders the window at about width x height pixels (the width decides, the window keeps its shape): sets the scale of
     // SDL's view, the graphics context takes the new size on its draw thread, then the engine gets a size change event.
     void setRenderResolution(SDL_Window* window, osg::GraphicsContext* context, int width, int height);

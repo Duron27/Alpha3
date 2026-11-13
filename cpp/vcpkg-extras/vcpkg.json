@@ -30,7 +30,7 @@
     "glslang",
     {
       "name": "vulkan-headers",
-      "platform": "android"
+      "platform": "android | ios"
     },
     "spirv-cross",
     {

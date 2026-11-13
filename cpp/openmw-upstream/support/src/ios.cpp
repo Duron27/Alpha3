@@ -1,15 +1,20 @@
 // iOS stand-ins for the parts of the support library that only exist on Android: Swappy frame pacing and the frame times
-// for the launcher (framepacing.cpp), frame generation (framegen.cpp), Mesa Zink (zink.cpp), mimalloc (allocator.cpp) and
-// the player state androidmain.cpp hands to the app. The swap is SDL's own: Core Animation paces it to the display.
+// for the launcher (framepacing.cpp), Mesa Zink (zink.cpp) and mimalloc (allocator.cpp); and frame generation's store of
+// the engine's cameras (framegen.cpp's on Android; the generated frames are metal/translator.mm's). The swap is SDL's
+// own: Core Animation paces it to the display.
 #include "support.hpp"
 
 #include <alpha3/upstream.hpp>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
+#include <cstdlib>
+#include <cstring>
 #include <functional>
 #include <mutex>
 
+#include <osg/Camera>
 #include <osg/GraphicsContext>
 
 namespace
@@ -53,9 +58,13 @@ namespace Alpha3
 
     void paceZinkPost() {}
 
+    // Frame generation (OPENMW_FRAMEGEN, the launcher's switch) is the Metal renderer's (metal/translator.mm), as it is
+    // the Vulkan renderer's on Android: the engine's camera and textures for the last few frames are kept here (handed
+    // over by iosengine.cpp), the translator draws the generated frames. OpenGL ES and ANGLE have none.
     bool frameGenRequested()
     {
-        return false;
+        const char* request = std::getenv("OPENMW_FRAMEGEN");
+        return request != nullptr && *request != '\0' && std::strcmp(request, "0") != 0;
     }
 
     bool frameGenSwap(osg::GraphicsContext&, int, int, bool, int64_t, const std::function<void(int64_t)>&)
@@ -65,14 +74,49 @@ namespace Alpha3
 
     bool frameGenWanted()
     {
-        return false;
+        static const bool wanted = frameGenRequested() && usesMetal();
+        return wanted;
     }
 
-    void frameGenSubmitView(FrameGenView) {}
+    namespace
+    {
+        std::mutex sViewsMutex;
+        std::array<FrameGenView, 4> sViews;
+
+        // the post processor's HUD camera gets it (the OpenGL ES path copies the window before the GUI there); Metal
+        // keeps its own images, so it does nothing
+        struct NoCapture : osg::Camera::DrawCallback
+        {
+            void operator()(osg::RenderInfo&) const override {}
+        };
+    }
+
+    void frameGenSubmitView(FrameGenView view)
+    {
+        std::lock_guard lock(sViewsMutex);
+        sViews[view.frame % sViews.size()] = std::move(view);
+    }
+
+    bool frameGenFindView(unsigned frame, FrameGenView& out)
+    {
+        std::lock_guard lock(sViewsMutex);
+        const FrameGenView& view = sViews[frame % sViews.size()];
+        if (view.frame != frame || !view.scene || !view.depth || !view.opaqueDepth)
+            return false;
+        out = view;
+        return true;
+    }
 
     osg::Camera::DrawCallback* frameGenPreGuiCapture()
     {
-        return nullptr;
+        static osg::ref_ptr<osg::Camera::DrawCallback> sCapture = new NoCapture;
+        return sCapture.get();
+    }
+
+    // a generated frame sent to the screen: counted in the launcher's frame times like a rendered one
+    void noteShownFrame()
+    {
+        recordFrame();
     }
 
     void zinkClipPlane(unsigned int, const double*) {}
@@ -82,5 +126,4 @@ namespace Alpha3
     void applyAllocatorSetting() {}
 }
 
-// apps/openmw/androidmain.cpp on Android: the player state the launcher polls. The iOS launcher does not read it.
-extern "C" void omw_frame_update() {}
+// omw_frame_update (androidmain.cpp's on Android) is iosengine.cpp's here.

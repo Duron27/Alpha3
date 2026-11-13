@@ -161,6 +161,9 @@ data class Entry(val key: String, val value: Expr)
 
 @Serializable
 sealed class Expr {
+    // (not exported to Objective-C: its factory would be a method named nil, which Objective-C's nil macro breaks)
+    @OptIn(kotlin.experimental.ExperimentalObjCRefinement::class)
+    @kotlin.native.HiddenFromObjC
     @Serializable @SerialName("nil") data object Nil : Expr()
     @Serializable @SerialName("text") data class Text(val value: String) : Expr()
     @Serializable @SerialName("num") data class Num(val value: Double) : Expr()

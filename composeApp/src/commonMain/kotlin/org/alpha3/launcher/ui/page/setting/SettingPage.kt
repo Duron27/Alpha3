@@ -510,7 +510,7 @@ fun GraphicsSettingsSection() {
             TexturePrepassRow()
         }
 
-        // The renderers of a platform without custom GPU drivers (iOS: Apple's OpenGL ES or ANGLE on Metal)
+        // The renderers of a platform without custom GPU drivers (iOS: native Metal, Apple's OpenGL ES or ANGLE on Metal)
         val glRenderers = Platform.features.glRenderers
         if (Platform.features.gpuDrivers == null && glRenderers.isNotEmpty()) {
             val default = glRenderers.keys.first()
@@ -550,9 +550,14 @@ fun GraphicsSettingsSection() {
             ) {
                 Switch(checked = disableSwappy, onCheckedChange = { scope.launch { GameFilesPreferences.setPreference(GameFilesPreferences.DISABLE_SWAPPY_KEY, it) } })
             }
+        }
+        // Frame generation: Android's (OpenGL ES, Zink, Vulkan) and iOS's (the Metal renderer)
+        val frameGenerationNote = Platform.features.frameGenerationNote
+        if (Platform.features.gpuDrivers != null || frameGenerationNote != null) {
             SettingRow(
                 title = "Frame generation (experimental)",
-                subtitle = "Qualcomm motion estimation where the GPU has it; the stock engine falls back to a shader estimator. Needs frame pacing or Zink."
+                subtitle = frameGenerationNote
+                    ?: "Qualcomm motion estimation where the GPU has it; the stock engine falls back to a shader estimator. Needs frame pacing or Zink."
             ) {
                 Switch(checked = frameGeneration, onCheckedChange = { scope.launch { GameFilesPreferences.setPreference(GameFilesPreferences.FRAME_GENERATION_KEY, it) } })
             }

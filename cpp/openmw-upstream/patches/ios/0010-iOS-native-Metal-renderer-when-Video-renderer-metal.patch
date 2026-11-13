@@ -1,0 +1,140 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Thu, 12 Nov 2026 19:14:57 -0500
+Subject: [PATCH] iOS: native Metal renderer when [Video] renderer = metal
+
+Alpha3's support library (src/metal/) draws the frame OSG culled through Metal, as src/vulkan/ does on Android:
+alpha3PrepareMetal picks it (falling back to Apple's OpenGL ES 3.0 when the GPU cannot run it), the window is made
+with a CAMetalLayer instead of an SDL OpenGL context, the graphics window takes the support library's context
+(Alpha3::createWindowContext, the member Android's Zink and Vulkan contexts use), and the main camera gets the renderer
+that records its culled frame as Metal commands.
+---
+ apps/openmw/engine.cpp                   | 14 ++++++++++++--
+ components/sdlutil/sdlgraphicswindow.cpp | 14 +++++++-------
+ components/sdlutil/sdlgraphicswindow.hpp |  7 ++++---
+ 3 files changed, 23 insertions(+), 12 deletions(-)
+
+diff --git a/apps/openmw/engine.cpp b/apps/openmw/engine.cpp
+index e259f93393..3d2ca9222c 100644
+--- a/apps/openmw/engine.cpp
++++ b/apps/openmw/engine.cpp
+@@ -544,6 +544,11 @@ extern "C" bool alpha3PrepareRenderer();
+ extern "C" double alpha3PacedFrameSeconds(double measured);
+ extern "C" void alpha3InstallVulkanRenderer(osg::Camera* camera);
+ #endif
++#if TARGET_OS_IPHONE
++// Alpha3's support library: the native Metal renderer ([Video] renderer = metal), src/metal/
++extern "C" bool alpha3PrepareMetal();
++extern "C" void alpha3InstallMetalRenderer(osg::Camera* camera);
++#endif
+ 
+ void OMW::Engine::createWindow()
+ {
+@@ -572,8 +577,9 @@ void OMW::Engine::createWindow()
+ #if TARGET_OS_IPHONE
+     // A native-scale drawable would not match the window-unit viewport math used by the engine.
+     flags &= ~SDL_WINDOW_ALLOW_HIGHDPI;
+-    // ANGLE on Metal (Alpha3's support library): the window gets a CAMetalLayer for ANGLE's EGL, no SDL OpenGL context
+-    if (getenv("OSG_USE_ANGLE") != nullptr)
++    // Native Metal ([Video] renderer = metal, Alpha3's support library) or ANGLE on Metal: the window gets a
++    // CAMetalLayer, no SDL OpenGL context. Metal falls back to Apple's OpenGL ES when the GPU cannot run it.
++    if (alpha3PrepareMetal() || getenv("OSG_USE_ANGLE") != nullptr)
+         flags = (flags & ~SDL_WINDOW_OPENGL) | SDL_WINDOW_METAL;
+ #endif
+ 
+@@ -692,6 +698,10 @@ void OMW::Engine::createWindow()
+ #ifdef ANDROID
+     // under Vulkan the main camera's culled frame is recorded as Vulkan commands instead of drawn with OpenGL
+     alpha3InstallVulkanRenderer(camera.get());
++#endif
++#if TARGET_OS_IPHONE
++    // likewise under Metal
++    alpha3InstallMetalRenderer(camera.get());
+ #endif
+     camera->setViewport(0, 0, graphicsWindow->getTraits()->width, graphicsWindow->getTraits()->height);
+ #if TARGET_OS_IPHONE
+diff --git a/components/sdlutil/sdlgraphicswindow.cpp b/components/sdlutil/sdlgraphicswindow.cpp
+index 6be40a0a13..b4d3b2f25d 100644
+--- a/components/sdlutil/sdlgraphicswindow.cpp
++++ b/components/sdlutil/sdlgraphicswindow.cpp
+@@ -107,8 +107,8 @@ namespace SDLUtil
+             return;
+         }
+ 
+-#ifdef ANDROID
+-        // Zink's or Vulkan's own context, when [Video] renderer picked one of them
++#if defined(ANDROID) || TARGET_OS_IPHONE
++        // Zink's or Vulkan's own context, when [Video] renderer picked one of them (iOS: Metal's)
+         bool ownContext = false;
+         mZink = Alpha3::createWindowContext(mWindow, ownContext);
+         if (ownContext)
+@@ -279,7 +279,7 @@ namespace SDLUtil
+             return false;
+         }
+ 
+-#ifdef ANDROID
++#if defined(ANDROID) || TARGET_OS_IPHONE
+         if (mZink)
+             return mZink->makeCurrent();
+ #endif
+@@ -298,7 +298,7 @@ namespace SDLUtil
+             return false;
+         }
+ 
+-#ifdef ANDROID
++#if defined(ANDROID) || TARGET_OS_IPHONE
+         if (mZink)
+             return mZink->release();
+ #endif
+@@ -311,7 +311,7 @@ namespace SDLUtil
+ 
+     void GraphicsWindowSDL2::closeImplementation()
+     {
+-#ifdef ANDROID
++#if defined(ANDROID) || TARGET_OS_IPHONE
+         mZink.reset();
+ #endif
+ #if TARGET_OS_IPHONE
+@@ -334,7 +334,7 @@ namespace SDLUtil
+         if (!mRealized)
+             return;
+ 
+-#ifdef ANDROID
++#if defined(ANDROID) || TARGET_OS_IPHONE
+         if (mZink)
+             return mZink->present();
+ #endif
+@@ -353,7 +353,7 @@ namespace SDLUtil
+ 
+     void GraphicsWindowSDL2::setSyncToVBlank(VSyncMode mode)
+     {
+-#ifdef ANDROID
++#if defined(ANDROID) || TARGET_OS_IPHONE
+         if (mZink)
+             return;
+ #endif
+diff --git a/components/sdlutil/sdlgraphicswindow.hpp b/components/sdlutil/sdlgraphicswindow.hpp
+index cebb917f86..00a7d3a2ec 100644
+--- a/components/sdlutil/sdlgraphicswindow.hpp
++++ b/components/sdlutil/sdlgraphicswindow.hpp
+@@ -16,7 +16,7 @@
+ #include "drawablesize.hpp"
+ #include "vsyncmode.hpp"
+ 
+-#ifdef ANDROID
++#if defined(ANDROID) || TARGET_OS_IPHONE
+ namespace Alpha3
+ {
+     class WindowContext;
+@@ -36,8 +36,9 @@ namespace SDLUtil
+     {
+         SDL_Window* mWindow;
+         SDL_GLContext mContext;
+-#ifdef ANDROID
+-        // renderer = opengl: desktop GL through Mesa Zink instead of an SDL/EGL context (Alpha3's support library)
++#if defined(ANDROID) || TARGET_OS_IPHONE
++        // renderer = opengl: desktop GL through Mesa Zink instead of an SDL/EGL context (Alpha3's support library);
++        // Vulkan's on Android, Metal's on iOS
+         std::unique_ptr<Alpha3::WindowContext> mZink;
+ #endif
+ #if TARGET_OS_IPHONE

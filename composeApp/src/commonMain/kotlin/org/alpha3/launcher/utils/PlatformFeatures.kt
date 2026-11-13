@@ -55,6 +55,11 @@ open class PlatformFeatures {
      * see FlyTuning) on top; null when started, otherwise why not.
      */
     open fun startFlyBenchmark(tuning: Map<String, String> = emptyMap()): String? = "Not available here"
+    /**
+     * Where the platform has frame generation without the Android GPU drivers (iOS: the Metal renderer's), what the
+     * settings row says about it; null where the row follows [gpuDrivers] (Android).
+     */
+    open val frameGenerationNote: String? get() = null
     /** The screen's full size in pixels, the longer side first. */
     open fun nativeScreenSize(): Pair<Int, Int> = 0 to 0
     open fun resetUI() {}

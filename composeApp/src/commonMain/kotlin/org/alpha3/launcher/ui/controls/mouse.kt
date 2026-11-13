@@ -108,6 +108,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.platform.LocalDensity
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.IO
 import org.alpha3.launcher.engine.Engine.onNativeMouse
 import org.alpha3.launcher.utils.Uri
 import org.alpha3.launcher.ui.controls.UIStateManager.configureControls

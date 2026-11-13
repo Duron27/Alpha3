@@ -137,8 +137,8 @@ namespace Alpha3
             // may sample DXT when the Vulkan driver does not (Adreno), and DXT handed on to Vulkan would be white.
             bool samplesDxt = false, samplesAstc = false, samplesEtc2 = true; // ETC2 is part of OpenGL ES 3
             bool vulkan = false;
-#ifdef __ANDROID__
-            if (usesVulkan())
+            // (iOS: the Metal device's, src/metal/device.mm)
+            if (usesVulkan() || usesMetal())
             {
                 const VulkanTextureFormats formats = vulkanTextureFormats();
                 if (formats.mKnown)
@@ -149,7 +149,6 @@ namespace Alpha3
                     samplesEtc2 = formats.mEtc2;
                 }
             }
-#endif
             if (!vulkan)
             {
                 const osg::GLExtensions* gl = osg::GLExtensions::Get(0, false);
@@ -202,8 +201,8 @@ namespace Alpha3
                     if (usesAngle())
                         load = reinterpret_cast<GLADloadfunc>(angleProcAddress);
 #endif
-                    // Zink's and Vulkan's window contexts load glad themselves
-                    if (!usesZink() && !usesVulkan() && !gladLoadGLES2(load))
+                    // Zink's, Vulkan's and Metal's window contexts load glad themselves
+                    if (!usesZink() && !usesVulkan() && !usesMetal() && !gladLoadGLES2(load))
                         Log(Debug::Error) << "Failed to initialize GLAD";
                     enableDebugOutput();
                     // the settings are loaded by the time there is a window

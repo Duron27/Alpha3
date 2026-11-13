@@ -144,9 +144,14 @@ if (ANDROID)
     set(ALPHA3_SUPPORT_SYSTEM_LIBS android EGL log)
 else()
     enable_language(OBJCXX)
-    list(APPEND ALPHA3_SUPPORT_SOURCES src/angle.cpp src/ios.cpp src/resolution.mm)
-    set_source_files_properties(src/resolution.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
-    set(ALPHA3_SUPPORT_SYSTEM_LIBS "")
+    # the native Metal renderer ([Video] renderer = metal; iOS's default, Apple's OpenGL ES and ANGLE the fallbacks):
+    # src/vulkan/'s design, its shaders made Metal's by SPIRV-Cross
+    set(ALPHA3_METAL_SOURCES src/metal/device.mm src/metal/context.mm src/metal/window.mm src/metal/renderer.mm
+        src/metal/translator.mm src/metal/resources.mm src/metal/programs.mm)
+    list(APPEND ALPHA3_SUPPORT_SOURCES src/angle.cpp src/ios.cpp src/resolution.mm ${ALPHA3_METAL_SOURCES})
+    set_source_files_properties(src/resolution.mm ${ALPHA3_METAL_SOURCES} PROPERTIES COMPILE_OPTIONS -fobjc-arc)
+    set(ALPHA3_SUPPORT_SYSTEM_LIBS spirv-cross-msl "-framework Metal" "-framework QuartzCore" "-framework OpenGLES"
+        "-framework UIKit")
 endif()
 add_library(alpha3_support STATIC ${ALPHA3_SUPPORT_SOURCES})
 # The commit the library is built from (with -dirty for uncommitted changes) and when, for the benchmark's file
@@ -213,6 +218,10 @@ target_link_libraries(alpha3_support_init alpha3_support components)
 
 if (NOT ANDROID)
     target_link_libraries(openmw alpha3_support_init alpha3_support)
+    # what androidmain.cpp gives the library on Android (the image manager, frame generation's camera), compiled with the
+    # engine's own sources: it needs the engine's headers
+    target_sources(openmw-lib PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/iosengine.cpp)
+    target_include_directories(openmw-lib PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     if (ALPHA3_MULTIPLAYER)
         add_subdirectory(multiplayer)
     endif()

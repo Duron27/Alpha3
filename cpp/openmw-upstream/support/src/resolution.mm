@@ -75,7 +75,7 @@ namespace Alpha3
         return static_cast<float>(UIScreen.mainScreen.nativeScale);
     }
 
-    float renderScale()
+    float windowPixelsPerPoint()
     {
         return sRenderScale;
     }

@@ -421,8 +421,8 @@ internal class GuardActor private constructor(
                     if (!l.startsWith("idle")) continue
                     val group = l.substringBefore(':').trim()
                     when (l.substringAfter(':').trim()) {
-                        "start" -> starts.putIfAbsent(group, t)
-                        "stop" -> stops.putIfAbsent(group, t)
+                        "start" -> starts.getOrPut(group) { t }
+                        "stop" -> stops.getOrPut(group) { t }
                     }
                 }
                 var fileTracks: Map<String, Track>? = null

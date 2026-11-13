@@ -21,7 +21,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -136,7 +135,7 @@ fun InspectorDialog(report: String, onRefresh: () -> Unit, onDismiss: () -> Unit
 
     Dialog(
         onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
+        properties = fullScreenDialogProperties(),
     ) {
         HideDialogSystemBars()
         // the filter field is not to take the focus (and open the keyboard) when the dialog opens

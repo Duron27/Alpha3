@@ -60,7 +60,7 @@ internal class RaceBodies(doc: CsDocument) {
             if (type != 0 || vampire || part !in SKIN_SLOTS) continue
             val race = subs.z("FNAM")?.lowercase() ?: continue
             val model = subs.z("MODL") ?: continue
-            skin.putIfAbsent("$race|$part|$female", meshPath(model))
+            skin.getOrPut("$race|$part|$female") { meshPath(model) }
         }
     }
 

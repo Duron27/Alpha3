@@ -72,6 +72,8 @@ namespace Alpha3
     bool usesZink();
     // [Video] renderer = vulkan (OSG_USE_VULKAN): the native Vulkan 1.0 renderer (src/vulkan/), OSG drawing nothing
     bool usesVulkan();
+    // iOS, [Video] renderer = metal (OSG_USE_METAL): the native Metal renderer (src/metal/), OSG drawing nothing
+    bool usesMetal();
     bool usesGles();
 
     // ---- vulkan/device.cpp (Android): the compressed formats the Vulkan device samples. mKnown is false until the

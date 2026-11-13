@@ -10,6 +10,9 @@
 #ifdef __ANDROID__
 #include "vulkan/device.hpp"
 #endif
+#ifdef __APPLE__
+#include "metal/probe.hpp"
+#endif
 
 #include <components/debug/debuglog.hpp>
 #ifdef __ANDROID__
@@ -88,6 +91,48 @@ namespace Alpha3
     {
         return std::getenv("OSG_USE_VULKAN") != nullptr;
     }
+
+    bool usesMetal()
+    {
+#ifdef __APPLE__
+        return std::getenv("OSG_USE_METAL") != nullptr;
+#else
+        return false;
+#endif
+    }
+
+#ifdef __APPLE__
+    // iOS: native Metal (OSG_USE_METAL, which the launcher sets for its default renderer, or [Video] renderer = metal),
+    // unless ANGLE was asked for or the GPU cannot run it; Apple's OpenGL ES 3.0 then (the launcher's other choices set
+    // no OSG_USE_METAL). Decided before the window is made: a Metal window has no OpenGL ES surface for OSG to fall
+    // back on.
+    bool prepareMetal()
+    {
+        const std::string renderer = setting("Video", "renderer", "");
+        const bool wanted = std::getenv("OSG_USE_METAL") != nullptr || renderer == "metal";
+        if (std::getenv("OSG_USE_ANGLE") != nullptr || !wanted)
+        {
+            unsetenv("OSG_USE_METAL");
+            Log(Debug::Info) << "Renderer: " << (std::getenv("OSG_USE_ANGLE") ? "ANGLE on Metal" : "OpenGL ES 3.0")
+                             << " (setting '" << renderer << "')";
+            return false;
+        }
+        if (!Mtl::probe())
+        {
+            unsetenv("OSG_USE_METAL");
+            Log(Debug::Warning) << "Renderer: Metal cannot start on this device, using OpenGL ES 3.0";
+            return false;
+        }
+        setenv("OSG_USE_METAL", "1", 1);
+        // the shaders go the way the Vulkan renderer's do: translated to OpenGL ES 3.2, compiled by glslang to SPIR-V,
+        // then to Metal (src/metal/programs.mm). The 3.0 context under the window only answers OSG's queries.
+        setenv("OPENMW_GLES_VERSION", "32", 1);
+        // nothing is compiled ahead for OpenGL: the translator makes its objects when it first draws them
+        setenv("OPENMW_DONT_PRECOMPILE", "1", 1);
+        Log(Debug::Info) << "Renderer: metal (native) (setting '" << renderer << "')";
+        return true;
+    }
+#endif
 
     bool usesGles()
     {
@@ -174,3 +219,11 @@ extern "C" bool alpha3PrepareRenderer()
 {
     return Alpha3::prepareRenderer();
 }
+
+#ifdef __APPLE__
+// iOS (patch ios/0010): true when the window is to be a Metal one drawn by src/metal/
+extern "C" bool alpha3PrepareMetal()
+{
+    return Alpha3::prepareMetal();
+}
+#endif
