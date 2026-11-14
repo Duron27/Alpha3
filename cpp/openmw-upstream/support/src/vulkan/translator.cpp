@@ -2371,7 +2371,11 @@ void main()
                     return true;
                 if (!mWaterSeen)
                     return false;
-                if (!mReflectObjects && std::strstr(typeid(drawable).name(), "TerrainDrawable") == nullptr)
+                // little water seen: the objects far off are left out (a few pixels each), not the near ones (a
+                // canal's bridges and walls, whose reflection fills it however little of the screen it covers)
+                static const double objectsNear = std::max(0.f, settingFloat("Water", "reflection objects near", 6000.f));
+                if (!mReflectObjects && depth - radius > objectsNear
+                    && std::strstr(typeid(drawable).name(), "TerrainDrawable") == nullptr)
                     return false;
                 constexpr double margin = 0.15;
                 const double reach = radius / (depth - radius) * 1.1;

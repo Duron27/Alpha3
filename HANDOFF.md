@@ -850,3 +850,11 @@ the GPU: no CPU/GPU overlap, 60 → 16-19 fps on the Note 10+ (GPU frame 17 → 
 save came earlier in the session. Now the callback waits for the GPU only on a frame whose `readImages()` had reads (the
 screenshot's); otherwise it runs at once, as on GL. Tested: after a save 46-55 fps (the rest is the reflection), the
 save's thumbnail is right, an in-game load without a save 57 fps.
+
+## 2026-11-13: Vulkan canal reflections changed with the camera's pitch — fixed
+
+`reflection objects from water cover = 0.02` left all objects out of the reflection when water covered < 2% of the
+screen. A canal seen level (Balmora, 1.3%) lost its bridges and walls and reflected bright sky; looked down at (3.9%) it
+was right. New `[Water] reflection objects near = 6000` (game units): under the cover limit, objects nearer than that
+are still reflected; only distant ones are left out. Balmora canal level view: reflection 69 → 215-355 draws, about
+2 → 5-8 ms GPU, matches the looked-down picture.
