@@ -1514,10 +1514,14 @@ void main()
                     info.pushCamera(camera.get());
                     callback->run(info);
                 };
-                if (afterFrame)
+                // after the GPU is done only on a frame that read the window (a saved game's screenshot, whose
+                // callback the main thread waits on for the pixels). OpenMW leaves its callback on the camera after the
+                // first save: run after every frame, it made each frame wait for the GPU (60 to 17 fps on a Note 10+)
+                if (afterFrame && mReadThisFrame)
                     mContext.afterFrame(run);
                 else
                     run();
+                mReadThisFrame = false;
             }
 
             // The window read into images, as glReadPixels would (rows bottom first, RGB): the scene's image is read,
@@ -1528,6 +1532,7 @@ void main()
                     return;
                 std::vector<PendingRead> reads;
                 reads.swap(mReads);
+                mReadThisFrame = true;
                 Image* scene = mSceneColor != nullptr ? mSceneColor : mLastSceneColor;
                 if (scene == nullptr || scene->mDepthAspect)
                 {
@@ -5052,6 +5057,7 @@ void main()
             uint64_t mOpaqueCopies = 0;
             std::set<const osg::Texture*> mDummyLogged;
             // the window of the last frame the loading screen drew
+            bool mReadThisFrame = false; // readImages() had reads this frame (done after the GPU is)
             Image* mLoadingWindow = nullptr;
             uint64_t mLoadingWindowFrame = 0;
             int mLoadingWindowKey = 0;

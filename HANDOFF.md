@@ -840,3 +840,13 @@ holds the texture (the chunk manager queues it first, on a loading thread) waits
 dropped, and a failed target is retried. The periodic Vulkan log line now ends with "composite maps: N drawn, N dropped
 unused, N without a target, N waiting, N queued, N kept". Tested on the Note 10+ (vanilla, Downloads settings, Balmora):
 44 drawn/kept, terrain stays textured after being out of view 25 s+, no 512x512 "drawn as the dummy" lines.
+
+## 2026-11-13: Vulkan fps drop after saving a game — fixed
+
+Saving takes a screenshot: OpenMW's ScreenshotManager sets a NotifyDrawCompletedCallback as the main camera's final
+draw callback and never removes it. `runFinalDrawCallbacks` ran it through `Context::afterFrame`, and `present()` waits
+on the frame's fence whenever there is after-frame work, so after the first save (autosaves too) every frame waited for
+the GPU: no CPU/GPU overlap, 60 → 16-19 fps on the Note 10+ (GPU frame 17 → 58 ms). A load only looked affected when a
+save came earlier in the session. Now the callback waits for the GPU only on a frame whose `readImages()` had reads (the
+screenshot's); otherwise it runs at once, as on GL. Tested: after a save 46-55 fps (the rest is the reflection), the
+save's thumbnail is right, an in-game load without a save 57 fps.
