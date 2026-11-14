@@ -1282,7 +1282,12 @@ void main()
                                      << " left out where no water is seen (water "
                                      << (mWaterSeen ? "seen" : "not seen") << ", covers " << mWaterCover * 100.f
                                      << "% of the screen); " << mGenerated
-                                     << " generated frames; " << mDispatches << " compute dispatches";
+                                     << " generated frames; " << mDispatches << " compute dispatches; composite maps: "
+                                     << (mCompositeRenderer.valid() ? "" : "no renderer seen, ") << mCompositeDrawn
+                                     << " drawn, " << mCompositeDropped << " dropped unused, " << mCompositeFailed
+                                     << " without a target, " << mCompositeWaiting.size() << " waiting, "
+                                     << mCompositeQueued << " queued, " << mResources.mKeptTargets << " kept";
+                    mCompositeDrawn = mCompositeDropped = mCompositeFailed = 0;
                     mDispatches = 0;
                     mReflectionKept = mReflectionCulled = 0;
                     mVertices = 0;
@@ -3985,6 +3990,26 @@ void main()
                         maps.push_back(*it);
                         it = queues.mCompileSet.erase(it);
                     }
+                    mCompositeQueued = queues.mCompileSet.size();
+                }
+                // The chunk manager queues a map (on a loading thread) before the chunk's material holds its texture:
+                // one with no other holder yet waits a while instead of being dropped, which left it white for good
+                for (auto it = mCompositeWaiting.begin(); it != mCompositeWaiting.end();)
+                {
+                    if (it->first->mTexture && it->first->mTexture->referenceCount() > 1)
+                    {
+                        maps.push_back(it->first);
+                        it = mCompositeWaiting.erase(it);
+                    }
+                    else if (mFrameCounter - it->second > 120)
+                    {
+                        it->first->mCompiled = it->first->mDrawables.size();
+                        it->first->mDrawables.clear();
+                        ++mCompositeDropped;
+                        it = mCompositeWaiting.erase(it);
+                    }
+                    else
+                        ++it;
                 }
                 if (maps.empty())
                     return;
@@ -3995,13 +4020,26 @@ void main()
                 {
                     if (!map->mTexture || map->mTexture->referenceCount() <= 1)
                     {
-                        map->mCompiled = map->mDrawables.size();
-                        map->mDrawables.clear();
+                        if (map->mTexture)
+                            mCompositeWaiting.emplace(map, mFrameCounter);
+                        else
+                        {
+                            map->mCompiled = map->mDrawables.size();
+                            map->mDrawables.clear();
+                            ++mCompositeDropped;
+                        }
                         continue;
                     }
                     Image* image = mResources.renderTarget(*map->mTexture);
                     if (image == nullptr)
+                    {
+                        // tried again next frame, not lost
+                        mCompositeWaiting.emplace(map, mFrameCounter);
+                        ++mCompositeFailed;
                         continue;
+                    }
+                    mResources.keepTarget(*map->mTexture);
+                    ++mCompositeDrawn;
                     AttachmentUse colorUse;
                     colorUse.mFormat = image->mFormat;
                     colorUse.mLoad = VK_ATTACHMENT_LOAD_OP_LOAD;
@@ -5027,6 +5065,9 @@ void main()
             int mReadKey = 0; // the key of the image a read back is copied through
             uint64_t mLastSceneFrame = 0;
             osg::observer_ptr<const osg::Drawable> mCompositeRenderer;
+            // composite maps whose texture nothing else holds yet, with the frame they were first seen so
+            std::map<std::shared_ptr<Terrain::CompositeMap>, uint64_t> mCompositeWaiting;
+            uint64_t mCompositeDrawn = 0, mCompositeDropped = 0, mCompositeFailed = 0, mCompositeQueued = 0;
             struct ParticleEntry
             {
                 osg::observer_ptr<const osgParticle::ParticleSystem> mSystem;

@@ -1250,6 +1250,13 @@ namespace Alpha3::Vk
         return image;
     }
 
+    void Resources::keepTarget(const osg::Texture& texture)
+    {
+        auto it = mTargets.find(&texture);
+        if (it != mTargets.end())
+            it->second.mKeep = true;
+    }
+
     Image* Resources::renderTarget(const osg::RenderBuffer& buffer)
     {
         return renderTarget(&buffer, std::max(buffer.getWidth(), 1), std::max(buffer.getHeight(), 1),
@@ -1459,8 +1466,20 @@ namespace Alpha3::Vk
             else
                 ++it;
         }
+        mKeptTargets = 0;
         for (auto it = mTargets.begin(); it != mTargets.end();)
         {
+            if (it->second.mKeep)
+            {
+                // kept while its texture lives and still samples this image (the dead are gone from mTextures above)
+                auto texture = mTextures.find(static_cast<const osg::Texture*>(it->first));
+                if (texture != mTextures.end() && texture->second.mTarget
+                    && texture->second.mImage == it->second.mImage.get())
+                {
+                    it->second.mLastUse = mFrame;
+                    ++mKeptTargets;
+                }
+            }
             if (mFrame - it->second.mLastUse > 600)
             {
                 // a texture entry may still point at it

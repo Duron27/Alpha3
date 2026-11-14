@@ -78,6 +78,7 @@ namespace Alpha3::Vk
     class Resources
     {
     public:
+        uint64_t mKeptTargets = 0; // keepTarget() targets alive at the last purge
         uint64_t mStreamedBytes = 0; // what stream() handed out since the translator last reported it
         // goes up each time an image (and its views) is let go: descriptor sets made before then are made again
         uint64_t mImageGeneration = 0;
@@ -133,6 +134,9 @@ namespace Alpha3::Vk
         Image* renderTarget(const osg::Texture& texture, uint32_t width, uint32_t height, unsigned internalFormat);
         Image* renderTarget(const osg::RenderBuffer& buffer);
         Image* renderTarget(const void* key, uint32_t width, uint32_t height, unsigned internalFormat);
+        // The texture's render target is kept as long as the texture lives, sampled or not: it is drawn once (a
+        // terrain composite map), so a target let go while its chunk was out of sight would never be filled again
+        void keepTarget(const osg::Texture& texture);
 
         VkFramebuffer framebuffer(VkRenderPass pass, const std::vector<VkImageView>& views, uint32_t width,
             uint32_t height);
@@ -193,6 +197,7 @@ namespace Alpha3::Vk
             std::unique_ptr<Image> mImage;
             unsigned mFormat = 0;
             uint64_t mLastUse = 0;
+            bool mKeep = false; // keepTarget(): kept while the texture lives
         };
         struct Chunk
         {

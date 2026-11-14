@@ -829,3 +829,14 @@ Vulkan, bone uploads; biggest cull win but riskiest for GLES).
 but `formatOpenMWConfig` never wrote them, so lists like total-overhaul had no `groundcover=` lines (no grass from
 those plugins). Fixed (uncommitted): a `## Groundcover` section after the plugins, without `groundcover.omwaddon`
 (the desktop tool's; Alpha3's groundcover tool writes and enables `alpha3_groundcover.omwaddon` itself).
+
+## 2026-11-13: Vulkan white distant terrain (composite maps) — fixed
+
+Distant land showed white (the dummy texture) with big viewing distances (user's settings: 81920, `composite map level = 0`).
+Cause: `Resources::purge()` freed render targets not sampled for 600 frames. A terrain composite map is drawn once, so a
+chunk out of sight for ~10 s while the chunk manager kept it lost its image for good. Fix: `Resources::keepTarget()`
+(set by `renderCompositeMaps`) keeps the target while its texture lives. Also: a map queued before its chunk's material
+holds the texture (the chunk manager queues it first, on a loading thread) waits up to 120 frames instead of being
+dropped, and a failed target is retried. The periodic Vulkan log line now ends with "composite maps: N drawn, N dropped
+unused, N without a target, N waiting, N queued, N kept". Tested on the Note 10+ (vanilla, Downloads settings, Balmora):
+44 drawn/kept, terrain stays textured after being out of view 25 s+, no 512x512 "drawn as the dummy" lines.
