@@ -505,6 +505,12 @@ class EngineActivity : SDLActivity() {
             // The fly-through benchmark (FlyBenchmark): its route for the support library, and no frame generation
             val benchmarkRoute = intent?.getStringExtra(org.openmw.utils.FlyBenchmark.EXTRA_ROUTE)
             if (benchmarkRoute != null) setEnv("OPENMW_BENCHMARK_FLY", benchmarkRoute) else Os.unsetenv("OPENMW_BENCHMARK_FLY")
+            // The benchmark runs uncapped (its settings have no frame limit and vsync off): Vulkan presents with
+            // mailbox/immediate rather than FIFO, and OpenGL ES swaps without Swappy's pacing to the refresh rate
+            if (benchmarkRoute != null) {
+                setEnv("A3_VK_MAILBOX", "1")
+                setEnv("OPENMW_NO_SWAPPY", "1")
+            }
             val frameGeneration = benchmarkRoute == null &&
                 runBlocking { dataStore.data.first()[GameFilesPreferences.FRAME_GENERATION_KEY] == true }
             if (frameGeneration) setEnv("OPENMW_FRAMEGEN", "1") else Os.unsetenv("OPENMW_FRAMEGEN")

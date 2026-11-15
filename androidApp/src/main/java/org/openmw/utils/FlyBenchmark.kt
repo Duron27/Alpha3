@@ -70,6 +70,10 @@ object FlyBenchmark {
         val values = linkedMapOf(
             "Camera/viewing distance" to VIEWING_DISTANCE.toString(),
             "Post Processing/enabled" to "false",
+            // uncapped: the score is what the phone can draw, not the screen's refresh rate (EngineActivity also asks
+            // Vulkan for mailbox presents and turns Swappy off)
+            "Video/framerate limit" to "0",
+            "Video/vsync mode" to "0",
         )
         // What this phone needs to show the textures at all, taken from the player's settings: a GPU without BC (DXT)
         // textures draws them white unless they are converted to ASTC, and the cache of converted ones is reused
