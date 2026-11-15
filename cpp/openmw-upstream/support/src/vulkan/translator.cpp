@@ -28,6 +28,7 @@
 
 #include <algorithm>
 #include <array>
+#include <initializer_list>
 #include <chrono>
 #include <cstdlib>
 #include <cstdio>
@@ -2261,7 +2262,14 @@ void main()
             {
                 if (mChainGraph == nullptr || mChainState == nullptr)
                     return nullptr;
+                // the levels stepped through by hand are the state's last ones: without them, every volatile
+                // uniform was looked for that many levels off (a post-processing technique's uniforms that Lua
+                // changes each frame were not found, and stayed as they were first written)
                 int at = static_cast<int>(mChainState->mDepth) - 1;
+                const int firstTop = at - static_cast<int>(mChainTopCount) + 1;
+                if (static_cast<int>(level) >= firstTop)
+                    return mChainTop[level - firstTop];
+                at = firstTop - 1;
                 const osgUtil::StateGraph* graph = mChainGraph;
                 for (; graph->_parent != nullptr; graph = graph->_parent)
                     if (const osg::StateSet* stateSet = graph->getStateSet())
@@ -2705,12 +2713,18 @@ void main()
                 return SplitKind::Objects;
             }
 
+            // `top`: the levels the state was stepped through by hand over the graph's (a post-processing pass's
+            // technique and pass state sets, a text's texture as nullptr), lowest first
             void setChain(const osgUtil::StateGraph* graph, const std::vector<const osgUtil::RenderBin*>* bins,
-                const Accumulated* state)
+                const Accumulated* state, std::initializer_list<const osg::StateSet*> top = {})
             {
                 mChainGraph = graph;
                 mChainBins = bins;
                 mChainState = state;
+                mChainTopCount = 0;
+                for (const osg::StateSet* stateSet : top)
+                    if (mChainTopCount < mChainTop.size())
+                        mChainTop[mChainTopCount++] = stateSet;
             }
 
             // The state's program with its defines (looked up once for the state)
@@ -3866,7 +3880,11 @@ void main()
                         geometry->addPrimitiveSet(quads._primitives.get());
                     }
                     Accumulated* state = step(base, nullptr, proxy.mTexture.get());
-                    setChain(leaf._parent, &bins, state);
+                    // the texture's step is a level of its own (none without a texture)
+                    if (proxy.mTexture)
+                        setChain(leaf._parent, &bins, state, { nullptr });
+                    else
+                        setChain(leaf._parent, &bins, state);
                     drawGeometry(*geometry, *state, modelView.get(), leaf._projection.get());
                     setChain(nullptr, nullptr, nullptr);
                 }
@@ -4977,7 +4995,7 @@ void main()
                         Accumulated* state = accumulate(leaf._parent, bins);
                         state = step(state, node.mRootStateSet.get());
                         state = step(state, pass.mStateSet.get());
-                        setChain(leaf._parent, &bins, state);
+                        setChain(leaf._parent, &bins, state, { node.mRootStateSet.get(), pass.mStateSet.get() });
                         drawGeometry(canvas, *state, leaf._modelview.get(), leaf._projection.get());
                         setChain(nullptr, nullptr, nullptr);
                         endImagePass();
@@ -5049,6 +5067,8 @@ void main()
             // the leaf being drawn, for the uniforms of volatile states
             const osgUtil::StateGraph* mChainGraph = nullptr;
             const std::vector<const osgUtil::RenderBin*>* mChainBins = nullptr;
+            std::array<const osg::StateSet*, 4> mChainTop{}; // setChain's `top`
+            size_t mChainTopCount = 0;
             const Accumulated* mChainState = nullptr;
             Accumulated mEmpty; // id 0
             struct StepKey
