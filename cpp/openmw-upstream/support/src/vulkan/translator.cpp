@@ -30,6 +30,7 @@
 #include <array>
 #include <chrono>
 #include <cstdlib>
+#include <cstdio>
 #include <cstring>
 #include <cmath>
 #include <fstream>
@@ -1772,9 +1773,11 @@ void main()
                 // A camera without a name drawn into a texture that was not drawn the frame before (the local map's,
                 // drawn once for a cell): its programs and pipelines are made now rather than its draws left out
                 // while they are made, which would leave its texture without them for good. The cameras drawn every
-                // frame (scene, shadows, reflection) have names.
+                // frame (scene, shadows, reflection) have names. The character preview (inventory, race menu) is
+                // named but drawn once too (DrawOnceCallback): its draws left out showed an empty preview.
                 const osg::Camera* stageCamera = stage.getCamera();
-                const bool oneShot = !target.mWindow && stageCamera != nullptr && stageCamera->getName().empty()
+                const bool oneShot = !target.mWindow && stageCamera != nullptr
+                    && (stageCamera->getName().empty() || stageCamera->getName() == "CharacterPreview")
                     && mCamerasDrawn[(mFrameCounter + 1) % 2].count(stageCamera) == 0;
                 if (stageCamera != nullptr)
                     mCamerasDrawn[mFrameCounter % 2].insert(stageCamera);
@@ -1787,8 +1790,15 @@ void main()
                     ~RestoreWait() { mWait = mBefore; }
                 } restoreWait{ mWaitForPrograms, waitedBefore };
 
-                // the stage's viewport, which bounds its clears too (OSG sets the scissor to it)
+                // the stage's viewport, which bounds its clears too (OSG sets the scissor to it). A viewport in the
+                // camera's state set is the one its draws use under OpenGL: the inventory's character preview draws
+                // into the corner of its texture the widget shows that way (InventoryPreview::setViewport); drawn
+                // over the whole texture instead, the widget showed an empty corner of it.
                 const osg::Viewport* viewport = stage.getViewport();
+                if (stageCamera != nullptr && stageCamera->getStateSet() != nullptr)
+                    if (const auto* own = dynamic_cast<const osg::Viewport*>(
+                            stageCamera->getStateSet()->getAttribute(osg::StateAttribute::VIEWPORT)))
+                        viewport = own;
                 VkRect2D area{ { 0, 0 }, { target.mWidth, target.mHeight } };
                 if (viewport != nullptr)
                 {
@@ -1931,7 +1941,15 @@ void main()
 
                 stageClipPlanes(stage);
                 std::vector<const osgUtil::RenderBin*> bins;
+                const unsigned drawsBefore = mDraws, skippedBefore = mSkipped, leavesBefore = mLeaves;
                 drawBin(stage, bins);
+                // Dev hook, off by default: adb shell setprop debug.alpha3.vkstage <camera name>, read at start: what
+                // each pass of that camera drew (its leaves, draws recorded, draws left out for want of a program)
+                if (stageCamera != nullptr && !stageLogged().empty() && stageCamera->getName() == stageLogged())
+                    Log(Debug::Info) << "Vulkan: pass " << stageCamera->getName() << " " << area.extent.width << "x"
+                                     << area.extent.height << ": " << (mLeaves - leavesBefore) << " leaves, "
+                                     << (mDraws - drawsBefore) << " draws, " << (mSkipped - skippedBefore)
+                                     << " left out, one-shot " << oneShot;
 
                 if (target.mWindow)
                     mContext.endWindowPass();
@@ -1939,8 +1957,69 @@ void main()
                 {
                     vkCmdEndRenderPass(commands);
                     gpuTimestamp("");
+                    // with debug.alpha3.vkstage: the pass's colour image saved (Alpha3/vkstage-<n>.pam)
+                    if (stageCamera != nullptr && !stageLogged().empty() && stageCamera->getName() == stageLogged()
+                        && target.mColor != nullptr)
+                        dumpImage(*target.mColor);
                 }
                 mPass = VK_NULL_HANDLE;
+            }
+
+            // A colour render target (8 bits a channel) written to a PAM file once the frame is done (a dev hook)
+            void dumpImage(Image& image)
+            {
+                if (image.mDepthAspect || (image.mFormat != VK_FORMAT_R8G8B8A8_UNORM
+                        && image.mFormat != VK_FORMAT_B8G8R8A8_UNORM && image.mFormat != VK_FORMAT_R8G8B8A8_SRGB))
+                    return;
+                const uint32_t width = image.mWidth, height = image.mHeight;
+                Buffer buffer = mResources.readbackBuffer(VkDeviceSize(width) * height * 4);
+                if (buffer.mBuffer == VK_NULL_HANDLE)
+                    return;
+                VkCommandBuffer commands = mContext.commands();
+                VkImageMemoryBarrier b{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+                b.oldLayout = image.readLayout();
+                b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                b.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+                b.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                b.image = image.mImage;
+                b.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+                vkCmdPipelineBarrier(commands, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+                VkBufferImageCopy region{};
+                region.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+                region.imageExtent = { width, height, 1 };
+                vkCmdCopyImageToBuffer(
+                    commands, image.mImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buffer.mBuffer, 1, &region);
+                b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                b.newLayout = image.readLayout();
+                b.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                vkCmdPipelineBarrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0,
+                    nullptr, 1, &b);
+                VkMemoryBarrier host{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+                host.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                host.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+                vkCmdPipelineBarrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &host,
+                    0, nullptr, 0, nullptr);
+                Resources* resources = &mResources;
+                static unsigned counter = 0;
+                const unsigned number = counter++ % 8;
+                mContext.afterFrame([resources, buffer, width, height, number] {
+                    const uint8_t* pixels = resources->read(buffer);
+                    if (pixels == nullptr)
+                        return;
+                    const std::string path = "/storage/emulated/0/Alpha3/vkstage-" + std::to_string(number) + ".pam";
+                    if (FILE* file = std::fopen(path.c_str(), "wb"))
+                    {
+                        std::fprintf(file, "P7\nWIDTH %u\nHEIGHT %u\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n",
+                            width, height);
+                        std::fwrite(pixels, 4, size_t(width) * height, file);
+                        std::fclose(file);
+                        Log(Debug::Info) << "Vulkan: pass image written to " << path;
+                    }
+                });
             }
 
             // The clip planes the stage's positional state (and what it inherits) puts in eye space, as
@@ -2509,6 +2588,19 @@ void main()
                 unsigned mFrames = 0;
             };
 
+            static const std::string& stageLogged()
+            {
+                static const std::string name = [] {
+#ifdef __ANDROID__
+                    char value[PROP_VALUE_MAX] = {};
+                    if (__system_property_get("debug.alpha3.vkstage", value) > 0)
+                        return std::string(value);
+#endif
+                    return std::string();
+                }();
+                return name;
+            }
+
             static bool gpuSplitAsked()
             {
 #ifdef __ANDROID__
@@ -2703,6 +2795,7 @@ void main()
                 const osg::Drawable* drawable = leaf.getDrawable();
                 if (drawable == nullptr || leaf._parent == nullptr)
                     return;
+                ++mLeaves;
                 if (mGpuSplitSkip != SplitKind::None && mStageKind == StageKind::Scene
                     && splitKindOf(*drawable, bins) == mGpuSplitSkip)
                     return;
@@ -5090,7 +5183,7 @@ void main()
             VkRect2D mArea{};
             bool mFlip = false;
             float mViewportDepth[2]{ -1.f, -1.f };
-            unsigned mDraws = 0, mSkipped = 0;
+            unsigned mDraws = 0, mSkipped = 0, mLeaves = 0;
             osg::Timer_t mLastReport = 0;
             double mRecordSeconds = 0.0, mWaitSeconds = 0.0;
         };
