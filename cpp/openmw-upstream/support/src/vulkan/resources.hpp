@@ -121,6 +121,14 @@ namespace Alpha3::Vk
         // The image of a texture: its osg::Image uploaded (with mip levels), or what a camera drew into it. Null when
         // it has neither yet, or when its upload waits for a later frame (this frame's upload budget is used up).
         Image* texture(const osg::Texture& texture);
+        // While set, textures are uploaded whatever this frame's budget: for a pass drawn once (the local map's, the
+        // character preview's), where one left to a later frame would stay out of its picture for good
+        bool uploadAll(bool all)
+        {
+            const bool before = mUploadAll;
+            mUploadAll = all;
+            return before;
+        }
         // texture() and its sampler, both looked up once a frame (the texture's entry keeps them for the frame)
         Image* texture(const osg::Texture& texture, bool shadow, VkSampler& sampler);
         VkSampler sampler(const osg::Texture* texture, bool shadow);
@@ -230,6 +238,7 @@ namespace Alpha3::Vk
         VkSampler mNearest = VK_NULL_HANDLE;
         VkSampler mLinear = VK_NULL_HANDLE;
         VkDeviceSize mUploadedThisFrame = 0;
+        bool mUploadAll = false; // uploadAll
         uint64_t mFrame = 0;
     };
 

@@ -1790,6 +1790,14 @@ void main()
                     bool mBefore;
                     ~RestoreWait() { mWait = mBefore; }
                 } restoreWait{ mWaitForPrograms, waitedBefore };
+                // its textures too, over the frame's upload budget (the local map of a cell with many new textures
+                // showed its ground white: those left for the next frame were never drawn into it)
+                struct RestoreUploads
+                {
+                    Resources& mResources;
+                    bool mBefore;
+                    ~RestoreUploads() { mResources.uploadAll(mBefore); }
+                } restoreUploads{ mResources, mResources.uploadAll(mWaitForPrograms) };
 
                 // the stage's viewport, which bounds its clears too (OSG sets the scissor to it). A viewport in the
                 // camera's state set is the one its draws use under OpenGL: the inventory's character preview draws

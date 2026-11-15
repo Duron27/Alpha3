@@ -1035,7 +1035,7 @@ namespace Alpha3::Vk
                 regions.push_back(region);
             }
         }
-        if (mUploadedThisFrame > 0 && mUploadedThisFrame + total > sUploadBudget)
+        if (!mUploadAll && mUploadedThisFrame > 0 && mUploadedThisFrame + total > sUploadBudget)
             return nullptr; // next frame
         mUploadedThisFrame += total;
 
