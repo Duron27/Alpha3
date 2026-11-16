@@ -391,10 +391,15 @@ namespace Alpha3::Vk
                 return VK_FORMAT_R8G8_UNORM;
             case 0x81A5: // GL_DEPTH_COMPONENT16
                 return VK_FORMAT_D16_UNORM;
+            // Fixed point, as OpenGL makes them: a shadow comparison clamps the depth it compares to 0..1 for a fixed
+            // point format only. The sun's shadow maps are GL_DEPTH_COMPONENT; as D32_SFLOAT, what lay past the far
+            // plane of the nearer map (fitted to its casters) compared as shadowed: a dark square about the player.
+            // renderTarget() falls back to D16 (then the device's own) where X8_D24 cannot be drawn into or filtered.
             case 0x81A6: // GL_DEPTH_COMPONENT24
             case 0x81A7: // GL_DEPTH_COMPONENT32
-            case 0x8CAC: // GL_DEPTH_COMPONENT32F
             case glDepthComponent:
+                return VK_FORMAT_X8_D24_UNORM_PACK32;
+            case 0x8CAC: // GL_DEPTH_COMPONENT32F
                 return VK_FORMAT_D32_SFLOAT;
             case 0x88F0: // GL_DEPTH24_STENCIL8
             case 0x8CAD: // GL_DEPTH32F_STENCIL8
