@@ -501,6 +501,9 @@ class EngineActivity : SDLActivity() {
             // Launcher switch: plain buffer swaps instead of Swappy frame pacing (read by the engine's SDL window)
             val noSwappy = runBlocking { dataStore.data.first()[GameFilesPreferences.DISABLE_SWAPPY_KEY] != false } // (off unless turned on)
             if (noSwappy) setEnv("OPENMW_NO_SWAPPY", "1") else Os.unsetenv("OPENMW_NO_SWAPPY")
+            // Launcher switch: the gamepad keyboard (on unless turned off; read by the support library's gamepadkeyboard.cpp)
+            val noGamepadKeyboard = runBlocking { dataStore.data.first()[GameFilesPreferences.GAMEPAD_KEYBOARD_KEY] == false }
+            if (noGamepadKeyboard) setEnv("OPENMW_NO_GAMEPAD_KEYBOARD", "1") else Os.unsetenv("OPENMW_NO_GAMEPAD_KEYBOARD")
             // Launcher switch: an extra generated frame between the rendered ones (read by the engine's SDL window)
             // The fly-through benchmark (FlyBenchmark): its route for the support library, and no frame generation
             val benchmarkRoute = intent?.getStringExtra(org.openmw.utils.FlyBenchmark.EXTRA_ROUTE)

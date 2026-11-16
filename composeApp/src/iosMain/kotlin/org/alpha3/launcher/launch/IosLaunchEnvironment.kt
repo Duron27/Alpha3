@@ -41,6 +41,9 @@ fun applyLaunchEnvironment() {
         unsetenv("OPENMW_FRAMEGEN")
         unsetenv("OPENMW_FRAMEGEN_FRAMES")
     }
+    // Launcher switch: the gamepad keyboard (on unless turned off), as on Android
+    if (prefs[GameFilesPreferences.GAMEPAD_KEYBOARD_KEY] == false) setenv("OPENMW_NO_GAMEPAD_KEYBOARD", "1", 1)
+    else unsetenv("OPENMW_NO_GAMEPAD_KEYBOARD")
 }
 
 /** The engine's command line options chosen in the Launch options dialog, as Android passes them. Values stay whole. */

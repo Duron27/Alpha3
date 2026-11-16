@@ -600,6 +600,7 @@ fun ControlsSettingsSection() {
     val isVibrationOnFlow = remember { GameFilesPreferences.getPreference(GameFilesPreferences.VIBRATION_STATE_KEY, "true").map { it.toBoolean() } }
     val isVibrationOn by isVibrationOnFlow.collectAsState(initial = true)
     val buttonGroupSwitch by GameFilesPreferences.getPreference(GameFilesPreferences.BUTTON_GROUP_SWITCH_KEY, false).collectAsState(initial = false)
+    val gamepadKeyboard by GameFilesPreferences.getPreference(GameFilesPreferences.GAMEPAD_KEYBOARD_KEY, true).collectAsState(initial = true)
 
     SettingSectionCard(
         title = stringResource(Res.string.customize_controls),
@@ -611,6 +612,13 @@ fun ControlsSettingsSection() {
         
         SettingRow(title = if (isVibrationOn) stringResource(Res.string.vibration_enabled) else stringResource(Res.string.vibration_disabled)) {
             Switch(checked = isVibrationOn, onCheckedChange = { scope.launch { GameFilesPreferences.setPreference(GameFilesPreferences.VIBRATION_STATE_KEY, it.toString()) } })
+        }
+
+        SettingRow(
+            title = "Gamepad keyboard",
+            subtitle = "An on-screen keyboard for the game's text boxes (the console, save names, names) when playing with a controller. Back + Start opens the console"
+        ) {
+            Switch(checked = gamepadKeyboard, onCheckedChange = { scope.launch { GameFilesPreferences.setPreference(GameFilesPreferences.GAMEPAD_KEYBOARD_KEY, it) } })
         }
 
         SettingRow(title = "Ignore controllers in the launcher", subtitle = "Keep the launcher's options available when a controller is connected. The controller still works in game") {

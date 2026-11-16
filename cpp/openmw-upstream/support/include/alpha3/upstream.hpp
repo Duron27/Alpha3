@@ -425,6 +425,20 @@ namespace Alpha3
         float pitch = 0.f, yaw = 0.f; // radians, as the player's rotation
     };
     bool benchmarkFlyPose(BenchmarkPose& pose, bool& done);
+
+    // The gamepad keyboard (src/gamepadkeyboard.cpp, the Lua mod's engine side, called through openmw.input): whether a
+    // text box has the key focus, and its top and bottom on the screen (0 to 1, from the top); text typed into it and
+    // its keys pressed ("Backspace", "Delete", "Return", "Left", "Right", "Up", "Down", "Home", "End", "Tab"), on the
+    // main thread, false without a text box; the gamepad kept from
+    // the menus and the game for a short while (renewed each frame while the keyboard is open), and whether it is
+    // (asked by MWInput::ControllerManager, which then hands its buttons to Lua only)
+    bool gamepadKeyboardTextFocused(float& top, float& bottom);
+    bool gamepadKeyboardType(std::string_view utf8);
+    bool gamepadKeyboardPress(std::string_view key);
+    void gamepadKeyboardCapture();
+    bool gamepadCaptured();
+    // whether the console may open or close now (not over a modal window)
+    bool gamepadConsoleAllowed();
 }
 
 #endif

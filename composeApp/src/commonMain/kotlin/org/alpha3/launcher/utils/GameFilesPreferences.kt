@@ -45,6 +45,8 @@ object GameFilesPreferences {
     val AUTO_MOUSE_MODE_KEY = stringPreferencesKey("autoMouseMode")
     val DISABLE_SWAPPY_KEY = booleanPreferencesKey("disableSwappy")
     val FRAME_GENERATION_KEY = booleanPreferencesKey("frameGeneration")
+    /** The gamepad keyboard (an on-screen keyboard for the game's text boxes, driven by a gamepad): on unless turned off. */
+    val GAMEPAD_KEYBOARD_KEY = booleanPreferencesKey("gamepadKeyboard")
     /** Frames shown per rendered one with frame generation on: 2, 3 or 4 (OPENMW_FRAMEGEN_FRAMES is one less). */
     val FRAME_GENERATION_MULTIPLIER_KEY = intPreferencesKey("frameGenerationMultiplier")
     /** The stock OpenMW engine's OpenGL renderer: "gles" (the device's driver), "angle" (ANGLE, on Vulkan on Android and on Metal on iOS), "zink" (Mesa Zink on Vulkan), "vulkan" (Android's native Vulkan renderer) or "metal" (iOS's native Metal renderer, its default). */

@@ -109,6 +109,7 @@ set(ALPHA3_SUPPORT_SOURCES
     src/experimentalshaders.cpp
     ${CMAKE_CURRENT_BINARY_DIR}/generated/experimentalsources.cpp
     src/generatedmaps.cpp
+    src/gamepadkeyboard.cpp
     src/grass.cpp
     src/hudlayout.cpp
     src/benchmark.cpp
@@ -215,6 +216,20 @@ endfunction()
 cmake_language(DEFER DIRECTORY ${CMAKE_SOURCE_DIR} CALL alpha3_link_navmeshtool)
 target_compile_options(alpha3_support_init PRIVATE -fPIC)
 target_link_libraries(alpha3_support_init alpha3_support components)
+
+# The gamepad keyboard (gamepadkeyboard/, a Lua mod; its engine side is src/gamepadkeyboard.cpp), Android and iOS: put into resources/vfs,
+# where its script list is loaded as a built-in one (by the multiplayer patch's main.cpp, which loads every
+# resources/vfs/*.omwscripts). It does nothing until a text box has the focus while a gamepad is in use, and can be
+# turned off in Options > Scripts > Gamepad Keyboard.
+set(ALPHA3_GAMEPAD_KEYBOARD ${CMAKE_CURRENT_SOURCE_DIR}/gamepadkeyboard)
+file(GLOB_RECURSE ALPHA3_GAMEPAD_KEYBOARD_FILES CONFIGURE_DEPENDS RELATIVE ${ALPHA3_GAMEPAD_KEYBOARD}
+    ${ALPHA3_GAMEPAD_KEYBOARD}/*.omwscripts
+    ${ALPHA3_GAMEPAD_KEYBOARD}/scripts/*/*.lua
+    ${ALPHA3_GAMEPAD_KEYBOARD}/l10n/*/*.yaml
+)
+foreach (f ${ALPHA3_GAMEPAD_KEYBOARD_FILES})
+    copy_resource_file(${ALPHA3_GAMEPAD_KEYBOARD}/${f} ${OPENMW_RESOURCES_ROOT} resources/vfs/${f})
+endforeach ()
 
 if (NOT ANDROID)
     target_link_libraries(openmw alpha3_support_init alpha3_support)

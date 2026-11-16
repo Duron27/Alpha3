@@ -1,0 +1,110 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Sat, 14 Nov 2026 20:26:05 -0500
+Subject: [PATCH] Lua: the gamepad keyboard types into the game's text boxes
+
+openmw.input gets the gamepad keyboard's engine side (support/src/gamepadkeyboard.cpp):
+whether a text box has the focus, text typed into it and its keys pressed (as delayed
+actions, on the main thread), the console opened and closed (for a gamepad combo), and
+the gamepad captured for a short while. While it is, the controller manager hands the
+gamepad's buttons to Lua only: no menu navigation, no cursor, no game actions.
+---
+ apps/openmw/mwinput/controllermanager.cpp | 13 ++++++++++--
+ apps/openmw/mwlua/inputbindings.cpp       | 25 +++++++++++++++++++++++
+ 2 files changed, 36 insertions(+), 2 deletions(-)
+
+diff --git a/apps/openmw/mwinput/controllermanager.cpp b/apps/openmw/mwinput/controllermanager.cpp
+index d921376..b256639 100644
+--- a/apps/openmw/mwinput/controllermanager.cpp
++++ b/apps/openmw/mwinput/controllermanager.cpp
+@@ -5,6 +5,8 @@
+ 
+ #include <SDL.h>
+ 
++#include <alpha3/upstream.hpp>
++
+ #include <components/debug/debuglog.hpp>
+ #include <components/esm/refid.hpp>
+ #include <components/files/conversion.hpp>
+@@ -86,7 +88,8 @@ namespace MWInput
+ 
+     void ControllerManager::update(float dt)
+     {
+-        if (mGuiCursorEnabled && !(mJoystickLastUsed && !mGamepadGuiCursorEnabled))
++        // Alpha3: not while the gamepad keyboard has the gamepad
++        if (mGuiCursorEnabled && !(mJoystickLastUsed && !mGamepadGuiCursorEnabled) && !Alpha3::gamepadCaptured())
+         {
+             float xAxis = mBindingsManager->getActionValue(A_MoveLeftRight) * 2.0f - 1.0f;
+             float yAxis = mBindingsManager->getActionValue(A_MoveForwardBackward) * 2.0f - 1.0f;
+@@ -132,6 +135,9 @@ namespace MWInput
+ 
+         MWBase::Environment::get().getLuaManager()->inputEvent(
+             { MWBase::LuaManager::InputEvent::ControllerPressed, arg.button });
++        // Alpha3: the gamepad keyboard has the gamepad, its buttons go to Lua only
++        if (Alpha3::gamepadCaptured())
++            return;
+ 
+         mJoystickLastUsed = true;
+         if (MWBase::Environment::get().getWindowManager()->isGuiMode())
+@@ -183,6 +189,8 @@ namespace MWInput
+             MWBase::Environment::get().getLuaManager()->inputEvent(
+                 { MWBase::LuaManager::InputEvent::ControllerReleased, arg.button });
+         }
++        if (Alpha3::gamepadCaptured())
++            return;
+ 
+         if (!Settings::input().mEnableController || MWBase::Environment::get().getInputManager()->controlsDisabled())
+             return;
+@@ -223,7 +231,8 @@ namespace MWInput
+             return;
+         }
+ 
+-        if (!Settings::input().mEnableController || MWBase::Environment::get().getInputManager()->controlsDisabled())
++        if (!Settings::input().mEnableController || MWBase::Environment::get().getInputManager()->controlsDisabled()
++            || Alpha3::gamepadCaptured())
+             return;
+ 
+         mJoystickLastUsed = true;
+diff --git a/apps/openmw/mwlua/inputbindings.cpp b/apps/openmw/mwlua/inputbindings.cpp
+index 205e5aa..17db763 100644
+--- a/apps/openmw/mwlua/inputbindings.cpp
++++ b/apps/openmw/mwlua/inputbindings.cpp
+@@ -9,6 +9,10 @@
+ #include <components/sdlutil/events.hpp>
+ #include <components/settings/values.hpp>
+ 
++#include <alpha3/upstream.hpp>
++
++#include <tuple>
++
+ #include "../mwbase/environment.hpp"
+ #include "../mwbase/inputmanager.hpp"
+ #include "../mwbase/windowmanager.hpp"
+@@ -244,6 +248,27 @@ namespace MWLua
+             = [](int button) -> bool { return SDL_GetMouseState(nullptr, nullptr) & SDL_BUTTON(button); };
+         api["_isGamepadCursorActive"] = [input]() -> bool { return input->isGamepadGuiCursorEnabled(); };
+         api["_isControllerMenusEnabled"] = []() -> bool { return Settings::gui().mControllerMenus; };
++        // Alpha3: the gamepad keyboard (support/src/gamepadkeyboard.cpp); the typing on the main thread
++        api["_alpha3TextFocused"] = []() -> std::tuple<bool, float, float> {
++            float top = 0.f, bottom = 1.f;
++            const bool focused = Alpha3::gamepadKeyboardTextFocused(top, bottom);
++            return { focused, top, bottom };
++        };
++        api["_alpha3TypeText"] = [manager = context.mLuaManager](std::string text) {
++            manager->addAction([text = std::move(text)] { Alpha3::gamepadKeyboardType(text); }, "alpha3TypeText");
++        };
++        api["_alpha3PressKey"] = [manager = context.mLuaManager](std::string key) {
++            manager->addAction([key = std::move(key)] { Alpha3::gamepadKeyboardPress(key); }, "alpha3PressKey");
++        };
++        api["_alpha3CaptureGamepad"] = []() { Alpha3::gamepadKeyboardCapture(); };
++        api["_alpha3ToggleConsole"] = [manager = context.mLuaManager]() {
++            manager->addAction(
++                [] {
++                    if (Alpha3::gamepadConsoleAllowed())
++                        MWBase::Environment::get().getWindowManager()->toggleConsole();
++                },
++                "alpha3ToggleConsole");
++        };
+         api["_setGamepadCursorActive"] = [input](bool v) {
+             input->setGamepadGuiCursorEnabled(v);
+             MWBase::Environment::get().getWindowManager()->setCursorActive(v);

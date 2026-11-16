@@ -75,6 +75,41 @@ offline with glslangValidator; it needs glslang and g++ on the host.
 15. The ESM readers cache keeps up to a quarter of RLIMIT_NOFILE content files open (100 to 2048), not 100
 16. Skinning (`RigGeometry::cull`): no allocation per frame, a branchless weighted sum, no perspective divide per vertex
 17. The time step follows the interval Swappy shows the frames at (`alpha3PacedFrameSeconds`, `../support/src/framepacing.cpp`)
+18. Textures: the image manager names the file it reads (texture streaming keeps flat screen pictures, the GUI and
+    splash screens, at full size by their path)
+19. Navmesh baking in the engine through `androidmain.cpp` (`Alpha3::buildNavMesh`, with tile progress for the launcher)
+    instead of loading `libopenmw-navmeshtool.so`
+20. Occlusion culling: large static meshes and object paging's active grid chunks split into pieces on a grid
+    (`[Camera] occlusion mesh splitting`, `../support/src/meshsplitting.cpp`)
+21. Occlusion culling: point lights whose sphere is hidden behind the occluders left out of the light lists
+    (`[Camera] occlusion light culling`)
+22. Render scale: the scene drawn at a fraction of the window and upscaled and sharpened by the support library
+    (`[Experimental] render scale`, `renderScaleResolve`); the shaders' `screenRes` is the render size
+23. Point light shadows: a texture unit reserved for their cube maps and their install on the scene root
+    (`[Shadows] point light shadows`, `../support/src/pointshadows.cpp`)
+24. Seamless cells: cell changes without the fade and loading screen, and doors between exteriors and interiors opened
+    and walked through, the other side drawn through the doorway (`[Cells] seamless cells`, `seamless doors`)
+25. Bandwidth for tile GPUs: idle ripples stop, the opaque copy only when something reads it, unused buffers discarded
+    (`[Water] idle ripples`, `[Video] skip unused opaque copy`, `discard unused buffers`, `../support/src/bandwidth.cpp`)
+26. Vulkan: the window's context and the main camera's renderer from the support library (`Alpha3::createWindowContext`,
+    `../support/src/vulkan/`)
+27. Live cells through seamless doors: the cell behind an open door is in the scene (secondary cells; actors path,
+    fight and follow through the door)
+28. Point light shadows: each object's light list hands its shadowed lights to the support library, which adds the
+    shadow code only where one reaches
+29. HUD: its elements placed and sized from the touch overlay's edit mode (`Alpha3::hudLayoutFrame`)
+30. Cell borders: object paging chunks built in the background, levelled creatures preloaded, unloading spread over
+    frames (`[Cells]` settings, `../support/src/cellborders.cpp`)
+31. Fly-through benchmark: the player moved along the route each frame, noon, clear weather and the clock stopped
+    (`Alpha3::benchmarkFlyPose`, `../support/src/benchmark.cpp`)
+32. Lua: `pcall(require, name)` of a missing module answered without a C++ exception (two full unwinds on arm64 each)
+33. Lua: engine handlers stored as protected functions, not converted on every call
+34. Rendering rays: ignored objects skipped by their base node instead of a cast at every transform
+35. Lua: the gamepad keyboard types into the game's text boxes: `openmw.input._alpha3TextFocused` (and where the box is
+    on the screen), `_alpha3TypeText`, `_alpha3PressKey` (on the main thread), `_alpha3ToggleConsole` (for its Back +
+    Start combo) and `_alpha3CaptureGamepad`, during which the controller manager gives the gamepad's buttons to Lua
+    only (`../support/src/gamepadkeyboard.cpp`; the Lua mod is `../support/gamepadkeyboard`, shipped in `resources/vfs`
+    on Android and iOS)
 
 `ios/`, from the fork's iOS patches (`cpp/openmw/patches/ios/upstream`), rebased onto the common series:
 
@@ -90,6 +125,19 @@ offline with glslangValidator; it needs glslang and g++ on the host.
    set by `OpenMWLauncher.swift`) and reports the context to the engine as GLSL 3.3 without compute shaders;
    `../support/src/ios.cpp` stands in for Swappy, frame generation, Zink and mimalloc. OSG is built with the same GLES
    patches as on Android plus `vcpkg-extras/ports/openmw-osg/ios/glad.patch`.
+8. ANGLE on Metal as the renderer when `OSG_USE_ANGLE` is set: a Metal window, and ANGLE's EGL context on its
+   CAMetalLayer from the support library
+9. The resolution list offers fractions of the native pixels as a render scale (what common/0008 does for Android), and
+   the gamma slider sets the interface scale
+10. A native Metal renderer when `[Video] renderer = metal` (`../support/src/metal/`, as `src/vulkan/` on Android), with
+    Apple's OpenGL ES 3.0 as the fallback
+
+`multiplayer/` (applied last, with `ALPHA3_MULTIPLAYER`, after `../support/multiplayer/tree` is copied in):
+
+1. Engine hooks for the support library's multiplayer: client mods and the built-in script lists at startup
+   (`main.cpp` loads every `resources/vfs/*.omwscripts`, which the gamepad keyboard's list relies on too), the main
+   menu's Multiplayer button, player markers on the maps, `openmw.net` and `openmw.modstore`, `animation.setHeadPitch`,
+   `animation.setMovementOverride`, and text edit additions
 
 ## Where the earlier patches went
 
