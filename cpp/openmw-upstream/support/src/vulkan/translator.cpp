@@ -1782,6 +1782,22 @@ void main()
                     && mCamerasDrawn[(mFrameCounter + 1) % 2].count(stageCamera) == 0;
                 if (stageCamera != nullptr)
                     mCamerasDrawn[mFrameCounter % 2].insert(stageCamera);
+                // ...and what it drew is kept while its texture lives, as the terrain composite maps are: left to the
+                // purge of targets unused for 600 frames, the local map of a cell went white once its window had been
+                // closed for a while, and the minimap's neighbouring cells did once walked to
+                if (oneShot)
+                {
+                    if (const osg::FrameBufferObject* fbo = stage.getFrameBufferObject())
+                    {
+                        for (const auto& [component, attachment] : fbo->getAttachmentMap())
+                            if (const osg::Texture* texture = attachment.getTexture())
+                                mResources.keepTarget(*texture);
+                    }
+                    else
+                        for (const auto& [component, attachment] : stageCamera->getBufferAttachmentMap())
+                            if (attachment._texture.valid())
+                                mResources.keepTarget(*attachment._texture);
+                }
                 const bool waitedBefore = mWaitForPrograms;
                 mWaitForPrograms = waitedBefore || oneShot;
                 struct RestoreWait
