@@ -830,6 +830,135 @@ but `formatOpenMWConfig` never wrote them, so lists like total-overhaul had no `
 those plugins). Fixed (uncommitted): a `## Groundcover` section after the plugins, without `groundcover.omwaddon`
 (the desktop tool's; Alpha3's groundcover tool writes and enables `alpha3_groundcover.omwaddon` itself).
 
+## 2026-11-13: Vulkan crash turning shadows on in game with freedreno (Turnip) — NOT fixed yet
+
+**Bug.** On the Note 10+ (RF8N124YRQX), Vulkan with the bundled freedreno driver: load a save with shadows off, then
+Options > Video > Shadows > turn on Actor (or Object) shadows → `VK_ERROR_DEVICE_LOST` at once (the GPU hangs or
+faults). The system (Qualcomm) driver does not crash. Loading a save with shadows already on in `settings.cfg` does
+NOT crash on freedreno either: only turning them on in game does. Toggling in the main menu (no world) does not crash.
+
+**Done (uncommitted unless said):**
+- `cba7394` (committed): mipmaps on Vulkan. OSG's unset max LOD (-1) was cast to unsigned (0 on ARM), so every
+  sampler had maxLod 0. Confirmed fixed by the user.
+- `context.cpp`: `stopIfLost()` — on DEVICE_LOST (submit, present, acquire) logs "the GPU driver lost the device (...)"
+  and aborts, instead of the later null-pointer crash in `Context::acquire` (swapchain could not be remade,
+  NATIVE_WINDOW_IN_USE). `acquire()` also remakes a missing swapchain.
+- `translator.cpp`:
+  - the first-person `DepthClearCallback` clear now only runs in passes with a colour target (scene/window), not
+    inside the shadow maps' passes (it cleared them part way and set mSceneDepth to a shadow map). Kept: correct
+    anyway, but it was NOT the crash (my "fixed" test was the load-with-shadows path, which never crashed).
+  - kept descriptor sets (`DrawTemplate::Kept`) now remember their `VkDescriptorSetLayout` and are not reused for
+    another layout. Safety only; did not fix the crash.
+  - dev switch `debug.alpha3.vkskip` (bits, read once at start; off by default, keep it):
+    1 no draws into depth-only targets (shadow maps), 2 shadow samplers read the dummy, 4 no depth-only passes at all,
+    8 depth-only passes begun/ended with nothing in them, 16 depth-only passes LOAD instead of CLEAR, 32 no draws but
+    the GUI's, 64 no draws in the scene pass, 128 none in the other RTT passes (reflection, previews, maps),
+    256 none into the window but the GUI's, 512 none in the water reflection pass.
+- `programs.cpp`: dev switch `debug.alpha3.vkraster` (1 no depth clamp, 2 no depth bias). Neither was the cause; the
+  user may want it dropped (asked, not answered).
+- Turnip env vars already exist in the launcher (`composeApp/.../utils/DriverDebugEnvs.kt`, dev settings). Tried by
+  the user, all still crash: sysmem, nolrz, noubwc, syncdraw. Depth clamp off / depth bias off: still crash.
+
+**Bisect on the in-game toggle path** (scripts copied to `handoff/tools/shadow-toggle/`: `loadsave.sh` + `toggle.sh <vkskip>`; fix the scratchpad path
+inside them first: loads the newest save
+with shadows off, opens Options > Video > Shadows, taps Actor, reports CRASHED/SURVIVED):
+| vkskip | what is skipped | result |
+|---|---|---|
+| 0 | nothing (with the two fixes above) | crash |
+| 7 | shadow passes + shadow sampling | crash |
+| 39 | every draw but the GUI's (+7) | **survived** |
+| 71 | shadow passes, sampling, scene draws | crash |
+| 199 | 71 + all other RTT passes' draws | **survived** |
+| 512 | only the water reflection's draws | crash |
+| 583 | 71 + water reflection | **survived** |
+| 513 | water reflection + shadow-map draws | crash |
+| 576 | water reflection + scene draws (shadow passes ON) | **survived** |
+
+Reading: 71 crashed and 583 (71 + reflection skipped) survived, so the **water reflection's draws** fault after the
+toggle. But 512 (only the reflection skipped) still crashed, so there is at least one more faulting draw in the
+shadow passes or the scene pass (both on in 512, both off in 583). 513 crashed and 576 survived: the second one is in
+the **scene pass**. So the world draws in the scene and in the water reflection both fault after the in-game toggle,
+while the shadow-map draws are fine (on in 576). The shadow maps' sampling is not it either (dummy in 7, still
+crashed). Look at what an ordinary world draw (objects/terrain shaders) binds after OpenMW rewrites the shader
+sources in place: program variants, draw templates, uniform blocks, the 60-frame source check.
+
+Before 583 the candidates were the RTT passes other than the scene and the shadow maps: the water reflection
+(ReflectionCamera 512x512), CharacterPreview 512x1024, the local/global map RTTs ("RTT 512x512", "RTT 3402x2880",
+"RTT 18x18"), possibly several. Toggling shadows makes OpenMW rewrite shader sources in place (ShaderManager global
+defines); Programs::checkSources notices only every 60 frames. Ideas not yet checked: a program made again with
+other bindings while a stage's cached pipeline/template still points at the old one; the reflection's clip variant
+with the new shadow defines; the shadows' 1x1 fallback depth map ("drawn as the depth dummy") in passes that disable
+shadows (SceneUtil::ShadowManager::disableShadowsForStateSet, used by reflection/previews).
+
+**Next:** reproduce on the vanilla (default) profile, which loads much faster; then the bindings above. Six 1024x1024 D32 targets are made on the toggle (three on load) — find out why two sets.
+
+**Phone state:** release build with all of the above installed; `debug.alpha3.vkskip` set back to 0. The total-overhaul `settings.cfg` has shadows off (each test
+force-stops the game, so the toggle is never saved). Launcher has freedreno selected.
+
+- Shadow crash, later result: with the **vanilla** profile the in-game shadow toggle does NOT crash on freedreno; only the total-overhaul profile does.
+
+**2026-11-16 session (default profile, Note 10+, Turnip "API 1.3.366, driver 109457507"):**
+- Now reproduces on the default profile too (shadow maps 512² X8_D24 there, 1024² D32 on total-overhaul). Fast loop:
+  `handoff/tools/shadow-toggle/shadowtest.sh <vkskip>` starts EngineActivity with `omw_args` `--skip-menu
+  --load-savegame` (no menu, no intro videos; game in the world ~7 s), then Options > Video > Shadows > Actor.
+  Menu taps match the current menu (it has a Multiplayer entry now; the old toggle.sh taps hit Exit).
+- **Single runs are not reliable:** `debug.alpha3.vkdedicated=1` survived once, then crashed twice. Repeat each
+  bisect point 3x before trusting it (the table above was single runs).
+- New dev switches (off by default, keep): `debug.alpha3.vkdrawlog=<frames>` logs every stage and draw (program,
+  pipelines, images with format/layout, uniform values incl. ints, storage bindings, vertex/index buffers) of the frame
+  before the first depth-only pass and the next <frames> frames; `debug.alpha3.vkdedicated` 1 depth-only targets / 2
+  all targets in dedicated VMA memory.
+- What the draw log showed: the world draws of the frames after the toggle are the same as before it (same programs,
+  pipelines, images, uniform values, buffers); the world programs are not remade yet (checkSources every 60 frames);
+  the ShadowCamera passes record no draws in those frames; OpenMW recreates the sky and reflection RTT textures one
+  frame later (new osg::Texture objects; mTargets is keyed by raw pointer, no liveness check: a recycled address
+  inherits an old target image; not shown to matter). Hang reported at the first-part submit 1-2 frames later.
+- Ruled out this session: vkskip 4 and 8 (no / empty shadow passes) still crash; recreating the water RTTs alone
+  (Refraction toggled 4x) does not crash; dedicated memory for targets does not fix it.
+- **Cause found: a Turnip regression between Mesa 26.3 and 27.0.** Repeated 3x each: vkskip 576 and 39 survive, 7
+  crashes (the old table holds). Same toggle with downloaded drivers (StevenMXZ, put in `<Alpha3>/gpu_drivers/<id>/`,
+  `selectedGpuDriver` set in `game_files_prefs.preferences_pb`): **Turnip 27.0.0-R2 One UI (v39, 7 Nov, API 1.3.367)
+  crashes 3/3; Turnip 26.3.0-R6 One UI (v37, API 1.3.363) survives 3/3 and the shadows render** (ShadowCamera ~0.35
+  ms, world programs remade, confirmed on screen by the user). Our bundled Turnip is Mesa main `da28b3e40` (30 Oct
+  2026), built by `cpp/Zink/CMakeLists.txt` from `GIT_TAG main`.
+- **Correction (later the same day): it is not a plain regression, the GPU really faults.** Mesa bisect (our build
+  options, 3 runs a step, `<cache>/vulkan/pipelines.bin` deleted before every run because a warm cache hid crashes):
+  first bad commit **`b7ad24ada3` "tu/kgsl: Distinguish timestamp and sync wait errors"** (MR 44838, 8 Oct 2026); its
+  parent `b889ab52c6` survives 3/3. Before it, a failed `IOCTL_KGSL_DEVICE_WAITTIMESTAMP_CTXTID` that was not a timeout
+  hit an `assert` (compiled out) and came back as VK_TIMEOUT; since it, EDEADLK/EPROTO/ENOENT set the device lost. With
+  a logcat print added there, the crash shows `timestamp wait: context N timestamp 1752 errno 71 (Protocol error)`
+  every time: EPROTO = kgsl says the context **faulted** since the last check (most likely a GPU page fault; the
+  phone's `ft_pagefault_policy` is 0, so the GPU goes on and old Turnip just never noticed). So some draw/copy right
+  after shadows are turned on touches memory it shouldn't, and the shadows still look right on 26.3 only because the
+  fault is ignored. Mali/vendor drivers may ignore it too. StevenMXZ 26.3 "survived" for the same reason.
+- **Tablet (SM-T720, root dmesg), same session: it is a GPU hang in our rendering, on every driver.** kgsl prints
+  `MISC: GPU hang detected` / `gpu fault ctx N ... status 00E51005` ~0.35 s (2 frames) after the toggle, with bundled
+  Turnip **and with Qualcomm's own system driver** (status 00E51004/5). Older Turnip and the vendor driver on the phone
+  just recover from it. Findings: TU_DEBUG nolrz / sysmem / noubwc / flushall don't help; vkskip 64 (no scene draws)
+  and 512 (no reflection draws) each still hang, 576 (both) survives; 4 (no shadow passes) still hangs; new
+  `debug.alpha3.vkskipshader=objects` survives (terrain, water, sky: hang), so it's objects.vert/frag draws (programs
+  33/36 and 63/66 alpha-tested) in the scene and reflection after the toggle, with no program change in those frames.
+  Clustered lighting is off on the tablet (the only data-driven loop is ruled out). New `debug.alpha3.vkskipdraws=
+  <first>,<count>` bisect pointed at draws ~128-143, but draw numbering shifts between runs, so it isn't reliable.
+  Tools (copied to `handoff/tools/shadow-toggle/`): `tabtest.sh` (tablet toggle test: Duron/Autosave, taps for 2560x1600, dmesg check), `drawbisect.sh`, `pbset.py`, `mesa-bisect/`.
+- Old next step (superseded): find the fault address. `dmesg` is denied on the Note 10+; the rooted SM-T720 (Adreno 615, same Turnip a6xx
+  path) shows kgsl page-fault lines with the address and buffer. The vkskip 7 (crash) / 39 (survive) split narrows the
+  passes. Don't patch Mesa to ignore EPROTO except as a stopgap. Bisect tooling: scratchpad `mesa-bisect/` (build.sh,
+  test.sh, rerun.sh); `handoff/tools/shadow-toggle/shadowtest.sh` is the toggle test.
+- **FIXED (uncommitted, later the same day).** Capping the lighting loop (`i < min(PointLightCount, 8)`) in the
+  tablet's shader copies stopped the hang, so the GPU read a garbage `PointLightCount`. A Turnip command-stream
+  capture (`setprop debug.mesa.fd.rd.dump trigger,full` + `debug.mesa.fd.rd.dump.path`, then write a count into
+  the `_trigger` file) showed the hung draw's binding 3 holding another block's data (512.0 where the count goes).
+  `debug.alpha3.vknocache=6` (no once-a-frame or shared blocks) survived 5/5. Cause: when shadows are turned on, OpenMW
+  draws a frame twice with no present between them; `Resources::beginFrame()` reset the slot's stream for the second
+  pass while the first pass's commands in the same command buffer still read it, and the cached blocks then pointed
+  at reused memory. Fix: `Resources::resetStream()` does nothing when the context's frame number hasn't changed
+  since the last reset (log "a frame drawn again before the last was presented", verbose). Tablet: Turnip 4/4,
+  system driver 2/2 survive. Also fixed: kept descriptor sets are matched by VkBuffer handle, and a freed and remade
+  stream chunk can get the same handle; `Resources::mGeneration` (was mImageGeneration) now also goes up when a chunk
+  is let go. New switches (off): `debug.alpha3.vkcheckuniforms=1`, `debug.alpha3.vknocache=<1 sets|2 static|4 shared>`.
+  To do: retest on the phone with the newest Turnip; commit apart from the gamepad keyboard work.
+
 ## 2026-11-13: Vulkan white distant terrain (composite maps) — fixed
 
 Distant land showed white (the dummy texture) with big viewing distances (user's settings: 81920, `composite map level = 0`).

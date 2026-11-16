@@ -6,6 +6,10 @@
 #include "vma.hpp"
 
 #include <algorithm>
+#include <cstdlib>
+#ifdef __ANDROID__
+#include <sys/system_properties.h>
+#endif
 #include <cmath>
 #include <cstring>
 
@@ -456,6 +460,17 @@ namespace Alpha3::Vk
         }
         buffer.mMapped = static_cast<uint8_t*>(allocated.pMappedData);
         buffer.mSize = info.size;
+        VkMemoryPropertyFlags flags = 0;
+        vmaGetAllocationMemoryProperties(mContext.device().mAllocator, buffer.mMemory, &flags);
+        buffer.mCoherent = (flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0;
+        static bool told[2] = { false, false };
+        if (!told[readback ? 1 : 0])
+        {
+            told[readback ? 1 : 0] = true;
+            Log(Debug::Info) << "Vulkan: " << (readback ? "read-back" : "written") << " buffers get memory type "
+                             << allocated.memoryType << ", flags 0x" << std::hex << flags << std::dec
+                             << (buffer.mCoherent ? " (coherent)" : " (not coherent: flushed by hand)");
+        }
         return buffer;
     }
 
@@ -474,7 +489,7 @@ namespace Alpha3::Vk
     {
         if (!image)
             return;
-        ++mImageGeneration;
+        ++mGeneration;
         // the framebuffers that hold it go with it
         for (auto it = mFramebuffers.begin(); it != mFramebuffers.end();)
         {
@@ -516,11 +531,25 @@ namespace Alpha3::Vk
 
     void Resources::resetStream()
     {
+        // twice in one of the context's frames, with no present between them (OpenMW draws a frame again when shadows
+        // are turned on in game): both are recorded into the one command buffer, so the stream goes on. Resetting it
+        // handed the first one's blocks, still to be read, to the second's, and with the blocks kept for a frame a
+        // light block's count read another block's data: the lighting loop ran on and the GPU hung (Turnip lost the
+        // device)
+        if (mResetContextFrame == mContext.frameNumber())
+        {
+            static int told = 0;
+            if (told++ < 5)
+                Log(Debug::Verbose) << "Vulkan: a frame drawn again before the last was presented: the stream goes on";
+            return;
+        }
+        mResetContextFrame = mContext.frameNumber();
         std::vector<Chunk>& chunks = mChunks[mContext.frameSlot()];
         // the chunks beyond the first that this slot did not need last time are let go
         while (chunks.size() > 1 && chunks.back().mUsed == 0)
         {
             destroyLater(chunks.back().mBuffer);
+            ++mGeneration; // the kept descriptor sets hold the chunks by handle (see mGeneration)
             chunks.pop_back();
         }
         for (Chunk& chunk : chunks)
@@ -822,6 +851,23 @@ namespace Alpha3::Vk
             info.flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
         VmaAllocationCreateInfo memory{};
         memory.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        // debug.alpha3.vkdedicated (off by default): render targets in memory of their own, 1 the depth-only ones,
+        // 2 all of them (whether a driver writes past an image's memory into its neighbours')
+        {
+            static const int dedicated = [] {
+#ifdef __ANDROID__
+                char value[PROP_VALUE_MAX] = {};
+                if (__system_property_get("debug.alpha3.vkdedicated", value) > 0)
+                    return std::atoi(value);
+#endif
+                return 0;
+            }();
+            const bool attachment
+                = (usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) != 0;
+            if ((dedicated == 2 && attachment)
+                || (dedicated == 1 && attachment && image->mDepthAspect && !image->mStencilAspect))
+                memory.flags |= VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
+        }
         const VkResult result
             = vmaCreateImage(mContext.device().mAllocator, &info, &memory, &image->mImage, &image->mMemory, nullptr);
         if (result != VK_SUCCESS)

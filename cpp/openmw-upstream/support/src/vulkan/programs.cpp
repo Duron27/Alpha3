@@ -13,8 +13,12 @@
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#ifdef __ANDROID__
+#include <sys/system_properties.h>
+#endif
 #include <chrono>
 #include <cstddef>
+#include <cstdlib>
 #include <iomanip>
 #include <cstring>
 #include <filesystem>
@@ -1473,8 +1477,19 @@ namespace Alpha3::Vk
         raster.polygonMode = VK_POLYGON_MODE_FILL;
         raster.cullMode = state.mCullMode;
         raster.frontFace = static_cast<VkFrontFace>(state.mFrontFace);
-        raster.depthClampEnable = state.mDepthClamp && mContext.device().mFeatures.depthClamp ? VK_TRUE : VK_FALSE;
-        raster.depthBiasEnable = state.mDepthBias;
+        // Dev hook, off by default: adb shell setprop debug.alpha3.vkraster <bits>, read at start: 1 no depth clamp,
+        // 2 no depth bias (to find which one a driver fails on)
+        static const unsigned rasterOff = [] {
+#ifdef __ANDROID__
+            char value[PROP_VALUE_MAX] = {};
+            if (__system_property_get("debug.alpha3.vkraster", value) > 0)
+                return static_cast<unsigned>(std::atoi(value));
+#endif
+            return 0u;
+        }();
+        raster.depthClampEnable
+            = state.mDepthClamp && mContext.device().mFeatures.depthClamp && !(rasterOff & 1) ? VK_TRUE : VK_FALSE;
+        raster.depthBiasEnable = state.mDepthBias && !(rasterOff & 2);
         raster.depthBiasConstantFactor = state.mBiasConstant;
         raster.depthBiasSlopeFactor = state.mBiasSlope;
         raster.lineWidth = 1.f;

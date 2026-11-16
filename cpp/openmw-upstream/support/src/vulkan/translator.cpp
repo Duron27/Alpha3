@@ -270,12 +270,16 @@ namespace Alpha3::Vk
             std::vector<unsigned> mStamps;
             bool mWritten = false;
             // descriptor sets kept from frame to frame, for each frame slot: made again when the buffers (the slot's
-            // stream chunks), the images or the resources' image generation change
+            // stream chunks), the images or the resources' generation (an image or a chunk let go) change
             struct Kept
             {
                 std::array<VkBuffer, 4> mBuffers{};
                 std::vector<VkDescriptorImageInfo> mImages;
                 uint64_t mGeneration = 0;
+                // the layout it was made with: the template's program can be made again with other bindings (OpenMW
+                // rewrites the shaders in place when shadows are turned on in game), and a set of the old layout bound
+                // with the new pipeline left its new bindings unwritten (Turnip lost the device)
+                VkDescriptorSetLayout mLayout = VK_NULL_HANDLE;
                 VkDescriptorSet mSet = VK_NULL_HANDLE;
             };
             std::vector<Kept> mKept[sFramesInFlight];
@@ -1196,6 +1200,11 @@ void main()
                 for (VkDescriptorSet set : *mFreedSets)
                     mContext.freeKeptSetLater(set);
                 mFreedSets->clear();
+                if (checkUniformsAsked())
+                {
+                    verifySentLights("at the next frame's start, before");
+                    mSentLights.clear();
+                }
                 mResources.beginFrame();
                 mState = sceneView.getState();
                 mFrameNumber = sceneView.getFrameStamp() ? sceneView.getFrameStamp()->getFrameNumber() : 0;
@@ -1230,6 +1239,7 @@ void main()
                 mSceneDepth = nullptr;
                 mSceneOpaqueDepth = nullptr;
                 mCamerasDrawn[mFrameCounter % 2].clear();
+                drawLogFrame();
                 if (mFrameNumber % 300 == 0)
                     for (auto it = mParticles.begin(); it != mParticles.end();)
                     {
@@ -1240,6 +1250,7 @@ void main()
                             ++it;
                     }
                 mDraws = mSkipped = 0;
+                mDrawIndex = 0;
                 gpuTimesBegin();
                 waterQueriesBegin();
                 copyFramebufferCallbacks(sceneView);
@@ -1769,6 +1780,21 @@ void main()
                 Target target;
                 if (!resolveTarget(stage, target))
                     return;
+                if ((skipAsked() & 4) && !target.mWindow && target.mDepth != nullptr && target.mColor == nullptr)
+                    return;
+                if (drawLogAsked() > 0)
+                {
+                    if (!target.mWindow && target.mDepth != nullptr && target.mColor == nullptr)
+                        drawLogTrigger();
+                    std::ostringstream line;
+                    const osg::Camera* camera = stage.getCamera();
+                    line << "stage '" << (camera ? camera->getName() : std::string("?")) << "' kind "
+                         << static_cast<int>(mStageKind) << (target.mWindow ? " window" : "") << " " << target.mWidth
+                         << "x" << target.mHeight << " color " << target.mColor << " fmt " << target.mColorFormat
+                         << " depth " << target.mDepth << " fmt " << target.mDepthFormat << " clear 0x" << std::hex
+                         << stage.getClearMask() << std::dec << " leaves " << hasLeaves(stage);
+                    drawLog(line.str());
+                }
                 if (!target.mWindow && stage.getFrameBufferObject() != nullptr && target.mColor != nullptr)
                     mSceneColor = target.mColor;
                 // A camera without a name drawn into a texture that was not drawn the frame before (the local map's,
@@ -1902,8 +1928,10 @@ void main()
                     if (target.mDepth)
                     {
                         depthUse.mFormat = target.mDepth->mFormat;
-                        depthUse.mLoad = (clearDepth || clearStencil) ? VK_ATTACHMENT_LOAD_OP_CLEAR
-                                                                      : VK_ATTACHMENT_LOAD_OP_LOAD;
+                        depthUse.mLoad = (clearDepth || clearStencil)
+                                && !((skipAsked() & 16) && target.mColor == nullptr)
+                            ? VK_ATTACHMENT_LOAD_OP_CLEAR
+                            : VK_ATTACHMENT_LOAD_OP_LOAD;
                         depthUse.mInitial = depthUse.mFinal = target.mDepth->readLayout();
                         views.push_back(target.mDepth->mAttachmentView);
                         VkClearValue value{};
@@ -1967,7 +1995,8 @@ void main()
                 stageClipPlanes(stage);
                 std::vector<const osgUtil::RenderBin*> bins;
                 const unsigned drawsBefore = mDraws, skippedBefore = mSkipped, leavesBefore = mLeaves;
-                drawBin(stage, bins);
+                if (!((skipAsked() & 8) && !target.mWindow && target.mDepth != nullptr && target.mColor == nullptr))
+                    drawBin(stage, bins);
                 // Dev hook, off by default: adb shell setprop debug.alpha3.vkstage <camera name>, read at start: what
                 // each pass of that camera drew (its leaves, draws recorded, draws left out for want of a program)
                 if (stageCamera != nullptr && !stageLogged().empty() && stageCamera->getName() == stageLogged())
@@ -2129,9 +2158,11 @@ void main()
                     // the copy of the opaque scene, before the bins after it are drawn
                     if (type.find("OpaqueColorBinCallback") != std::string::npos)
                         copyOpaque(bin, static_cast<const OpaqueColorBinCallbackMirror&>(*callback));
-                    // the first person view: the depth starts again
+                    // the first person view: the depth starts again. Only in a pass with a colour target (the scene,
+                    // the window): the bin turns up in the shadow maps' passes too, where a clear part way through
+                    // made Turnip lose the device (and the shadow map was taken as the scene's depth)
                     if (type.find("DepthClearCallback") != std::string::npos && hasLeaves(bin)
-                        && (mTarget.mWindow || mTarget.mDepth))
+                        && (mTarget.mWindow || (mTarget.mDepth && mTarget.mColor)))
                     {
                         VkClearAttachment attachment{ VK_IMAGE_ASPECT_DEPTH_BIT, 0, {} };
                         // glClear with the camera's clear depth: 0 when the depth is reversed
@@ -2620,6 +2651,346 @@ void main()
                 unsigned mFrames = 0;
             };
 
+            // Dev hook, off by default: adb shell setprop debug.alpha3.vkskip <bits>, read at start, to find which part of
+            // a frame a driver fails on: 1 no draws into depth-only targets (the shadow maps), 2 shadow samplers read the
+            // dummy instead of the shadow maps, 4 no passes at all into depth-only targets, 8 depth-only passes begun and ended
+            // with nothing in them, 16 depth-only passes load their depth rather than clear it, 32 no draws
+            // but the GUI's, 64 no draws in the scene's pass, 128 none in the other passes into textures (reflection,
+            // previews, maps), 256 none into the window but the GUI's, 512 none in the
+            // water reflection's pass
+            static unsigned skipAsked()
+            {
+                static const unsigned bits = [] {
+#ifdef __ANDROID__
+                    char value[PROP_VALUE_MAX] = {};
+                    if (__system_property_get("debug.alpha3.vkskip", value) > 0)
+                        return static_cast<unsigned>(std::atoi(value));
+#endif
+                    return 0u;
+                }();
+                return bits;
+            }
+
+            // debug.alpha3.vknocache=<bits> (off by default): 1 a descriptor set made for each draw (none kept or reused),
+            // 2 the blocks without volatile uniforms sent for each draw (none once a frame), 4 the shared blocks sent for each
+            // draw
+            static int noCacheAsked()
+            {
+                static const int bits = [] {
+#ifdef __ANDROID__
+                    char value[PROP_VALUE_MAX] = {};
+                    if (__system_property_get("debug.alpha3.vknocache", value) > 0)
+                        return std::atoi(value);
+#endif
+                    return 0;
+                }();
+                return bits;
+            }
+
+            // debug.alpha3.vkcheckuniforms=1 (off by default): each draw's light block (binding 3) as sent is checked: a
+            // PointLightCount outside 0..64 (a loop bound in the lighting code: a garbage one hangs the GPU) is logged
+            // with where its value came from (the first 20 times)
+            static bool checkUniformsAsked()
+            {
+                static const bool on = [] {
+#ifdef __ANDROID__
+                    char value[PROP_VALUE_MAX] = {};
+                    if (__system_property_get("debug.alpha3.vkcheckuniforms", value) > 0)
+                        return std::atoi(value) != 0;
+#endif
+                    return false;
+                }();
+                return on;
+            }
+
+            // the light counts sent this frame, read again later: one that changed after it was written was written
+            // over (by whom: the draw or step it is noticed at)
+            struct SentLight
+            {
+                const uint8_t* mAt;
+                int32_t mCount;
+                uint32_t mDraw;
+            };
+            std::vector<SentLight> mSentLights;
+            void verifySentLights(const char* where)
+            {
+                static int logged = 0;
+                for (SentLight& sent : mSentLights)
+                {
+                    int32_t now = 0;
+                    std::memcpy(&now, sent.mAt, 4);
+                    if (now == sent.mCount || logged >= 20)
+                        continue;
+                    ++logged;
+                    Log(Debug::Warning) << "Vulkan check: frame " << mFrameCounter << " light count of draw "
+                                        << sent.mDraw << " at " << static_cast<const void*>(sent.mAt) << " was "
+                                        << sent.mCount << ", now " << now << " (0x" << std::hex << now << std::dec
+                                        << "), noticed " << where << " draw " << mDrawIndex << " stage "
+                                        << static_cast<int>(mStageKind);
+                    sent.mCount = now;
+                }
+            }
+
+            void checkLightBlock(const DrawTemplate& draw, const uint8_t* sent)
+            {
+                static int logged = 0;
+                if (logged >= 20)
+                    return;
+                const UniformBlock& block = draw.mVariant->mLightUniforms;
+                static std::set<const Variant*> described;
+                if (described.insert(draw.mVariant).second)
+                {
+                    std::ostringstream out;
+                    out << "Vulkan check: variant " << static_cast<const void*>(draw.mVariant) << " light block size "
+                        << block.mSize << " template bytes " << draw.mBlocks[2].size() << ":";
+                    for (const UniformMember& member : block.mMembers)
+                        out << " " << member.mName << "@" << member.mOffset << " x" << member.mArraySize << " stride "
+                            << member.mArrayStride << " gl 0x" << std::hex << member.mGlType << std::dec;
+                    Log(Debug::Warning) << out.str();
+                }
+                for (const UniformMember& member : block.mMembers)
+                {
+                    if (member.mName != "PointLightCount" || member.mOffset + 4 > block.mSize)
+                        continue;
+                    int32_t count = 0;
+                    std::memcpy(&count, sent + member.mOffset, 4);
+                    int32_t inTemplate = 0;
+                    std::memcpy(&inTemplate, draw.mBlocks[2].data() + member.mOffset, 4);
+                    if (count >= 0 && count <= 64)
+                    {
+                        mSentLights.push_back({ sent + member.mOffset, count, mDrawIndex });
+                        continue;
+                    }
+                    ++logged;
+                    std::ostringstream out;
+                    out << "Vulkan check: frame " << mFrameCounter << " stage " << static_cast<int>(mStageKind) << " PointLightCount "
+                        << count << " (0x" << std::hex << count << std::dec << ") at offset " << member.mOffset
+                        << " of " << block.mSize << ", in the template " << inTemplate << ", glType 0x" << std::hex
+                        << member.mGlType << std::dec << "; sources:";
+                    for (const DrawTemplate::Source& source : draw.mSources)
+                    {
+                        if (source.mStage != 2)
+                            continue;
+                        out << " [" << source.mMember->mName << " offset " << source.mMember->mOffset << " level "
+                            << source.mLevel << " volatile " << (source.mOwner ? source.mOwner->mVolatile : -1)
+                            << " uniform " << static_cast<const void*>(source.mUniform);
+                        const osg::StateSet* stateSet = chainStateSet(source.mLevel);
+                        const osg::Uniform* now
+                            = stateSet ? stateSet->getUniform(source.mMember->mName) : nullptr;
+                        out << " chain stateset " << static_cast<const void*>(stateSet) << " its uniform "
+                            << static_cast<const void*>(now);
+                        if (now != nullptr)
+                            out << " type 0x" << std::hex << now->getType() << std::dec << " name '" << now->getName()
+                                << "'";
+                        out << "]";
+                    }
+                    Log(Debug::Warning) << out.str();
+                }
+            }
+
+            // debug.alpha3.vkskipshader=<words, comma-separated> (off by default): leaves out the draws whose program has a
+            // shader whose name holds one of the words (objects, terrain, water, sky...), to find which shader a GPU hang is in
+            static const std::vector<std::string>& skipShadersAsked()
+            {
+                static const std::vector<std::string> words = [] {
+                    std::vector<std::string> out;
+#ifdef __ANDROID__
+                    char value[PROP_VALUE_MAX] = {};
+                    if (__system_property_get("debug.alpha3.vkskipshader", value) > 0)
+                    {
+                        std::string all(value);
+                        for (size_t start = 0; start < all.size();)
+                        {
+                            const size_t end = std::min(all.find(',', start), all.size());
+                            if (end > start)
+                                out.push_back(all.substr(start, end - start));
+                            start = end + 1;
+                        }
+                    }
+#endif
+                    return out;
+                }();
+                return words;
+            }
+
+            // debug.alpha3.vkskipdraws=<first>,<count> (off by default): leaves out the frame's draws from <first> (counted
+            // over all passes, in the order they are recorded), to bisect which draw a GPU hang is in
+            static const std::pair<unsigned, unsigned>& skipDrawsAsked()
+            {
+                static const std::pair<unsigned, unsigned> range = [] {
+                    std::pair<unsigned, unsigned> out{ 0, 0 };
+#ifdef __ANDROID__
+                    char value[PROP_VALUE_MAX] = {};
+                    if (__system_property_get("debug.alpha3.vkskipdraws", value) > 0)
+                    {
+                        unsigned first = 0, count = 0;
+                        if (std::sscanf(value, "%u,%u", &first, &count) == 2)
+                            out = { first, count };
+                    }
+#endif
+                    return out;
+                }();
+                return range;
+            }
+
+            static bool skipShader(const osg::Program& program)
+            {
+                for (unsigned i = 0; i < program.getNumShaders(); ++i)
+                    for (const std::string& word : skipShadersAsked())
+                        if (program.getShader(i)->getName().find(word) != std::string::npos)
+                            return true;
+                return false;
+            }
+
+            // debug.alpha3.vkdrawlog=<frames> (off by default): every stage and draw of the frame before the first pass
+            // into a depth-only target (shadows turned on) and of the <frames> frames from it, to the log: what the
+            // draws bind before and after, for faults that come with a change of state (the shadow toggle)
+            static int drawLogAsked()
+            {
+                static const int frames = [] {
+#ifdef __ANDROID__
+                    char value[PROP_VALUE_MAX] = {};
+                    if (__system_property_get("debug.alpha3.vkdrawlog", value) > 0)
+                        return std::atoi(value);
+#endif
+                    return 0;
+                }();
+                return frames;
+            }
+
+            void drawLog(std::string line)
+            {
+                if (mDrawLogLeft > 0)
+                    Log(Debug::Info) << "Vulkan drawlog " << mFrameCounter << ": " << line;
+                else if (mDrawLogLeft < 0 && mDrawLogCur.size() < 20000)
+                    mDrawLogCur.push_back(std::to_string(mFrameCounter) + ": " + std::move(line));
+            }
+
+            void drawLogTrigger()
+            {
+                if (mDrawLogLeft >= 0)
+                    return;
+                mDrawLogLeft = drawLogAsked();
+                Log(Debug::Info) << "Vulkan drawlog: first depth-only pass in frame " << mFrameCounter
+                                 << "; the frame before it:";
+                for (const std::string& line : mDrawLogPrev)
+                    Log(Debug::Info) << "Vulkan drawlog " << line;
+                Log(Debug::Info) << "Vulkan drawlog: this frame so far:";
+                for (const std::string& line : mDrawLogCur)
+                    Log(Debug::Info) << "Vulkan drawlog " << line;
+                mDrawLogPrev.clear();
+                mDrawLogCur.clear();
+            }
+
+            void drawLogFrame()
+            {
+                if (drawLogAsked() <= 0)
+                    return;
+                if (mDrawLogLeft > 0)
+                {
+                    if (--mDrawLogLeft == 0)
+                        Log(Debug::Info) << "Vulkan drawlog: done";
+                    return;
+                }
+                if (mDrawLogLeft < 0)
+                {
+                    mDrawLogPrev.swap(mDrawLogCur);
+                    mDrawLogCur.clear();
+                }
+            }
+
+            template <class Pipelines>
+            void drawLogDraw(const osg::Geometry& geometry, const Accumulated& state, const Variant& variant,
+                const DrawTemplate& draw, const Pipelines& pipelines)
+            {
+                std::ostringstream line;
+                line << "draw '" << geometry.getName() << "' state " << state.mId << (state.mVolatile ? " volatile" : "")
+                     << " program '" << variant.mName << "' " << &variant << " setLayout " << variant.mSetLayout
+                     << " pipelines";
+                for (VkPipeline pipeline : pipelines.mPerPrimitive)
+                    line << " " << pipeline;
+                line << " pass " << mPass << " images";
+                for (size_t i = 0; i < draw.mImageSources.size(); ++i)
+                {
+                    const DrawTemplate::ImageSource& source = draw.mImageSources[i];
+                    line << " [" << i << (source.mShadow ? " shadow" : "") << " view type " << source.mViewType
+                         << " tex " << source.mTexture;
+                    if (source.mTexture != nullptr)
+                    {
+                        line << " " << source.mTexture->className() << " '" << source.mTexture->getName() << "' "
+                             << source.mTexture->getTextureWidth() << "x" << source.mTexture->getTextureHeight();
+                        if (Image* image = mResources.texture(*source.mTexture))
+                            line << " image " << image << " fmt " << image->mFormat << " " << image->mWidth << "x"
+                                 << image->mHeight << " layers " << image->mLayers << " depth " << image->mDepthAspect
+                                 << " layout " << image->mLayout;
+                        else
+                            line << " no image";
+                    }
+                    if (i < draw.mImages.size())
+                        line << " bound view " << draw.mImages[i].imageView << " sampler " << draw.mImages[i].sampler
+                             << " layout " << draw.mImages[i].imageLayout;
+                    line << "]";
+                }
+                for (const StorageSlot& slot : variant.mStorage)
+                {
+                    const VkDescriptorBufferInfo info = storageInfo(mChainGraph, mChainBins, slot);
+                    line << " storage[" << slot.mBinding << (slot.mUniform ? " ubo" : " ssbo") << " buf " << info.buffer
+                         << " off " << info.offset << " range " << info.range << "]";
+                }
+                drawLog(line.str());
+            }
+
+            // the uniform blocks as sent: a hash of each, and the integer members' values (loop counts)
+            void drawLogUniforms(const Variant& variant, const std::vector<uint8_t> (&blocks)[3], const uint8_t* const (&written)[3])
+            {
+                const UniformBlock* layouts[3] = { &variant.mVertexUniforms, &variant.mFragmentUniforms, &variant.mLightUniforms };
+                std::ostringstream line;
+                line << "uniforms program " << &variant;
+                for (int stage = 0; stage < 3; ++stage)
+                {
+                    const uint8_t* data = written[stage];
+                    const size_t size = blocks[stage].size();
+                    if (data == nullptr || size == 0)
+                        continue;
+                    uint64_t hash = 0xcbf29ce484222325ull;
+                    for (size_t i = 0; i < size; ++i)
+                        hash = (hash ^ data[i]) * 0x100000001b3ull;
+                    line << " | block " << stage << " size " << size << " hash " << std::hex << hash << std::dec;
+                    for (const UniformMember& member : layouts[stage]->mMembers)
+                    {
+                        // GL_INT, GL_UNSIGNED_INT, GL_BOOL and their vectors
+                        const bool integer = member.mGlType == 0x1404 || member.mGlType == 0x1405
+                            || (member.mGlType >= 0x8B53 && member.mGlType <= 0x8B59);
+                        const bool floats = member.mGlType == 0x1406;
+                        if (!integer && !floats)
+                            continue;
+                        line << " " << member.mName << "=";
+                        for (uint32_t e = 0; e < std::min<uint32_t>(member.mArraySize, 8); ++e)
+                        {
+                            const uint32_t at = member.mOffset + e * member.mArrayStride;
+                            if (at + 4 > size)
+                                break;
+                            if (integer)
+                            {
+                                int32_t value;
+                                std::memcpy(&value, data + at, 4);
+                                line << value << ",";
+                            }
+                            else
+                            {
+                                float value;
+                                std::memcpy(&value, data + at, 4);
+                                line << value << ",";
+                            }
+                        }
+                    }
+                }
+                drawLog(line.str());
+            }
+
+            int mDrawLogLeft = -1; // -1 waiting for the first depth-only pass, then frames left to log, 0 done
+            std::vector<std::string> mDrawLogPrev, mDrawLogCur;
+
             static const std::string& stageLogged()
             {
                 static const std::string name = [] {
@@ -2837,6 +3208,18 @@ void main()
                 if (mGpuSplitSkip != SplitKind::None && mStageKind == StageKind::Scene
                     && splitKindOf(*drawable, bins) == mGpuSplitSkip)
                     return;
+                if ((skipAsked() & 1) && !mTarget.mWindow && mTarget.mDepth != nullptr && mTarget.mColor == nullptr)
+                    return;
+                if ((skipAsked() & 32) && kindOf(*drawable) != DrawableKind::MyGui)
+                    return;
+                if ((skipAsked() & 64) && mStageKind == StageKind::Scene)
+                    return;
+                if ((skipAsked() & 128) && !mTarget.mWindow && mStageKind != StageKind::Scene)
+                    return;
+                if ((skipAsked() & 256) && mTarget.mWindow && kindOf(*drawable) != DrawableKind::MyGui)
+                    return;
+                if ((skipAsked() & 512) && mStageKind == StageKind::Reflection)
+                    return;
                 switch (kindOf(*drawable))
                 {
                     case DrawableKind::MyGui:
@@ -3022,6 +3405,8 @@ void main()
                     // copy, is fine)
                     if (image != nullptr && source.mShadow && !image->mDepthAspect)
                         image = nullptr;
+                    if (source.mShadow && (skipAsked() & 2))
+                        image = nullptr;
                     const bool dummy = image == nullptr;
                     if (dummy && texture != nullptr && mDummyLogged.size() < 40 && mDummyLogged.insert(texture).second)
                     {
@@ -3059,9 +3444,11 @@ void main()
 
             VkDescriptorSet descriptorSet(DrawTemplate& draw, const std::array<VkBuffer, 4>& buffers)
             {
-                for (const auto& [key, set] : draw.mSets)
-                    if (key == buffers)
-                        return set;
+                const bool noCache = (noCacheAsked() & 1) != 0;
+                if (!noCache)
+                    for (const auto& [key, set] : draw.mSets)
+                        if (key == buffers)
+                            return set;
                 Variant& variant = *draw.mVariant;
                 // a set kept from this slot's last frames, if nothing it holds changed
                 std::vector<DrawTemplate::Kept>& kept = draw.mKept[mContext.frameSlot()];
@@ -3069,13 +3456,15 @@ void main()
                 for (DrawTemplate::Kept& candidate : kept)
                     if (candidate.mBuffers == buffers)
                         reuse = &candidate;
-                if (reuse != nullptr && reuse->mGeneration == mResources.mImageGeneration
-                    && sameImages(reuse->mImages, draw.mImages))
+                if (noCache)
+                    reuse = nullptr;
+                if (reuse != nullptr && reuse->mGeneration == mResources.mGeneration
+                    && reuse->mLayout == variant.mSetLayout && sameImages(reuse->mImages, draw.mImages))
                 {
                     draw.mSets.emplace_back(buffers, reuse->mSet);
                     return reuse->mSet;
                 }
-                if (reuse == nullptr && kept.size() < 4)
+                if (reuse == nullptr && kept.size() < 4 && !noCache)
                 {
                     kept.emplace_back();
                     reuse = &kept.back();
@@ -3089,7 +3478,8 @@ void main()
                     reuse->mSet = set = mContext.allocateKeptSet(variant.mSetLayout);
                     reuse->mBuffers = buffers;
                     reuse->mImages = draw.mImages;
-                    reuse->mGeneration = mResources.mImageGeneration;
+                    reuse->mGeneration = mResources.mGeneration;
+                    reuse->mLayout = variant.mSetLayout;
                     draw.mFreed = mFreedSets;
                 }
                 else
@@ -3144,6 +3534,9 @@ void main()
                     = std::max<VkDeviceSize>(mContext.device().mProperties.limits.minUniformBufferOffsetAlignment, 16);
                 std::array<VkBuffer, 4> buffers{};
                 VkDeviceSize bufferOffsets[4]{};
+                const uint8_t* written[3] = { nullptr, nullptr, nullptr }; // for the draw log
+                if (checkUniformsAsked())
+                    verifySentLights("before");
 
                 // the state's blocks (vertex, fragment, lights at bindings 0, 1 and 3): sent once a frame, but for
                 // those with volatile uniforms (the light list's), sent for each set of them. A lights block is
@@ -3160,7 +3553,7 @@ void main()
                         hasVolatile |= source->mStage == stage;
                     if (!hasVolatile)
                     {
-                        if (draw.mStatic[stage] == VK_NULL_HANDLE)
+                        if (draw.mStatic[stage] == VK_NULL_HANDLE || (noCacheAsked() & 2) != 0)
                         {
                             Span span = mResources.stream(bytes.size(), alignment);
                             if (span.mData == nullptr)
@@ -3171,6 +3564,7 @@ void main()
                         }
                         buffers[binding] = draw.mStatic[stage];
                         bufferOffsets[binding] = draw.mStaticOffset[stage];
+                        written[stage] = bytes.data();
                         continue;
                     }
                     // what the block is made of: the template's uniforms (for a block with others than the volatile
@@ -3199,7 +3593,7 @@ void main()
                     if (!onlyVolatile)
                         mix(reinterpret_cast<uintptr_t>(&draw));
                     SharedBlock& shared = mSharedBlocks[key];
-                    if (shared.mFrame != mFrameCounter)
+                    if (shared.mFrame != mFrameCounter || (noCacheAsked() & 4) != 0)
                     {
                         Span span = mResources.stream(bytes.size(), alignment);
                         if (span.mData == nullptr)
@@ -3215,11 +3609,17 @@ void main()
                             if (uniform != nullptr)
                                 writeUniform(span.mData, static_cast<uint32_t>(bytes.size()), *source.mMember, *uniform);
                         }
-                        shared = { span.mBuffer, span.mOffset, mFrameCounter };
+                        shared = { span.mBuffer, span.mOffset, mFrameCounter, span.mData };
                     }
                     buffers[binding] = shared.mBuffer;
                     bufferOffsets[binding] = shared.mOffset;
+                    written[stage] = shared.mData;
                 }
+
+                if (drawLogAsked() > 0)
+                    drawLogUniforms(variant, draw.mBlocks, written);
+                if (checkUniformsAsked() && written[2] != nullptr)
+                    checkLightBlock(draw, written[2]);
 
                 // the draw's matrices: model view, projection, their product and the normal matrix (OSG's,
                 // State::applyModelViewMatrix, its columns padded to vec4)
@@ -3594,6 +3994,17 @@ void main()
                     ++mSkipped;
                     return;
                 }
+                if (!skipShadersAsked().empty() && skipShader(*state.mProgram))
+                {
+                    ++mSkipped;
+                    return;
+                }
+                const unsigned drawIndex = mDrawIndex++;
+                if (drawIndex - skipDrawsAsked().first < skipDrawsAsked().second)
+                {
+                    ++mSkipped;
+                    return;
+                }
                 Variant* variant = variantOf(state);
                 if (variant == nullptr || !variant->mOk)
                 {
@@ -3652,6 +4063,19 @@ void main()
                 }
 
                 DrawTemplate* draw = templateFor(state, *variant);
+                if (drawLogAsked() > 0)
+                {
+                    drawLogDraw(geometry, state, *variant, *draw, *pipelines);
+                    std::ostringstream line;
+                    line << "geometry " << &geometry << " entry v" << entry->mVersion << " vertices "
+                         << (geometry.getVertexArray() ? geometry.getVertexArray()->getNumElements() : 0) << " buffers";
+                    for (VkBuffer buffer : entry->mBuffers)
+                        line << " " << buffer;
+                    for (const auto& primitive : entry->mPrimitives)
+                        line << " | index " << primitive.mIndexBuffer << " +" << primitive.mIndexOffset << " count "
+                             << primitive.mIndexCount;
+                    drawLog(line.str());
+                }
                 bool bound = false;
                 for (size_t i = 0; i < entry->mPrimitives.size(); ++i)
                 {
@@ -5127,6 +5551,7 @@ void main()
                 VkBuffer mBuffer = VK_NULL_HANDLE;
                 VkDeviceSize mOffset = 0;
                 uint64_t mFrame = ~0ull;
+                const uint8_t* mData = nullptr; // where it was written (the draw log reads it)
             };
             std::unordered_map<uint64_t, SharedBlock> mSharedBlocks;
             std::unordered_map<StepKey, Step, StepHash> mSteps;
@@ -5228,6 +5653,7 @@ void main()
             bool mFlip = false;
             float mViewportDepth[2]{ -1.f, -1.f };
             unsigned mDraws = 0, mSkipped = 0, mLeaves = 0;
+            unsigned mDrawIndex = 0; // the frame's draws so far, for debug.alpha3.vkskipdraws
             osg::Timer_t mLastReport = 0;
             double mRecordSeconds = 0.0, mWaitSeconds = 0.0;
         };

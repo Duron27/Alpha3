@@ -15,6 +15,20 @@
 #include <components/debug/debuglog.hpp>
 #include <components/settings/settings.hpp>
 
+namespace
+{
+    // A lost device does not come back: every later call fails, and the swap chain cannot be made again (the window is
+    // still held by the dead one). Stop with the reason in the log rather than crash later on a missing swap chain.
+    void stopIfLost(VkResult result, const char* where)
+    {
+        if (result != VK_ERROR_DEVICE_LOST)
+            return;
+        Log(Debug::Error) << "Vulkan: the GPU driver lost the device (" << where
+                          << "): the GPU hung or faulted on the work sent; the game cannot go on";
+        std::abort();
+    }
+}
+
 namespace Alpha3::Vk
 {
     namespace
@@ -446,7 +460,7 @@ namespace Alpha3::Vk
     {
         if (mAcquired)
             return true;
-        if (mRecreate)
+        if (mRecreate || mSwapchain == VK_NULL_HANDLE)
         {
             destroySwapchain();
             if (!createSwapchain())
@@ -466,6 +480,7 @@ namespace Alpha3::Vk
         if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)
         {
             Log(Debug::Error) << "Vulkan: vkAcquireNextImageKHR: " << resultName(result);
+            stopIfLost(result, "vkAcquireNextImageKHR");
             return false;
         }
         mAcquired = true;
@@ -491,7 +506,10 @@ namespace Alpha3::Vk
         submit.pCommandBuffers = buffers;
         const VkResult result = vkQueueSubmit(mDevice.mQueue, 1, &submit, VK_NULL_HANDLE);
         if (result != VK_SUCCESS)
+        {
             Log(Debug::Error) << "Vulkan: vkQueueSubmit (first part): " << resultName(result);
+            stopIfLost(result, "vkQueueSubmit (first part)");
+        }
         mPart = 1;
         ++mCommandsGeneration;
         VkCommandBufferBeginInfo begin{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
@@ -745,7 +763,10 @@ namespace Alpha3::Vk
         VkResult result = vkQueueSubmit(mDevice.mQueue, 1, &submit, frame.mFence);
         const bool submitted = result == VK_SUCCESS;
         if (result != VK_SUCCESS)
+        {
             Log(Debug::Error) << "Vulkan: vkQueueSubmit: " << resultName(result);
+            stopIfLost(result, "vkQueueSubmit");
+        }
 
         if (mAcquired)
         {
@@ -768,7 +789,10 @@ namespace Alpha3::Vk
                     || caps.currentExtent.height != mSurfaceExtent.height;
             }
             else if (result != VK_SUCCESS)
+            {
                 Log(Debug::Error) << "Vulkan: vkQueuePresentKHR: " << resultName(result);
+                stopIfLost(result, "vkQueuePresentKHR");
+            }
         }
 
         if (!after.empty())

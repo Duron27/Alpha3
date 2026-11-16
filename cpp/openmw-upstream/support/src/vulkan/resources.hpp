@@ -38,6 +38,7 @@ namespace Alpha3::Vk
         VmaAllocation_T* mMemory = nullptr;
         uint8_t* mMapped = nullptr;
         VkDeviceSize mSize = 0;
+        bool mCoherent = true; // false: what the CPU writes reaches the GPU only once flushed
     };
 
     // A piece of the frame's memory
@@ -80,8 +81,12 @@ namespace Alpha3::Vk
     public:
         uint64_t mKeptTargets = 0; // keepTarget() targets alive at the last purge
         uint64_t mStreamedBytes = 0; // what stream() handed out since the translator last reported it
-        // goes up each time an image (and its views) is let go: descriptor sets made before then are made again
-        uint64_t mImageGeneration = 0;
+        // goes up each time an image (and its views) or a stream chunk is let go: descriptor sets made before then are made
+        // again. A chunk too: one let go and another made can get the same VkBuffer handle, and a kept set
+        // matched by handle then sent the GPU to the old one's freed memory (light counts read from it as garbage
+        // looped the lighting shader until the GPU hung, after shadows were turned on in game)
+        uint64_t mGeneration = 0;
+        uint64_t mResetContextFrame = ~0ull; // the context's frame number at the last stream reset
         explicit Resources(Context& context);
         ~Resources();
 
