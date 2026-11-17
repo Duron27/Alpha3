@@ -1,7 +1,11 @@
 #include "vk.hpp"
 
+#include <cctype>
 #include <cstdlib>
 #include <dlfcn.h>
+#ifdef __ANDROID__
+#include <sys/system_properties.h>
+#endif
 
 #include <components/debug/debuglog.hpp>
 
@@ -88,5 +92,30 @@ namespace Alpha3::Vk
             default:
                 return "VK_ERROR (other)";
         }
+    }
+
+    std::string debugSetting(const char* name)
+    {
+#ifdef __ANDROID__
+        char value[PROP_VALUE_MAX] = {};
+        if (__system_property_get((std::string("debug.alpha3.") + name).c_str(), value) > 0 && value[0] != '\0')
+            return value;
+#endif
+        std::string variable = "ALPHA3_";
+        for (const char* c = name; *c != '\0'; ++c)
+            variable += static_cast<char>(std::toupper(static_cast<unsigned char>(*c)));
+        const char* text = std::getenv(variable.c_str());
+        return text != nullptr ? text : "";
+    }
+
+    int debugNumber(const char* name)
+    {
+        return std::atoi(debugSetting(name).c_str());
+    }
+
+    bool diagnostics()
+    {
+        static const bool on = debugNumber("vkdiag") != 0;
+        return on;
     }
 }

@@ -1308,7 +1308,10 @@ void main()
                                      << mSkipped << " left out, "
                                      << (seconds > 0 ? 300.0 / seconds : 0.0) << " fps; per frame "
                                      << mRecordSeconds / 300 * 1000 << " ms recording, " << mWaitSeconds / 300 * 1000
-                                     << " ms waiting for the GPU; states " << mSteps.size() << ", "
+                                     << " ms waiting for the GPU (context: fence "
+                                     << mContext.mFenceSeconds / 300 * 1000 << " ms, swap chain image "
+                                     << mContext.mAcquireSeconds / 300 * 1000 << " ms, present "
+                                     << mContext.mPresentSeconds / 300 * 1000 << " ms); states " << mSteps.size() << ", "
                                      << mStepsNew / 300 << " new and " << mStepsChanged / 300
                                      << " made volatile a frame; " << mResources.mStreamedBytes / 300 / 1024
                                      << " KiB streamed a frame; " << mClippedDraws / 300 << " clipped draws a frame; "
@@ -1351,6 +1354,12 @@ void main()
                         Log(Debug::Info) << out.str();
                         mGpuSums.clear();
                     }
+                    if (diagnostics())
+                    {
+                        Log(Debug::Info) << "Vulkan memory: " << memoryBudgetLine();
+                        Log(Debug::Info) << mResources.textureSummary();
+                    }
+                    mContext.mFenceSeconds = mContext.mAcquireSeconds = mContext.mPresentSeconds = 0.0;
                     mResources.mStreamedBytes = 0;
                     mLastReport = now;
                     mRecordSeconds = mWaitSeconds = 0.0;
@@ -2729,14 +2738,7 @@ void main()
             // water reflection's pass
             static unsigned skipAsked()
             {
-                static const unsigned bits = [] {
-#ifdef __ANDROID__
-                    char value[PROP_VALUE_MAX] = {};
-                    if (__system_property_get("debug.alpha3.vkskip", value) > 0)
-                        return static_cast<unsigned>(std::atoi(value));
-#endif
-                    return 0u;
-                }();
+                static const unsigned bits = static_cast<unsigned>(debugNumber("vkskip"));
                 return bits;
             }
 
@@ -2745,14 +2747,7 @@ void main()
             // draw
             static int noCacheAsked()
             {
-                static const int bits = [] {
-#ifdef __ANDROID__
-                    char value[PROP_VALUE_MAX] = {};
-                    if (__system_property_get("debug.alpha3.vknocache", value) > 0)
-                        return std::atoi(value);
-#endif
-                    return 0;
-                }();
+                static const int bits = debugNumber("vknocache");
                 return bits;
             }
 
@@ -2761,14 +2756,7 @@ void main()
             // with where its value came from (the first 20 times)
             static bool checkUniformsAsked()
             {
-                static const bool on = [] {
-#ifdef __ANDROID__
-                    char value[PROP_VALUE_MAX] = {};
-                    if (__system_property_get("debug.alpha3.vkcheckuniforms", value) > 0)
-                        return std::atoi(value) != 0;
-#endif
-                    return false;
-                }();
+                static const bool on = debugNumber("vkcheckuniforms") != 0 || diagnostics();
                 return on;
             }
 
@@ -2863,11 +2851,8 @@ void main()
             {
                 static const std::vector<std::string> words = [] {
                     std::vector<std::string> out;
-#ifdef __ANDROID__
-                    char value[PROP_VALUE_MAX] = {};
-                    if (__system_property_get("debug.alpha3.vkskipshader", value) > 0)
+                    if (const std::string all = debugSetting("vkskipshader"); !all.empty())
                     {
-                        std::string all(value);
                         for (size_t start = 0; start < all.size();)
                         {
                             const size_t end = std::min(all.find(',', start), all.size());
@@ -2876,7 +2861,6 @@ void main()
                             start = end + 1;
                         }
                     }
-#endif
                     return out;
                 }();
                 return words;
@@ -2888,15 +2872,9 @@ void main()
             {
                 static const std::pair<unsigned, unsigned> range = [] {
                     std::pair<unsigned, unsigned> out{ 0, 0 };
-#ifdef __ANDROID__
-                    char value[PROP_VALUE_MAX] = {};
-                    if (__system_property_get("debug.alpha3.vkskipdraws", value) > 0)
-                    {
-                        unsigned first = 0, count = 0;
-                        if (std::sscanf(value, "%u,%u", &first, &count) == 2)
-                            out = { first, count };
-                    }
-#endif
+                    unsigned first = 0, count = 0;
+                    if (std::sscanf(debugSetting("vkskipdraws").c_str(), "%u,%u", &first, &count) == 2)
+                        out = { first, count };
                     return out;
                 }();
                 return range;
@@ -2916,14 +2894,7 @@ void main()
             // draws bind before and after, for faults that come with a change of state (the shadow toggle)
             static int drawLogAsked()
             {
-                static const int frames = [] {
-#ifdef __ANDROID__
-                    char value[PROP_VALUE_MAX] = {};
-                    if (__system_property_get("debug.alpha3.vkdrawlog", value) > 0)
-                        return std::atoi(value);
-#endif
-                    return 0;
-                }();
+                static const int frames = debugNumber("vkdrawlog");
                 return frames;
             }
 
@@ -3062,26 +3033,18 @@ void main()
 
             static const std::string& stageLogged()
             {
-                static const std::string name = [] {
-#ifdef __ANDROID__
-                    char value[PROP_VALUE_MAX] = {};
-                    if (__system_property_get("debug.alpha3.vkstage", value) > 0)
-                        return std::string(value);
-#endif
-                    return std::string();
-                }();
+                static const std::string name = debugSetting("vkstage");
                 return name;
             }
 
             static bool gpuSplitAsked()
             {
-#ifdef __ANDROID__
-                char value[PROP_VALUE_MAX] = {};
-                return __system_property_get("debug.alpha3.gpusplit", value) > 0 && value[0] == '1';
-#else
-                const char* value = std::getenv("ALPHA3_GPU_SPLIT");
-                return value != nullptr && value[0] == '1';
-#endif
+                // read each frame: the property can be set while the game runs
+                const std::string value = debugSetting("gpusplit");
+                if (!value.empty())
+                    return value[0] == '1';
+                const char* old = std::getenv("ALPHA3_GPU_SPLIT");
+                return old != nullptr && old[0] == '1';
             }
 
             // The phase the frame being recorded is measured in (-1 not measured), and what its scene leaves out
@@ -3471,6 +3434,7 @@ void main()
                     const osg::Texture* texture = source.mTexture;
                     VkSampler sampler = VK_NULL_HANDLE;
                     Image* image = texture ? mResources.texture(*texture, source.mShadow, sampler) : nullptr;
+                    Image* const sampled = image;
                     // a texture the pass draws into is not read in it
                     if (image != nullptr && (image == mTarget.mColor || image == mTarget.mDepth))
                         image = nullptr;
@@ -3481,11 +3445,29 @@ void main()
                     if (source.mShadow && (skipAsked() & 2))
                         image = nullptr;
                     const bool dummy = image == nullptr;
-                    if (dummy && texture != nullptr && mDummyLogged.size() < 40 && mDummyLogged.insert(texture).second)
+                    if (dummy && texture != nullptr)
+                        ++mResources.mDummyDraws;
+                    // why: the upload's failure, else what the draw itself ruled out
+                    const char* why = nullptr;
+                    if (dummy && texture != nullptr)
+                    {
+                        why = mResources.failureOf(texture);
+                        if (why == nullptr)
+                            why = source.mShadow && (skipAsked() & 2) ? "vkskip 2"
+                                : (sampled != nullptr && (sampled == mTarget.mColor || sampled == mTarget.mDepth))
+                                ? "the pass draws into it"
+                                : (sampled != nullptr && source.mShadow && !sampled->mDepthAspect)
+                                ? "shadow sampler on a colour image"
+                                : "not uploaded yet (or a render target not drawn yet)";
+                    }
+                    if (dummy && texture != nullptr && mDummyLogged.size() < (diagnostics() ? 400u : 40u)
+                        && mDummyLogged.insert(texture).second)
                     {
                         auto& mutableTexture = const_cast<osg::Texture&>(*texture);
                         const osg::Image* first = mutableTexture.getNumImages() ? mutableTexture.getImage(0) : nullptr;
-                        Log(Debug::Verbose) << "Vulkan: texture drawn as the dummy: " << texture->className() << " '"
+                        Log(diagnostics() ? Debug::Info : Debug::Verbose)
+                            << "Vulkan: texture drawn as the dummy (" << why << ", frame " << mFrameCounter << "): "
+                            << texture->className() << " '"
                                             << texture->getName() << "' image "
                                             << (first ? first->getFileName() : std::string("none")) << " "
                                             << (first ? first->s() : 0) << "x" << (first ? first->t() : 0)

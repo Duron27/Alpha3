@@ -1,6 +1,8 @@
 #include "context.hpp"
 
 #include <algorithm>
+#include <chrono>
+#include <sstream>
 #include <cmath>
 #include <cstdlib>
 
@@ -25,6 +27,7 @@ namespace
             return;
         Log(Debug::Error) << "Vulkan: the GPU driver lost the device (" << where
                           << "): the GPU hung or faulted on the work sent; the game cannot go on";
+        Alpha3::Vk::logDeviceFault();
         std::abort();
     }
 }
@@ -315,8 +318,27 @@ namespace Alpha3::Vk
         }
         mSurfaceTransform = caps.currentTransform;
         mSurfaceExtent = caps.currentExtent;
-        Log(Debug::Info) << "Vulkan: swap chain " << mExtent.width << "x" << mExtent.height << ", " << count
-                         << " images, format " << mFormat;
+        {
+            // a window that is not pre-rotated is turned by the compositor (or the display hardware): on some phones
+            // that costs a full-screen pass a frame. currentTransform other than 1 (identity) while preTransform is 1
+            // means that.
+            std::ostringstream formatsText;
+            for (const VkSurfaceFormatKHR& f : formats)
+                formatsText << " " << f.format << "/" << f.colorSpace;
+            Log(Debug::Info) << "Vulkan: swap chain " << mExtent.width << "x" << mExtent.height << " (asked "
+                             << mWanted.width << "x" << mWanted.height << ", window " << caps.currentExtent.width
+                             << "x" << caps.currentExtent.height << "), " << count << " images (asked " << images
+                             << ", driver min " << caps.minImageCount << " max " << caps.maxImageCount << "), format "
+                             << mFormat << " colour space " << chosen.colorSpace << " (offered" << formatsText.str()
+                             << "), present mode " << static_cast<int>(presentMode) << ", transform: current 0x"
+                             << std::hex << caps.currentTransform << " supported 0x" << caps.supportedTransforms
+                             << " used 0x" << info.preTransform << ", composite alpha used 0x" << info.compositeAlpha
+                             << " supported 0x" << caps.supportedCompositeAlpha << ", usage 0x" << info.imageUsage
+                             << std::dec << ", " << mInFlight << " frames in flight";
+            if (caps.currentTransform != info.preTransform)
+                Log(Debug::Info) << "Vulkan: the window is not pre-rotated: the system turns each frame (can cost "
+                                    "speed on some GPUs)";
+        }
         mRecreate = false;
         return true;
     }
@@ -443,7 +465,9 @@ namespace Alpha3::Vk
         if (mSwapchain == VK_NULL_HANDLE)
             return false;
         Frame& frame = mFrames[mFrameSlot];
+        const auto fenceBegun = std::chrono::steady_clock::now();
         vkWaitForFences(mDevice.mDevice, 1, &frame.mFence, VK_TRUE, UINT64_MAX);
+        mFenceSeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - fenceBegun).count();
         for (auto& release : frame.mReleases)
             release();
         frame.mReleases.clear();
@@ -475,6 +499,13 @@ namespace Alpha3::Vk
                 return false;
         }
         Frame& frame = mFrames[mFrameSlot];
+        const auto acquireBegun = std::chrono::steady_clock::now();
+        struct Timed
+        {
+            double& mSum;
+            std::chrono::steady_clock::time_point mBegun;
+            ~Timed() { mSum += std::chrono::duration<double>(std::chrono::steady_clock::now() - mBegun).count(); }
+        } timed{ mAcquireSeconds, acquireBegun };
         VkResult result
             = vkAcquireNextImageKHR(mDevice.mDevice, mSwapchain, UINT64_MAX, frame.mAcquired, VK_NULL_HANDLE, &mImage);
         if (result == VK_ERROR_OUT_OF_DATE_KHR)
@@ -801,7 +832,10 @@ namespace Alpha3::Vk
             present.swapchainCount = 1;
             present.pSwapchains = &mSwapchain;
             present.pImageIndices = &mImage;
+            const auto presentBegun = std::chrono::steady_clock::now();
             result = vkQueuePresentKHR(mDevice.mQueue, &present);
+            mPresentSeconds
+                += std::chrono::duration<double>(std::chrono::steady_clock::now() - presentBegun).count();
             if (result == VK_ERROR_OUT_OF_DATE_KHR)
                 mRecreate = true;
             else if (result == VK_SUBOPTIMAL_KHR)

@@ -857,14 +857,7 @@ namespace Alpha3::Vk
         // debug.alpha3.vkdedicated (off by default): render targets in memory of their own, 1 the depth-only ones,
         // 2 all of them (whether a driver writes past an image's memory into its neighbours')
         {
-            static const int dedicated = [] {
-#ifdef __ANDROID__
-                char value[PROP_VALUE_MAX] = {};
-                if (__system_property_get("debug.alpha3.vkdedicated", value) > 0)
-                    return std::atoi(value);
-#endif
-                return 0;
-            }();
+            static const int dedicated = debugNumber("vkdedicated");
             const bool attachment
                 = (usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) != 0;
             if ((dedicated == 2 && attachment)
@@ -912,7 +905,14 @@ namespace Alpha3::Vk
         info.subresourceRange.levelCount = image.mMips;
         info.subresourceRange.layerCount = image.mLayers;
         VkImageView view = VK_NULL_HANDLE;
-        vkCreateImageView(mContext.vkDevice(), &info, nullptr, &view);
+        if (const VkResult result = vkCreateImageView(mContext.vkDevice(), &info, nullptr, &view); result != VK_SUCCESS)
+        {
+            static int logged = 0;
+            if (logged++ < 20)
+                Log(Debug::Error) << "Vulkan: vkCreateImageView (format " << image.mFormat << ", type " << type
+                                  << ", " << image.mMips << " mips, " << image.mLayers << " layers): "
+                                  << resultName(result);
+        }
         image.mViews[type] = view;
         return view;
     }
@@ -966,8 +966,13 @@ namespace Alpha3::Vk
                 textureStreamingTextureLoading(*image);
             }
         const osg::Image* first = images > 0 ? mutableTexture.getImage(0) : nullptr;
+        mLastFailure = nullptr;
         if (first == nullptr || first->data() == nullptr || first->s() <= 0 || first->t() <= 0)
+        {
+            noteFailure(first == nullptr ? "no image" : first->data() == nullptr ? "image without pixels" : "empty image",
+                texture, first);
             return nullptr;
+        }
 
         VkImageViewType type = VK_IMAGE_VIEW_TYPE_2D;
         uint32_t layers = 1;
@@ -991,7 +996,10 @@ namespace Alpha3::Vk
         {
             const osg::Image* layer = mutableTexture.getImage(std::min(i, images - 1));
             if (layer == nullptr || layer->data() == nullptr || layer->s() != first->s() || layer->t() != first->t())
+            {
+                noteFailure("layers or faces missing or of other sizes", texture, first);
                 return nullptr;
+            }
         }
 
         const Device& device = mContext.device();
@@ -1013,6 +1021,9 @@ namespace Alpha3::Vk
                     Log(Debug::Warning) << "Vulkan: compressed texture format 0x" << std::hex
                                         << first->getPixelFormat() << std::dec << " is not supported ("
                                         << texture.getName() << ")";
+                noteFailure(format == VK_FORMAT_UNDEFINED ? "compressed format unknown"
+                                                          : "compressed format the GPU cannot sample",
+                    texture, first);
                 return nullptr;
             }
         }
@@ -1027,7 +1038,35 @@ namespace Alpha3::Vk
                 if (first->getPixelFormat() != 0x1902 /* GL_DEPTH_COMPONENT */ && warned++ < 10)
                     Log(Debug::Warning) << "Vulkan: texture pixel format 0x" << std::hex << first->getPixelFormat()
                                         << " type 0x" << first->getDataType() << std::dec << " is not supported";
+                if (first->getPixelFormat() != 0x1902)
+                    noteFailure("pixel format not mapped to Vulkan", texture, first);
                 return nullptr;
+            }
+        }
+
+        // a format the GPU cannot sample, or filter linearly while the texture asks for it, samples as undefined
+        // (white, black or garbage): logged once a format, the texture still made (what the driver does is the clue)
+        {
+            static std::map<std::pair<int, int>, bool> warned;
+            const bool linear = texture.getFilter(osg::Texture::MAG_FILTER) != 0x2600
+                || (texture.getFilter(osg::Texture::MIN_FILTER) != 0x2600
+                    && texture.getFilter(osg::Texture::MIN_FILTER) != 0x2700);
+            if (!formatSupports(device.mPhysical, format, VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT))
+            {
+                if (!warned[{ format, 0 }])
+                    Log(Debug::Warning) << "Vulkan: texture format " << format << " cannot be sampled on this GPU ('"
+                                        << texture.getName() << "' " << first->getFileName() << "): drawn anyway";
+                warned[{ format, 0 }] = true;
+                ++mFailures["format not sampled by the GPU (drawn anyway)"];
+            }
+            else if (linear && !formatSupports(device.mPhysical, format, VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT))
+            {
+                if (!warned[{ format, 1 }])
+                    Log(Debug::Warning) << "Vulkan: texture format " << format
+                                        << " cannot be filtered linearly on this GPU, the texture asks for it ('"
+                                        << texture.getName() << "' " << first->getFileName() << "): drawn anyway";
+                warned[{ format, 1 }] = true;
+                ++mFailures["format not linearly filterable (drawn anyway)"];
             }
         }
 
@@ -1090,12 +1129,18 @@ namespace Alpha3::Vk
             }
         }
         if (!mUploadAll && mUploadedThisFrame > 0 && mUploadedThisFrame + total > sUploadBudget)
+        {
+            ++mDeferred;
             return nullptr; // next frame
+        }
         mUploadedThisFrame += total;
 
         Span staging = stream(total, 16);
         if (staging.mData == nullptr)
+        {
+            noteFailure("no staging memory", texture, first);
             return nullptr;
+        }
         std::vector<VkBufferImageCopy> copies;
         VkDeviceSize at = 0;
         const unsigned sourceTexelBytes = compressed ? 0 : osg::Image::computePixelSizeInBits(
@@ -1132,9 +1177,13 @@ namespace Alpha3::Vk
             usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
         std::unique_ptr<Image> image = createImage(format, type, width, height, depth, mips, layers, usage);
         if (!image)
+        {
+            noteFailure("image could not be made (memory?)", texture, first);
             return nullptr;
+        }
         if (!compressed)
             image->mSwizzle = layout.mSwizzle;
+        ++mUploadedFormats[format];
 
         VkCommandBuffer commands = mContext.uploadCommands();
         transition(*image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, mips);
@@ -1165,6 +1214,43 @@ namespace Alpha3::Vk
             transition(*image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, mips);
         image->mLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         return image;
+    }
+
+    void Resources::noteFailure(const char* reason, const osg::Texture& texture, const osg::Image* image)
+    {
+        mLastFailure = reason;
+        const uint64_t count = ++mFailures[reason];
+        // the first few of each reason, always (a texture that is not uploaded is drawn white)
+        if (count <= 5 || (diagnostics() && count <= 50))
+            Log(Debug::Warning) << "Vulkan: texture not uploaded (" << reason << "): " << texture.className() << " '"
+                                << texture.getName() << "' image " << (image ? image->getFileName() : std::string("none"))
+                                << " " << (image ? image->s() : 0) << "x" << (image ? image->t() : 0) << " format 0x"
+                                << std::hex << (image ? image->getPixelFormat() : 0) << " type 0x"
+                                << (image ? image->getDataType() : 0) << " internal 0x"
+                                << (image ? image->getInternalTextureFormat() : 0) << std::dec << " mips "
+                                << (image ? image->getNumMipmapLevels() : 0) << " target 0x" << std::hex
+                                << texture.getTextureTarget() << std::dec;
+    }
+
+    const char* Resources::failureOf(const osg::Texture* texture) const
+    {
+        auto found = mTextures.find(texture);
+        return found != mTextures.end() ? found->second.mFailure : nullptr;
+    }
+
+    std::string Resources::textureSummary() const
+    {
+        std::string out = "Vulkan textures: uploaded by VkFormat:";
+        for (const auto& [format, count] : mUploadedFormats)
+            out += " " + std::to_string(format) + "=" + std::to_string(count);
+        out += "; put off to a later frame " + std::to_string(mDeferred) + "; problems:";
+        if (mFailures.empty())
+            out += " none";
+        for (const auto& [reason, count] : mFailures)
+            out += " [" + reason + "] " + std::to_string(count);
+        out += "; bound as the white dummy " + std::to_string(mDummyDraws) + " times; "
+            + std::to_string(mTextures.size()) + " textures known";
+        return out;
     }
 
     Image* Resources::texture(const osg::Texture& texture, bool shadow, VkSampler& sampler)
@@ -1221,6 +1307,7 @@ namespace Alpha3::Vk
             return entry.mImage;
         }
         std::unique_ptr<Image> image = upload(texture);
+        entry.mFailure = mLastFailure;
         if (!image)
             return same ? entry.mImage : nullptr; // the old one until the new one is up
         destroyLater(entry.mOwned);
@@ -1409,7 +1496,13 @@ namespace Alpha3::Vk
             : key[8] == 1             ? VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK
                                       : VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
         VkSampler sampler = VK_NULL_HANDLE;
-        vkCreateSampler(device.mDevice, &info, nullptr, &sampler);
+        if (const VkResult result = vkCreateSampler(device.mDevice, &info, nullptr, &sampler); result != VK_SUCCESS)
+        {
+            static int logged = 0;
+            if (logged++ < 20)
+                Log(Debug::Error) << "Vulkan: vkCreateSampler (" << mSamplers.size() << " made, the GPU allows "
+                                  << device.mProperties.limits.maxSamplerAllocationCount << "): " << resultName(result);
+        }
         mSamplers[key] = sampler;
         return sampler;
     }

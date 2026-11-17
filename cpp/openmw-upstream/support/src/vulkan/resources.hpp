@@ -15,6 +15,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -87,12 +88,18 @@ namespace Alpha3::Vk
         // looped the lighting shader until the GPU hung, after shadows were turned on in game)
         uint64_t mGeneration = 0;
         uint64_t mResetContextFrame = ~0ull; // the context's frame number at the last stream reset
+        uint64_t mDummyDraws = 0; // textures bound as the white dummy (the translator counts them)
         explicit Resources(Context& context);
         ~Resources();
 
         // At the start of a frame (its command buffer begun): the ring's part for this frame is free again, and what
         // was let go of long enough ago is destroyed
         void beginFrame();
+
+        // Why the texture's last upload failed (null when it did not fail, or it was only put off to a later frame)
+        const char* failureOf(const osg::Texture* texture) const;
+        // One log line: textures uploaded by format, put off, and not uploaded by reason (diagnostics())
+        std::string textureSummary() const;
         // At the start of a frame of the context's that is not the translator's (frame generation): only the ring's
         // part for it is free again
         void resetStream();
@@ -205,6 +212,7 @@ namespace Alpha3::Vk
             uint64_t mChecked = ~0ull; // the frame it was last checked in
             VkSampler mSampler[2]{}; // plain and shadow, made from the texture's parameters in that frame
             uint64_t mSamplerFrame[2]{ ~0ull, ~0ull };
+            const char* mFailure = nullptr; // why its last upload failed
         };
         Image* textureChecked(const osg::Texture& texture, TextureEntry& entry);
         struct TargetEntry
@@ -245,6 +253,12 @@ namespace Alpha3::Vk
         VkSampler mNearest = VK_NULL_HANDLE;
         VkSampler mLinear = VK_NULL_HANDLE;
         VkDeviceSize mUploadedThisFrame = 0;
+        // diagnostics: what upload() did, and why it gave up
+        const char* mLastFailure = nullptr;
+        std::map<int, uint64_t> mUploadedFormats;
+        std::map<std::string, uint64_t> mFailures;
+        uint64_t mDeferred = 0;
+        void noteFailure(const char* reason, const osg::Texture& texture, const osg::Image* image);
         bool mUploadAll = false; // uploadAll
         uint64_t mFrame = 0;
     };

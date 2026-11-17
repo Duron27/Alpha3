@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <string>
 
 struct VmaAllocator_T;
 struct VmaAllocation_T;
@@ -45,7 +46,18 @@ namespace Alpha3::Vk
         bool mEtc2Textures = false;
         bool mAstcTextures = false;
         VkFormat mDepthFormat = VK_FORMAT_UNDEFINED; // a depth and stencil format for attachments that are sampled too
+
+        // Diagnostics (none of them changes what is drawn)
+        bool mMemoryBudget = false; // VK_EXT_memory_budget: VMA reads the driver's budgets (the periodic log line)
+        bool mDeviceFault = false; // VK_EXT_device_fault: a lost device logs the fault the driver saw
+        bool mDebugUtils = false; // VK_EXT_debug_utils on the instance: the driver's messages logged (diagnostics())
+        std::string mDriverName; // VkPhysicalDeviceDriverProperties where the driver has them, else empty
     };
+
+    // On VK_ERROR_DEVICE_LOST: what the driver says faulted (VK_EXT_device_fault), when it can say
+    void logDeviceFault();
+    // The heaps' use against the driver's budgets, one line (VK_EXT_memory_budget, else VMA's own count)
+    std::string memoryBudgetLine();
 
     // The device, made on the first call (null when Vulkan cannot start; the reason is logged)
     Device* device();

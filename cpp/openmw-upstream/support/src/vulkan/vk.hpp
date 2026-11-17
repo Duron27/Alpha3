@@ -13,6 +13,8 @@
 #endif
 #include <vulkan/vulkan.h>
 
+#include <string>
+
 
 // Loaded before an instance exists
 #define ALPHA3_VK_GLOBAL_FUNCTIONS(X)                                                                                   \
@@ -41,7 +43,9 @@
     X(vkGetPhysicalDeviceSurfacePresentModesKHR)                                                                       \
     X(vkCreateAndroidSurfaceKHR)                                                                                       \
     X(vkGetPhysicalDeviceFeatures2) /* 1.1; null on a 1.0 instance */                                                \
-    X(vkGetPhysicalDeviceProperties2) /* 1.1 */
+    X(vkGetPhysicalDeviceProperties2) /* 1.1 */                                                                      \
+    X(vkCreateDebugUtilsMessengerEXT) /* VK_EXT_debug_utils; null without it */                                      \
+    X(vkDestroyDebugUtilsMessengerEXT)
 
 // Loaded from the device
 #define ALPHA3_VK_DEVICE_FUNCTIONS(X)                                                                                   \
@@ -165,6 +169,18 @@ namespace Alpha3::Vk
 
     // VK_SUCCESS as "success", VK_ERROR_DEVICE_LOST as "VK_ERROR_DEVICE_LOST", ...
     const char* resultName(VkResult result);
+
+    // A dev switch, off (empty) by default: the property debug.alpha3.<name> (adb shell setprop), else the environment
+    // variable ALPHA3_<NAME> (the launcher's Launch options, for testers without adb), e.g. vkskip / ALPHA3_VKSKIP
+    std::string debugSetting(const char* name);
+    int debugNumber(const char* name); // debugSetting as a number (0 when unset)
+
+    // Extra Vulkan diagnostics in openmw.log, off by default: ALPHA3_VKDIAG=1 in the launcher's Launch options, or
+    // adb shell setprop debug.alpha3.vkdiag 1. The driver's own messages (VK_EXT_debug_utils, where it has it), every
+    // texture drawn as the white dummy and why, the uniform check (vkcheckuniforms), and memory budgets and a texture
+    // summary with the periodic frame line. Read once. The rest (always on): the device report at start, textures
+    // not uploaded and formats the GPU cannot sample, swap chain details, and the driver's fault on a lost device.
+    bool diagnostics();
 }
 
 #endif

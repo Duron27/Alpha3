@@ -555,7 +555,10 @@ namespace Alpha3::Vk
             info.bindingCount = static_cast<uint32_t>(bindings.size());
             info.pBindings = bindings.data();
             VkDescriptorSetLayout layout = VK_NULL_HANDLE;
-            vkCreateDescriptorSetLayout(device, &info, nullptr, &layout);
+            const VkResult result = vkCreateDescriptorSetLayout(device, &info, nullptr, &layout);
+            if (result != VK_SUCCESS)
+                Log(Debug::Error) << "Vulkan: vkCreateDescriptorSetLayout (" << bindings.size()
+                                  << " bindings): " << resultName(result);
             return layout;
         }
 
@@ -565,7 +568,10 @@ namespace Alpha3::Vk
             info.codeSize = spirv.size() * sizeof(unsigned);
             info.pCode = spirv.data();
             VkShaderModule module = VK_NULL_HANDLE;
-            vkCreateShaderModule(device, &info, nullptr, &module);
+            const VkResult result = vkCreateShaderModule(device, &info, nullptr, &module);
+            if (result != VK_SUCCESS)
+                Log(Debug::Error) << "Vulkan: vkCreateShaderModule (" << spirv.size() * 4 << " bytes of SPIR-V): "
+                                  << resultName(result);
             return module;
         }
 
@@ -1479,14 +1485,7 @@ namespace Alpha3::Vk
         raster.frontFace = static_cast<VkFrontFace>(state.mFrontFace);
         // Dev hook, off by default: adb shell setprop debug.alpha3.vkraster <bits>, read at start: 1 no depth clamp,
         // 2 no depth bias (to find which one a driver fails on)
-        static const unsigned rasterOff = [] {
-#ifdef __ANDROID__
-            char value[PROP_VALUE_MAX] = {};
-            if (__system_property_get("debug.alpha3.vkraster", value) > 0)
-                return static_cast<unsigned>(std::atoi(value));
-#endif
-            return 0u;
-        }();
+        static const unsigned rasterOff = static_cast<unsigned>(debugNumber("vkraster"));
         raster.depthClampEnable
             = state.mDepthClamp && mContext.device().mFeatures.depthClamp && !(rasterOff & 1) ? VK_TRUE : VK_FALSE;
         raster.depthBiasEnable = state.mDepthBias && !(rasterOff & 2);

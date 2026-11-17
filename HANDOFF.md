@@ -1021,3 +1021,19 @@ screen. A canal seen level (Balmora, 1.3%) lost its bridges and walls and reflec
 was right. New `[Water] reflection objects near = 6000` (game units): under the cover limit, objects nearer than that
 are still reflected; only distant ones are left out. Balmora canal level view: reflection 69 → 215-355 draws, about
 2 → 5-8 ms GPU, matches the looked-down picture.
+
+## 2026-11-16 (night): Vulkan diagnostics for Mali testers (no device here) — UNCOMMITTED, builds
+
+Mali (G76 tester) reports white textures and Vulkan slower than GLES. Added logging, nothing that changes rendering:
+- Every `debug.alpha3.<name>` switch is now read through `Vk::debugSetting()` (vk.cpp): the property first, else the
+  env var `ALPHA3_<NAME>` (e.g. `ALPHA3_VKSKIP`). All are in the launcher's Launch options ("Logging and debugging").
+- `ALPHA3_VKDIAG=1` / `debug.alpha3.vkdiag`: driver messages (VK_EXT_debug_utils), every texture drawn as the white
+  dummy with the reason (Info, up to 400), vkcheckuniforms, "Vulkan memory:" budgets and "Vulkan textures:" summary
+  with the periodic frame line.
+- Always on: device report at start (vendor, driver name/info/version, memory heaps/types, queue families, limits,
+  features, per-format s/f/b/c/a/d support table, device + instance extensions); swap chain line with transforms
+  (not pre-rotated warning), colour space, image counts; "texture not uploaded (reason)" (5 per reason); warning when
+  a texture's format cannot be sampled / linearly filtered; vkCreateShaderModule / set layout / image view / sampler
+  failures; on DEVICE_LOST, VK_EXT_device_fault addresses and memory budgets; the periodic line now has fence /
+  swap chain image / present wait ms.
+- Tester: set only ALPHA3_VKDIAG=1, load a save with white textures, ~30 s, send openmw.log.

@@ -202,6 +202,62 @@ object LaunchEnvironment {
             OptionKind.TEXT, "FrameNumber;Loading;Compiling;Texture", "not set",
         ),
         OptionSpec(
+            "ALPHA3_VKDIAG", GROUP_DEBUG, "Alpha3 (Vulkan)",
+            "Vulkan diagnostics for bug reports (any GPU, e.g. Mali): the driver's own messages, every texture drawn white " +
+                    "and why, a uniform check, memory use and a texture summary every 300 frames in openmw.log. A little slower. " +
+                    "Same as adb shell setprop debug.alpha3.vkdiag 1.",
+            OptionKind.FLAG, "1", "not set",
+        ),
+        OptionSpec(
+            "ALPHA3_VKSKIP", GROUP_DEBUG, "Alpha3 (Vulkan)",
+            "Leaves parts of the frame out, to find which one a driver fails on (bits, add them up): 1 shadow map draws, " +
+                    "2 shadows read nothing, 4 no shadow passes, 32 only the GUI drawn, 64 no world in the main view, " +
+                    "128 none in other passes (reflection, maps), 512 none in the water reflection.",
+            OptionKind.NUMBER, "7", "not set",
+        ),
+        OptionSpec(
+            "ALPHA3_VKSKIPSHADER", GROUP_DEBUG, "Alpha3 (Vulkan)",
+            "Leaves out draws whose shader name holds one of these words (comma-separated): objects, terrain, water, sky...",
+            OptionKind.TEXT, "objects", "not set",
+        ),
+        OptionSpec(
+            "ALPHA3_VKRASTER", GROUP_DEBUG, "Alpha3 (Vulkan)",
+            "Turns rasterizer features off (bits): 1 depth clamp, 2 depth bias.",
+            OptionKind.NUMBER, "3", "not set",
+        ),
+        OptionSpec(
+            "ALPHA3_VKNOCACHE", GROUP_DEBUG, "Alpha3 (Vulkan)",
+            "Turns caches off (bits): 1 descriptor sets made for each draw, 2 no once-a-frame blocks, 4 no shared blocks. Slower.",
+            OptionKind.NUMBER, "7", "not set",
+        ),
+        OptionSpec(
+            "ALPHA3_VKDEDICATED", GROUP_DEBUG, "Alpha3 (Vulkan)",
+            "Render targets in memory of their own: 1 the depth-only ones, 2 all of them.",
+            OptionKind.NUMBER, "2", "not set",
+        ),
+        OptionSpec(
+            "ALPHA3_VKCHECKUNIFORMS", GROUP_DEBUG, "Alpha3 (Vulkan)",
+            "Checks each draw's light block as it is sent and logs bad values (on with ALPHA3_VKDIAG too).",
+            OptionKind.FLAG, "1", "not set",
+        ),
+        OptionSpec(
+            "ALPHA3_VKDRAWLOG", GROUP_DEBUG, "Alpha3 (Vulkan)",
+            "Logs every pass and draw (programs, images and their formats, uniforms, buffers) for this many frames from " +
+                    "the first shadow pass. Makes a very large log.",
+            OptionKind.NUMBER, "2", "not set",
+        ),
+        OptionSpec(
+            "ALPHA3_VKSTAGE", GROUP_DEBUG, "Alpha3 (Vulkan)",
+            "Saves the image of the pass of this camera (e.g. SceneCam, ReflectionCamera) to Alpha3/vkstage-<n>.pam and logs it.",
+            OptionKind.TEXT, "SceneCam", "not set",
+        ),
+        OptionSpec(
+            "ALPHA3_GPUSPLIT", GROUP_DEBUG, "Alpha3 (Vulkan)",
+            "Measures what each kind of draw costs the GPU by leaving it out of the main view for 60 frames at a time " +
+                    "(things blink). Stand still; logs \"GPU split\" lines.",
+            OptionKind.FLAG, "1", "not set",
+        ),
+        OptionSpec(
             "OPENMW_WATER_CULLING_DEBUG", GROUP_DEBUG, "OpenMW",
             "Log extra information about how terrain is culled against the water plane.",
             OptionKind.FLAG, "1", "not set",
