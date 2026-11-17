@@ -1256,8 +1256,32 @@ void main()
                 copyFramebufferCallbacks(sceneView);
                 renderCompositeMaps();
                 renderRipples();
+                // The first frames after a loading screen are drawn whole, as OpenGL draws them: nothing left out
+                // while its programs are made or its textures wait for the upload budget (the new place has many),
+                // and the window cleared first. Reported on fast phones: a frame or two of the place left behind
+                // after the loading screen.
+                const bool loadingNow = loadingFrame(sceneView);
+                mFramesSinceLoading = loadingNow ? 0 : std::min<uint64_t>(mFramesSinceLoading + 1, 1000);
+                const bool afterLoading = !loadingNow && mFramesSinceLoading <= 3;
+                if (afterLoading)
+                    mContext.clearWindowThisFrame();
+                mWaitForPrograms = afterLoading;
+                const bool uploadedAll = mResources.uploadAll(afterLoading);
+                mCanvasShown = nullptr;
                 if (osgUtil::RenderStage* stage = sceneView.getRenderStage())
                     drawStage(*stage);
+                mWaitForPrograms = false;
+                mResources.uploadAll(uploadedAll);
+                if (!loadingNow && mFramesSinceLoading <= 5)
+                {
+                    osg::Vec3d eye;
+                    if (const osg::Camera* camera = sceneView.getCamera())
+                        eye = osg::Matrixd::inverse(camera->getViewMatrix()).getTrans();
+                    Log(Debug::Info) << "Vulkan: frame " << mFramesSinceLoading << " after the loading screen (OSG "
+                                     << mFrameNumber << "): " << mDraws << " draws, " << mSkipped
+                                     << " left out; scene image drawn " << mSceneColor << ", shown " << mCanvasShown
+                                     << "; camera at " << eye.x() << " " << eye.y() << " " << eye.z();
+                }
                 drawStatistics(sceneView);
                 mContext.endWindowPass();
                 keepLoadingWindow(sceneView);
@@ -1494,16 +1518,22 @@ void main()
                 }
             }
 
-            // A frame the loading screen draws (it marks them in the viewer's stats): its window is kept, for the
-            // loading screen's copy of it on the next frame
-            void keepLoadingWindow(osgUtil::SceneView& sceneView)
+            // a frame the loading screen draws (it marks them in the viewer's stats)
+            bool loadingFrame(osgUtil::SceneView& sceneView) const
             {
                 const osg::Camera* camera = sceneView.getCamera();
                 auto* viewer = camera ? dynamic_cast<osgViewer::ViewerBase*>(const_cast<osg::View*>(camera->getView()))
                                       : nullptr;
                 osg::Stats* stats = viewer ? viewer->getViewerStats() : nullptr;
                 double loading = 0.0;
-                if (stats == nullptr || !stats->getAttribute(mFrameNumber, "Loading", loading) || loading == 0.0)
+                return stats != nullptr && stats->getAttribute(mFrameNumber, "Loading", loading) && loading != 0.0;
+            }
+
+            // A frame the loading screen draws (it marks them in the viewer's stats): its window is kept, for the
+            // loading screen's copy of it on the next frame
+            void keepLoadingWindow(osgUtil::SceneView& sceneView)
+            {
+                if (!loadingFrame(sceneView))
                     return;
                 const VkExtent2D window = mContext.windowExtent();
                 Image* image = mResources.renderTarget(&mLoadingWindowKey, window.width, window.height, 0x8058);
@@ -5323,6 +5353,13 @@ void main()
                 Image* scene = canvas.mTextureScene ? mResources.texture(*canvas.mTextureScene) : nullptr;
                 if (scene == nullptr)
                     scene = mSceneColor;
+                // (diagnostic) the canvas showing a scene image other than the one drawn this frame: a frame late,
+                // and after a loading screen the place left behind
+                mCanvasShown = scene;
+                if (scene != mSceneColor && mSceneColor != nullptr && mCanvasMismatches++ < 20)
+                    Log(Debug::Info) << "Vulkan: frame " << mFrameCounter << " (OSG " << mFrameNumber
+                                     << "): the post-processing canvas shows scene image " << scene
+                                     << ", not the one drawn this frame " << mSceneColor;
                 if (scene == nullptr)
                     return;
                 std::vector<size_t> filtered;
@@ -5500,6 +5537,9 @@ void main()
             enum class StageKind { Other, Scene, Reflection };
             StageKind mStageKind = StageKind::Other;
             uint64_t mReflectionCulled = 0, mReflectionKept = 0;
+            uint64_t mCanvasMismatches = 0; // drawCanvas's diagnostic
+            Image* mCanvasShown = nullptr; // the scene image drawCanvas showed this frame
+            uint64_t mFramesSinceLoading = 1000; // frames since the last one the loading screen drew
             uint32_t mGpuUsed[sFramesInFlight]{};
             std::vector<std::string> mGpuLabels[sFramesInFlight];
             // the GPU split (gpuSplitNext): each slot's phase (set as its frame is recorded), the sums of each phase

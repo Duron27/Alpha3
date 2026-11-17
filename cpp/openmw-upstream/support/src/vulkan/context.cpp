@@ -529,8 +529,15 @@ namespace Alpha3::Vk
         AttachmentUse colorUse;
         colorUse.mFormat = mFormat;
         // the first pass of the frame on the image: what was there before is not needed unless it is kept
-        colorUse.mLoad = clearColor ? VK_ATTACHMENT_LOAD_OP_CLEAR
-                                    : (mWindowDrawn ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_DONT_CARE);
+        // (DONT_CARE keeps, on many drivers, what the image showed frames ago: a frame that did not cover the window
+        // then showed it under the GUI, the place left behind just after a loading screen. Cleared for those frames.)
+        const bool forceClear = !clearColor && !mWindowDrawn && mClearWindow;
+        static const float black[4] = { 0.f, 0.f, 0.f, 1.f };
+        if (forceClear)
+            color = black;
+        colorUse.mLoad = clearColor || forceClear
+            ? VK_ATTACHMENT_LOAD_OP_CLEAR
+            : (mWindowDrawn ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_DONT_CARE);
         colorUse.mInitial = mWindowDrawn ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR : VK_IMAGE_LAYOUT_UNDEFINED;
         colorUse.mFinal = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
         AttachmentUse depthUse;
@@ -552,6 +559,7 @@ namespace Alpha3::Vk
         begin.pClearValues = clears;
         vkCmdBeginRenderPass(commands(), &begin, VK_SUBPASS_CONTENTS_INLINE);
         mWindowDrawn = true;
+        mClearWindow = false;
         mInWindowPass = true;
         return true;
     }

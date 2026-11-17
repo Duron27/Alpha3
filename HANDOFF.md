@@ -959,6 +959,14 @@ force-stops the game, so the toggle is never saved). Launcher has freedreno sele
   is let go. New switches (off): `debug.alpha3.vkcheckuniforms=1`, `debug.alpha3.vknocache=<1 sets|2 static|4 shared>`.
   To do: retest on the phone with the newest Turnip; commit apart from the gamepad keyboard work.
 
+## 2026-11-16: Vulkan old place shown for a frame or two after loading a save — fixed
+
+Reported on fast phones (not reproducible on the Note 10+): after the loading screen, 1-2 frames of the place left
+behind. The 3 frames after a loading-screen frame now draw whole (wait for programs, upload all textures) and the
+frame's first window pass clears the image instead of DONT_CARE (`Context::clearWindowThisFrame`). User confirmed fixed.
+Diagnostics kept: "Vulkan: frame N after the loading screen" (5 frames: draws, left out, scene image drawn vs shown,
+camera) and "post-processing canvas shows scene image ..." on a Tex_Scene parity mismatch.
+
 ## 2026-11-13: Vulkan white distant terrain (composite maps) — fixed
 
 Distant land showed white (the dummy texture) with big viewing distances (user's settings: 81920, `composite map level = 0`).

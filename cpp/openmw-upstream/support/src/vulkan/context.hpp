@@ -59,6 +59,8 @@ namespace Alpha3::Vk
         void freeKeptSetLater(VkDescriptorSet set);
         bool inWindowPass() const { return mInWindowPass; }
         void endWindowPass();
+        // the frame's first window pass clears the image (black) rather than leaving what it held undefined
+        void clearWindowThisFrame() { mClearWindow = true; }
         unsigned frameSlot() const { return mFrameSlot; }
         uint64_t frameNumber() const { return mFrameNumber; }
         // Runs once the GPU is done with this frame (resources released while it may still read them)
@@ -148,6 +150,7 @@ namespace Alpha3::Vk
         bool mAcquired = false;
         bool mWindowDrawn = false; // a window pass ran this frame (the image left in PRESENT_SRC layout)
         bool mInWindowPass = false;
+        bool mClearWindow = false; // clearWindowThisFrame
         uint32_t mImage = 0;
 
         std::map<std::tuple<decltype(AttachmentUse().key()), decltype(AttachmentUse().key()),
