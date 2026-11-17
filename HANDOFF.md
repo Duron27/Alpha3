@@ -1049,3 +1049,17 @@ Mali (G76 tester) reports white textures and Vulkan slower than GLES. Added logg
   "Vulkan GPU:" gives GPU ms per frame from fence signalling (helper thread in Context; median/average/90%) and the
   kernel's busy %/clock where readable (not on the tablet). Diagnostics cost ~3 ms CPU a frame on the tablet
   (43.3 -> 40.5 fps). Next for Mali if still slow: the window is not pre-rotated (transform 0x2), then libGPUCounters.
+
+### 2026-11-17: pre-rotated swap chain
+
+- Phones are portrait displays held landscape (currentTransform ROTATE_90). Before, the swap chain was 2280x1080 with
+  preTransform IDENTITY: SurfaceFlinger composed our layer on the GPU (`dumpsys SurfaceFlinger`: SurfaceView CLIENT,
+  ROT_90), a full-screen 1440x3040 pass every frame. GLES drivers pre-rotate on their own (layer DEVICE, transform 0).
+- Now (Context::createRotation/rotateToWindow, shaders in prerotate_spirv.hpp): swap chain in the display's way
+  (1080x2280, preTransform = currentTransform), the window passes draw into a landscape image per frame slot
+  (mWindowImages, same mExtent and depth as before, so nothing else changed), and one pass turns it into the swap chain
+  image (nearest, pixel for pixel). Layer is DEVICE, transform 0.
+- Note 10+, same save and spot: 48.3 -> 55 fps (59.4 standing still), present 10 -> 6-7 ms. Resume from background ok.
+- Off: ALPHA3_VKNOPREROTATE=1 / debug.alpha3.vknoprerotate. Only mode 1 (90) tested; EngineActivity is
+  `landscape`-locked so 180/270 come up only on devices whose landscape is the other way round. A failed setup logs an
+  error and falls back to the old way.

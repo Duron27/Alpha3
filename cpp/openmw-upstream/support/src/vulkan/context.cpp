@@ -1,4 +1,5 @@
 #include "context.hpp"
+#include "prerotate_spirv.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -203,6 +204,20 @@ namespace Alpha3::Vk
         // the size the engine draws at (the compositor scales it to the screen, as with OpenGL ES)
         mExtent.width = std::clamp(mWanted.width, caps.minImageExtent.width, std::max(caps.maxImageExtent.width, 1u));
         mExtent.height = std::clamp(mWanted.height, caps.minImageExtent.height, std::max(caps.maxImageExtent.height, 1u));
+        // pre-rotation: the display is turned from its natural way (a phone held landscape) and the swap chain can be
+        // made that way. debug.alpha3.vknoprerotate=1 (ALPHA3_VKNOPREROTATE) leaves it to the system as before.
+        {
+            static const bool noPrerotate = debugNumber("vknoprerotate") != 0;
+            const VkSurfaceTransformFlagBitsKHR turn = caps.currentTransform;
+            mRotateMode = turn == VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR ? 1
+                : turn == VK_SURFACE_TRANSFORM_ROTATE_180_BIT_KHR        ? 2
+                : turn == VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR        ? 3
+                                                                         : 0;
+            mRotated = !noPrerotate && !mRotationFailed && mRotateMode != 0 && (caps.supportedTransforms & turn) != 0;
+            mSwapExtent = mExtent;
+            if (mRotated && mRotateMode != 2)
+                mSwapExtent = { mExtent.height, mExtent.width };
+        }
         // the present modes, logged; FIFO is used
         int vsyncMode = 1;
         try
@@ -246,16 +261,16 @@ namespace Alpha3::Vk
         info.minImageCount = images;
         info.imageFormat = chosen.format;
         info.imageColorSpace = chosen.colorSpace;
-        info.imageExtent = mExtent;
+        info.imageExtent = mSwapExtent;
         info.imageArrayLayers = 1;
         info.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
             | (caps.supportedUsageFlags & (VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT));
-        mWindowReadable = (info.imageUsage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0;
+        mWindowReadable = mRotated || (info.imageUsage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0;
         info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
         // the compositor turns the picture when the display is turned: simplest, and the game is held to landscape
-        info.preTransform = (caps.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR)
-            ? VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR
-            : caps.currentTransform;
+        info.preTransform = mRotated || !(caps.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR)
+            ? caps.currentTransform
+            : VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
         info.compositeAlpha = (caps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR)
             ? VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR
             : VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
@@ -309,6 +324,8 @@ namespace Alpha3::Vk
             VkImageView colorView = VK_NULL_HANDLE;
             vkCreateImageView(mDevice.mDevice, &view, nullptr, &colorView);
             mViews.push_back(colorView);
+            if (mRotated)
+                continue; // the window passes draw into the window images instead (createRotation)
             VkImageView attachments[] = { colorView, mDepthView };
             VkFramebufferCreateInfo framebuffer{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
             framebuffer.renderPass = compatible;
@@ -323,6 +340,13 @@ namespace Alpha3::Vk
         }
         mSurfaceTransform = caps.currentTransform;
         mSurfaceExtent = caps.currentExtent;
+        if (mRotated && !createRotation())
+        {
+            Log(Debug::Error) << "Vulkan: pre-rotation could not be set up: the system turns the picture instead";
+            mRotationFailed = true;
+            destroySwapchain();
+            return createSwapchain();
+        }
         {
             // a window that is not pre-rotated is turned by the compositor (or the display hardware): on some phones
             // that costs a full-screen pass a frame. currentTransform other than 1 (identity) while preTransform is 1
@@ -343,6 +367,10 @@ namespace Alpha3::Vk
             if (caps.currentTransform != info.preTransform)
                 Log(Debug::Info) << "Vulkan: the window is not pre-rotated: the system turns each frame (can cost "
                                     "speed on some GPUs)";
+            else if (mRotated)
+                Log(Debug::Info) << "Vulkan: pre-rotated: swap chain images " << mSwapExtent.width << "x"
+                                 << mSwapExtent.height << ", drawn " << mExtent.width << "x" << mExtent.height
+                                 << " and turned (mode " << mRotateMode << ")";
         }
         mRecreate = false;
         return true;
@@ -351,6 +379,7 @@ namespace Alpha3::Vk
     void Context::destroySwapchain()
     {
         vkDeviceWaitIdle(mDevice.mDevice);
+        destroyRotation();
         for (VkFramebuffer framebuffer : mFramebuffers)
             vkDestroyFramebuffer(mDevice.mDevice, framebuffer, nullptr);
         for (VkImageView view : mViews)
@@ -365,6 +394,295 @@ namespace Alpha3::Vk
         mDepthView = VK_NULL_HANDLE;
         mDepthImage = VK_NULL_HANDLE;
         mDepthMemory = nullptr;
+    }
+
+    bool Context::createRotation()
+    {
+        VkDevice device = mDevice.mDevice;
+        // made once (again only if the swap chain's format changes): the pass, the pipeline and what they use
+        if (mRotatePass == VK_NULL_HANDLE || mRotateFormat != mFormat)
+        {
+            if (mRotatePipeline != VK_NULL_HANDLE)
+                vkDestroyPipeline(device, mRotatePipeline, nullptr);
+            if (mRotatePass != VK_NULL_HANDLE)
+                vkDestroyRenderPass(device, mRotatePass, nullptr);
+            mRotatePipeline = VK_NULL_HANDLE;
+            mRotatePass = VK_NULL_HANDLE;
+
+            VkAttachmentDescription color{};
+            color.format = mFormat;
+            color.samples = VK_SAMPLE_COUNT_1_BIT;
+            color.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; // every pixel is written
+            color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            color.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+            color.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+            color.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            color.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+            VkAttachmentReference reference{ 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
+            VkSubpassDescription subpass{};
+            subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+            subpass.colorAttachmentCount = 1;
+            subpass.pColorAttachments = &reference;
+            // the image is the acquired one: its layout change waits for the acquire semaphore (waited on at the
+            // colour output stage)
+            VkSubpassDependency dependency{};
+            dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+            dependency.dstSubpass = 0;
+            dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+            dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+            dependency.srcAccessMask = 0;
+            dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+            VkRenderPassCreateInfo pass{ VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO };
+            pass.attachmentCount = 1;
+            pass.pAttachments = &color;
+            pass.subpassCount = 1;
+            pass.pSubpasses = &subpass;
+            pass.dependencyCount = 1;
+            pass.pDependencies = &dependency;
+            VkResult result = vkCreateRenderPass(device, &pass, nullptr, &mRotatePass);
+            if (result != VK_SUCCESS)
+            {
+                Log(Debug::Error) << "Vulkan: pre-rotation: vkCreateRenderPass: " << resultName(result);
+                mRotatePass = VK_NULL_HANDLE;
+                return false;
+            }
+            mRotateFormat = mFormat;
+
+            if (mRotateSetLayout == VK_NULL_HANDLE)
+            {
+                VkDescriptorSetLayoutBinding binding{};
+                binding.binding = 0;
+                binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                binding.descriptorCount = 1;
+                binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+                VkDescriptorSetLayoutCreateInfo setLayout{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+                setLayout.bindingCount = 1;
+                setLayout.pBindings = &binding;
+                if (vkCreateDescriptorSetLayout(device, &setLayout, nullptr, &mRotateSetLayout) != VK_SUCCESS)
+                    return false;
+                VkPushConstantRange push{ VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(int32_t) };
+                VkPipelineLayoutCreateInfo layout{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+                layout.setLayoutCount = 1;
+                layout.pSetLayouts = &mRotateSetLayout;
+                layout.pushConstantRangeCount = 1;
+                layout.pPushConstantRanges = &push;
+                if (vkCreatePipelineLayout(device, &layout, nullptr, &mRotateLayout) != VK_SUCCESS)
+                    return false;
+                // the copy is pixel for pixel (only turned): nearest
+                VkSamplerCreateInfo sampler{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+                sampler.magFilter = sampler.minFilter = VK_FILTER_NEAREST;
+                sampler.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+                sampler.addressModeU = sampler.addressModeV = sampler.addressModeW
+                    = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+                sampler.maxLod = 0.f;
+                if (vkCreateSampler(device, &sampler, nullptr, &mRotateSampler) != VK_SUCCESS)
+                    return false;
+            }
+
+            VkShaderModule modules[2]{};
+            const std::pair<const uint32_t*, size_t> code[2] = { { sRotateVertex, sizeof(sRotateVertex) },
+                { sRotateFragment, sizeof(sRotateFragment) } };
+            for (int i = 0; i < 2; ++i)
+            {
+                VkShaderModuleCreateInfo module{ VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+                module.codeSize = code[i].second;
+                module.pCode = code[i].first;
+                if (vkCreateShaderModule(device, &module, nullptr, &modules[i]) != VK_SUCCESS)
+                {
+                    if (i == 1)
+                        vkDestroyShaderModule(device, modules[0], nullptr);
+                    return false;
+                }
+            }
+            VkPipelineShaderStageCreateInfo stages[2]{};
+            stages[0].sType = stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+            stages[0].module = modules[0];
+            stages[0].pName = "main";
+            stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+            stages[1].module = modules[1];
+            stages[1].pName = "main";
+            VkPipelineVertexInputStateCreateInfo vertexInput{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+            VkPipelineInputAssemblyStateCreateInfo assembly{
+                VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
+            assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+            VkPipelineViewportStateCreateInfo viewport{ VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
+            viewport.viewportCount = 1;
+            viewport.scissorCount = 1;
+            VkPipelineRasterizationStateCreateInfo raster{ VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
+            raster.polygonMode = VK_POLYGON_MODE_FILL;
+            raster.cullMode = VK_CULL_MODE_NONE;
+            raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+            raster.lineWidth = 1.f;
+            VkPipelineMultisampleStateCreateInfo multisample{ VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
+            multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+            VkPipelineColorBlendAttachmentState blendAttachment{};
+            blendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT
+                | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+            VkPipelineColorBlendStateCreateInfo blend{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+            blend.attachmentCount = 1;
+            blend.pAttachments = &blendAttachment;
+            const VkDynamicState dynamicStates[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+            VkPipelineDynamicStateCreateInfo dynamic{ VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
+            dynamic.dynamicStateCount = 2;
+            dynamic.pDynamicStates = dynamicStates;
+            VkGraphicsPipelineCreateInfo pipeline{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+            pipeline.stageCount = 2;
+            pipeline.pStages = stages;
+            pipeline.pVertexInputState = &vertexInput;
+            pipeline.pInputAssemblyState = &assembly;
+            pipeline.pViewportState = &viewport;
+            pipeline.pRasterizationState = &raster;
+            pipeline.pMultisampleState = &multisample;
+            pipeline.pColorBlendState = &blend;
+            pipeline.pDynamicState = &dynamic;
+            pipeline.layout = mRotateLayout;
+            pipeline.renderPass = mRotatePass;
+            result = vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipeline, nullptr, &mRotatePipeline);
+            vkDestroyShaderModule(device, modules[0], nullptr);
+            vkDestroyShaderModule(device, modules[1], nullptr);
+            if (result != VK_SUCCESS)
+            {
+                Log(Debug::Error) << "Vulkan: pre-rotation: vkCreateGraphicsPipelines: " << resultName(result);
+                mRotatePipeline = VK_NULL_HANDLE;
+                return false;
+            }
+        }
+
+        // with each swap chain: a framebuffer on each of its images, and the landscape images the frames draw on
+        for (VkImageView view : mViews)
+        {
+            VkFramebufferCreateInfo framebuffer{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
+            framebuffer.renderPass = mRotatePass;
+            framebuffer.attachmentCount = 1;
+            framebuffer.pAttachments = &view;
+            framebuffer.width = mSwapExtent.width;
+            framebuffer.height = mSwapExtent.height;
+            framebuffer.layers = 1;
+            VkFramebuffer handle = VK_NULL_HANDLE;
+            if (vkCreateFramebuffer(device, &framebuffer, nullptr, &handle) != VK_SUCCESS)
+                return false;
+            mRotateFramebuffers.push_back(handle);
+        }
+        VkDescriptorPoolSize poolSize{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, mInFlight };
+        VkDescriptorPoolCreateInfo pool{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+        pool.maxSets = mInFlight;
+        pool.poolSizeCount = 1;
+        pool.pPoolSizes = &poolSize;
+        if (vkCreateDescriptorPool(device, &pool, nullptr, &mRotatePool) != VK_SUCCESS)
+            return false;
+        VkRenderPass compatible = windowCompatiblePass();
+        mWindowImages.resize(mInFlight);
+        for (WindowImage& window : mWindowImages)
+        {
+            VkImageCreateInfo image{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+            image.imageType = VK_IMAGE_TYPE_2D;
+            image.format = mFormat;
+            image.extent = { mExtent.width, mExtent.height, 1 };
+            image.mipLevels = 1;
+            image.arrayLayers = 1;
+            image.samples = VK_SAMPLE_COUNT_1_BIT;
+            image.tiling = VK_IMAGE_TILING_OPTIMAL;
+            image.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
+                | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+            VmaAllocationCreateInfo memory{};
+            memory.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+            if (vmaCreateImage(mDevice.mAllocator, &image, &memory, &window.mImage, &window.mMemory, nullptr)
+                != VK_SUCCESS)
+            {
+                window.mImage = VK_NULL_HANDLE;
+                return false;
+            }
+            VkImageViewCreateInfo view{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+            view.image = window.mImage;
+            view.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            view.format = mFormat;
+            view.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+            if (vkCreateImageView(device, &view, nullptr, &window.mView) != VK_SUCCESS)
+                return false;
+            VkImageView attachments[] = { window.mView, mDepthView };
+            VkFramebufferCreateInfo framebuffer{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
+            framebuffer.renderPass = compatible;
+            framebuffer.attachmentCount = 2;
+            framebuffer.pAttachments = attachments;
+            framebuffer.width = mExtent.width;
+            framebuffer.height = mExtent.height;
+            framebuffer.layers = 1;
+            if (vkCreateFramebuffer(device, &framebuffer, nullptr, &window.mFramebuffer) != VK_SUCCESS)
+                return false;
+            VkDescriptorSetAllocateInfo allocate{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+            allocate.descriptorPool = mRotatePool;
+            allocate.descriptorSetCount = 1;
+            allocate.pSetLayouts = &mRotateSetLayout;
+            if (vkAllocateDescriptorSets(device, &allocate, &window.mSet) != VK_SUCCESS)
+                return false;
+            VkDescriptorImageInfo imageInfo{ mRotateSampler, window.mView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+            VkWriteDescriptorSet write{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+            write.dstSet = window.mSet;
+            write.dstBinding = 0;
+            write.descriptorCount = 1;
+            write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            write.pImageInfo = &imageInfo;
+            vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+        }
+        return true;
+    }
+
+    void Context::destroyRotation()
+    {
+        VkDevice device = mDevice.mDevice;
+        for (WindowImage& window : mWindowImages)
+        {
+            if (window.mFramebuffer != VK_NULL_HANDLE)
+                vkDestroyFramebuffer(device, window.mFramebuffer, nullptr);
+            if (window.mView != VK_NULL_HANDLE)
+                vkDestroyImageView(device, window.mView, nullptr);
+            if (window.mImage != VK_NULL_HANDLE)
+                vmaDestroyImage(mDevice.mAllocator, window.mImage, window.mMemory);
+        }
+        mWindowImages.clear();
+        for (VkFramebuffer framebuffer : mRotateFramebuffers)
+            vkDestroyFramebuffer(device, framebuffer, nullptr);
+        mRotateFramebuffers.clear();
+        if (mRotatePool != VK_NULL_HANDLE)
+            vkDestroyDescriptorPool(device, mRotatePool, nullptr); // frees the sets
+        mRotatePool = VK_NULL_HANDLE;
+    }
+
+    void Context::rotateToWindow()
+    {
+        if (mFrameSlot >= mWindowImages.size() || mImage >= mRotateFramebuffers.size())
+            return;
+        const WindowImage& window = mWindowImages[mFrameSlot];
+        VkCommandBuffer commandBuffer = commands();
+        // what the window passes drew, read by the turning pass
+        VkImageMemoryBarrier barrier{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+        barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image = window.mImage;
+        barrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+        VkRenderPassBeginInfo begin{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+        begin.renderPass = mRotatePass;
+        begin.framebuffer = mRotateFramebuffers[mImage];
+        begin.renderArea = { { 0, 0 }, mSwapExtent };
+        vkCmdBeginRenderPass(commandBuffer, &begin, VK_SUBPASS_CONTENTS_INLINE);
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, mRotatePipeline);
+        const VkViewport viewport{ 0.f, 0.f, float(mSwapExtent.width), float(mSwapExtent.height), 0.f, 1.f };
+        const VkRect2D scissor{ { 0, 0 }, mSwapExtent };
+        vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+        vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+        vkCmdBindDescriptorSets(
+            commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, mRotateLayout, 0, 1, &window.mSet, 0, nullptr);
+        const int32_t mode = mRotateMode;
+        vkCmdPushConstants(commandBuffer, mRotateLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(mode), &mode);
+        vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+        vkCmdEndRenderPass(commandBuffer);
     }
 
     void Context::setWindow(ANativeWindow* window)
@@ -734,8 +1052,8 @@ namespace Alpha3::Vk
         colorUse.mLoad = clearColor || forceClear
             ? VK_ATTACHMENT_LOAD_OP_CLEAR
             : (mWindowDrawn ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_DONT_CARE);
-        colorUse.mInitial = mWindowDrawn ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR : VK_IMAGE_LAYOUT_UNDEFINED;
-        colorUse.mFinal = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        colorUse.mInitial = mWindowDrawn ? windowLayout() : VK_IMAGE_LAYOUT_UNDEFINED;
+        colorUse.mFinal = windowLayout();
         AttachmentUse depthUse;
         depthUse.mFormat = mDevice.mDepthFormat;
         depthUse.mLoad = clearDepth ? VK_ATTACHMENT_LOAD_OP_CLEAR
@@ -749,7 +1067,7 @@ namespace Alpha3::Vk
         clears[1].depthStencil = { depth, stencil };
         VkRenderPassBeginInfo begin{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
         begin.renderPass = renderPass(colorUse, depthUse);
-        begin.framebuffer = mFramebuffers[mImage];
+        begin.framebuffer = mRotated ? mWindowImages[mFrameSlot].mFramebuffer : mFramebuffers[mImage];
         begin.renderArea = { { 0, 0 }, mExtent };
         begin.clearValueCount = 2;
         begin.pClearValues = clears;
@@ -873,7 +1191,8 @@ namespace Alpha3::Vk
 
     bool Context::blitWindow(VkImage target, uint32_t width, uint32_t height, VkImageLayout layout)
     {
-        if (!mWindowReadable || !mWindowDrawn || !mAcquired || mInWindowPass || mImage >= mImages.size())
+        if (!mWindowReadable || !mWindowDrawn || !mAcquired || mInWindowPass
+            || (mRotated ? mFrameSlot >= mWindowImages.size() : mImage >= mImages.size()))
             return false;
         VkCommandBuffer commandBuffer = commands();
         auto barrier = [&](VkImage image, VkImageLayout from, VkImageLayout to, VkAccessFlags fromAccess,
@@ -889,8 +1208,8 @@ namespace Alpha3::Vk
             vkCmdPipelineBarrier(commandBuffer, fromStage, toStage, 0, 0, nullptr, 0, nullptr, 1, &b);
         };
         const VkPipelineStageFlags shaders = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-        VkImage window = mImages[mImage];
-        barrier(window, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        VkImage window = mRotated ? mWindowImages[mFrameSlot].mImage : mImages[mImage];
+        barrier(window, windowLayout(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
             VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
         barrier(target, layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_SHADER_READ_BIT,
@@ -904,8 +1223,13 @@ namespace Alpha3::Vk
         region.dstOffsets[1] = { int32_t(width), 0, 1 };
         vkCmdBlitImage(commandBuffer, window, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, target,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region, VK_FILTER_LINEAR);
-        barrier(window, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-            VK_ACCESS_TRANSFER_READ_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+        if (mRotated)
+            barrier(window, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, windowLayout(), VK_ACCESS_TRANSFER_READ_BIT,
+                VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+        else
+            barrier(window, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                VK_ACCESS_TRANSFER_READ_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
         barrier(target, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, layout, VK_ACCESS_TRANSFER_WRITE_BIT,
             VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, shaders);
         return true;
@@ -950,6 +1274,8 @@ namespace Alpha3::Vk
                 endWindowPass();
         }
         endWindowPass();
+        if (mRotated && mAcquired)
+            rotateToWindow();
         vkEndCommandBuffer(frame.mCommands[mPart]);
         VkCommandBuffer buffers[2];
         uint32_t bufferCount = 0;

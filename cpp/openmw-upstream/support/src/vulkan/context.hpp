@@ -108,6 +108,17 @@ namespace Alpha3::Vk
         bool createSurface();
         bool createSwapchain();
         void destroySwapchain();
+        // Pre-rotation (Android, the display turned from its natural way): the swap chain is made in the display's
+        // own orientation, so the system shows it as it is (no composition on the GPU each frame), and the window
+        // passes draw a landscape image of their own (one a frame slot), copied turned into the swap chain image at
+        // the end of the frame. Everything that draws on the window sees mExtent, the landscape size, either way.
+        bool createRotation();
+        void destroyRotation();
+        void rotateToWindow();
+        VkImageLayout windowLayout() const
+        {
+            return mRotated ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        }
         bool acquire();
         // Submits the frame's first part (before the swap chain image is acquired) and begins the second
         void submitFirstPart();
@@ -147,6 +158,29 @@ namespace Alpha3::Vk
         VkSurfaceTransformFlagBitsKHR mSurfaceTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
         VkExtent2D mSurfaceExtent{};
         bool mWindowReadable = false; // the swap chain's images can be copied from
+
+        // pre-rotation (createRotation)
+        bool mRotated = false;
+        bool mRotationFailed = false; // set up once and failed: not tried again
+        int mRotateMode = 0; // 1 a quarter turn, 2 a half, 3 three quarters (the shader's mode)
+        VkExtent2D mSwapExtent{ 0, 0 }; // the swap chain images' size (mExtent turned)
+        struct WindowImage
+        {
+            VkImage mImage = VK_NULL_HANDLE;
+            VmaAllocation_T* mMemory = nullptr;
+            VkImageView mView = VK_NULL_HANDLE;
+            VkFramebuffer mFramebuffer = VK_NULL_HANDLE; // with the window's depth, for the window passes
+            VkDescriptorSet mSet = VK_NULL_HANDLE; // the rotation pass reads it through this
+        };
+        std::vector<WindowImage> mWindowImages; // one a frame slot
+        std::vector<VkFramebuffer> mRotateFramebuffers; // one a swap chain image
+        VkRenderPass mRotatePass = VK_NULL_HANDLE;
+        VkFormat mRotateFormat = VK_FORMAT_UNDEFINED; // the swap chain format the pass and pipeline were made for
+        VkPipeline mRotatePipeline = VK_NULL_HANDLE;
+        VkPipelineLayout mRotateLayout = VK_NULL_HANDLE;
+        VkDescriptorSetLayout mRotateSetLayout = VK_NULL_HANDLE;
+        VkDescriptorPool mRotatePool = VK_NULL_HANDLE;
+        VkSampler mRotateSampler = VK_NULL_HANDLE;
 
         std::vector<std::function<void()>> mAfterFrame;
         // the pools of the kept sets (sets freed one at a time), and which pool each set came from

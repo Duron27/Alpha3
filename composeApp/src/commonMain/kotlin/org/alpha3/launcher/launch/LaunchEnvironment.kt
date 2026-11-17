@@ -221,6 +221,11 @@ object LaunchEnvironment {
             OptionKind.TEXT, "objects", "not set",
         ),
         OptionSpec(
+            "ALPHA3_VKNOPREROTATE", GROUP_DEBUG, "Alpha3 (Vulkan)",
+            "1: no pre-rotation; the system turns each frame for the screen as before (slower on phones).",
+            OptionKind.NUMBER, "1", "not set",
+        ),
+        OptionSpec(
             "ALPHA3_VKRASTER", GROUP_DEBUG, "Alpha3 (Vulkan)",
             "Turns rasterizer features off (bits): 1 depth clamp, 2 depth bias.",
             OptionKind.NUMBER, "3", "not set",
