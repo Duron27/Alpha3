@@ -59,6 +59,9 @@ namespace Alpha3::Vk
         void freeKeptSetLater(VkDescriptorSet set);
         bool inWindowPass() const { return mInWindowPass; }
         void endWindowPass();
+        // In a render pass just begun: Turnip draws it straight to memory instead of in tiles (for a pass whose geometry
+        // is most of its cost, as the water's reflection: in tiles it is drawn again for each)
+        void drawDirect();
         // the frame's first window pass clears the image (black) rather than leaving what it held undefined
         void clearWindowThisFrame() { mClearWindow = true; }
         unsigned frameSlot() const { return mFrameSlot; }

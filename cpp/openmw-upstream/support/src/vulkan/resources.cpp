@@ -794,18 +794,21 @@ namespace Alpha3::Vk
 
     bool Resources::convertedIndices(const osg::BufferData& data, uint32_t variant,
         const std::function<void(std::vector<uint32_t>&)>& converter, VkBuffer& buffer, VkDeviceSize& offset,
-        uint32_t& count)
+        uint32_t& count, bool keptOnly)
     {
         ConvertedEntry& entry = mConverted[{ &data, variant }];
         entry.mLastUse = mFrame;
-        const bool same = entry.mBuffer.mBuffer != VK_NULL_HANDLE && entry.mData.get() == &data;
+        const bool same = entry.mMade && entry.mData.get() == &data;
         if (!same || entry.mModified != data.getModifiedCount())
         {
+            if (keptOnly)
+                return false;
             destroyLater(entry.mBuffer);
             std::vector<uint32_t> indices;
             converter(indices);
             entry.mData = &data;
             entry.mModified = data.getModifiedCount();
+            entry.mMade = true;
             entry.mCount = static_cast<uint32_t>(indices.size());
             if (indices.empty())
                 return false;
@@ -818,7 +821,7 @@ namespace Alpha3::Vk
         buffer = entry.mBuffer.mBuffer;
         offset = 0;
         count = entry.mCount;
-        return count > 0;
+        return count > 0 && buffer != VK_NULL_HANDLE;
     }
 
     std::unique_ptr<Image> Resources::createImage(VkFormat format, VkImageViewType type, uint32_t width,

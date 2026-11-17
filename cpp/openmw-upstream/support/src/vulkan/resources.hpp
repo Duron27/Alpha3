@@ -109,10 +109,11 @@ namespace Alpha3::Vk
         // False for what cannot be (colours outside 0 to 1) and for an array that changes: the caller uses buffer().
         bool packedArray(const osg::Array& array, bool direction, VkBuffer& buffer, VkDeviceSize& offset);
         // An index list of GL_UNSIGNED_BYTE, or one that needs another primitive (quads), as 16 or 32 bit indices
-        // made once: converter fills the given vector from the data
+        // made once: converter fills the given vector from the data (left empty: none, also remembered). keptOnly: only
+        // one already made, false (without calling converter) when there is none yet
         bool convertedIndices(const osg::BufferData& data, uint32_t variant,
             const std::function<void(std::vector<uint32_t>&)>& converter, VkBuffer& buffer, VkDeviceSize& offset,
-            uint32_t& count);
+            uint32_t& count, bool keptOnly = false);
 
         // The buffer of a shader storage or uniform buffer binding's data (OpenMW's clustered lighting, the post
         // processor's uniforms): kept from frame to frame, as
@@ -191,6 +192,7 @@ namespace Alpha3::Vk
             unsigned mModified = 0;
             uint32_t mCount = 0;
             uint64_t mLastUse = 0;
+            bool mMade = false; // converter was called for mData as mModified (it may have given none)
         };
         struct TextureEntry
         {

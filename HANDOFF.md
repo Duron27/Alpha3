@@ -959,6 +959,32 @@ force-stops the game, so the toggle is never saved). Launcher has freedreno sele
   is let go. New switches (off): `debug.alpha3.vkcheckuniforms=1`, `debug.alpha3.vknocache=<1 sets|2 static|4 shared>`.
   To do: retest on the phone with the newest Turnip; commit apart from the gamepad keyboard work.
 
+## 2026-11-16 (evening): Vivec fly-through 39.4 -> 49.0 fps on the Note 10+ (Turnip 27)
+
+- No regression since 12 Nov: a clean build of dfa8f24 scores 39.4 like today's. The 41.2 run of 12 Nov was made
+  before the benchmark's settings were fixed (viewing distance 7168, 60 fps cap, mipmaps nearest), so not comparable.
+- Over Vivec the 512x512 water reflection took 22-26 ms of a ~35 ms frame (470-490 draws, ~540k triangles: as many as
+  the 2280x1080 scene). Two fixes, both settings:
+  - `[Video] direct passes = reflection` (alpha3.cfg): Turnip draws those passes straight to memory, not in tiles
+    (every render pass now has a vertex-to-vertex self-dependency; `Context::drawDirect()` records a vertex-stage
+    barrier in the pass, which makes Turnip choose sysmem). Reflection 26 -> 13.5 ms, Vivec 27-30 -> 38-40 fps.
+    Qualcomm's driver: no change either way (its reflection was already ~14 ms). `none`: Turnip chooses.
+  - Simplified meshes (`simplifiedIndices`): plain triangle meshes of 1000+ indices drawn with a meshoptimizer list of
+    about `[Camera] simplified mesh detail = 0.3` of their triangles (error at most 2% of the mesh's size), cached by
+    `Resources::convertedIndices` variant 0x5e1f, made at most ~2 ms a frame. In the reflection
+    (`[Water] reflection simplified meshes = true`): 13.5 -> 9.2 ms, Vivec 38-40 -> 46-48 fps, no visible difference
+    in screenshots. In the scene (`[Camera] simplified mesh error = 1` pixel; 0 off): saves almost nothing on this
+    route (400 triangles at 1 px, 70k of ~500k at 16 px, ~0.2 ms): the scene's triangles are terrain and paging's
+    large merged chunks, and it is likely pixel-bound at 2280x1080. Left on (costs nothing measurable).
+  - Full benchmark: 39.4 -> 49.0 overall (Vivec tenths 28-35 -> 44-48), p99 47 -> 36.5 ms.
+- Tried and dropped: `TU_AUTOTUNE_ALGO` (no effect on this Turnip), a far cut-off for reflected objects (the cost is
+  the near cantons). Not done yet: the tablet (bandwidth-bound) with direct passes; simplified meshes for small/far
+  objects in the scene too; the xenon translator's alternate states and light lists by camera (CPU-side; the phone is
+  GPU-bound in the benchmark).
+- The periodic Vulkan log line now splits the reflection's triangles (terrain / other / saved).
+- Quick test: scratchpad `vivecq.sh <label>` runs the route to frame 1230 and prints fps and reflection/scene GPU ms;
+  benchmark settings can be changed through `Alpha3/benchmarks/profile/tuning.cfg` (`Section/name = value` lines).
+
 ## 2026-11-16: Vulkan old place shown for a frame or two after loading a save — fixed
 
 Reported on fast phones (not reproducible on the Note 10+): after the loading screen, 1-2 frames of the place left

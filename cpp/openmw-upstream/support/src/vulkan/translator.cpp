@@ -40,6 +40,8 @@
 #include <mutex>
 #include <set>
 #include <sstream>
+
+#include <meshoptimizer.h>
 #include <typeinfo>
 #include <unordered_map>
 #include <unordered_set>
@@ -1251,6 +1253,7 @@ void main()
                     }
                 mDraws = mSkipped = 0;
                 mDrawIndex = 0;
+                mSimplifySeconds = 0.0;
                 gpuTimesBegin();
                 waterQueriesBegin();
                 copyFramebufferCallbacks(sceneView);
@@ -1314,8 +1317,12 @@ void main()
                                      << mSetBinds / 300 << " descriptor sets (" << mSameImageBinds / 300
                                      << " with the last one's images), " << mUniformBytes / 300 / 1024
                                      << " KiB of uniforms bound; " << mVertices / 300 / 3
-                                     << " triangles (vertices / 3) a frame; reflection: "
-                                     << mReflectionKept / 300 << " draws, " << mReflectionCulled / 300
+                                     << " triangles (vertices / 3) a frame (" << mSceneSaved / 300 / 3
+                                     << " saved by simpler meshes in the scene); reflection: "
+                                     << mReflectionKept / 300 << " draws (" << mReflectionVertices[0] / 300 / 3
+                                     << " terrain and " << mReflectionVertices[1] / 300 / 3
+                                     << " other triangles, " << mReflectionSaved / 300 / 3
+                                     << " saved by simpler meshes, " << mSimplified << " made), " << mReflectionCulled / 300
                                      << " left out where no water is seen (water "
                                      << (mWaterSeen ? "seen" : "not seen") << ", covers " << mWaterCover * 100.f
                                      << "% of the screen); " << mGenerated
@@ -1327,6 +1334,8 @@ void main()
                     mCompositeDrawn = mCompositeDropped = mCompositeFailed = 0;
                     mDispatches = 0;
                     mReflectionKept = mReflectionCulled = 0;
+                    mReflectionVertices[0] = mReflectionVertices[1] = 0;
+                    mReflectionSaved = mSceneSaved = 0;
                     mVertices = 0;
                     mGenerated = 0;
                     mPipelineBinds = mVertexBinds = mSetBinds = mUniformBytes = mSameImageBinds = 0;
@@ -1981,6 +1990,8 @@ void main()
                     gpuTimestamp((camera && !camera->getName().empty() ? camera->getName() : std::string("RTT")) + " "
                         + std::to_string(area.extent.width) + "x" + std::to_string(area.extent.height));
                     vkCmdBeginRenderPass(commands, &begin, VK_SUBPASS_CONTENTS_INLINE);
+                    if (drawsDirect(target))
+                        mContext.drawDirect();
                     forgetBindings();
                     mPass = pass;
                 }
@@ -2403,6 +2414,34 @@ void main()
                 slot.mState = state;
                 slot.mFrame = mFrameCounter;
                 return state;
+            }
+
+            // [Video] direct passes: the kinds of pass Turnip draws straight to memory rather than in tiles (words:
+            // reflection, scene, shadow, other; none: Turnip chooses for each)
+            bool drawsDirect(const Target& target) const
+            {
+                static const unsigned kinds = [] {
+                    const std::string words = setting("Video", "direct passes", "reflection");
+                    unsigned bits = 0;
+                    if (words.find("reflection") != std::string::npos)
+                        bits |= 1;
+                    if (words.find("scene") != std::string::npos)
+                        bits |= 2;
+                    if (words.find("shadow") != std::string::npos)
+                        bits |= 4;
+                    if (words.find("other") != std::string::npos)
+                        bits |= 8;
+                    return bits;
+                }();
+                if (kinds == 0 || target.mWindow)
+                    return false;
+                if (mStageKind == StageKind::Reflection)
+                    return (kinds & 1) != 0;
+                if (mStageKind == StageKind::Scene)
+                    return (kinds & 2) != 0;
+                if (target.mColor == nullptr && target.mDepth != nullptr)
+                    return (kinds & 4) != 0;
+                return (kinds & 8) != 0;
             }
 
             static bool waterQueriesOn()
@@ -3299,9 +3338,13 @@ void main()
                 Accumulated* state = accumulate(leaf._parent, bins);
                 setChain(leaf._parent, &bins, state);
                 const auto& geometry = static_cast<const osg::Geometry&>(*drawable);
+                const uint64_t verticesBefore = mVertices;
                 if (mStageKind != StageKind::Scene || geometry.getName() != "Water Geometry"
                     || !drawWaterInQueries(leaf, geometry, *state))
                     drawGeometry(geometry, *state, leaf._modelview.get(), leaf._projection.get());
+                if (mStageKind == StageKind::Reflection)
+                    mReflectionVertices[std::strstr(typeid(geometry).name(), "TerrainDrawable") != nullptr ? 0 : 1]
+                        += mVertices - verticesBefore;
                 setChain(nullptr, nullptr, nullptr);
             }
 
@@ -3965,6 +4008,91 @@ void main()
                 entry.mValid = true;
             }
 
+            // Simplified meshes: a mesh is drawn with an index list simplified by meshoptimizer to about [Camera]
+            // simplified mesh detail of its triangles (0.3), no point moved more than 2% of the mesh's size, made the
+            // first time it is wanted and kept (at most a couple of ms a frame are spent making them; a mesh waiting is
+            // drawn whole). Plain triangle lists of 1000 indices or more only: not terrain (it has its own levels), nor
+            // what is skinned or morphed. Where: in the water's reflection ([Water] reflection simplified meshes; over
+            // Vivec its 512x512 pixels took as many triangles as the 2280x1080 scene), and in the scene where the
+            // simplification moves no point more than [Camera] simplified mesh error pixels on the screen (1; 0: never)
+            void simplifiedIndices(const osg::Geometry& geometry, const GeometryEntry::Primitive& primitive,
+                const osg::RefMatrix* modelView, const osg::RefMatrix* projection, VkBuffer& buffer,
+                VkDeviceSize& offset, VkIndexType& type, uint32_t& count)
+            {
+                static const float detail = std::clamp(settingFloat("Camera", "simplified mesh detail", 0.3f), 0.f, 1.f);
+                static const bool inReflection = settingBool("Water", "reflection simplified meshes", true);
+                static const float sceneError = std::max(0.f, settingFloat("Camera", "simplified mesh error", 1.f));
+                constexpr float maxError = 0.02f; // of the mesh's size (meshopt: its largest extent)
+                if (detail >= 1.f || primitive.mConverted || primitive.mTopology != VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST
+                    || count < 1000 || typeid(geometry) != typeid(osg::Geometry))
+                    return;
+                const bool reflection = mStageKind == StageKind::Reflection;
+                if (reflection ? !inReflection : (mStageKind != StageKind::Scene || sceneError <= 0.f))
+                    return;
+                if (!reflection)
+                {
+                    // the most the simplification moves a point, in pixels: 2% of the mesh's extent (at most its
+                    // bounding sphere's diameter) at the nearest the sphere comes
+                    if (modelView == nullptr || projection == nullptr || (*projection)(3, 3) != 0.0)
+                        return;
+                    const osg::BoundingSphere& bound = geometry.getBound();
+                    if (!bound.valid())
+                        return;
+                    const osg::Matrixd& view = *modelView;
+                    const double scale = std::sqrt(std::max({ osg::Vec3d(view(0, 0), view(0, 1), view(0, 2)).length2(),
+                        osg::Vec3d(view(1, 0), view(1, 1), view(1, 2)).length2(),
+                        osg::Vec3d(view(2, 0), view(2, 1), view(2, 2)).length2() }));
+                    const double radius = bound.radius() * scale;
+                    const double nearest = -(osg::Vec3d(bound.center()) * view).z() - radius;
+                    if (nearest <= 1.0)
+                        return;
+                    const double pixels = maxError * 2.0 * radius / nearest * std::abs((*projection)(1, 1)) * 0.5
+                        * mArea.extent.height;
+                    if (pixels > sceneError)
+                        return;
+                }
+                const osg::DrawElements* elements = primitive.mSet->getDrawElements();
+                const auto* positions = dynamic_cast<const osg::Vec3Array*>(geometry.getVertexArray());
+                if (elements == nullptr || positions == nullptr || positions->empty()
+                    || positions->getDataVariance() == osg::Object::DYNAMIC)
+                    return;
+                const auto simplify = [&](std::vector<uint32_t>& out) {
+                    const osg::Timer_t start = osg::Timer::instance()->tick();
+                    std::vector<uint32_t> in(elements->getNumIndices());
+                    for (size_t i = 0; i < in.size(); ++i)
+                    {
+                        in[i] = elements->index(static_cast<unsigned>(i));
+                        if (in[i] >= positions->size())
+                            return; // not a list this can read: none
+                    }
+                    const size_t target = static_cast<size_t>(in.size() * detail) / 3 * 3;
+                    out.resize(in.size());
+                    float error = 0.f;
+                    out.resize(meshopt_simplify(out.data(), in.data(), in.size(),
+                        static_cast<const float*>(positions->getDataPointer()), positions->size(), sizeof(osg::Vec3f),
+                        std::max<size_t>(target, 3), maxError, 0, &error));
+                    // too little saved to be worth a list of its own: the whole mesh
+                    if (out.size() * 10 > in.size() * 8)
+                        out.clear();
+                    mSimplifySeconds += osg::Timer::instance()->delta_s(start, osg::Timer::instance()->tick());
+                    ++mSimplified;
+                };
+                // a couple of ms a frame for new ones; the others wait for the next frames
+                const bool keptOnly = mSimplifySeconds > 0.002;
+                VkBuffer simplified = VK_NULL_HANDLE;
+                VkDeviceSize simplifiedOffset = 0;
+                uint32_t simplifiedCount = 0;
+                if (!mResources.convertedIndices(
+                        *elements, 0x5e1f, simplify, simplified, simplifiedOffset, simplifiedCount, keptOnly))
+                    return;
+                buffer = simplified;
+                offset = simplifiedOffset;
+                type = VK_INDEX_TYPE_UINT32;
+                count = simplifiedCount;
+                (reflection ? mReflectionSaved : mSceneSaved)
+                    += primitive.mSet->getDrawElements()->getNumIndices() - simplifiedCount;
+            }
+
             GeometryEntry* geometryEntry(const osg::Geometry& geometry, const Variant& variant,
                 const osg::Program::AttribBindingList& bindings)
             {
@@ -4146,17 +4274,21 @@ void main()
                     const uint32_t instances = std::max(1u, static_cast<unsigned>(primitives.getNumInstances()));
                     if (indexed)
                     {
-                        if (primitive.mIndexBuffer != mBoundIndexBuffer || primitive.mIndexOffset != mBoundIndexOffset
-                            || primitive.mIndexType != mBoundIndexType)
+                        VkBuffer indexBuffer = primitive.mIndexBuffer;
+                        VkDeviceSize indexOffset = primitive.mIndexOffset;
+                        VkIndexType indexType = primitive.mIndexType;
+                        uint32_t count = primitive.mConverted ? primitive.mIndexCount
+                                                              : primitives.getDrawElements()->getNumIndices();
+                        simplifiedIndices(
+                            geometry, primitive, modelView, projection, indexBuffer, indexOffset, indexType, count);
+                        if (indexBuffer != mBoundIndexBuffer || indexOffset != mBoundIndexOffset
+                            || indexType != mBoundIndexType)
                         {
-                            vkCmdBindIndexBuffer(commands, primitive.mIndexBuffer, primitive.mIndexOffset,
-                                primitive.mIndexType);
-                            mBoundIndexBuffer = primitive.mIndexBuffer;
-                            mBoundIndexOffset = primitive.mIndexOffset;
-                            mBoundIndexType = primitive.mIndexType;
+                            vkCmdBindIndexBuffer(commands, indexBuffer, indexOffset, indexType);
+                            mBoundIndexBuffer = indexBuffer;
+                            mBoundIndexOffset = indexOffset;
+                            mBoundIndexType = indexType;
                         }
-                        const uint32_t count = primitive.mConverted ? primitive.mIndexCount
-                                                                    : primitives.getDrawElements()->getNumIndices();
                         vkCmdDrawIndexed(commands, count, instances, 0, 0, 0);
                         mVertices += static_cast<uint64_t>(count) * instances;
                     }
@@ -5537,9 +5669,12 @@ void main()
             enum class StageKind { Other, Scene, Reflection };
             StageKind mStageKind = StageKind::Other;
             uint64_t mReflectionCulled = 0, mReflectionKept = 0;
+            uint64_t mReflectionVertices[2]{}; // drawn in the reflection: terrain's, the rest's
+            double mSimplifySeconds = 0.0; // spent this frame making simplifiedIndices' lists
             uint64_t mCanvasMismatches = 0; // drawCanvas's diagnostic
             Image* mCanvasShown = nullptr; // the scene image drawCanvas showed this frame
             uint64_t mFramesSinceLoading = 1000; // frames since the last one the loading screen drew
+            uint64_t mSimplified = 0, mReflectionSaved = 0, mSceneSaved = 0; // lists made, indices not drawn thanks to them
             uint32_t mGpuUsed[sFramesInFlight]{};
             std::vector<std::string> mGpuLabels[sFramesInFlight];
             // the GPU split (gpuSplitNext): each slot's phase (set as its frame is recorded), the sums of each phase

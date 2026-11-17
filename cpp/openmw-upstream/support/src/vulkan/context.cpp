@@ -37,7 +37,7 @@ namespace Alpha3::Vk
 
         // Every render pass waits for what earlier passes (and transfers) wrote, and makes what it writes visible to
         // whatever samples it later: the attachments of one pass are often the textures of the next
-        void addDependencies(VkRenderPassCreateInfo& info, VkSubpassDependency (&dependencies)[2])
+        void addDependencies(VkRenderPassCreateInfo& info, VkSubpassDependency (&dependencies)[3])
         {
             const VkPipelineStageFlags attachmentStages = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
                 | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
@@ -62,7 +62,15 @@ namespace Alpha3::Vk
             dependencies[1].srcAccessMask
                 = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
             dependencies[1].dstAccessMask = attachmentAccess | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT;
-            info.dependencyCount = 2;
+            // the subpass on itself, from the vertex stage to the vertex stage: what Context::drawDirect's barrier needs.
+            // Every pass has it (unused it costs nothing), so that the passes stay compatible with one another and a
+            // pipeline made for one serves them all
+            dependencies[2] = {};
+            dependencies[2].srcSubpass = 0;
+            dependencies[2].dstSubpass = 0;
+            dependencies[2].srcStageMask = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT;
+            dependencies[2].dstStageMask = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT;
+            info.dependencyCount = 3;
             info.pDependencies = dependencies;
         }
 
@@ -399,7 +407,7 @@ namespace Alpha3::Vk
         info.pAttachments = attachments;
         info.subpassCount = 1;
         info.pSubpasses = &subpass;
-        VkSubpassDependency dependencies[2];
+        VkSubpassDependency dependencies[3];
         addDependencies(info, dependencies);
         VkRenderPass pass = VK_NULL_HANDLE;
         const VkResult result = vkCreateRenderPass(mDevice.mDevice, &info, nullptr, &pass);
@@ -713,6 +721,15 @@ namespace Alpha3::Vk
         barrier(target, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, layout, VK_ACCESS_TRANSFER_WRITE_BIT,
             VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, shaders);
         return true;
+    }
+
+    void Context::drawDirect()
+    {
+        // a barrier on the vertex stage in the pass (the subpass's dependency on itself): Turnip then draws the pass
+        // straight to memory rather than in tiles. Other drivers only wait on the vertex stage, which nothing before it
+        // in the pass uses
+        vkCmdPipelineBarrier(commands(), VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, 0, 0,
+            nullptr, 0, nullptr, 0, nullptr);
     }
 
     void Context::afterFrame(std::function<void()> work)
