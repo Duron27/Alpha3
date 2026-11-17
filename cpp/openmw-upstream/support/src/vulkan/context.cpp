@@ -2,7 +2,12 @@
 
 #include <algorithm>
 #include <chrono>
+#include <condition_variable>
+#include <cstdio>
+#include <deque>
+#include <mutex>
 #include <sstream>
+#include <thread>
 #include <cmath>
 #include <cstdlib>
 
@@ -458,6 +463,153 @@ namespace Alpha3::Vk
         mFrames[mFrameSlot].mReleases.push_back(std::move(release));
     }
 
+    // A thread that waits for each frame's fence and notes when it signalled. The GPU's time for a frame: from when
+    // it could start on it (submitted, or the previous frame done, whichever is later) to its fence. Includes the
+    // GPU waiting for a window image (the swap chain image ms in the frame line says how long the CPU waited for one).
+    struct Context::FenceTimer
+    {
+        using Clock = std::chrono::steady_clock;
+        struct Pending
+        {
+            VkFence mFence;
+            Clock::time_point mSubmitted;
+        };
+        VkDevice mDevice;
+        std::mutex mMutex;
+        std::condition_variable mChanged;
+        std::deque<Pending> mPending;
+        VkFence mWaiting = VK_NULL_HANDLE; // the fence the thread is waiting on now
+        Clock::time_point mLastDone{};
+        std::vector<double> mTimes; // since the last report, ms
+
+
+        explicit FenceTimer(VkDevice device)
+            : mDevice(device)
+        {
+        }
+
+        void run()
+        {
+            for (;;)
+            {
+                Pending next;
+                {
+                    std::unique_lock lock(mMutex);
+                    mChanged.wait(lock, [&] { return !mPending.empty(); });
+                    next = mPending.front();
+                    mPending.pop_front();
+                    mWaiting = next.mFence;
+                }
+                VkResult result = VK_TIMEOUT;
+                for (int tries = 0; tries < 10 && result == VK_TIMEOUT; ++tries)
+                    result = vkWaitForFences(mDevice, 1, &next.mFence, VK_TRUE, 500'000'000);
+                const Clock::time_point done = Clock::now();
+                std::lock_guard lock(mMutex);
+                mWaiting = VK_NULL_HANDLE;
+                if (result == VK_SUCCESS)
+                {
+                    const Clock::time_point start = std::max(next.mSubmitted, mLastDone);
+                    const double ms = std::chrono::duration<double, std::milli>(done - start).count();
+                    mLastDone = done;
+                    mTimes.push_back(ms);
+                }
+                mChanged.notify_all();
+            }
+        }
+
+        void submitted(VkFence fence, Clock::time_point when)
+        {
+            std::lock_guard lock(mMutex);
+            mPending.push_back({ fence, when });
+            mChanged.notify_all();
+        }
+
+        // before the fence is reset: the thread is done with it (it has signalled already, so this is short)
+        void release(VkFence fence)
+        {
+            std::unique_lock lock(mMutex);
+            mChanged.wait(lock, [&] {
+                if (mWaiting == fence)
+                    return false;
+                for (const Pending& p : mPending)
+                    if (p.mFence == fence)
+                        return false;
+                return true;
+            });
+        }
+    };
+
+    std::string Context::gpuDiagnostics()
+    {
+        std::ostringstream out;
+        out << "Vulkan GPU: ";
+        if (mFenceTimer)
+        {
+            std::lock_guard lock(mFenceTimer->mMutex);
+            std::vector<double>& times = mFenceTimer->mTimes;
+            if (!times.empty())
+            {
+                // frames over a second are loading screens and the like: counted apart, not in the average
+                double sum = 0.0;
+                unsigned counted = 0, longFrames = 0;
+                for (double ms : times)
+                    if (ms > 1000.0)
+                        ++longFrames;
+                    else
+                        sum += ms, ++counted;
+                std::sort(times.begin(), times.end());
+                out << "per frame (fences) median " << times[times.size() / 2] << " ms, average "
+                    << (counted ? sum / counted : 0.0) << " ms, 90% under " << times[times.size() * 9 / 10]
+                    << " ms, over " << times.size() << " frames (" << longFrames << " over 1 s left out of the average)";
+            }
+            else
+                out << "no frame timed by fences";
+            times.clear();
+        }
+        else
+            out << "fence timing off";
+
+        // the kernel's view, where SELinux lets an app read it: Adreno (kgsl), Samsung's Exynos/Mali node, Mali's own
+        auto readNumber = [](const char* path, double& value) {
+            FILE* file = std::fopen(path, "r");
+            if (file == nullptr)
+                return false;
+            const bool read = std::fscanf(file, "%lf", &value) == 1;
+            std::fclose(file);
+            return read;
+        };
+        double busy = 0, clock = 0;
+        const char* busyFrom = nullptr;
+        for (const char* path : { "/sys/class/kgsl/kgsl-3d0/gpu_busy_percentage", "/sys/kernel/gpu/gpu_busy",
+                 "/sys/class/misc/mali0/device/utilization", "/sys/devices/platform/mali.0/utilization" })
+            if (readNumber(path, busy))
+            {
+                busyFrom = path;
+                break;
+            }
+        const char* clockFrom = nullptr;
+        for (const char* path : { "/sys/class/kgsl/kgsl-3d0/devfreq/cur_freq", "/sys/kernel/gpu/gpu_clock",
+                 "/sys/class/misc/mali0/device/cur_freq", "/sys/class/misc/mali0/device/clock" })
+            if (readNumber(path, clock))
+            {
+                clockFrom = path;
+                break;
+            }
+        if (clock > 1e5)
+            clock /= 1e6; // Hz to MHz (kgsl, some Mali kernels); Samsung's gpu_clock is MHz already
+        out << "; kernel: busy ";
+        if (busyFrom)
+            out << busy << "% (" << busyFrom << ")";
+        else
+            out << "not readable";
+        out << ", clock ";
+        if (clockFrom)
+            out << clock << " MHz (" << clockFrom << ")";
+        else
+            out << "not readable";
+        return out.str();
+    }
+
     bool Context::beginFrame()
     {
         if (mBegun)
@@ -543,6 +695,11 @@ namespace Alpha3::Vk
         VkSubmitInfo submit{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
         submit.commandBufferCount = bufferCount;
         submit.pCommandBuffers = buffers;
+        if (!mFirstSubmitted)
+        {
+            mFirstSubmit = std::chrono::steady_clock::now();
+            mFirstSubmitted = true;
+        }
         const VkResult result = vkQueueSubmit(mDevice.mQueue, 1, &submit, VK_NULL_HANDLE);
         if (result != VK_SUCCESS)
         {
@@ -815,9 +972,20 @@ namespace Alpha3::Vk
             submit.signalSemaphoreCount = 1;
             submit.pSignalSemaphores = &frame.mFinished;
         }
+        if (diagnostics() && !mFenceTimer)
+        {
+            mFenceTimer = std::make_shared<FenceTimer>(mDevice.mDevice);
+            std::thread([timer = mFenceTimer] { timer->run(); }).detach();
+        }
+        if (mFenceTimer)
+            mFenceTimer->release(frame.mFence);
+        const auto submittedAt = mFirstSubmitted ? mFirstSubmit : std::chrono::steady_clock::now();
+        mFirstSubmitted = false;
         vkResetFences(mDevice.mDevice, 1, &frame.mFence);
         VkResult result = vkQueueSubmit(mDevice.mQueue, 1, &submit, frame.mFence);
         const bool submitted = result == VK_SUCCESS;
+        if (submitted && mFenceTimer)
+            mFenceTimer->submitted(frame.mFence, submittedAt);
         if (result != VK_SUCCESS)
         {
             Log(Debug::Error) << "Vulkan: vkQueueSubmit: " << resultName(result);

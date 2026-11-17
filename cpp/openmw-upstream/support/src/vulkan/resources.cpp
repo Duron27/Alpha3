@@ -32,6 +32,13 @@ namespace Alpha3::Vk
                            glUnsignedInt248 = 0x84FA, glUnsignedInt = 0x1405, glUnsignedShort565 = 0x8363,
                            glUnsignedShort5551 = 0x8034;
 
+        // upload failures that can go away by trying again (the rest are not tried again until the image changes)
+        const char* const sNoImage = "no image";
+        const char* const sNoPixels = "image without pixels";
+        const char* const sEmpty = "empty image";
+        const char* const sNoStaging = "no staging memory";
+        const char* const sImageNotMade = "image could not be made (memory?)";
+
         constexpr VkDeviceSize sChunkSize = 16 << 20;
         constexpr VkDeviceSize sUploadBudget = 48 << 20; // texture bytes uploaded per frame, the rest waits
 
@@ -86,12 +93,56 @@ namespace Alpha3::Vk
                     return VK_FORMAT_ASTC_12x10_UNORM_BLOCK;
                 case 0x93BD:
                     return VK_FORMAT_ASTC_12x12_UNORM_BLOCK;
+                // the sRGB ones (read as OpenGL ES reads them: decoded to linear when sampled). Mods ship ASTC
+                // already compressed as sRGB (0x93D7, 8x8, in Tamriel Rebuilt packs); unknown, they were drawn white
+                case 0x8C4C: // GL_COMPRESSED_SRGB_S3TC_DXT1_EXT
+                    return VK_FORMAT_BC1_RGB_SRGB_BLOCK;
+                case 0x8C4D:
+                    return VK_FORMAT_BC1_RGBA_SRGB_BLOCK;
+                case 0x8C4E:
+                    return VK_FORMAT_BC2_SRGB_BLOCK;
+                case 0x8C4F:
+                    return VK_FORMAT_BC3_SRGB_BLOCK;
+                case 0x9275: // GL_COMPRESSED_SRGB8_ETC2
+                    return VK_FORMAT_ETC2_R8G8B8_SRGB_BLOCK;
+                case 0x9277:
+                    return VK_FORMAT_ETC2_R8G8B8A1_SRGB_BLOCK;
+                case 0x9279:
+                    return VK_FORMAT_ETC2_R8G8B8A8_SRGB_BLOCK;
+                case 0x9271: // GL_COMPRESSED_SIGNED_R11_EAC
+                    return VK_FORMAT_EAC_R11_SNORM_BLOCK;
+                case 0x9273:
+                    return VK_FORMAT_EAC_R11G11_SNORM_BLOCK;
+                // RGTC (BC4/5, normal maps) and BPTC (BC7, BC6H): a GPU without BC still cannot sample them
+                case 0x8DBB:
+                    return VK_FORMAT_BC4_UNORM_BLOCK;
+                case 0x8DBC:
+                    return VK_FORMAT_BC4_SNORM_BLOCK;
+                case 0x8DBD:
+                    return VK_FORMAT_BC5_UNORM_BLOCK;
+                case 0x8DBE:
+                    return VK_FORMAT_BC5_SNORM_BLOCK;
+                case 0x8E8C:
+                    return VK_FORMAT_BC7_UNORM_BLOCK;
+                case 0x8E8D:
+                    return VK_FORMAT_BC7_SRGB_BLOCK;
+                case 0x8E8E:
+                    return VK_FORMAT_BC6H_SFLOAT_BLOCK;
+                case 0x8E8F:
+                    return VK_FORMAT_BC6H_UFLOAT_BLOCK;
                 default:
+                    // GL_COMPRESSED_SRGB8_ALPHA8_ASTC_4x4_KHR (0x93D0) to 12x12 (0x93DD), in the order of the plain
+                    // ones; Vulkan's sRGB ASTC formats each follow their UNORM one
+                    if (format >= 0x93D0 && format <= 0x93DD)
+                    {
+                        const VkFormat plain = compressedFormat(format - 0x93D0 + 0x93B0);
+                        return static_cast<VkFormat>(plain + 1);
+                    }
                     return VK_FORMAT_UNDEFINED;
             }
         }
 
-        // The block size of a compressed format, in texels and bytes
+        // The block size of a compressed format, in texels and bytes (UNORM, SNORM and sRGB alike)
         void blockSize(VkFormat format, uint32_t& width, uint32_t& height, uint32_t& bytes)
         {
             width = height = 4;
@@ -99,53 +150,30 @@ namespace Alpha3::Vk
             switch (format)
             {
                 case VK_FORMAT_BC1_RGB_UNORM_BLOCK:
+                case VK_FORMAT_BC1_RGB_SRGB_BLOCK:
                 case VK_FORMAT_BC1_RGBA_UNORM_BLOCK:
+                case VK_FORMAT_BC1_RGBA_SRGB_BLOCK:
+                case VK_FORMAT_BC4_UNORM_BLOCK:
+                case VK_FORMAT_BC4_SNORM_BLOCK:
                 case VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK:
+                case VK_FORMAT_ETC2_R8G8B8_SRGB_BLOCK:
                 case VK_FORMAT_ETC2_R8G8B8A1_UNORM_BLOCK:
+                case VK_FORMAT_ETC2_R8G8B8A1_SRGB_BLOCK:
                 case VK_FORMAT_EAC_R11_UNORM_BLOCK:
+                case VK_FORMAT_EAC_R11_SNORM_BLOCK:
                     bytes = 8;
                     return;
-                case VK_FORMAT_ASTC_5x4_UNORM_BLOCK:
-                    width = 5;
-                    return;
-                case VK_FORMAT_ASTC_5x5_UNORM_BLOCK:
-                    width = height = 5;
-                    return;
-                case VK_FORMAT_ASTC_6x5_UNORM_BLOCK:
-                    width = 6, height = 5;
-                    return;
-                case VK_FORMAT_ASTC_6x6_UNORM_BLOCK:
-                    width = height = 6;
-                    return;
-                case VK_FORMAT_ASTC_8x5_UNORM_BLOCK:
-                    width = 8, height = 5;
-                    return;
-                case VK_FORMAT_ASTC_8x6_UNORM_BLOCK:
-                    width = 8, height = 6;
-                    return;
-                case VK_FORMAT_ASTC_8x8_UNORM_BLOCK:
-                    width = height = 8;
-                    return;
-                case VK_FORMAT_ASTC_10x5_UNORM_BLOCK:
-                    width = 10, height = 5;
-                    return;
-                case VK_FORMAT_ASTC_10x6_UNORM_BLOCK:
-                    width = 10, height = 6;
-                    return;
-                case VK_FORMAT_ASTC_10x8_UNORM_BLOCK:
-                    width = 10, height = 8;
-                    return;
-                case VK_FORMAT_ASTC_10x10_UNORM_BLOCK:
-                    width = height = 10;
-                    return;
-                case VK_FORMAT_ASTC_12x10_UNORM_BLOCK:
-                    width = 12, height = 10;
-                    return;
-                case VK_FORMAT_ASTC_12x12_UNORM_BLOCK:
-                    width = height = 12;
-                    return;
                 default:
-                    return;
+                    break;
+            }
+            // ASTC: 4x4 to 12x12, each as UNORM then sRGB
+            if (format >= VK_FORMAT_ASTC_4x4_UNORM_BLOCK && format <= VK_FORMAT_ASTC_12x12_SRGB_BLOCK)
+            {
+                static const uint8_t sizes[14][2] = { { 4, 4 }, { 5, 4 }, { 5, 5 }, { 6, 5 }, { 6, 6 }, { 8, 5 },
+                    { 8, 6 }, { 8, 8 }, { 10, 5 }, { 10, 6 }, { 10, 8 }, { 10, 10 }, { 12, 10 }, { 12, 12 } };
+                const auto& size = sizes[(format - VK_FORMAT_ASTC_4x4_UNORM_BLOCK) / 2];
+                width = size[0];
+                height = size[1];
             }
         }
 
@@ -969,8 +997,7 @@ namespace Alpha3::Vk
         mLastFailure = nullptr;
         if (first == nullptr || first->data() == nullptr || first->s() <= 0 || first->t() <= 0)
         {
-            noteFailure(first == nullptr ? "no image" : first->data() == nullptr ? "image without pixels" : "empty image",
-                texture, first);
+            noteFailure(first == nullptr ? sNoImage : first->data() == nullptr ? sNoPixels : sEmpty, texture, first);
             return nullptr;
         }
 
@@ -1138,7 +1165,7 @@ namespace Alpha3::Vk
         Span staging = stream(total, 16);
         if (staging.mData == nullptr)
         {
-            noteFailure("no staging memory", texture, first);
+            noteFailure(sNoStaging, texture, first);
             return nullptr;
         }
         std::vector<VkBufferImageCopy> copies;
@@ -1178,7 +1205,7 @@ namespace Alpha3::Vk
         std::unique_ptr<Image> image = createImage(format, type, width, height, depth, mips, layers, usage);
         if (!image)
         {
-            noteFailure("image could not be made (memory?)", texture, first);
+            noteFailure(sImageNotMade, texture, first);
             return nullptr;
         }
         if (!compressed)
@@ -1306,8 +1333,20 @@ namespace Alpha3::Vk
             entry.mImage->mLastUse = mFrame;
             return entry.mImage;
         }
+        if (entry.mFailedForGood && entry.mImage == nullptr && entry.mFailedSource == source && source != nullptr
+            && source->getModifiedCount() == entry.mFailedModified && entry.mTexture.lock(alive) && alive.get() == &texture)
+            return nullptr;
         std::unique_ptr<Image> image = upload(texture);
         entry.mFailure = mLastFailure;
+        entry.mFailedForGood = !image && mLastFailure != nullptr && mLastFailure != sNoStaging
+            && mLastFailure != sNoImage && mLastFailure != sNoPixels && mLastFailure != sEmpty
+            && mLastFailure != sImageNotMade;
+        if (entry.mFailedForGood)
+        {
+            entry.mTexture = &texture;
+            entry.mFailedSource = source;
+            entry.mFailedModified = source ? source->getModifiedCount() : 0;
+        }
         if (!image)
             return same ? entry.mImage : nullptr; // the old one until the new one is up
         destroyLater(entry.mOwned);

@@ -213,6 +213,12 @@ namespace Alpha3::Vk
             VkSampler mSampler[2]{}; // plain and shadow, made from the texture's parameters in that frame
             uint64_t mSamplerFrame[2]{ ~0ull, ~0ull };
             const char* mFailure = nullptr; // why its last upload failed
+            // a failure that will not go away by trying again (a format this GPU or the renderer cannot take): the
+            // image and its modified count then, so the upload is not tried again (and the file not read back) for
+            // every draw of every frame until the image changes
+            const osg::Image* mFailedSource = nullptr;
+            unsigned mFailedModified = 0;
+            bool mFailedForGood = false;
         };
         Image* textureChecked(const osg::Texture& texture, TextureEntry& entry);
         struct TargetEntry

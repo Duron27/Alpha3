@@ -1037,3 +1037,15 @@ Mali (G76 tester) reports white textures and Vulkan slower than GLES. Added logg
   failures; on DEVICE_LOST, VK_EXT_device_fault addresses and memory budgets; the periodic line now has fence /
   swap chain image / present wait ms.
 - Tester: set only ALPHA3_VKDIAG=1, load a save with white textures, ~30 s, send openmw.log.
+
+### 2026-11-17: first Mali log (Mali-G76 MC4, driver r26p0, Vulkan 1.1) — white textures fixed
+
+- White textures: `.ktx` textures (kram, read in place of .dds) in sRGB ASTC 8x8 (GL 0x93D7, Tamriel Rebuilt armour
+  in the tester's mods) were not in `compressedFormat()`, so drawn as the dummy. Now all sRGB S3TC/ETC2/ASTC, signed
+  EAC, BC4/5/6H/7 are mapped (`blockSize` covers them). Checked on the tablet with a magenta sRGB ASTC sky `.ktx`.
+- Slowness in that log (63-67 ms recording, 7.6 fps): each failed texture was tried again on every draw (~370 a frame,
+  texture release hooks reading files back). A failure that retrying can't fix is now remembered until the image changes.
+- Mali's queue has timestampValidBits 0: the timestamp GPU times are skipped (logged once). With ALPHA3_VKDIAG,
+  "Vulkan GPU:" gives GPU ms per frame from fence signalling (helper thread in Context; median/average/90%) and the
+  kernel's busy %/clock where readable (not on the tablet). Diagnostics cost ~3 ms CPU a frame on the tablet
+  (43.3 -> 40.5 fps). Next for Mali if still slow: the window is not pre-rotated (transform 0x2), then libGPUCounters.

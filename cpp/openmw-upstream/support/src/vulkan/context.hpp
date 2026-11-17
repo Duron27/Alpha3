@@ -3,7 +3,10 @@
 
 #include "device.hpp"
 
+#include <chrono>
 #include <cstdint>
+#include <memory>
+#include <string>
 #include <functional>
 #include <map>
 #include <tuple>
@@ -69,6 +72,9 @@ namespace Alpha3::Vk
         // CPU seconds spent waiting since the translator last reported them (its periodic log line): for a swap chain
         // image (acquire: the display holds them all), in vkQueuePresentKHR, and for a frame slot's fence (the GPU)
         double mAcquireSeconds = 0.0, mPresentSeconds = 0.0, mFenceSeconds = 0.0;
+        // With diagnostics(): the GPU's time per frame from when each frame's fence signalled (any driver, no
+        // timestamps needed), and the kernel's GPU load and clock where an app may read them. One line; resets.
+        std::string gpuDiagnostics();
         // Runs once the GPU is done with this frame (resources released while it may still read them)
         void releaseLater(std::function<void()> release);
         // Runs when this frame is presented, after the GPU has finished it (present() waits for that, so only for
@@ -147,6 +153,10 @@ namespace Alpha3::Vk
         std::vector<VkDescriptorPool> mKeptPools;
         std::unordered_map<VkDescriptorSet, VkDescriptorPool> mKeptOwners;
         Frame mFrames[sFramesInFlight];
+        struct FenceTimer;
+        std::shared_ptr<FenceTimer> mFenceTimer; // diagnostics() only
+        std::chrono::steady_clock::time_point mFirstSubmit{}; // the frame's first submit (its first part's)
+        bool mFirstSubmitted = false;
         unsigned mFrameSlot = 0;
         unsigned mInFlight = 2;
         unsigned mPart = 0; // which of the frame's command buffers is being recorded

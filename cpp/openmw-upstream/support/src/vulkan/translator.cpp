@@ -1356,6 +1356,7 @@ void main()
                     }
                     if (diagnostics())
                     {
+                        Log(Debug::Info) << mContext.gpuDiagnostics();
                         Log(Debug::Info) << "Vulkan memory: " << memoryBudgetLine();
                         Log(Debug::Info) << mResources.textureSummary();
                     }
@@ -2614,6 +2615,20 @@ void main()
             {
                 const unsigned slot = mContext.frameSlot();
                 VkDevice device = mContext.vkDevice();
+                // a queue without timestamps (Mali's: timestampValidBits 0) writes nothing worth reading: no GPU times
+                static const bool timestamps = [&] {
+                    const Device& d = mContext.device();
+                    uint32_t count = 0;
+                    vkGetPhysicalDeviceQueueFamilyProperties(d.mPhysical, &count, nullptr);
+                    std::vector<VkQueueFamilyProperties> families(count);
+                    vkGetPhysicalDeviceQueueFamilyProperties(d.mPhysical, &count, families.data());
+                    const bool has = d.mQueueFamily < count && families[d.mQueueFamily].timestampValidBits > 0;
+                    if (!has)
+                        Log(Debug::Info) << "Vulkan: the GPU's queue has no timestamps: no GPU times in the log";
+                    return has;
+                }();
+                if (!timestamps)
+                    return;
                 if (mGpuPools[slot] == VK_NULL_HANDLE)
                 {
                     VkQueryPoolCreateInfo info{ VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
