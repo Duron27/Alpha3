@@ -70,6 +70,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.ArrowDropUp
 import androidx.compose.material.icons.filled.ChevronLeft
@@ -790,6 +791,30 @@ fun OverlayUI(
                                             }
                                         )
                                     }
+
+                                IconButton(onClick = { EffectsPanelState.visible = !EffectsPanelState.visible }) {
+                                    if (iconGlowChecked) {
+                                        Icon(
+                                            imageVector = Icons.Default.AutoAwesome,
+                                            contentDescription = null,
+                                            modifier = Modifier
+                                                .size(30.dp)
+                                                .scale(scaleFactor)
+                                                .blur(blurRadius),
+                                            tint = shadowColor,
+                                        )
+                                    }
+                                    Icon(
+                                        imageVector = Icons.Default.AutoAwesome,
+                                        contentDescription = "Effects",
+                                        modifier = Modifier.size(24.dp),
+                                        tint = if (matchIconColorChecked) {
+                                            menuColor.copy(alpha = menuAlpha)
+                                        } else {
+                                            Color.Black
+                                        }
+                                    )
+                                }
 
                                 TravelMenuPopup(onKeyEvent = onKeyEvent)
                             }

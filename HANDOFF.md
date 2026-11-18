@@ -1063,3 +1063,36 @@ Mali (G76 tester) reports white textures and Vulkan slower than GLES. Added logg
 - Off: ALPHA3_VKNOPREROTATE=1 / debug.alpha3.vknoprerotate. Only mode 1 (90) tested; EngineActivity is
   `landscape`-locked so 180/270 come up only on devices whose landscape is the other way round. A failed setup logs an
   error and falls back to the old way.
+
+### 2026-11-17: ReShade effects on the Vulkan renderer (UNCOMMITTED)
+
+- What: ReShade .fx effects run on the window after the post-processing chain and before the GUI, with the scene's
+  real depth. Compiled by ReShade's own FX compiler (support/third_party/reshadefx, crosire/reshade v6.7.3, BSD-3) to
+  SPIR-V. The runtime is ours (support/src/vulkan/reshade.cpp), after vkShade's design, on Vulkan 1.0 render passes and
+  inside our frame's command buffer. The back buffer is two images that take turns.
+- Hook: translator.cpp drawCanvas() now calls drawPostProcessing() (the old body), then Effects::apply on
+  Context::windowImage(). At frame start, `mContext.wantOwnWindow(mEffects.active())` (pre-rotation already gives the
+  own window on phones).
+- Files on the phone: Alpha3/reshade/Shaders (any pack; the bundled set from cpp/reshade-starter goes to
+  `Shaders/Alpha3 starter`, replaced each build), Textures/, ReShadePreset.ini (ReShade's format plus
+  Alpha3EffectsOn=). Licences: handoff/RESHADE_SHADER_LICENCES.md, THIRD_PARTY_NOTICES.md.
+- Overlay: a new menu button (AutoAwesome icon) opens EffectsPanel.kt on the right side of the screen. It has the on
+  switch, the running list (reorder, remove), the available techniques (tick), and per-file settings (sliders, combos,
+  switches, #define steppers). Changes go to the game live through JNI omwEffectsReport/omwEffectsCommand. Values
+  apply the next frame. Techniques and #defines recompile that file on a thread of its own.
+- Tested on the Note 10+ (Seyda Neen, --start, frame 630). Vibrance + Vignette + CAS + a depth view all compiled and
+  drew correctly on both drivers. Depth is the right way up and not reversed (RESHADE_DEPTH_INPUT_IS_UPSIDE_DOWN=1 and
+  _IS_REVERSED from AutoDepth are the defaults we give):
+  - System driver (Vulkan 1.1): 36.1 fps with effects off, 29.5 fps with the four on (GPU 27.3 -> 33.5 ms).
+  - Turnip (Vulkan 1.3): 34.6 fps with the four on.
+- Panel fixes after the first try:
+  - Android draws its overlay in EngineActivity, not GameplayScreen, so the panel is added there too.
+  - The panel's touch blocker consumed events in the Main pass, so the buttons' tap detection gave up. It now only
+    takes the hit, without consuming.
+  - The user has not yet confirmed the buttons work after that fix. Not supported: compute passes (that technique is
+  marked unusable), stencil (ignored, logged), non-2D textures. Key/mouse/overlay uniforms are 0.
+- Test shader: scratchpad A3DepthTest.fx (left half depth, right half scene). It is on the phone in
+  reshade/Shaders/test, not bundled.
+- The phone was left on renderer = vulkan, Turnip on. Backups: config/settings.cfg.before-effects,
+  game_files_prefs.preferences_pb.before-effects.
+

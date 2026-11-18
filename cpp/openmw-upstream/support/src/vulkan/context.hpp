@@ -99,6 +99,24 @@ namespace Alpha3::Vk
         // The window was replaced (the app went to the background and came back)
         void setWindow(ANativeWindow* window);
 
+        // The window passes to draw into an image of the context's own, which windowImage() gives (from the next
+        // swap chain made; asking for it again changes nothing). For the effects (reshade.cpp), which read the window.
+        void wantOwnWindow(bool want)
+        {
+            if (want != mWantOwnWindow)
+            {
+                mWantOwnWindow = want;
+                mRecreate = true;
+            }
+        }
+        // This frame's window image when the window passes draw into one of the context's own (in
+        // VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL between passes), else null
+        VkImage windowImage() const
+        {
+            return mOwnWindow && mAcquired && mFrameSlot < mWindowImages.size() ? mWindowImages[mFrameSlot].mImage
+                                                                                  : VK_NULL_HANDLE;
+        }
+
         // color1: a second colour attachment (the scene's normals), after the first
         VkRenderPass renderPass(
             const AttachmentUse& color, const AttachmentUse& depth, const AttachmentUse& color1 = AttachmentUse{});
@@ -117,7 +135,7 @@ namespace Alpha3::Vk
         void rotateToWindow();
         VkImageLayout windowLayout() const
         {
-            return mRotated ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+            return mOwnWindow ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
         }
         bool acquire();
         // Submits the frame's first part (before the swap chain image is acquired) and begins the second
@@ -161,6 +179,11 @@ namespace Alpha3::Vk
 
         // pre-rotation (createRotation)
         bool mRotated = false;
+        // the window passes draw into images of the context's own (mWindowImages), copied (turned when mRotated) into
+        // the swap chain image at the end of the frame: when pre-rotated, or when asked (wantOwnWindow: the ReShade
+        // effects read and write the window)
+        bool mOwnWindow = false;
+        bool mWantOwnWindow = false;
         bool mRotationFailed = false; // set up once and failed: not tried again
         int mRotateMode = 0; // 1 a quarter turn, 2 a half, 3 three quarters (the shader's mode)
         VkExtent2D mSwapExtent{ 0, 0 }; // the swap chain images' size (mExtent turned)

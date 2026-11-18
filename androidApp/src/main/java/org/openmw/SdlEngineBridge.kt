@@ -206,6 +206,16 @@ class SdlEngineBridge(private val context: Context) : EngineBridge {
         runCatching { omwHudReset() }
     }
 
+    // in libopenmw_upstream (support/src/vulkan/reshade.cpp)
+    private external fun omwEffectsReport(): ByteArray?
+    private external fun omwEffectsCommand(command: String)
+
+    override fun effectsReport(): String? = runCatching { omwEffectsReport()?.decodeToString() }.getOrNull()
+
+    override fun effectsCommand(command: String) {
+        runCatching { omwEffectsCommand(command) }
+    }
+
     override fun platformMemory(): List<Pair<String, String>> {
         val lines = mutableListOf<Pair<String, String>>()
         fun mb(bytes: Long) = "%.1f MB".format(bytes / 1048576.0)

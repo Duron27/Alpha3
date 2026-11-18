@@ -65,6 +65,15 @@ interface EngineBridge {
 
     /** Every HUD element back where the game puts it. */
     fun hudReset() {}
+
+    /**
+     * The ReShade effects (support/src/vulkan/reshade.cpp, Vulkan renderer only): the shader files, the preset's
+     * techniques and their values, as JSON. Null where there are none (another renderer, iOS).
+     */
+    fun effectsReport(): String? = null
+
+    /** A change to the effects' preset, words separated by tabs (reshade.cpp, Effects::command). */
+    fun effectsCommand(command: String) {}
 }
 
 private object NoEngine : EngineBridge {
@@ -126,4 +135,6 @@ object Engine : EngineBridge {
     override fun hudSet(name: String, left: Float, top: Float, scale: Float, keep: Boolean) =
         bridge.hudSet(name, left, top, scale, keep)
     override fun hudReset() = bridge.hudReset()
+    override fun effectsReport() = bridge.effectsReport()
+    override fun effectsCommand(command: String) = bridge.effectsCommand(command)
 }

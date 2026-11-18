@@ -91,6 +91,9 @@ and libiconv from OpenSceneGraph, LuaJIT and others from the OpenMW overlay) mus
 | ...built into ANGLE: cpu_features | Apache-2.0 | Seen | |
 | ...built into ANGLE: jsoncpp | Public domain / MIT | Seen | |
 | ...built into ANGLE: xxHash | BSD-2-Clause | Seen | |
+| [ReShade FX compiler](https://github.com/crosire/reshade) (reshadefx, v6.7.3: lexer, preprocessor, parser, SPIR-V code generator; `cpp/openmw-upstream/support/third_party/reshadefx/`) | BSD-3-Clause, Copyright (C) 2014 Patrick Mours (`LICENSE.md` there) | Seen | Compiles ReShade `.fx` effects for the Vulkan renderer (`support/src/vulkan/reshade.cpp`). Only the compiler is used, unchanged; not ReShade's injector or overlay. |
+| ...with it: [SPIRV-Headers](https://github.com/KhronosGroup/SPIRV-Headers) `spirv.hpp`, `GLSL.std.450.h` (commit 7845730) | MIT-style (Khronos), `third_party/reshadefx/spirv/LICENSE.SPIRV-Headers` | Seen | |
+| [vkShade](https://github.com/ralgar/vkShade) | BSD-2-Clause, Copyright (c) 2026 Ryan Algar | Seen | Design reference for the effect runtime in `support/src/vulkan/reshade.cpp` (credited there); no files copied. |
 | [kram](https://github.com/alecazam/kram) (`libkram.so`, texture conversion) via the fork `Duron27/kram` | MIT | Seen | Patched in `cpp/kram/patches/`. |
 | ...inside kram: Arm astc-encoder | Apache-2.0 | Seen | |
 | ...inside kram: bc7enc | MIT; `bc7e.ispc` is Apache-2.0 | Seen | |
@@ -130,6 +133,12 @@ release (`./gradlew :androidApp:dependencies`, `:composeApp:dependencies`).
   app and must stay with it.
 * OpenMW's resource directory carries its own font and image license files. The packaging step copies the whole
   directory; check that they are in the finished app.
+* The starter set of ReShade effects (`cpp/reshade-starter/`, copied into the app's assets and from there into
+  `Alpha3/reshade/`): files from SweetFX (MIT), prod80's repository (MIT), potatoFX (MIT), FXShaders (MIT, with its
+  lens-dirt texture) and CShade (BSD-3-Clause, with AMD's MIT and Colour Developers' BSD-3-Clause parts), and
+  ReShade.fxh (CC0). Sources, commits and license texts are in its `README.md` and `licenses/`, which ship with it.
+  Shaders users add themselves are theirs and are not distributed by the app. Licence survey of other packs:
+  `handoff/RESHADE_SHADER_LICENCES.md`.
 * **OPEN - provenance not documented in the repository:** `composeApp/src/commonMain/composeResources/drawable/`
   `dreadnought_big_004.png`, `starmap.jpg` (look like Star Control II / Ur-Quan Masters artwork, which would fall
   under the non-commercial CC BY-NC-SA 2.5 content license), `backgroundbouncebw.jpg`, `ic_launcher_foreground.webp`,

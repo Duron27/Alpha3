@@ -20,6 +20,8 @@ import java.io.File
  */
 object UpstreamEngine {
     private const val ASSETS = "libopenmw-upstream"
+    /** The folder name of the bundled ReShade effects, under Alpha3/reshade/Shaders and Textures */
+    private const val RESHADE_STARTER = "Alpha3 starter"
     /** In the config folder: the game folder whose Morrowind.ini was last imported into the global openmw.cfg. */
     private const val INI_STAMP = "ini-imported"
 
@@ -82,6 +84,7 @@ object UpstreamEngine {
 
     /** Copies resources and the global config out of the APK when this build is not what was copied last. */
     fun prepare(context: Context) {
+        installReshadeStarter(context)
         val stamp = File(globalPath(context), "stamp")
         val target = BuildConfig.RANDOMIZER.toString()
         val resources = File(resourcesDir)
@@ -106,6 +109,30 @@ object UpstreamEngine {
         ensureMultiplayerMod(config)
         stamp.parentFile?.mkdirs()
         stamp.writeText(target)
+    }
+
+    /**
+     * The starter set of ReShade effects (cpp/reshade-starter, licences in its README) into Alpha3/reshade, once per
+     * build: their own folders are replaced whole, so edits there are lost; the user's other shaders and the preset
+     * (ReShadePreset.ini) are not touched. The Vulkan renderer reads them (support/src/vulkan/reshade.cpp).
+     */
+    private fun installReshadeStarter(context: Context) {
+        val root = File(OpenMWPaths.USER_FILE_STORAGE, "reshade")
+        val stamp = File(root, ".starter-stamp")
+        val target = BuildConfig.RANDOMIZER.toString()
+        if (stamp.exists() && stamp.readText().trim() == target) return
+        runCatching {
+            val shaders = File(root, "Shaders/$RESHADE_STARTER")
+            val textures = File(root, "Textures/$RESHADE_STARTER")
+            shaders.deleteRecursively()
+            textures.deleteRecursively()
+            val assets = ManageAssets(context)
+            assets.copy("$ASSETS/reshade/Shaders", shaders.absolutePath, overwrite = true)
+            assets.copy("$ASSETS/reshade/Textures", textures.absolutePath, overwrite = true)
+            assets.copy("$ASSETS/reshade/licenses", File(shaders, "licenses").absolutePath, overwrite = true)
+            assets.copy("$ASSETS/reshade/README.md", File(shaders, "README.md").absolutePath, overwrite = true)
+            stamp.writeText(target)
+        }.onFailure { Log.w("UpstreamEngine", "ReShade starter set not installed", it) }
     }
 
     /**

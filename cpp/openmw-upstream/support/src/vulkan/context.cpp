@@ -215,6 +215,9 @@ namespace Alpha3::Vk
                                                                          : 0;
             mRotated = !noPrerotate && !mRotationFailed && mRotateMode != 0 && (caps.supportedTransforms & turn) != 0;
             mSwapExtent = mExtent;
+            if (!mRotated)
+                mRotateMode = 0; // copied as it is
+            mOwnWindow = mRotated || (mWantOwnWindow && !mRotationFailed);
             if (mRotated && mRotateMode != 2)
                 mSwapExtent = { mExtent.height, mExtent.width };
         }
@@ -265,7 +268,7 @@ namespace Alpha3::Vk
         info.imageArrayLayers = 1;
         info.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
             | (caps.supportedUsageFlags & (VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT));
-        mWindowReadable = mRotated || (info.imageUsage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0;
+        mWindowReadable = mOwnWindow || (info.imageUsage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0;
         info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
         // the compositor turns the picture when the display is turned: simplest, and the game is held to landscape
         info.preTransform = mRotated || !(caps.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR)
@@ -324,7 +327,7 @@ namespace Alpha3::Vk
             VkImageView colorView = VK_NULL_HANDLE;
             vkCreateImageView(mDevice.mDevice, &view, nullptr, &colorView);
             mViews.push_back(colorView);
-            if (mRotated)
+            if (mOwnWindow)
                 continue; // the window passes draw into the window images instead (createRotation)
             VkImageView attachments[] = { colorView, mDepthView };
             VkFramebufferCreateInfo framebuffer{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
@@ -340,7 +343,7 @@ namespace Alpha3::Vk
         }
         mSurfaceTransform = caps.currentTransform;
         mSurfaceExtent = caps.currentExtent;
-        if (mRotated && !createRotation())
+        if (mOwnWindow && !createRotation())
         {
             Log(Debug::Error) << "Vulkan: pre-rotation could not be set up: the system turns the picture instead";
             mRotationFailed = true;
@@ -371,6 +374,8 @@ namespace Alpha3::Vk
                 Log(Debug::Info) << "Vulkan: pre-rotated: swap chain images " << mSwapExtent.width << "x"
                                  << mSwapExtent.height << ", drawn " << mExtent.width << "x" << mExtent.height
                                  << " and turned (mode " << mRotateMode << ")";
+            else if (mOwnWindow)
+                Log(Debug::Info) << "Vulkan: the window is drawn into images of its own (for the effects) and copied";
         }
         mRecreate = false;
         return true;
@@ -584,7 +589,7 @@ namespace Alpha3::Vk
             image.samples = VK_SAMPLE_COUNT_1_BIT;
             image.tiling = VK_IMAGE_TILING_OPTIMAL;
             image.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
-                | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+                | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
             VmaAllocationCreateInfo memory{};
             memory.usage = VMA_MEMORY_USAGE_GPU_ONLY;
             if (vmaCreateImage(mDevice.mAllocator, &image, &memory, &window.mImage, &window.mMemory, nullptr)
@@ -1067,7 +1072,7 @@ namespace Alpha3::Vk
         clears[1].depthStencil = { depth, stencil };
         VkRenderPassBeginInfo begin{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
         begin.renderPass = renderPass(colorUse, depthUse);
-        begin.framebuffer = mRotated ? mWindowImages[mFrameSlot].mFramebuffer : mFramebuffers[mImage];
+        begin.framebuffer = mOwnWindow ? mWindowImages[mFrameSlot].mFramebuffer : mFramebuffers[mImage];
         begin.renderArea = { { 0, 0 }, mExtent };
         begin.clearValueCount = 2;
         begin.pClearValues = clears;
@@ -1192,7 +1197,7 @@ namespace Alpha3::Vk
     bool Context::blitWindow(VkImage target, uint32_t width, uint32_t height, VkImageLayout layout)
     {
         if (!mWindowReadable || !mWindowDrawn || !mAcquired || mInWindowPass
-            || (mRotated ? mFrameSlot >= mWindowImages.size() : mImage >= mImages.size()))
+            || (mOwnWindow ? mFrameSlot >= mWindowImages.size() : mImage >= mImages.size()))
             return false;
         VkCommandBuffer commandBuffer = commands();
         auto barrier = [&](VkImage image, VkImageLayout from, VkImageLayout to, VkAccessFlags fromAccess,
@@ -1208,7 +1213,7 @@ namespace Alpha3::Vk
             vkCmdPipelineBarrier(commandBuffer, fromStage, toStage, 0, 0, nullptr, 0, nullptr, 1, &b);
         };
         const VkPipelineStageFlags shaders = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-        VkImage window = mRotated ? mWindowImages[mFrameSlot].mImage : mImages[mImage];
+        VkImage window = mOwnWindow ? mWindowImages[mFrameSlot].mImage : mImages[mImage];
         barrier(window, windowLayout(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
             VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
@@ -1223,7 +1228,7 @@ namespace Alpha3::Vk
         region.dstOffsets[1] = { int32_t(width), 0, 1 };
         vkCmdBlitImage(commandBuffer, window, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, target,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region, VK_FILTER_LINEAR);
-        if (mRotated)
+        if (mOwnWindow)
             barrier(window, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, windowLayout(), VK_ACCESS_TRANSFER_READ_BIT,
                 VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
                 VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
@@ -1274,7 +1279,7 @@ namespace Alpha3::Vk
                 endWindowPass();
         }
         endWindowPass();
-        if (mRotated && mAcquired)
+        if (mOwnWindow && mAcquired)
             rotateToWindow();
         vkEndCommandBuffer(frame.mCommands[mPart]);
         VkCommandBuffer buffers[2];

@@ -475,6 +475,13 @@ class EngineActivity : SDLActivity() {
                             containerHeight = containerHeight
                         )
 
+                        // the ReShade effects' panel (the menu's Effects button), over everything, the game beside it
+                        if (org.alpha3.launcher.ui.overlay.EffectsPanelState.visible &&
+                            UIStateManager.tempCodeGroup == "OpenMW"
+                        ) {
+                            org.alpha3.launcher.ui.overlay.EffectsPanel()
+                        }
+
                     }
 
                 // Remove the Global Layout Listener to prevent multiple calls

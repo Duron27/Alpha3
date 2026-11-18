@@ -217,6 +217,9 @@ fun GameplayScreen(
 
         ScrollWheelIndicator(containerWidth = containerWidth, containerHeight = containerHeight)
 
+        // the ReShade effects' panel (the menu's Effects button), over everything, the game visible beside it
+        if (EffectsPanelState.visible && UIStateManager.tempCodeGroup == "OpenMW") EffectsPanel()
+
     }
 }
 

@@ -139,7 +139,9 @@ if (ANDROID)
     list(APPEND ALPHA3_SUPPORT_SOURCES src/framegen.cpp src/framepacing.cpp src/zink.cpp
         # the native Vulkan 1.0 renderer ([Video] renderer = vulkan)
         src/vulkan/vk.cpp src/vulkan/vma.cpp src/vulkan/device.cpp src/vulkan/context.cpp src/vulkan/window.cpp
-        src/vulkan/renderer.cpp src/vulkan/translator.cpp src/vulkan/resources.cpp src/vulkan/programs.cpp)
+        src/vulkan/renderer.cpp src/vulkan/translator.cpp src/vulkan/resources.cpp src/vulkan/programs.cpp
+        # ReShade effects (src/vulkan/reshade.hpp)
+        src/vulkan/reshade.cpp)
     # VMA is third-party code: its warnings are not ours
     set_source_files_properties(src/vulkan/vma.cpp PROPERTIES COMPILE_OPTIONS -w)
     set(ALPHA3_SUPPORT_SYSTEM_LIBS android EGL log)
@@ -155,6 +157,18 @@ else()
         "-framework UIKit")
 endif()
 add_library(alpha3_support STATIC ${ALPHA3_SUPPORT_SOURCES})
+if (ANDROID)
+    # ReShade's FX compiler (crosire/reshade v6.7.3, BSD 3-clause) and the SPIR-V headers it needs: third-party code,
+    # its warnings are not ours
+    set(RESHADEFX_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/reshadefx)
+    add_library(alpha3_reshadefx STATIC ${RESHADEFX_DIR}/effect_codegen_spirv.cpp ${RESHADEFX_DIR}/effect_expression.cpp
+        ${RESHADEFX_DIR}/effect_lexer.cpp ${RESHADEFX_DIR}/effect_parser_exp.cpp ${RESHADEFX_DIR}/effect_parser_stmt.cpp
+        ${RESHADEFX_DIR}/effect_preprocessor.cpp ${RESHADEFX_DIR}/effect_symbol_table.cpp)
+    target_include_directories(alpha3_reshadefx PUBLIC ${RESHADEFX_DIR} PRIVATE ${RESHADEFX_DIR}/spirv)
+    target_compile_options(alpha3_reshadefx PRIVATE -w -fPIC)
+    target_compile_features(alpha3_reshadefx PUBLIC cxx_std_17)
+    target_link_libraries(alpha3_support alpha3_reshadefx)
+endif()
 # The commit the library is built from (with -dirty for uncommitted changes) and when, for the benchmark's file
 # (src/benchmark.cpp): written on every build, the header touched only when it changes
 add_custom_target(alpha3_build_id

@@ -15,6 +15,7 @@
 
 #include "context.hpp"
 #include "programs.hpp"
+#include "reshade.hpp"
 #include "resources.hpp"
 
 #include "../framegenlock.hpp"
@@ -1192,6 +1193,8 @@ void main()
                 generateFrames(sceneView);
                 mPrograms.poll();
                 mPrograms.checkSources();
+                // the effects draw on the window: it is then an image of the context's own (from the next swap chain)
+                mContext.wantOwnWindow(mEffects.active());
                 if (!mContext.beginFrame())
                 {
                     runFinalDrawCallbacks(sceneView, false);
@@ -5478,6 +5481,30 @@ void main()
             // the mipmaps of the passes' targets.
             void drawCanvas(const osgUtil::RenderLeaf& leaf, const std::vector<const osgUtil::RenderBin*>& bins)
             {
+                drawPostProcessing(leaf, bins);
+                // the ReShade effects (reshade.hpp) on the window as the chain left it, before the GUI
+                VkImage window = mContext.windowImage();
+                if (window == VK_NULL_HANDLE || !mTarget.mWindow || mPass == VK_NULL_HANDLE || !mEffects.active())
+                    return;
+                const auto& canvas = static_cast<const PingPongCanvasMirror&>(*leaf.getDrawable());
+                Image* depth = mSceneDepth;
+                if (depth == nullptr && canvas.mTextureDepth)
+                    depth = mResources.renderTarget(*canvas.mTextureDepth);
+                if (depth != nullptr && !depth->mDepthAspect)
+                    depth = nullptr;
+                const Target windowTarget = mTarget;
+                const VkRect2D windowArea = mArea;
+                mContext.endWindowPass();
+                mPass = VK_NULL_HANDLE;
+                mEffects.apply(window, mContext.windowExtent(), mContext.windowFormat(),
+                    depth != nullptr ? mResources.view(*depth, VK_IMAGE_VIEW_TYPE_2D) : VK_NULL_HANDLE,
+                    depth != nullptr ? depth->readLayout() : VK_IMAGE_LAYOUT_UNDEFINED,
+                    SceneUtil::AutoDepth::isReversed());
+                resumeWindowPass(windowTarget, windowArea);
+            }
+
+            void drawPostProcessing(const osgUtil::RenderLeaf& leaf, const std::vector<const osgUtil::RenderBin*>& bins)
+            {
                 const auto& canvas = static_cast<const PingPongCanvasMirror&>(*leaf.getDrawable());
                 Image* scene = canvas.mTextureScene ? mResources.texture(*canvas.mTextureScene) : nullptr;
                 if (scene == nullptr)
@@ -5638,6 +5665,7 @@ void main()
             Context& mContext;
             Resources mResources;
             Programs mPrograms;
+            Effects mEffects{ mContext }; // ReShade's (reshade.hpp)
             osg::State* mState = nullptr;
             unsigned mFrameNumber = 0;
             uint64_t mFrameCounter = 0;

@@ -300,6 +300,9 @@ if(ALPHA3_IS_ANDROID)
         COMMAND ${CMAKE_COMMAND} -E copy openmw.cfg ${assets_upstream_dir}/openmw/
         COMMAND ${CMAKE_COMMAND} -E copy ${ALPHA3_REPO_DIR}/3rdparty-licenses.txt ${assets_upstream_dir}/
         COMMAND ${CMAKE_COMMAND} -E copy ${ALPHA3_REPO_DIR}/LICENSE ${ALPHA3_REPO_DIR}/THIRD_PARTY_NOTICES.md ${assets_upstream_dir}/
+        # the starter set of ReShade effects (the launcher puts it in Alpha3/reshade, UpstreamEngine.installReshadeStarter)
+        COMMAND ${CMAKE_COMMAND} -E remove_directory ${assets_upstream_dir}/reshade
+        COMMAND ${CMAKE_COMMAND} -E copy_directory ${ALPHA3_REPO_DIR}/cpp/reshade-starter ${assets_upstream_dir}/reshade
     )
 else()
     # iOS: libopenmw.dylib (built into the macOS bundle layout, OpenMW.app/Contents/MacOS) becomes
