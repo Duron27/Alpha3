@@ -29,6 +29,7 @@ import kotlinx.coroutines.launch
 import org.alpha3.launcher.engine.Engine
 import org.alpha3.launcher.engine.EngineBridge
 import org.alpha3.launcher.files.FileBrowser
+import org.alpha3.launcher.files.copyPickedGameFolder
 import org.alpha3.launcher.files.copyPlatformFileToDirectory
 import org.alpha3.launcher.globals.PlayBridge
 import org.alpha3.launcher.io.File
@@ -104,10 +105,8 @@ class IosPlatformFeatures : PlatformFeatures() {
                 if (directory == null) {
                     onDismiss()
                 } else scope.launch {
-                    val destination = OpenMWPaths.SECOND_USER_FILE_STORAGE + "/" + directory.name
-                    if (!copyPlatformFileToDirectory(directory, destination)) {
-                        println("FileBrowserPopup: copy of ${directory.name} was incomplete")
-                    }
+                    // A picked "Data Files" folder is put inside a game folder of its own (see copyPickedGameFolder)
+                    val destination = copyPickedGameFolder(directory, OpenMWPaths.SECOND_USER_FILE_STORAGE)
                     // Validate whatever arrived; the game folder check reports a missing Morrowind.ini.
                     onFolderSelected?.invoke(destination)
                     onDismiss()

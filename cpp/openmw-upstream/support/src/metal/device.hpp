@@ -20,6 +20,7 @@ namespace Alpha3::Mtl
         bool mBcTextures = false; // DXT1/3/5: iPads with an M chip, iOS 16.4 on
         bool mAstcHdr = false;
         bool mDepthClamp = true; // setDepthClipMode
+        bool mPacked16 = true; // B5G6R5 and the other 16 bit packed formats: every Apple GPU, not the simulator's
         // a depth and stencil format that is sampled too: 32 bit float depth with stencil (iOS has no 24 bit depth)
         MTLPixelFormat mDepthFormat = MTLPixelFormatDepth32Float_Stencil8;
         uint32_t mFamily = 0; // the highest MTLGPUFamilyApple<n>

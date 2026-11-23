@@ -245,7 +245,29 @@ namespace Alpha3::Mtl
             // DXT1 decoded on the CPU (bcdecode.cpp, a GPU without BC formats) is 16 bit: RGB565 or RGB5_A1, the
             // top bits red. R5G6B5 is a format every Vulkan GPU samples and filters; R5G5B5A1 is not, so it goes as RGBA8.
             if (dataType == glUnsignedShort565 && pixelFormat == glRgb)
-                return { VK_FORMAT_R5G6B5_UNORM_PACK16, 2 };
+            {
+                // Metal's 16 bit packed formats (B5G6R5) are missing from the simulator's GPU, which aborts on them
+                static const bool packed16 = [] {
+                    const Device* d = device();
+                    return d != nullptr && d->mPacked16;
+                }();
+                if (packed16)
+                    return { VK_FORMAT_R5G6B5_UNORM_PACK16, 2 };
+                layout = { VK_FORMAT_R8G8B8A8_UNORM, 4 };
+                layout.mConvert = [](const uint8_t* s, uint8_t* d, uint32_t n) {
+                    for (uint32_t i = 0; i < n; ++i, s += 2, d += 4)
+                    {
+                        uint16_t v;
+                        std::memcpy(&v, s, 2);
+                        const uint32_t r = (v >> 11) & 31, g = (v >> 5) & 63, b = v & 31;
+                        d[0] = static_cast<uint8_t>((r << 3) | (r >> 2));
+                        d[1] = static_cast<uint8_t>((g << 2) | (g >> 4));
+                        d[2] = static_cast<uint8_t>((b << 3) | (b >> 2));
+                        d[3] = 255;
+                    }
+                };
+                return layout;
+            }
             if (dataType == glUnsignedShort5551 && pixelFormat == glRgba)
             {
                 layout = { VK_FORMAT_R8G8B8A8_UNORM, 4 };

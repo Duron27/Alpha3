@@ -320,6 +320,9 @@ class IniImporter {
     }
 
     fun mergeFallback(cfg: MultiStrMap, ini: Map<String, List<String>>) {
+        // A real Morrowind.ini always has some of these. One with none is the placeholder iOS makes when only the
+        // Data Files folder was selected: leave the config's own fallbacks alone rather than emptying them.
+        if (mergeFallback.none { it in ini }) return
         cfg.remove("fallback")
         for (key in mergeFallback) {
             val values = ini[key] ?: continue

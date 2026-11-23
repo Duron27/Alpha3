@@ -80,6 +80,7 @@ namespace Alpha3::Mtl
             if (@available(iOS 16.4, *))
                 device->mBcTextures = [gpu supportsBCTextureCompression];
             device->mAstcHdr = [gpu supportsFamily:MTLGPUFamilyApple6];
+            device->mPacked16 = !TARGET_OS_SIMULATOR;
 
             unsigned bits = sKnown | sEtc2 | sAstc;
             if (device->mBcTextures)
