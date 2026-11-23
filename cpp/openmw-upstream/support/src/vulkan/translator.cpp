@@ -1425,7 +1425,13 @@ void main()
                     }
                 }
 
-                // the pass again, loading what was drawn
+                resumePass();
+            }
+
+            // The scene stage's render pass begun again after it was ended part way, loading what it drew
+            void resumePass()
+            {
+                VkCommandBuffer commands = mContext.commands();
                 AttachmentUse colorUse, depthUse;
                 std::vector<VkImageView> views;
                 colorUse.mFormat = mTarget.mColor->mFormat;
@@ -1460,6 +1466,57 @@ void main()
                 setViewport(0.f, 1.f);
                 const VkRect2D scissor = scissorOf(mArea);
                 vkCmdSetScissor(commands, 0, 1, &scissor);
+            }
+
+            // DepthClearCallback's depth accumulation pass: the first person model drawn once more, depth only, into the
+            // opaque depth copy, over the world's depth there. Post-processing reads its depth from that copy
+            // (omw_GetDepth), and without the model in it, effects that go by distance (haze, fog, depth of field) took
+            // the hands for whatever was behind them.
+            void accumulateFirstPersonDepth(const osgUtil::RenderBin& bin, std::vector<const osgUtil::RenderBin*>& bins)
+            {
+                Image* depth = mSceneOpaqueDepth;
+                if (depth == nullptr || mPass == VK_NULL_HANDLE || mTarget.mWindow || mTarget.mDepth == nullptr
+                    || depth == mTarget.mDepth || depth->mWidth != mTarget.mWidth || depth->mHeight != mTarget.mHeight
+                    || firstPersonDepthOff())
+                    return;
+                VkCommandBuffer commands = mContext.commands();
+                vkCmdEndRenderPass(commands);
+                static const std::string label = "(first person depth)";
+                gpuTimestamp(label);
+
+                const Target scene = mTarget;
+                AttachmentUse depthUse;
+                depthUse.mFormat = depth->mFormat;
+                depthUse.mLoad = VK_ATTACHMENT_LOAD_OP_LOAD;
+                depthUse.mInitial = depthUse.mFinal = depth->readLayout();
+                std::vector<VkImageView> views{ depth->mAttachmentView };
+                VkRenderPass pass = mContext.renderPass(AttachmentUse{}, depthUse);
+                VkRenderPassBeginInfo begin{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+                begin.renderPass = pass;
+                begin.framebuffer = mResources.framebuffer(pass, views, depth->mWidth, depth->mHeight);
+                begin.renderArea = mArea;
+                vkCmdBeginRenderPass(commands, &begin, VK_SUBPASS_CONTENTS_INLINE);
+                forgetBindings();
+                mPass = pass;
+                Target target;
+                target.mWindow = false;
+                target.mDepth = depth;
+                target.mWidth = depth->mWidth;
+                target.mHeight = depth->mHeight;
+                target.mDepthFormat = scene.mDepthFormat;
+                mTarget = target;
+                mViewportDepth[0] = -1.f;
+                setViewport(0.f, 1.f);
+                const VkRect2D scissor = scissorOf(mArea);
+                vkCmdSetScissor(commands, 0, 1, &scissor);
+
+                mFirstPersonDepthPass = true;
+                drawBin(bin, bins);
+                mFirstPersonDepthPass = false;
+
+                vkCmdEndRenderPass(commands);
+                mTarget = scene;
+                resumePass(); // (which ends the GPU timing's part)
             }
 
             void copyDepth(Image& source, Image& target)
@@ -2210,12 +2267,12 @@ void main()
                         return;
                     }
                     // the copy of the opaque scene, before the bins after it are drawn
-                    if (type.find("OpaqueColorBinCallback") != std::string::npos)
+                    if (type.find("OpaqueColorBinCallback") != std::string::npos && !mFirstPersonDepthPass)
                         copyOpaque(bin, static_cast<const OpaqueColorBinCallbackMirror&>(*callback));
                     // the first person view: the depth starts again. Only in a pass with a colour target (the scene,
                     // the window): the bin turns up in the shadow maps' passes too, where a clear part way through
                     // made Turnip lose the device (and the shadow map was taken as the scene's depth)
-                    if (type.find("DepthClearCallback") != std::string::npos && hasLeaves(bin)
+                    if (type.find("DepthClearCallback") != std::string::npos && hasLeaves(bin) && !mFirstPersonDepthPass
                         && (mTarget.mWindow || (mTarget.mDepth && mTarget.mColor)))
                     {
                         VkClearAttachment attachment{ VK_IMAGE_ASPECT_DEPTH_BIT, 0, {} };
@@ -2269,8 +2326,10 @@ void main()
                             drawLeaf(*leaf, bins);
                 for (; child != bin.getRenderBinList().end(); ++child)
                     drawBin(*child->second, bins);
-                mInFirstPersonBin = wasFirstPerson;
                 bins.pop_back();
+                if (firstPerson)
+                    accumulateFirstPersonDepth(bin, bins);
+                mInFirstPersonBin = wasFirstPerson;
             }
 
             // The state of a leaf's StateGraph with the bins' StateSets put in after its root's
@@ -2754,6 +2813,14 @@ void main()
             // but the GUI's, 64 no draws in the scene's pass, 128 none in the other passes into textures (reflection,
             // previews, maps), 256 none into the window but the GUI's, 512 none in the
             // water reflection's pass
+            // debug.alpha3.vknofpdepth=1 (off by default): the first person model is not drawn into the opaque depth copy
+            // (as before; post-processing then takes the hands for what is behind them)
+            static bool firstPersonDepthOff()
+            {
+                static const bool off = debugNumber("vknofpdepth") != 0;
+                return off;
+            }
+
             static unsigned skipAsked()
             {
                 static const unsigned bits = static_cast<unsigned>(debugNumber("vkskip"));
@@ -5802,6 +5869,7 @@ void main()
             bool mFirstPersonCleared = false; // this frame's scene depth was cleared for the first person model
             Image* mSceneDepth = nullptr; // the depth it was cleared in
             Image* mSceneOpaqueDepth = nullptr; // the copy of the scene's depth before the clear
+            bool mFirstPersonDepthPass = false; // drawing it again into the opaque depth copy
             bool mInFirstPersonBin = false; // drawing the bin of the first person model (after its depth clear)
             static bool frameGenerationOn()
             {
