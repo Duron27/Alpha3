@@ -211,12 +211,22 @@ namespace Alpha3
                     record.erase(before);
                 }
             }
-            writeOwnedRecord(record);
-
-            // the passes in the chain: ambient occlusion first (before anything changes the colours it darkens), the look
-            // last; taken out again when their switch is off
+            // The passes in the chain: ambient occlusion first (before anything changes the colours it darkens), the
+            // look last. Put in or taken out only when their switch changes (or the first time it is seen): between
+            // the changes the chain is the player's, as the post-processing menu (F2) left it, and a pass turned on or
+            // off there stays so after a restart (the record keeps the switch's last value under "chain:<pass>").
             std::vector<std::string> chain = post.mChain.get();
             const auto place = [&](std::string_view name, bool wanted, bool first) {
+                const std::string key = "chain:" + std::string(name);
+                const std::string value = wanted ? "1" : "0";
+                const auto seen = record.find(key);
+                if (seen != record.end() && seen->second == value)
+                    return;
+                const bool firstSeen = seen == record.end();
+                record[key] = value;
+                // the first time (a new install, or a chain from before this record): put in when on, never taken out
+                if (firstSeen && !wanted)
+                    return;
                 const auto found = std::find(chain.begin(), chain.end(), name);
                 if (wanted && found == chain.end())
                     chain.insert(first ? chain.begin() : chain.end(), std::string(name));
@@ -225,6 +235,7 @@ namespace Alpha3
             };
             place(sAmbientOcclusionTechnique, s.mAmbientOcclusion, true);
             place(sLookTechnique, s.mLook, false);
+            writeOwnedRecord(record);
             if (chain != post.mChain.get())
                 post.mChain.set(chain);
         }
