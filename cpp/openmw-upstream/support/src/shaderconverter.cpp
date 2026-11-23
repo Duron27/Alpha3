@@ -34,6 +34,27 @@ namespace Alpha3
             return version != 0 ? version : 120;
         }
 
+        // texture2D(...) and the other GLSL 1.20 texture functions as the overloads of texture() that replaced them
+        std::string modernTextureCalls(const std::string& source)
+        {
+            static const std::regex call(R"(\b(texture2DProjLod|texture2DProj|texture2DArrayLod|texture2DArray|texture2DLod|)"
+                                         R"(texture2D|texture3DLod|texture3D|textureCubeLod|textureCube|texture1DLod|texture1D)\s*\()");
+            std::string out;
+            auto last = source.cbegin();
+            for (std::sregex_iterator it(source.begin(), source.end(), call), end; it != end; ++it)
+            {
+                const std::smatch& match = *it;
+                out.append(last, match[0].first);
+                const std::string name = match[1].str();
+                const bool lod = name.size() > 3 && name.compare(name.size() - 3, 3, "Lod") == 0;
+                const bool proj = name.find("Proj") != std::string::npos;
+                out += proj ? (lod ? "textureProjLod(" : "textureProj(") : (lod ? "textureLod(" : "texture(");
+                last = match[0].second;
+            }
+            out.append(last, source.cend());
+            return out;
+        }
+
         bool toSpirv(const std::string& source, GlslStage stage, int version, std::vector<unsigned int>& spirv)
         {
             const EShLanguage language = stage == GlslStage::Vertex ? EShLangVertex
@@ -184,8 +205,17 @@ namespace Alpha3
             Misc::StringUtils::replaceAll(glsl, es, "#version 460");
         Misc::StringUtils::replaceAll(glsl, "defined(GL_ES)", "1");
 
+        const int version = sourceVersion(glsl);
+        // GLSL 1.20's texture functions in a newer shader: post-processing techniques are built as 3.30 when uniform
+        // buffers are on (components/fx/technique.cpp), and many still call texture2D() (the MOMW pack's ssao and
+        // ssao_hq). glslang parses 3.30 forward compatible, without them; drivers that allow them anyway are why
+        // these shaders work elsewhere. Without this the pass came out unconverted, and on Vulkan, where texture2D is
+        // a type, did not compile at all.
+        if (version >= 130)
+            glsl = modernTextureCalls(glsl);
+
         std::vector<unsigned int> spirv;
-        if (!toSpirv(glsl, stage, sourceVersion(glsl), spirv))
+        if (!toSpirv(glsl, stage, version, spirv))
             return source;
 
         std::string essl;
