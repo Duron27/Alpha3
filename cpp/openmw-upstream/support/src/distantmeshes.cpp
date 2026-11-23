@@ -87,7 +87,7 @@ namespace Alpha3
         constexpr int sViews = 6; // every 60 degrees: three planes, both sides
         constexpr int sGutter = 2; // transparent texels around each view, so mip levels do not mix neighbouring views
         constexpr int sSupersample = 2;
-        constexpr std::uint32_t sCacheVersion = 2;
+        constexpr std::uint32_t sCacheVersion = 3; // 3: cards take the mesh's average sunlight
         constexpr std::string_view sDistantSuffix = "_dist";
         constexpr std::string_view sTextureDirectory = "textures/alpha3_impostors/";
         constexpr std::string_view sCardRootName = "Alpha3 impostor";
@@ -1299,8 +1299,59 @@ namespace Alpha3
             }
         }
 
+        // How much sun the mesh's own faces catch, against the card's, whose faces all point up: the mean over suns from
+        // 20 degrees above the horizon to overhead of the area weighted max(n.l, 0) of the mesh, over that of the card.
+        // Leaves point every way, so a card lit as if they all faced the sun is lighter than the tree it replaces.
+        float cardDiffuse(const std::vector<Group>& groups)
+        {
+            struct Face
+            {
+                osg::Vec3f mNormal;
+                float mArea;
+            };
+            std::vector<Face> faces;
+            float total = 0.f;
+            for (const Group& group : groups)
+                for (std::size_t i = 0; i + 2 < group.mIndices.size(); i += 3)
+                {
+                    const Vertex* v[3] = { &group.mVertices[group.mIndices[i]], &group.mVertices[group.mIndices[i + 1]],
+                        &group.mVertices[group.mIndices[i + 2]] };
+                    auto pos = [](const Vertex* x) { return osg::Vec3f(x->mPosition[0], x->mPosition[1], x->mPosition[2]); };
+                    const float area = ((pos(v[1]) - pos(v[0])) ^ (pos(v[2]) - pos(v[0]))).length() * 0.5f;
+                    if (!(area > 0.f))
+                        continue;
+                    // lit with the normals it was given, as the shaders do (both sides alike)
+                    osg::Vec3f n;
+                    for (const Vertex* x : v)
+                        n += osg::Vec3f(x->mNormal[0], x->mNormal[1], x->mNormal[2]);
+                    if (n.normalize() == 0.f)
+                        continue;
+                    faces.push_back({ n, area });
+                    total += area;
+                }
+            if (faces.empty() || !(total > 0.f))
+                return 1.f;
+            double mesh = 0, flat = 0;
+            for (int e = 20; e <= 90; e += 10)
+            {
+                const float elevation = osg::DegreesToRadians(static_cast<float>(e));
+                for (int a = 0; a < 360; a += 30)
+                {
+                    const float azimuth = osg::DegreesToRadians(static_cast<float>(a));
+                    const osg::Vec3f sun(std::cos(elevation) * std::cos(azimuth), std::cos(elevation) * std::sin(azimuth),
+                        std::sin(elevation));
+                    double lit = 0;
+                    for (const Face& face : faces)
+                        lit += face.mArea * std::max(0.f, face.mNormal * sun);
+                    mesh += lit / total;
+                    flat += sun.z();
+                }
+            }
+            return std::clamp(static_cast<float>(mesh / flat), 0.1f, 1.f);
+        }
+
         // Three crossed quads, both sides, each side textured with the view from its side
-        Group cardGroup(const Card& card, std::string_view texture)
+        Group cardGroup(const Card& card, std::string_view texture, float diffuse)
         {
             Group group;
             group.mHasNormals = true;
@@ -1313,6 +1364,7 @@ namespace Alpha3
             m.mAlphaFlags = 0x0200 | (6 << 10); // alpha test, greater or equal
             m.mAlphaThreshold = 128;
             m.mHasMaterial = true;
+            m.mDiffuse = osg::Vec3f(diffuse, diffuse, diffuse);
 
             for (int i = 0; i < sViews; ++i)
             {
@@ -1360,7 +1412,10 @@ namespace Alpha3
             drawCard(draws, viewSize, card);
             // the NIF names textures relative to textures/
             const std::string_view name = std::string_view(texturePath).substr(std::string_view("textures/").size());
-            return { writeNif(sCardRootName, { cardGroup(card, name) }),
+            const float diffuse = cardDiffuse(groups);
+            // made once per mesh, then cached
+            Log(Debug::Info) << "Distant meshes: card " << texturePath << " diffuse " << diffuse;
+            return { writeNif(sCardRootName, { cardGroup(card, name, diffuse) }),
                 writeDds(card.mRgba, card.mAtlasWidth, card.mAtlasHeight) };
         }
 
